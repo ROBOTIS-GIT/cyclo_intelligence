@@ -39,6 +39,28 @@ else
     echo "[container.sh] Detected AMD64 architecture (x86_64)"
 fi
 
+# Optional opt-in rebuild. Default is to use the pre-built Hub image.
+# Pass `--build` (or `-b`) on any start* command to rebuild from source.
+BUILD_FLAG=""
+NEW_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --build|-b) BUILD_FLAG="--build" ;;
+        *)          NEW_ARGS+=("$arg") ;;
+    esac
+done
+set -- "${NEW_ARGS[@]}"
+
+# Pre-create host bind-mount targets so docker doesn't auto-create them
+# as root-owned directories (which then can't be written to from the
+# host without sudo).
+for d in workspace huggingface; do
+    [ -d "${SCRIPT_DIR}/${d}" ] || mkdir -p "${SCRIPT_DIR}/${d}"
+done
+mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
+    || sudo mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
+    || true
+
 # X11 forwarding for UI windows (rviz, plotjuggler, etc.) when started
 # from an interactive shell. Silently skipped if DISPLAY isn't set.
 setup_x11() {
@@ -76,9 +98,15 @@ Lifecycle:
   stop             compose down (prompts for confirmation)
   help             Show this help
 
+Flags (any start* command):
+  --build, -b      Rebuild image from local Dockerfile instead of using
+                   the pre-built image pulled from Docker Hub. Default
+                   is to use the pulled image (fast, no source build
+                   required). Use this only when iterating on Dockerfile.
+
 Environment:
   GPU_ARCH         default | blackwell   (optional, amd64 only)
-  VERSION          image tag version (default: 1.0.0)
+  VERSION          image tag version (default: 0.1.0 for cyclo)
   ROS_DOMAIN_ID    default 30
 EOF
 }
@@ -87,8 +115,8 @@ start_main() {
     setup_x11
     echo "[container.sh] Pulling pre-built images (ignoring local-only failures)..."
     $COMPOSE pull --ignore-pull-failures "$MAIN_SERVICE" || true
-    echo "[container.sh] Starting $MAIN_SERVICE (ARCH=$ARCH)..."
-    $COMPOSE up -d --build "$MAIN_SERVICE"
+    echo "[container.sh] Starting $MAIN_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
+    $COMPOSE up -d $BUILD_FLAG "$MAIN_SERVICE"
     echo "[container.sh] Done. 'docker/container.sh status' to check s6 services."
 }
 
@@ -96,16 +124,16 @@ start_lerobot() {
     setup_x11
     echo "[container.sh] Pulling pre-built images..."
     $COMPOSE pull --ignore-pull-failures "$LEROBOT_SERVICE" || true
-    echo "[container.sh] Starting $LEROBOT_SERVICE (ARCH=$ARCH)..."
-    $COMPOSE up -d --build "$LEROBOT_SERVICE"
+    echo "[container.sh] Starting $LEROBOT_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
+    $COMPOSE up -d $BUILD_FLAG "$LEROBOT_SERVICE"
 }
 
 start_groot() {
     setup_x11
     echo "[container.sh] Pulling pre-built images..."
     $COMPOSE pull --ignore-pull-failures "$GROOT_SERVICE" || true
-    echo "[container.sh] Starting $GROOT_SERVICE (ARCH=$ARCH)..."
-    $COMPOSE up -d --build "$GROOT_SERVICE"
+    echo "[container.sh] Starting $GROOT_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
+    $COMPOSE up -d $BUILD_FLAG "$GROOT_SERVICE"
 }
 
 enter_main() {
@@ -143,29 +171,49 @@ show_status() {
         | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${GROOT_CONTAINER})\\b" \
         || echo "(none running)"
 
+    # s6-overlay installs s6-svstat under /package/admin/s6-*/command/
+    # rather than a stable PATH location, so resolve it dynamically.
+    # `sh -c` inside docker exec lets the inner shell glob the version
+    # directory without depending on bash being available.
+    local svstat_setup='
+        S6_SVSTAT=$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)
+        [ -z "$S6_SVSTAT" ] && S6_SVSTAT=$(command -v s6-svstat 2>/dev/null)
+        [ -z "$S6_SVSTAT" ] && { echo "  (s6-svstat not found)"; exit 0; }
+    '
+
     if container_running "$MAIN_CONTAINER"; then
         echo ""
         echo "=== ${MAIN_CONTAINER} s6 services ==="
-        docker exec "$MAIN_CONTAINER" /bin/sh -c \
-            'for svc in /run/service/*/; do
-               name=$(basename "$svc")
-               s6-svstat "$svc" 2>/dev/null | sed "s/^/  ${name}: /"
-             done' || true
+        docker exec "$MAIN_CONTAINER" sh -c "
+            ${svstat_setup}
+            for svc in /run/service/*/; do
+                name=\$(basename \"\$svc\")
+                printf '  %-30s %s\n' \"\$name\" \"\$(\$S6_SVSTAT \"\$svc\" 2>&1)\"
+            done
+        " || true
     fi
 
-    if container_running "$LEROBOT_CONTAINER"; then
-        echo ""
-        echo "=== ${LEROBOT_CONTAINER} s6 services ==="
-        docker exec "$LEROBOT_CONTAINER" s6-svstat /run/service/inference-server 2>/dev/null || true
-        docker exec "$LEROBOT_CONTAINER" s6-svstat /run/service/control-publisher 2>/dev/null || true
-    fi
-
-    if container_running "$GROOT_CONTAINER"; then
-        echo ""
-        echo "=== ${GROOT_CONTAINER} s6 services ==="
-        docker exec "$GROOT_CONTAINER" s6-svstat /run/service/inference-server 2>/dev/null || true
-        docker exec "$GROOT_CONTAINER" s6-svstat /run/service/control-publisher 2>/dev/null || true
-    fi
+    for cont in "$LEROBOT_CONTAINER" "$GROOT_CONTAINER"; do
+        if container_running "$cont"; then
+            echo ""
+            # Not every policy container uses s6-overlay (e.g. lerobot
+            # has PID 1 running executor.py directly). Detect /run/service
+            # first; fall back to top-level process list otherwise.
+            if docker exec "$cont" sh -c '[ -d /run/service ]' 2>/dev/null; then
+                echo "=== ${cont} s6 services ==="
+                docker exec "$cont" sh -c "
+                    ${svstat_setup}
+                    for svc in /run/service/*/; do
+                        name=\$(basename \"\$svc\")
+                        printf '  %-30s %s\n' \"\$name\" \"\$(\$S6_SVSTAT \"\$svc\" 2>&1)\"
+                    done
+                " || true
+            else
+                echo "=== ${cont} processes (no s6-overlay) ==="
+                docker exec "$cont" sh -c 'ps -eo pid,user,comm,args | head -8' || true
+            fi
+        fi
+    done
 }
 
 stop_all() {
