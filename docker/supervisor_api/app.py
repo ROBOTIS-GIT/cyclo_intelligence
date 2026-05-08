@@ -150,14 +150,13 @@ def _detect_arch() -> str:
     return "arm64" if machine in ("aarch64", "arm64") else "amd64"
 
 
-_BACKEND_VERSION = os.environ.get("VERSION", "1.0.0")
 _BACKEND_ARCH = os.environ.get("ARCH", _detect_arch())
 
 
-# Image tags follow docker-compose.yml's `${VERSION:-1.0.0}-${ARCH:-arm64}`
-# pattern. Inside the container neither var is set (compose only
-# interpolates them on the host invocation), so we fall back to the same
-# defaults plus a uname-based arch sniff.
+# Image versions are hardcoded per backend below since each service has
+# its own release cadence. ARCH still falls back to a uname-based sniff
+# because compose only interpolates env vars on the host invocation, so
+# inside the container the env var isn't set.
 _BACKENDS: Dict[str, Dict[str, str]] = {
     "lerobot": {
         "service": "lerobot",
