@@ -1,32 +1,34 @@
-# LeRobot Docker Container for Jetson (ARM64)
-# Two-process policy runtime (Step 4 §5.5): s6-overlay supervises
-# inference-server (Process A, PyTorch + obs + chunk pub) and
-# control-publisher (Process B, 100 Hz command publisher) as two
-# independent OS processes that communicate over Zenoh.
+# LeRobot Docker Container for Jetson (ARM64).
 #
-# Build context: cyclo_intelligence/cyclo_brain/policy/lerobot/
-# Usage: docker build -f Dockerfile.arm64 -t robotis/lerobot-zenoh:arm64 .
+# Two-process policy runtime: s6-overlay supervises inference-server
+# (Process A) and control-publisher (Process B) over Zenoh. Runtime
+# Python source + the per-policy lerobot_engine.py are bind-mounted
+# (see docker-compose.yml); only deps + s6 unit files are baked here.
+#
+# Build context: cyclo_brain/policy/        (NOTE: parent of lerobot/)
+# Usage:         docker build -f lerobot/Dockerfile.arm64 \
+#                  -t robotis/lerobot-zenoh:arm64 .
 
-# JetPack 6.x (L4T R36.4) base image for Jetson Orin series
-# Same base image used by NVIDIA GR00T
+# JetPack 6.x (L4T R36.4) base image for Jetson Orin / Thor series.
+# Ubuntu 22.04 — system Python is 3.10, but lerobot upstream now
+# requires ``python>=3.12`` so we install python3.12 from deadsnakes
+# below and run lerobot in a 3.12 virtualenv.
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${BASE_IMAGE}
 
-# s6-overlay version (Step 4 §10.1 — supervises the two processes)
 ARG S6_OVERLAY_VERSION=3.2.0.2
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Set up locale
 RUN apt-get update && apt-get install -y locales \
     && locale-gen en_US en_US.UTF-8 \
     && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 ENV LANG=en_US.UTF-8
 
-# Install system dependencies
+# System dependencies (build toolchain + media + Python 3.12 prereqs).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
     build-essential \
     git \
     curl \
@@ -46,13 +48,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     speech-dispatcher \
     libgeos-dev \
     portaudio19-dev \
-    python3-dev \
-    python3-pip \
-    python3-venv \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install s6-overlay (supervises the two runtime processes)
+# Python 3.12 from deadsnakes — JetPack 6.x ships only 3.10 in apt and
+# upstream lerobot's pyproject.toml requires >=3.12.
+RUN add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# s6-overlay (supervises the two runtime processes)
 RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
       https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz \
     && curl -fsSL -o /tmp/s6-overlay-aarch64.tar.xz \
@@ -61,90 +69,81 @@ RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
     && tar -C / -Jxpf /tmp/s6-overlay-aarch64.tar.xz \
     && rm /tmp/s6-overlay-*.tar.xz
 
-# Install uv (fast Python package manager)
+# uv (fast Python package manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv
 
-# Create working directory for LeRobot
 WORKDIR /lerobot
 
-# Create virtual environment using system Python (from L4T image)
-RUN uv venv /lerobot/.venv --python python3
-
-# Set virtual environment as default
+# Virtual env on Python 3.12 (NOT system 3.10).
+RUN uv venv /lerobot/.venv --python python3.12
 ENV VIRTUAL_ENV=/lerobot/.venv
 ENV PATH="/lerobot/.venv/bin:$PATH"
 
-# Install PyTorch for Jetson from Jetson AI Lab pip index
-# IMPORTANT: Use ONLY Jetson index (no --extra-index-url) to prevent uv from
-# picking CPU wheels from PyPI. Jetson index includes all torch dependencies.
+# PyTorch for Jetson — Jetson AI Lab pip index hosts cuda-aware wheels.
+# IMPORTANT: --index-url only (no --extra-index-url) so uv doesn't pull
+# CPU-only wheels from PyPI. The cu126 index publishes Python 3.12
+# wheels alongside 3.10/3.11; if your build fails with "no matching
+# distribution", check https://pypi.jetson-ai-lab.io/jp6/cu126/+simple
+# for the latest cp312 tags.
 RUN uv pip install torch torchvision \
     --index-url https://pypi.jetson-ai-lab.io/jp6/cu126/+simple
 
-# Install nvidia-cudss-cu12 (required by Jetson PyTorch, not included in l4t-jetpack base)
-# --no-deps to avoid re-downloading cublas which is already in the base image
+# nvidia-cudss-cu12 is required by Jetson PyTorch but isn't included in
+# l4t-jetpack. --no-deps avoids re-pulling cublas (already present).
 RUN uv pip install --no-deps nvidia-cudss-cu12
-ENV LD_LIBRARY_PATH="/lerobot/.venv/lib/python3.10/site-packages/nvidia/cu12/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/lerobot/.venv/lib/python3.12/site-packages/nvidia/cu12/lib:${LD_LIBRARY_PATH}"
 
-# Copy LeRobot source and install dependencies
-# Build context is cyclo_brain/policy/lerobot/, so paths are relative to that
-COPY lerobot/setup.py lerobot/pyproject.toml lerobot/README.md lerobot/MANIFEST.in ./
-COPY lerobot/src/ ./src/
+# Copy LeRobot source (paths now relative to cyclo_brain/policy/ build context)
+COPY lerobot/lerobot/setup.py lerobot/lerobot/pyproject.toml lerobot/lerobot/README.md lerobot/lerobot/MANIFEST.in ./
+COPY lerobot/lerobot/src/ ./src/
 
-# Install LeRobot dependencies (training/inference only, no hardware/simulation)
-# Removed: dynamixel, gamepad, hopejr, lekiwi, reachy2, kinematics (hardware)
-# Removed: dev, test, video_benchmark (development)
-# Removed: aloha, pusht, phone, libero, metaworld, sarm (simulation)
+# Install training/inference + VLA extras (same set as amd64).
 RUN uv pip install --no-cache ".[smolvla,xvla,hilserl,async,peft]"
 
-# Reinstall Jetson CUDA PyTorch (lerobot deps may overwrite with CPU version from PyPI)
+# Reinstall Jetson CUDA PyTorch — lerobot deps may have overwritten with
+# CPU wheels from PyPI during the previous step.
 RUN uv pip install --reinstall torch torchvision \
     --index-url https://pypi.jetson-ai-lab.io/jp6/cu126/+simple
 
-# Copy the rest of LeRobot (configs, tests, etc.)
-COPY lerobot/ ./
+COPY lerobot/lerobot/ ./
 
-# Zenoh + runtime Python dependencies. zenoh_ros2_sdk / robot_client /
-# post_processing are mounted as volumes (see docker-compose.yml).
-# IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled zenoh-c version (1.6.x)
-# Mismatched versions (e.g., 1.7.x vs 1.6.x) cause service call failures despite discovery working
+# Zenoh + runtime deps. SDKs are bind-mounted (see docker-compose.yml).
 RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config
+    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config \
+                /policy_runtime /app
 
-# Copy the two-process runtime into the image
-COPY runtime/ /app/runtime/
-
-# Copy the s6 service definitions
-COPY s6-services/ /etc/s6-overlay/s6-rc.d/
+# s6 unit files come from cyclo_brain/policy/common/. Generic across all
+# policy backends — never edited per-policy.
+COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/inference-server/run \
              /etc/s6-overlay/s6-rc.d/control-publisher/run
 
-# Environment variables for HuggingFace cache (mapped via volume)
+# HuggingFace cache
 ENV HF_HOME=/root/.cache/huggingface
 ENV HF_LEROBOT_HOME=/root/.cache/huggingface/lerobot
 ENV TORCH_HOME=/root/.cache/torch
 
-# Zenoh configuration
+# Zenoh
 ENV ZENOH_ROUTER_IP=127.0.0.1
 ENV ZENOH_ROUTER_PORT=7447
 ENV ZENOH_SHM_ENABLED=true
 ENV ZENOH_SDK_PATH=/zenoh_sdk
 ENV ZENOH_TRANSPORT_SHM_ENABLED=true
 
-# Runtime SDK paths (consumed by runtime/inference_server.py and
-# runtime/control_publisher.py).
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV POST_PROCESSING_SDK_PATH=/post_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
-# Default working directory
+# Common runtime dispatch
+ENV POLICY_BACKEND=lerobot
+ENV POLICY_ENGINE_MODULE=lerobot_engine
+
 WORKDIR /lerobot
 
-# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD s6-svstat /run/service/inference-server 2>&1 | grep -q "up" \
      && s6-svstat /run/service/control-publisher 2>&1 | grep -q "up" \
      || exit 1
 
-# s6-overlay init — launches both supervised services in parallel
 ENTRYPOINT ["/init"]

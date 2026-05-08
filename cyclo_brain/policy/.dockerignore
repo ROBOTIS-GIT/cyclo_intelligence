@@ -1,0 +1,27 @@
+# Build context hygiene for all policy backends — keep image builds
+# deterministic and prevent host-side scratch dirs from bleeding into
+# the image. Runtime data lives on the compose-mounted ./workspace
+# (host: docker/workspace/) shared across policy containers.
+#
+# Build context is cyclo_brain/policy/ (parent of lerobot/, groot/, ...)
+# so paths are written relative to that.
+
+# Per-policy scratch
+*/workspace/
+*/.git/
+*/.venv/
+*/.cache/
+*/*.log
+
+# Python build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+
+# Submodule build artifacts (huggingface/lerobot, NVIDIA/Isaac-GR00T, ...)
+**/build/
+**/dist/
+
+# Don't bake doc-only files into images
+**/INTEGRATION_REPORT.md

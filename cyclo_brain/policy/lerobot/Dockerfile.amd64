@@ -1,34 +1,41 @@
 # LeRobot Docker Container with Zenoh Communication Support (AMD64)
-# Two-process policy runtime (Step 4 §5.5): s6-overlay supervises
-# inference-server (Process A, PyTorch + obs + chunk pub) and
-# control-publisher (Process B, 100 Hz command publisher) as two
-# independent OS processes that communicate over Zenoh.
 #
-# Build context: cyclo_intelligence/cyclo_brain/policy/lerobot/
-# Usage: docker build -f Dockerfile.amd64 -t robotis/lerobot-zenoh:amd64 .
+# Two-process policy runtime: s6-overlay supervises inference-server
+# (Process A — PyTorch + obs + chunk pub) and control-publisher
+# (Process B — 100 Hz command publisher) as independent OS processes
+# that communicate over Zenoh.
+#
+# The runtime + s6 services are policy-agnostic and live under
+# cyclo_brain/policy/common/. This image only ships the LeRobot deps
+# and bakes the common s6 unit files; the actual Python source for
+# Process A/B and lerobot_engine.py are bind-mounted at runtime so the
+# container can be iterated without rebuilds.
+#
+# Build context: cyclo_brain/policy/        (NOTE: parent of lerobot/)
+# Usage:         docker build -f lerobot/Dockerfile.amd64 \
+#                  -t robotis/lerobot-zenoh:amd64 .
 
-# NVIDIA PyTorch base image (same as GR00T Thor)
-# Includes PyTorch, CUDA, cuDNN pre-installed
+# NVIDIA PyTorch base image (Python 3.12 — required by upstream lerobot
+# pyproject.toml ``requires-python = ">=3.12"``).
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:24.12-py3
 FROM ${BASE_IMAGE}
 
 # GPU architecture build arg (default=use base image PyTorch, blackwell=install nightly cu128)
 ARG GPU_ARCH=default
 
-# s6-overlay version (Step 4 §10.1 — supervises the two processes)
+# s6-overlay version (supervises the two processes)
 ARG S6_OVERLAY_VERSION=3.2.0.2
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Set up locale
+# Locale
 RUN apt-get update && apt-get install -y locales \
     && locale-gen en_US en_US.UTF-8 \
     && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 ENV LANG=en_US.UTF-8
 
-# Install system dependencies
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
@@ -46,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install s6-overlay (supervises the two runtime processes)
+# s6-overlay (supervises the two runtime processes)
 RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
       https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz \
     && curl -fsSL -o /tmp/s6-overlay-x86_64.tar.xz \
@@ -55,29 +62,24 @@ RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
     && tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz \
     && rm /tmp/s6-overlay-*.tar.xz
 
-# Install uv (fast Python package manager)
+# uv (fast Python package manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv
 
-# Create working directory for LeRobot
 WORKDIR /lerobot
 
-# Create virtual environment using the base image's Python
+# Virtual env on top of the base image's Python 3.12
 RUN uv venv /lerobot/.venv --python python3
-
-# Set virtual environment as default
 ENV VIRTUAL_ENV=/lerobot/.venv
 ENV PATH="/lerobot/.venv/bin:$PATH"
 
-# Copy LeRobot source and install dependencies
-# Build context is cyclo_brain/policy/lerobot/, so paths are relative to that
-COPY lerobot/setup.py lerobot/pyproject.toml lerobot/README.md lerobot/MANIFEST.in ./
-COPY lerobot/src/ ./src/
+# Copy LeRobot source (paths now relative to cyclo_brain/policy/ build context)
+COPY lerobot/lerobot/setup.py lerobot/lerobot/pyproject.toml lerobot/lerobot/README.md lerobot/lerobot/MANIFEST.in ./
+COPY lerobot/lerobot/src/ ./src/
 
-# Install LeRobot dependencies (training/inference only, no hardware/simulation)
-# Removed: dynamixel, gamepad, hopejr, lekiwi, reachy2, kinematics (hardware)
-# Removed: dev, test, video_benchmark (development)
-# Removed: aloha, pusht, phone, libero, metaworld, sarm (simulation)
+# Install training/inference + VLA extras. Removed: dynamixel/gamepad/
+# hopejr/lekiwi/reachy2/kinematics (hardware), dev/test/video_benchmark
+# (development), aloha/pusht/phone/libero/metaworld/sarm (simulation).
 RUN uv pip install --no-cache ".[smolvla,xvla,hilserl,async,peft]"
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
@@ -90,54 +92,51 @@ RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
     fi
 
 # Copy the rest of LeRobot (configs, tests, etc.)
-COPY lerobot/ ./
+COPY lerobot/lerobot/ ./
 
-# Zenoh + runtime Python dependencies. zenoh_ros2_sdk / robot_client /
-# post_processing are mounted as volumes (see docker-compose.yml) so they
-# can iterate independently of the image.
-# IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled zenoh-c version (1.6.x)
-# Mismatched versions (e.g., 1.7.x vs 1.6.x) cause service call failures despite discovery working
+# Zenoh + runtime Python deps. zenoh_ros2_sdk / robot_client /
+# post_processing come in via bind-mount (see docker-compose.yml).
+# IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled
+# zenoh-c version (1.6.x). Mismatched versions cause service call
+# failures despite discovery working.
 RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config
+    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config \
+                /policy_runtime /app
 
-# Copy the two-process runtime into the image. These files are version-
-# locked with the container; SDKs (post_processing, robot_client,
-# zenoh_ros2_sdk) and orchestrator YAML come in via volume mount.
-COPY runtime/ /app/runtime/
-
-# Copy the s6 service definitions (longrun services under s6-rc.d +
-# user bundle that enables both). Layout:
-#   /etc/s6-overlay/s6-rc.d/
-#     inference-server/{type,run}
-#     control-publisher/{type,run}
-#     user/contents.d/{inference-server,control-publisher}
-COPY s6-services/ /etc/s6-overlay/s6-rc.d/
+# s6 unit files come from cyclo_brain/policy/common/. Generic across all
+# policy backends — never edited per-policy.
+COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/inference-server/run \
              /etc/s6-overlay/s6-rc.d/control-publisher/run
 
-# Environment variables for HuggingFace cache (mapped via volume)
+# HuggingFace cache (bind-mounted from compose so weights survive rebuild).
 ENV HF_HOME=/root/.cache/huggingface
 ENV HF_LEROBOT_HOME=/root/.cache/huggingface/lerobot
 ENV TORCH_HOME=/root/.cache/torch
 
-# Zenoh configuration
+# Zenoh
 ENV ZENOH_ROUTER_IP=127.0.0.1
 ENV ZENOH_ROUTER_PORT=7447
 ENV ZENOH_SHM_ENABLED=true
 ENV ZENOH_SDK_PATH=/zenoh_sdk
 ENV ZENOH_TRANSPORT_SHM_ENABLED=true
 
-# Runtime SDK paths (consumed by runtime/inference_server.py and
-# runtime/control_publisher.py). Defaults match the compose volume
-# mounts; override if layout changes.
+# Bind-mount roots (consumed by /policy_runtime/inference_server.py and
+# /policy_runtime/control_publisher.py). Defaults match the compose
+# volume mounts; override if layout changes.
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV POST_PROCESSING_SDK_PATH=/post_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
-# Default working directory
+# Common runtime dispatch — POLICY_BACKEND drives the Zenoh topic
+# prefix (cyclo/policy/<backend>/...) and the default engine module
+# name (<backend>_engine). docker-compose mounts lerobot_engine.py at
+# /app/lerobot_engine.py.
+ENV POLICY_BACKEND=lerobot
+ENV POLICY_ENGINE_MODULE=lerobot_engine
+
 WORKDIR /lerobot
 
-# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD s6-svstat /run/service/inference-server 2>&1 | grep -q "up" \
      && s6-svstat /run/service/control-publisher 2>&1 | grep -q "up" \

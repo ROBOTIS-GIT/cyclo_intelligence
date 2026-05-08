@@ -1,52 +1,41 @@
 #!/usr/bin/env python3
 #
-# Copyright 2025 ROBOTIS CO., LTD.
+# Copyright 2026 ROBOTIS CO., LTD.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-"""Process B — 100 Hz control publisher for LeRobot.
+"""Process B — generic 100 Hz control publisher.
 
-Responsibilities (REVIEW §10.1–§10.5):
+Policy-agnostic. Listens for ``cyclo/policy/<backend>/configure`` from
+Process A, builds per-robot publishers + ActionChunkProcessor, then runs
+the 100 Hz tick loop:
 
-- Subscribe Zenoh ``cyclo/policy/lerobot/configure`` from Process A and
-  swap the active robot configuration on demand. The container starts
-  in an unconfigured state and stays idle until LOAD lands at A.
-- Once configured, subscribe Zenoh ``cyclo/policy/lerobot/action_chunk_raw``
-  from Process A, push each raw chunk through ``ActionChunkProcessor``
-  (L2 align → interpolate → blend → buffer).
-- Publish Zenoh trigger ``cyclo/policy/lerobot/run_inference`` to Process A
-  when the buffer falls below the refill threshold.
-- Run a ``CONTROL_HZ``-paced ``time.sleep`` loop, pop one action per tick,
-  fan out via ``split_action`` to per-group ROS2 publishers
-  (``JointTrajectory`` for joint groups, ``Twist`` for mobile).
+- Subscribe ``cyclo/policy/<backend>/action_chunk_raw`` (Process A).
+- Push raw chunks through ``ActionChunkProcessor`` (L2 align →
+  interpolate → blend → buffer) imported from
+  ``cyclo_brain/sdk/post_processing/``.
+- Publish ``cyclo/policy/<backend>/run_inference`` triggers when the
+  buffer falls below the refill threshold.
+- Pop one action per tick, fan out via ``split_action`` to per-group
+  ROS2 publishers (``JointTrajectory`` for joint groups, ``Twist`` for
+  mobile).
 
-Not this file's concern:
-
-- Model loading or observation subscription — lives in Process A
-  (runtime/inference_server.py).
-- L2 alignment / interpolation / blend logic — imported from
-  ``cyclo_brain/sdk/post_processing/`` (Step 4-A).
-
-Robot-type binding (2026-04-27 redesign):
-
-The original Step 4 design pinned ``ROBOT_TYPE`` to compose-time env so
-publishers could be created at boot. That locked one container to one
-robot. The current design moves that binding to ``InferenceCommand.LOAD``:
-Process A receives ``robot_type`` on the srv body, broadcasts it on the
-configure topic, and Process B reads ``<robot_type>_config.yaml`` then
-to build the per-group publishers + ActionChunkProcessor. This lets one
+Robot-type binding is dynamic (D16): the container starts in an
+unconfigured state and stays idle until ``LOAD`` lands at A and
+broadcasts ``robot_type`` on the configure topic. This lets one
 container support many robots — UNLOAD/LOAD with a different
 ``robot_type`` reconfigures everything in place.
+
+Configuration via environment variables:
+
+- ``POLICY_BACKEND`` — required, must match Process A's value.
+- ``REQUEST_TIMEOUT_S`` — chunk-arrival deadline before we drop the
+  in-flight ``_requesting`` flag (default 5 s; bump for slow VLAs like
+  GR00T post-TRT-load by setting e.g. ``REQUEST_TIMEOUT_S=8.0``).
 """
 
 from __future__ import annotations
@@ -65,17 +54,19 @@ import numpy as np
 # -- robot config schema helper -----------------------------------------------
 # shared/robot_configs/ is bind-mounted into the container at
 # /orchestrator_config/, so schema.py lands beside the per-robot yamls.
-# The module is intentionally self-contained (no `shared` package
-# imports) so it can be imported as a standalone file from that mount.
 _SCHEMA_DIR = os.environ.get("ORCHESTRATOR_CONFIG_PATH", "/orchestrator_config")
 if os.path.isdir(_SCHEMA_DIR) and _SCHEMA_DIR not in sys.path:
     sys.path.insert(0, _SCHEMA_DIR)
 try:
     import schema as robot_schema  # type: ignore[import-not-found]
 except ImportError:
-    # Source-tree fallback for unit tests on the host.
+    # Source-tree fallback for unit tests on the host. _parents[3]
+    # resolves to cyclo_brain/ for both the legacy
+    # policy/<backend>/runtime/ layout and the new policy/common/runtime/
+    # layout (same depth from cyclo_brain).
     _src_schema_dir = (
-        Path(__file__).resolve().parents[4] / "shared" / "shared" / "robot_configs"
+        Path(__file__).resolve().parents[3].parent
+        / "shared" / "shared" / "robot_configs"
     )
     if _src_schema_dir.is_dir():
         sys.path.insert(0, str(_src_schema_dir))
@@ -96,9 +87,6 @@ from zenoh_ros2_sdk import (  # noqa: E402
 
 
 # -- post_processing SDK import shim -------------------------------------------
-# Bootstrap inline: we can't use the shared dev_sdk_path helper yet because
-# it lives inside post_processing — chicken-and-egg. After post_processing
-# is on sys.path we import the shared helper for subsequent paths.
 _parents = Path(__file__).resolve().parents
 _default_pp = (
     str(_parents[3] / "sdk" / "post_processing") if len(_parents) > 3 else ""
@@ -132,13 +120,14 @@ logger = get_logger("control_publisher")
 
 # -- Constants -----------------------------------------------------------------
 
-BACKEND = "lerobot"
+BACKEND = os.environ.get("POLICY_BACKEND", "").strip()
+if not BACKEND:
+    raise RuntimeError(
+        "POLICY_BACKEND env var is required (e.g. 'lerobot', 'groot')."
+    )
 TRIGGER_TOPIC = f"cyclo/policy/{BACKEND}/run_inference"
 CHUNK_TOPIC = f"cyclo/policy/{BACKEND}/action_chunk_raw"
 CONFIGURE_TOPIC = f"cyclo/policy/{BACKEND}/configure"
-# Lifecycle broadcasts from Process A. We use "running" to gate triggers
-# (don't pump while paused/stopped/loaded/unloaded) and to drop stale
-# in-flight triggers on resume so the next tick fires immediately.
 LIFECYCLE_TOPIC = f"cyclo/policy/{BACKEND}/lifecycle"
 
 CONTROL_HZ = 100.0
@@ -147,9 +136,10 @@ CHUNK_ALIGN_WINDOW_S = 0.3
 
 # Refill when buffer falls below this many waypoints (200 ms of slack).
 REFILL_MARGIN_S = 0.2
-# Give up on a trigger if no chunk arrives within this window (prevents
-# _requesting from sticking forever when Process A is idle / unloaded).
-REQUEST_TIMEOUT_S = 5.0
+# Give up on a trigger if no chunk arrives within this window. Slow VLAs
+# (GR00T post-TRT-load, large Pi0 etc.) need more headroom — override via
+# REQUEST_TIMEOUT_S env var.
+REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "5.0"))
 # Best-effort real-time priority — requires CAP_SYS_NICE + rtprio ulimit.
 RT_PRIO = 80
 
@@ -179,13 +169,13 @@ class ControlPublisher:
         router_ip: str,
         router_port: int,
         domain_id: int,
-        node_name: str = "lerobot_control_publisher",
+        node_name: Optional[str] = None,
         namespace: str = "/",
     ):
         self._router_ip = router_ip
         self._router_port = router_port
         self._domain_id = domain_id
-        self._node_name = node_name
+        self._node_name = node_name or f"{BACKEND}_control_publisher"
         self._namespace = namespace
 
         # Configuration state — populated in configure(robot_type), cleared in
@@ -216,20 +206,16 @@ class ControlPublisher:
         self._chunk_sub: Optional[ROS2Subscriber] = None
         self._trajectory_preview_pub: Optional[ROS2Publisher] = None
 
-        # Always-on configure + lifecycle subscribers (created in setup(),
-        # torn down in shutdown()). configure carries robot_type;
-        # lifecycle carries Process A's run state ("running" means
-        # triggers will be honored).
+        # Always-on configure + lifecycle subscribers.
         self._configure_sub: Optional[ROS2Subscriber] = None
         self._lifecycle_sub: Optional[ROS2Subscriber] = None
         # Whether Process A is in a state that honors triggers (running).
-        # Updated by lifecycle subscriber; read inside _config_lock.
         self._a_honoring = False
 
         # Cache generated message classes — _publish_twist /
         # _publish_joint_trajectory run in the 100 Hz tick, so a per-call
-        # get_message_class lookup (5 dict lookups + 5 instantiations) was
-        # previously the hot path's biggest fixed cost. Bind once at init.
+        # get_message_class lookup was previously the hot path's biggest
+        # fixed cost. Bind once at init.
         self._Vector3 = get_message_class("geometry_msgs/msg/Vector3")
         self._msg_classes = {
             "JointTrajectoryPoint": get_message_class(
@@ -279,18 +265,14 @@ class ControlPublisher:
     def shutdown(self) -> None:
         self._shutdown.set()
         self.deconfigure()
-        if self._configure_sub is not None:
-            try:
-                self._configure_sub.close()
-            except Exception:
-                pass
-            self._configure_sub = None
-        if self._lifecycle_sub is not None:
-            try:
-                self._lifecycle_sub.close()
-            except Exception:
-                pass
-            self._lifecycle_sub = None
+        for attr in ("_configure_sub", "_lifecycle_sub"):
+            handle = getattr(self, attr, None)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def configure(self, robot_type: str) -> None:
         """Build per-robot publishers + ActionChunkProcessor for ``robot_type``.
@@ -311,21 +293,12 @@ class ControlPublisher:
             section = robot_schema.load_robot_section(robot_type)
             action_groups = robot_schema.get_action_groups(section)
 
-            # Each action.<modality>.topic is BOTH the inference command
-            # target (we publish here) AND the rosbag record target. The
-            # publisher key carries the legacy ``leader_<modality>`` prefix
-            # so post_processing.split_action's downstream contract stays
-            # stable without touching the shared SDK.
             self._command_topics = {
                 f"leader_{m}": cfg["topic"] for m, cfg in action_groups.items()
             }
             self._command_msg_types = {
                 f"leader_{m}": cfg["msg_type"] for m, cfg in action_groups.items()
             }
-            # Compatibility shim: build_action_joint_map (post_processing)
-            # expects ``"joint_order.leader_<key>"``-keyed entries. Re-emit
-            # the new schema's joint_names in that shape locally so we
-            # don't need to fork the SDK signature.
             self._joint_order = {
                 f"joint_order.leader_{m}": list(cfg["joint_names"])
                 for m, cfg in action_groups.items()
@@ -334,9 +307,6 @@ class ControlPublisher:
             self._action_joint_map = build_action_joint_map(
                 self._action_keys, self._joint_order
             )
-            # Trajectory preview joint_names: concat in the same sorted
-            # action-key order split_action uses, so the chunk's flat
-            # per-row dimension layout maps 1:1 onto these names.
             self._preview_joint_names = []
             for m in self._action_keys:
                 self._preview_joint_names.extend(
@@ -373,9 +343,6 @@ class ControlPublisher:
             prev = self._robot_type
             self._robot_type = None
             self._configured = False
-            # Belt-and-suspenders: lifecycle "unloaded" already sets this
-            # to False, but if that message is dropped we don't want to
-            # carry honoring=True into a deconfigured state.
             self._a_honoring = False
             logger.info(f"deconfigured (was {prev})")
 
@@ -417,8 +384,6 @@ class ControlPublisher:
             f"({len(self._preview_joint_names)} joints)"
         )
 
-        # Reset trigger state on (re)configure so a stale _requesting flag
-        # from a previous robot doesn't block triggers on the new one.
         self._requesting = False
         self._request_sent_at = 0.0
         self._seq_id = 0
@@ -465,8 +430,7 @@ class ControlPublisher:
         honoring state ("running"), drop any in-flight trigger we may
         have sent during a non-honoring state — otherwise the next tick
         wouldn't refire until the stale trigger times out
-        (REQUEST_TIMEOUT_S, ~8 s), which is the user-visible resume
-        latency we're fixing.
+        (REQUEST_TIMEOUT_S), producing a multi-second resume latency.
         """
         try:
             state = (getattr(msg, "data", "") or "").strip()
@@ -474,15 +438,12 @@ class ControlPublisher:
             with self._config_lock:
                 was_honoring = self._a_honoring
                 self._a_honoring = new_honoring
-                if new_honoring and not was_honoring:
-                    if self._requesting:
-                        logger.info(
-                            f"lifecycle: {state} — clearing stale in-flight "
-                            f"trigger seq={self._seq_id}"
-                        )
-                        self._requesting = False
-                    else:
-                        logger.info(f"lifecycle: {state}")
+                if new_honoring and not was_honoring and self._requesting:
+                    logger.info(
+                        f"lifecycle: {state} — clearing stale in-flight "
+                        f"trigger seq={self._seq_id}"
+                    )
+                    self._requesting = False
                 else:
                     logger.info(f"lifecycle: {state}")
         except Exception as e:
@@ -514,9 +475,8 @@ class ControlPublisher:
             if not self._configured or self._processor is None:
                 return
 
-            # Recover a stuck trigger: if Process A hasn't answered in N seconds
-            # we drop the in-flight flag and try again on the next buffer-low
-            # check.
+            # Recover a stuck trigger: drop the in-flight flag and try
+            # again on the next buffer-low check.
             if self._requesting and (time.time() - self._request_sent_at) > REQUEST_TIMEOUT_S:
                 logger.warning(
                     f"trigger seq={self._seq_id} timed out after "
@@ -526,11 +486,9 @@ class ControlPublisher:
 
             # Process A is paused / stopped / loaded / unloaded — don't
             # publish anything. ActionChunkProcessor.pop_action() falls
-            # back to last_action when the buffer drains, so without
-            # this gate we'd keep emitting the same JointTrajectory at
-            # 100 Hz long after PAUSE. The robot's controller holds its
-            # last commanded position on its own when no new trajectory
-            # arrives — that's the desired stop behavior.
+            # back to last_action when the buffer drains, so without this
+            # gate we'd keep emitting the same JointTrajectory at 100 Hz
+            # long after PAUSE.
             if not self._a_honoring:
                 return
 
@@ -565,9 +523,6 @@ class ControlPublisher:
                     f"chunk rx seq={seq_id} T={chunk_size} D={action_dim} → "
                     f"pushed={n_pushed} buffer={self._processor.buffer_size}"
                 )
-                # Fan out the full chunk to /inference/trajectory_preview
-                # for the UI's 3D viz. One message per chunk arrival
-                # (≈inference_hz); UI throttles further.
                 self._publish_trajectory_preview_locked(chunk)
             except Exception as e:
                 logger.error(f"chunk decode failed: {e}", exc_info=True)
@@ -590,11 +545,6 @@ class ControlPublisher:
         """Emit the full predicted action chunk as a JointTrajectory for the
         UI's 3D viz. ``chunk`` is shape (T, D) where D matches
         ``len(self._preview_joint_names)``. Caller holds _config_lock.
-
-        Construction mirrors post_processing.ros_msg_helpers.make_joint_trajectory
-        — zenoh_ros2_sdk's generated classes require every IDL field, so we
-        pass empty velocities/accelerations/effort + zero time_from_start
-        per point.
         """
         if self._trajectory_preview_pub is None:
             return

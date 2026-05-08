@@ -1,0 +1,8 @@
+#!/command/with-contenv bash
+# Process B — generic 100 Hz control publisher.
+# Idle until cyclo/policy/$POLICY_BACKEND/configure broadcast lands from
+# Process A (D16 — robot_type binds at InferenceCommand.LOAD, not
+# compose env).
+
+export PYTHONPATH="/app:/policy_runtime${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 /policy_runtime/control_publisher.py

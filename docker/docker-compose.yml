@@ -128,8 +128,12 @@ services:
     container_name: lerobot_server
     image: robotis/lerobot-zenoh:1.0.0-${ARCH:-arm64}
     build:
-      context: ../cyclo_brain/policy/lerobot
-      dockerfile: Dockerfile.${ARCH:-arm64}
+      # Build context bumped one level up so the Dockerfile can
+      # COPY common/s6-services/ (shared across all policy backends)
+      # alongside lerobot/lerobot/. Per-policy Dockerfile path moved
+      # under lerobot/.
+      context: ../cyclo_brain/policy
+      dockerfile: lerobot/Dockerfile.${ARCH:-arm64}
       # See cyclo_intelligence.build.network for why.
       network: host
       args:
@@ -163,6 +167,11 @@ services:
       - ZENOH_SHM_ENABLED=true
       - ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
       - POST_PROCESSING_SDK_PATH=/post_processing_sdk
+      # Drives Zenoh topic prefix (cyclo/policy/lerobot/...) and the
+      # default engine module name (lerobot_engine). Read by both
+      # /policy_runtime/inference_server.py and control_publisher.py.
+      - POLICY_BACKEND=lerobot
+      - POLICY_ENGINE_MODULE=lerobot_engine
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
@@ -177,11 +186,15 @@ services:
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/post_processing:/post_processing_sdk:ro
-      # Live-edit Process A + B. Without this, the baked /app/runtime/
-      # from a stale image build ignores the Phase 4 VLA-semantic yaml
-      # schema and creates zero ROS publishers — chunks get computed but
-      # never reach the robot.
-      - ../cyclo_brain/policy/lerobot/runtime:/app/runtime:ro
+      # Common policy runtime (Process A + B + Engine ABC). Shared
+      # across all backends; per-policy code lives in lerobot_engine.py
+      # below.
+      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
+      # Per-policy engine — implements InferenceEngine (load_policy +
+      # get_action_chunk + cleanup). The only file unique to this
+      # backend; bind-mounted so we can iterate on inference logic
+      # without rebuilding the image.
+      - ../cyclo_brain/policy/lerobot/lerobot_engine.py:/app/lerobot_engine.py:ro
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
       # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
       # doesn't have to git-fetch the upstream `master` branch (gone)

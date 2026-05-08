@@ -1,8 +1,0 @@
-#!/command/with-contenv bash
-# Process B — 100 Hz control publisher.
-# Reads orchestrator config for command topics + joint_order.
-# REQUEST_TIMEOUT_S handles the case where Process A isn't serving yet
-# (or is still loading a model), so we don't strictly need an s6
-# dependency on inference-server — both can start in parallel.
-
-exec python3 /app/runtime/control_publisher.py

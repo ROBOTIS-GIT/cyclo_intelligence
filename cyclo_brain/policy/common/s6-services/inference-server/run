@@ -1,0 +1,10 @@
+#!/command/with-contenv bash
+# Process A — generic policy inference server.
+# Common runtime + per-policy engine are bind-mounted; PYTHONPATH gives
+# the server access to both. POLICY_BACKEND / POLICY_ENGINE_MODULE come
+# from the container env (set in Dockerfile).
+# s6-overlay restarts this on exit; fail-fast with `exec` so exit codes
+# propagate and the backoff kicks in.
+
+export PYTHONPATH="/app:/policy_runtime${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 /policy_runtime/inference_server.py
