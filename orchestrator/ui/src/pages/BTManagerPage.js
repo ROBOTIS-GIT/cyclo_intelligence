@@ -31,11 +31,10 @@ import { MdPlayArrow, MdStop, MdUploadFile } from 'react-icons/md';
 import BTControlNode from '../components/bt/BTControlNode';
 import BTActionNode from '../components/bt/BTActionNode';
 import BTParamPanel from '../components/bt/BTParamPanel';
-import FileBrowserModal from '../components/FileBrowserModal';
+import TreeListModal from '../features/btmanager/components/TreeListModal';
 import { parseBTXml } from '../utils/btTreeParser';
 import { setTreeXml, setTreeFileName, setBtStatus, setActiveNodeNames, setSelectedNodeId } from '../features/btmanager/btmanagerSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { DEFAULT_PATHS } from '../constants/paths';
 
 const nodeTypes = {
   btControl: BTControlNode,
@@ -56,7 +55,7 @@ export default function BTManagerPage({ isActive = true }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [parseError, setParseError] = useState(null);
-  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [showTreeList, setShowTreeList] = useState(false);
 
   // Parse XML and update flow whenever treeXml changes
   useEffect(() => {
@@ -79,7 +78,7 @@ export default function BTManagerPage({ isActive = true }) {
     }
   }, [treeXml, setNodes, setEdges]);
 
-  // Handle file selection from FileBrowserModal
+  // Handle tree selection from TreeListModal
   const handleServerFileSelect = useCallback(async (item) => {
     if (!item || !item.full_path) return;
 
@@ -266,7 +265,7 @@ export default function BTManagerPage({ isActive = true }) {
             {treeFileName || 'No file loaded'}
           </span>
           <button
-            onClick={() => setShowFileBrowser(true)}
+            onClick={() => setShowTreeList(true)}
             className={clsx(
               'flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer',
               'bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium',
@@ -366,16 +365,11 @@ export default function BTManagerPage({ isActive = true }) {
         </div>
       </div>
 
-      {/* File Browser Modal */}
-      <FileBrowserModal
-        isOpen={showFileBrowser}
-        onClose={() => setShowFileBrowser(false)}
-        onFileSelect={handleServerFileSelect}
-        initialPath={DEFAULT_PATHS.BT_TREES_PATH}
-        defaultPath={DEFAULT_PATHS.BT_TREES_PATH}
-        title="Select BT XML File"
-        selectButtonText="Load"
-        fileFilter={(item) => item.name.endsWith('.xml')}
+      {/* Tree List Modal */}
+      <TreeListModal
+        isOpen={showTreeList}
+        onClose={() => setShowTreeList(false)}
+        onSelect={handleServerFileSelect}
       />
     </div>
   );

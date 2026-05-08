@@ -16,6 +16,7 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import os
 from typing import Any, Callable, Dict, Optional
 
 from interfaces.msg import (
@@ -27,6 +28,7 @@ from interfaces.srv import (
     BrowseFile,
     GetDatasetInfo,
     GetImageTopicList,
+    GetTreeList,
 )
 from cyclo_data.editor.episode_editor import DataEditor
 from orchestrator.internal.file_browser.file_browse_utils import FileBrowseUtils
@@ -180,6 +182,12 @@ class Communicator:
             GetDatasetInfo,
             '/dataset/get_info',
             self.get_dataset_info_callback
+        )
+
+        self.list_trees_service = self.node.create_service(
+            GetTreeList,
+            '/bt/list_trees',
+            self.list_trees_callback
         )
 
     # Rosbag command client + prepare/start/stop/finish/stop_and_delete_rosbag
@@ -337,6 +345,45 @@ class Communicator:
 
         return response
 
+    def list_trees_callback(self, request, response):
+        """List .xml files in the orchestrator/bt/trees source directory.
+
+        Resolved via realpath of the orchestrator package so colcon's
+        --symlink-install build chain follows back to the bind-mounted
+        source (install/share lags because data files are copied, not
+        symlinked).
+        """
+        try:
+            import orchestrator as _orch_pkg
+            pkg_root = os.path.dirname(os.path.realpath(_orch_pkg.__file__))
+            trees_dir = os.path.join(pkg_root, 'bt', 'trees')
+
+            if not os.path.isdir(trees_dir):
+                response.tree_names = []
+                response.tree_full_paths = []
+                response.success = False
+                response.message = f'Trees directory not found: {trees_dir}'
+                return response
+
+            names = sorted(
+                f for f in os.listdir(trees_dir) if f.endswith('.xml')
+            )
+            response.tree_names = names
+            response.tree_full_paths = [
+                os.path.join(trees_dir, n) for n in names
+            ]
+            response.success = True
+            response.message = f'Found {len(names)} tree(s) in {trees_dir}'
+        except Exception as e:
+            self.node.get_logger().error(
+                f'Error in list_trees_callback: {str(e)}'
+            )
+            response.tree_names = []
+            response.tree_full_paths = []
+            response.success = False
+            response.message = f'Error: {str(e)}'
+        return response
+
     def get_dataset_info_callback(self, request, response):
         from pathlib import Path
         try:
@@ -412,7 +459,8 @@ class Communicator:
         service_names = [
             'image_topic_list_service',
             'file_browser_service',
-            'get_dataset_info_service'
+            'get_dataset_info_service',
+            'list_trees_service'
         ]
         for service_name in service_names:
             self._destroy_service_if_exists(service_name)

@@ -275,6 +275,20 @@ export function useRosServiceCaller() {
     }
   }, [callService]);
 
+  const getTreeList = useCallback(async () => {
+    try {
+      const result = await callService(
+        '/bt/list_trees',
+        'interfaces/srv/GetTreeList',
+        {}
+      );
+      return result;
+    } catch (error) {
+      console.error('Failed to get BT tree list:', error);
+      throw new Error(`${error.message || error}`);
+    }
+  }, [callService]);
+
   const getRobotTypeList = useCallback(async () => {
     try {
       const result = await callService(
@@ -823,6 +837,7 @@ export function useRosServiceCaller() {
     callService,
     sendRecordCommand,
     getImageTopicList,
+    getTreeList,
     getRobotTypeList,
     setRobotType,
     registerHFUser,
