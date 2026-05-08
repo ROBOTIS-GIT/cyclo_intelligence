@@ -1,0 +1,10 @@
+# supervisor_api — FastAPI control plane (PLAN §4.7 + §4.8).
+#
+# 'docker' (docker-py) drives /backends/{name}/{pull,status} via the
+# Engine API on /var/run/docker.sock. Lifecycle (start/stop) shells
+# out to the 'docker compose' CLI so the live compose YAML stays the
+# single source of truth for env / volumes / network mode.
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+pydantic>=2.6,<3.0
+docker>=6.0,<8.0

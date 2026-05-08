@@ -1,0 +1,36 @@
+########################################
+# Constants — recording commands
+########################################
+# Focused subset of SendCommand.srv owned by the cyclo_data node.
+# Inference-related commands (START_INFERENCE, STOP_INFERENCE,
+# *_INFERENCE_RECORD, RESUME_INFERENCE) stay on SendCommand.srv
+# (orchestrator/cyclo_brain territory). Conversion uses StartConversion.srv.
+uint8 START = 0
+uint8 STOP = 1
+uint8 PAUSE = 2
+uint8 RESUME = 3
+uint8 FINISH = 4
+uint8 MOVE_TO_NEXT = 5
+uint8 RERECORD = 6
+uint8 SKIP_TASK = 7
+uint8 CANCEL = 8
+uint8 REFRESH_TOPICS = 9
+
+uint8 command
+TaskInfo task_info
+# Robot type key (e.g. 'ffw_sg2_rev1', 'omy_f3m'). Drives DataManager's
+# folder naming + save_root resolution. The orchestrator forwarder
+# (Step 3 Part C2d-4) populates this from its node-scoped self.robot_type
+# which is owned by SetRobotType / get_robot_type services.
+string robot_type
+# Rosbag topics to subscribe on START / REFRESH_TOPICS. Orchestrator's
+# Communicator owns the topic inventory (camera / joint / extra), so
+# the forwarder aggregates and passes the flat list here.
+string[] topics
+# URDF path for DataManager.save_robotis_metadata. Used by
+# STOP / FINISH / MOVE_TO_NEXT / RERECORD. Empty → metadata save skipped.
+# Forwarder reads this from orchestrator's ROS parameter `urdf_path`.
+string urdf_path
+---
+bool success
+string message

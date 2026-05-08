@@ -1,0 +1,124 @@
+orchestrator:
+  ros__parameters:
+    ffw_sg2_rev1:
+      robot_name: "FFW SG2 Rev1"
+      urdf_path: /root/ros2_ws/install/shared/share/shared/robot_configs/urdf/ffw_sg2_follower.urdf
+
+      # ────────────────────────────────────────────────────────────────
+      # Observation — every signal the policy reads from the robot.
+      # Recording subscribes to all topics referenced here. Inference
+      # Process A subscribes to these same topics for live obs.
+      # ────────────────────────────────────────────────────────────────
+      observation:
+        images:
+          cam_head_left:
+            topic: /zed/zed_node/left/image_rect_color/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          cam_head_right:
+            topic: /zed/zed_node/right/image_rect_color/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          cam_wrist_left:
+            topic: /camera_left/camera_left/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+            rotation_deg: 270
+          cam_wrist_right:
+            topic: /camera_right/camera_right/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+            rotation_deg: 270
+
+        state:
+          # Each entry contributes one slice of observation.state. Order
+          # of slices is keyed insertion order (yaml = ordered).
+          upper_body:
+            topic: /joint_states
+            msg_type: sensor_msgs/msg/JointState
+            joint_names:
+              - arm_l_joint1
+              - arm_l_joint2
+              - arm_l_joint3
+              - arm_l_joint4
+              - arm_l_joint5
+              - arm_l_joint6
+              - arm_l_joint7
+              - gripper_l_joint1
+              - arm_r_joint1
+              - arm_r_joint2
+              - arm_r_joint3
+              - arm_r_joint4
+              - arm_r_joint5
+              - arm_r_joint6
+              - arm_r_joint7
+              - gripper_r_joint1
+              - head_joint1
+              - head_joint2
+              - lift_joint
+          mobile:
+            topic: /odom
+            msg_type: nav_msgs/msg/Odometry
+            joint_names:
+              - linear_x
+              - linear_y
+              - angular_z
+
+      # ────────────────────────────────────────────────────────────────
+      # Action — every modality the policy commands. Each entry's topic
+      # is BOTH the inference command target (Process B publishes here)
+      # AND the rosbag record target. joint_names is the dimension
+      # layout for that slice of the action vector.
+      # ────────────────────────────────────────────────────────────────
+      action:
+        arm_left:
+          topic: /leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_l_joint1
+            - arm_l_joint2
+            - arm_l_joint3
+            - arm_l_joint4
+            - arm_l_joint5
+            - arm_l_joint6
+            - arm_l_joint7
+            - gripper_l_joint1
+        arm_right:
+          topic: /leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_r_joint1
+            - arm_r_joint2
+            - arm_r_joint3
+            - arm_r_joint4
+            - arm_r_joint5
+            - arm_r_joint6
+            - arm_r_joint7
+            - gripper_r_joint1
+        head:
+          topic: /leader/joystick_controller_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - head_joint1
+            - head_joint2
+        lift:
+          topic: /leader/joystick_controller_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - lift_joint
+        mobile:
+          topic: /cmd_vel
+          msg_type: geometry_msgs/msg/Twist
+          joint_names:
+            - linear_x
+            - linear_y
+            - angular_z
+
+      # ────────────────────────────────────────────────────────────────
+      # Recording — auxiliary topics that need to be in the bag but are
+      # NOT VLA training data. /tf for visualisation; camera_info per
+      # camera so MP4 conversion can pair frames with intrinsics.
+      # ────────────────────────────────────────────────────────────────
+      recording:
+        extra_topics:
+          - /tf
+          - /zed/zed_node/left/camera_info
+          - /zed/zed_node/right/camera_info
+          - /camera_left/camera_left/color/camera_info
+          - /camera_right/camera_right/color/camera_info

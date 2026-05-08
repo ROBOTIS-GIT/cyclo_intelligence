@@ -1,0 +1,21 @@
+# Build context hygiene — keep the GR00T image build deterministic
+# and prevent accidental host-side scratch dirs from bleeding into the
+# image. Runtime data lives on the compose-mounted ./workspace
+# (host: docker/workspace/), shared with cyclo_intelligence and
+# the other policy containers — not under this build context.
+
+workspace/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.cache/
+*.log
+
+# Submodule build artifacts (Isaac-GR00T builds inside the image,
+# not from host-side outputs)
+Isaac-GR00T/.venv/
+Isaac-GR00T/build/
+Isaac-GR00T/dist/
+Isaac-GR00T/*.egg-info/

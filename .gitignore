@@ -1,0 +1,95 @@
+# ────────────────────────────────────────────────────────────
+# Python
+# ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.Python
+build/
+dist/
+*.egg
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ────────────────────────────────────────────────────────────
+# Node / React (orchestrator/ui)
+# ────────────────────────────────────────────────────────────
+node_modules/
+orchestrator/ui/build/
+orchestrator/ui/.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ────────────────────────────────────────────────────────────
+# ROS2 / colcon
+# ────────────────────────────────────────────────────────────
+install/
+log/
+build/
+.catkin_tools/
+.catkin_workspace
+
+# ────────────────────────────────────────────────────────────
+# Docker
+# ────────────────────────────────────────────────────────────
+.env
+# Trailing-slash patterns ignore directories only — drop the slash so
+# the same patterns also catch symlinks (used when the bind-mount
+# target is relocated to an external SSD via
+# docker/relocate_workspace_to_ssd.sh).
+docker/workspace
+docker/huggingface
+docker/zenoh_cache
+
+# Per-backend runtime workspaces — model checkpoints / HF cache
+# downloaded at inference time. Bind-mounted into the policy
+# container at /workspace.
+cyclo_brain/policy/lerobot/workspace/
+cyclo_brain/policy/groot/workspace/
+
+# ────────────────────────────────────────────────────────────
+# IDE / OS
+# ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ────────────────────────────────────────────────────────────
+# Claude Code local workspace
+# ────────────────────────────────────────────────────────────
+.claude/
+.sixth/
+
+# ────────────────────────────────────────────────────────────
+# Scratch / draft dev docs
+# ────────────────────────────────────────────────────────────
+*_IMPLEMENTATION.md
+*_TEST_REPORT.md
+*_DESIGN.md
+
+# ────────────────────────────────────────────────────────────
+# Data / model artifacts
+# ────────────────────────────────────────────────────────────
+*.mcap
+*.bag
+*.bag.active
+*.bag.orig.active
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.engine

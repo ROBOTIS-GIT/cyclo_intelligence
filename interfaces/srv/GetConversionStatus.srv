@@ -1,0 +1,25 @@
+string job_id
+---
+########################################
+# Constants — job status (response field below references these)
+########################################
+uint8 QUEUED = 0
+uint8 RUNNING = 1
+uint8 COMPLETED = 2
+uint8 FAILED = 3
+uint8 CANCELLED = 4
+# Returned when job_id is not recognised (e.g., server restart).
+uint8 UNKNOWN = 5
+
+# Whether the lookup itself succeeded (false only on request errors).
+# Job status is reported via `status`.
+bool success
+uint8 status
+float32 progress_percentage
+uint16 episodes_processed
+uint16 episodes_total
+# Current stage label (e.g., "mp4_encoding", "lerobot_build",
+# "metadata_write"). Empty when job has not started.
+string current_stage
+# Status detail / error message.
+string message

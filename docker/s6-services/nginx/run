@@ -1,0 +1,14 @@
+#!/command/with-contenv bash
+# nginx service — serves the React UI on :80 and reverse-proxies
+# /api/ → supervisor_api:8100 + /data-api/ → video_file_server:8082
+# (orchestrator/ui/nginx.conf, copied to /etc/nginx/conf.d/default.conf
+# at image build time).
+#
+# 's6-overlay v3' does NOT auto-detect nginx as a managed service, so
+# this longrun is what actually keeps nginx alive. The Dockerfile
+# (docker/Dockerfile.{arm64,amd64}) prepares /run/nginx.pid with the
+# right ownership so master can run as the configured user.
+
+set -e
+
+exec nginx -g "daemon off;"

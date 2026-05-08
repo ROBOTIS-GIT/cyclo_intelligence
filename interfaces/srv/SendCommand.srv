@@ -1,0 +1,58 @@
+########################################
+# Constants
+########################################
+# command
+uint8 IDLE = 0
+uint8 START_RECORD = 1
+uint8 START_INFERENCE = 2
+uint8 STOP = 3
+uint8 MOVE_TO_NEXT = 4
+uint8 RERECORD = 5
+uint8 FINISH = 6
+uint8 SKIP_TASK = 7
+uint8 CANCEL = 8
+uint8 CONVERT_MP4 = 9
+uint8 STOP_INFERENCE = 10
+uint8 RESUME_INFERENCE = 11
+uint8 START_INFERENCE_RECORD = 12
+uint8 STOP_INFERENCE_RECORD = 13
+uint8 CANCEL_INFERENCE_RECORD = 14
+uint8 REFRESH_TOPICS = 15
+# UPDATE_INSTRUCTION: re-condition the running policy's language
+# instruction mid-run. task_info.task_instruction[0] carries the new
+# instruction; lifecycle stays at INFERENCING. No-op (failure response)
+# for backends without language conditioning.
+uint8 UPDATE_INSTRUCTION = 16
+
+uint8 command
+TaskInfo task_info
+
+# Conversion-only knobs. Only meaningful when command == CONVERT_MP4
+# and ignored otherwise. Lives here (not on TaskInfo) because it's a
+# one-shot conversion-time setting, not a property of the task itself.
+#
+# conversion_fps: target frame rate for the LeRobot dataset. 0 means
+# 'use the default' (15) so older UIs that don't yet send fps still
+# work.
+#
+# convert_v21 / convert_v30: pick which downstream LeRobot conversions
+# to run. If both are false the orchestrator interprets it as 'run
+# both' for backward compatibility with old UIs.
+uint16 conversion_fps
+bool convert_v21
+bool convert_v30
+
+# CONVERT_MP4 selection knobs — forwarded to StartConversion.srv when
+# the orchestrator dispatches conversion. All optional; empty / 0 means
+# "use everything from robot_config" so older UIs keep working.
+string[] selected_cameras
+string[] camera_rotation_keys
+uint16[] camera_rotation_values
+uint16 image_resize_height
+uint16 image_resize_width
+string[] selected_state_topics
+string[] selected_action_topics
+string[] selected_joints
+---
+bool success
+string message

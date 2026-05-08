@@ -1,0 +1,74 @@
+# Kicks the MP4 + LeRobot v2.1 + LeRobot v3.0 conversion pipeline
+# on the cyclo_data node (cyclo_data.converter.pipeline_worker.Mp4ConversionWorker).
+#
+# Request schema mirrors the worker's input dict — Part C2e aligned
+# the service with the worker API rather than the other way round.
+
+# Absolute path to the dataset folder.
+# - Single-convert mode: the folder must already exist and the worker
+#   runs the pipeline on it in place.
+# - Merge-then-convert mode (set source_folders): this is the OUTPUT
+#   folder to create; it must not exist.
+string dataset_path
+
+# Robot type identifier (e.g. 'ffw_sg2_rev1', 'omy_f3m'). Drives the
+# default config path when robot_config_path is empty.
+string robot_type
+
+# Absolute path to the robot YAML config. When empty, the forwarder
+# should populate this from the caller's ROS 2 share directory so
+# cyclo_data does not have to hunt across packages.
+string robot_config_path
+
+# Optional source folders to merge before conversion. 2+ entries switch
+# the worker into merge-then-convert mode. Each entry is an absolute
+# path; if a relative name is given, the worker resolves it against its
+# default rosbag2 base.
+string[] source_folders
+
+# Target frame rate for the LeRobot dataset. Recording itself is
+# rate-agnostic (sensors stream at their natural rates with timestamps
+# and the rosbag captures verbatim) — fps is purely a conversion-time
+# decision: what rate to encode MP4s at and what rate to declare in
+# the v2.1 / v3.0 info.json. 0 means 'use the default' (15) so older
+# UIs that don't yet send fps continue to work.
+uint16 fps
+
+# Output format selection. Stage 1 (rosbag → MP4) always runs because
+# both Stage 2 and Stage 3 read from it. The two flags pick which
+# downstream LeRobot conversions to run. Legacy callers that send both
+# false are interpreted as 'run both' by the orchestrator/forwarder so
+# the older flow (run all stages) keeps working without UI changes.
+bool convert_v21
+bool convert_v30
+
+# ---- Selection knobs (all optional) ----
+# Empty / 0 means "use everything discoverable from robot_config",
+# preserving the legacy behaviour for callers that don't fill these in.
+
+# Camera names to include (e.g. 'cam_left_head'). Empty = include all.
+string[] selected_cameras
+
+# Per-camera rotation in degrees, applied during MP4 encode. Parallel
+# arrays — camera_rotation_keys[i] rotates by camera_rotation_values[i]
+# (allowed: 0, 90, 180, 270). Cameras absent from keys are not rotated.
+string[] camera_rotation_keys
+uint16[] camera_rotation_values
+
+# Optional output resize applied during MP4 encode. Both 0 = no resize.
+uint16 image_resize_height
+uint16 image_resize_width
+
+# Topic subset to feed observation.state / action. Empty = all topics
+# from robot_config's joint_topic_list / command_topic_list.
+string[] selected_state_topics
+string[] selected_action_topics
+
+# Joint subset / order that ends up in observation.state and action.
+# Empty = full robot_config joint_order.
+string[] selected_joints
+---
+bool success
+# Async job identifier — poll via GetConversionStatus.srv.
+string job_id
+string message

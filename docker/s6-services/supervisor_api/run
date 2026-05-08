@@ -1,0 +1,16 @@
+#!/command/with-contenv bash
+# supervisor_api — FastAPI control plane (PLAN §4.7).
+# Listens on 127.0.0.1:8100; nginx reverse-proxies /api/ to it.
+
+set -e
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH=/opt/supervisor_api:${PYTHONPATH}
+
+echo "[supervisor_api] starting uvicorn on 127.0.0.1:8100 ..."
+
+exec uvicorn supervisor_api.app:app \
+    --app-dir /opt \
+    --host 127.0.0.1 \
+    --port 8100 \
+    --log-level info

@@ -1,0 +1,4 @@
+string endpoint
+---
+bool success
+string message

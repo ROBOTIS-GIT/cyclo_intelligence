@@ -1,0 +1,5 @@
+string robot_type
+string task_instruction
+uint32 episode_count
+float32 total_duration_s
+uint16 fps

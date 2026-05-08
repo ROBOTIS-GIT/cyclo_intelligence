@@ -1,0 +1,32 @@
+########################################
+# Constants — operation
+########################################
+uint8 UPLOAD = 0
+uint8 DOWNLOAD = 1
+uint8 CANCEL = 2
+
+########################################
+# Constants — repo_type
+########################################
+uint8 DATASET = 0
+uint8 MODEL = 1
+
+uint8 operation
+uint8 repo_type
+# HF repo identifier (user_id/repo_name).
+string repo_id
+# Local filesystem path (upload source / download destination).
+string local_dir
+# HF user (optional; empty = stored active user).
+string author
+# HF endpoint URL (optional; empty = active endpoint).
+string endpoint
+# HF auth token (optional; empty = stored token).
+string token
+---
+bool success
+# Async job identifier. Progress is reported via the
+# HFOperationStatus topic (unchanged for backwards compat) and the
+# DataOperationStatus umbrella topic.
+string job_id
+string message

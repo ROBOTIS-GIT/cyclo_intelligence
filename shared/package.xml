@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>shared</name>
+  <version>0.1.0</version>
+  <description>
+    Cyclo Intelligence — shared utilities common to orchestrator,
+    cyclo_data, and cyclo_brain (PLAN.md §1). Holds robot configuration
+    loaders, IO helpers, and logging formatters that every ROS 2 node
+    in the workspace needs.
+  </description>
+  <maintainer email="pyo@robotis.com">Pyo</maintainer>
+  <license>Apache 2.0</license>
+  <author email="kdy@robotis.com">Dongyun Kim</author>
+  <depend>rclpy</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,42 @@
+########################################
+# Constants — inference lifecycle commands
+########################################
+# Sent by orchestrator to a cyclo_brain/policy/<backend> container's
+# Process A (inference_server.py) to drive the policy lifecycle. The
+# 100 Hz control loop lives in Process B inside the same container and
+# does not take commands from this service directly — Process A
+# broadcasts pause/resume state to B over an internal Zenoh topic.
+#
+# Replaces the old StartInference.srv + the SendCommand.srv inference
+# branches (START_INFERENCE / STOP_INFERENCE / RESUME_INFERENCE /
+# *_INFERENCE_RECORD). SendCommand.srv itself stays owned by orchestrator
+# as the UI-facing entry point; orchestrator translates into this srv.
+
+uint8 LOAD               = 0   # Load model_path onto GPU. Returns action_keys.
+uint8 START              = 1   # Begin observing sensors and waiting for triggers.
+uint8 PAUSE              = 2   # Ignore triggers; Process B holds last action.
+uint8 RESUME             = 3
+uint8 STOP               = 4   # Stop loop; keep model in GPU memory.
+uint8 UNLOAD             = 5   # Free GPU memory.
+uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
+                               # Requires LOAD + START already issued. Touches
+                               # task_instruction only — no lifecycle change.
+
+uint8 command
+
+# LOAD fields — required when command = LOAD, "" otherwise.
+string model_path
+string embodiment_tag
+string robot_type
+# Language instruction for language-conditioned policies. Consumed on
+# LOAD (training-time conditioning) and refreshed on RESUME (online
+# re-conditioning without re-loading the model).
+string task_instruction
+---
+bool success
+string message
+# Populated only by LOAD: ordered action modality keys from the model's
+# modality_config (e.g. ["arm_left", "arm_right", "gripper"]). Used by
+# Process B to build the action_joint_map for split_action(). Empty on
+# non-LOAD commands.
+string[] action_keys

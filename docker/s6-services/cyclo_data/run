@@ -1,0 +1,19 @@
+#!/command/with-contenv bash
+# cyclo_data service — ROS2 node that owns the recording / conversion /
+# HF / editing lifecycle. Split from orchestrator in Step 3 (§6).
+
+set -e
+
+SERVICE_NAME="cyclo_data"
+ROS2_COMMAND="ros2 run cyclo_data cyclo_data_node"
+COMMON_SCRIPT="/usr/local/lib/s6-services/ros2_service_run.sh"
+
+if [ -f "${COMMON_SCRIPT}" ]; then
+    exec /command/with-contenv env \
+        SERVICE_NAME="${SERVICE_NAME}" \
+        ROS2_COMMAND="${ROS2_COMMAND}" \
+        bash "${COMMON_SCRIPT}"
+else
+    echo "Error: Common script not found at ${COMMON_SCRIPT}" >&2
+    exit 1
+fi

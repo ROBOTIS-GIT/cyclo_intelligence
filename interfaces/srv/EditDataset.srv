@@ -1,0 +1,33 @@
+########################################
+# Constants
+########################################
+# mode
+uint8 MERGE = 0
+uint8 DELETE = 1
+
+uint8 mode
+
+# --- MERGE -----------------------------------------------------------------
+# Source rosbag task folders to merge (absolute paths).
+string[] merge_source_task_dirs
+# Output task folder to create (absolute path). Must not already exist
+# (or must be empty) — the server refuses to silently merge into a populated
+# folder.
+string merge_output_task_dir
+# When true, source episodes are moved (frees disk). When false, they are
+# copied and the source folders are left intact.
+bool merge_move_sources
+
+# --- DELETE ----------------------------------------------------------------
+# Task folder containing the episodes to delete (absolute path).
+string delete_task_dir
+# Episode indices to delete (folder names, before any compaction).
+uint16[] delete_episode_num
+# When true, the surviving episodes are renumbered to a contiguous 0..N-1
+# range after deletion (folder rename + episode_info.json patch).
+bool delete_compact
+
+---
+bool success
+string message
+int32 affected_count

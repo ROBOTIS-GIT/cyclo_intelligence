@@ -1,0 +1,149 @@
+# cyclo_intelligence unified image (AMD64 / workstation) — PLAN §4.5
+# Mirror of Dockerfile.arm64; only the s6-overlay arch tarball differs.
+# See Dockerfile.arm64 for inline documentation.
+
+# ============================================================
+# Stage 1 — UI build
+# ============================================================
+FROM node:22 AS ui-builder
+
+WORKDIR /ui
+
+COPY orchestrator/ui/package.json orchestrator/ui/package-lock.json ./
+RUN npm ci --legacy-peer-deps
+
+COPY orchestrator/ui/ ./
+RUN npm run build
+
+
+# ============================================================
+# Stage 2 — ROS2 runtime
+# ============================================================
+FROM robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0 AS runtime
+
+# See Dockerfile.arm64 for why — base image has a broken pip index
+# default; route around it.
+ENV PIP_INDEX_URL=https://pypi.org/simple
+
+ARG S6_OVERLAY_VERSION=3.2.1.0
+
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
+
+RUN echo 'export PATH=/opt/venv/bin:$PATH' >> /root/.bashrc && \
+    echo 'export PYTHONPATH=/opt/venv/lib/python3.12/site-packages:$PYTHONPATH' >> /root/.bashrc
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    xz-utils \
+    ffmpeg \
+    vim \
+    nano \
+    nginx \
+    docker.io \
+    python3-pip \
+    ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+    ros-${ROS_DISTRO}-rosbridge-server \
+    ros-${ROS_DISTRO}-web-video-server \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV COLCON_WS=/root/ros2_ws
+WORKDIR ${COLCON_WS}
+RUN mkdir -p ${COLCON_WS}/src
+
+COPY orchestrator ${COLCON_WS}/src/cyclo_intelligence/orchestrator
+COPY cyclo_data   ${COLCON_WS}/src/cyclo_intelligence/cyclo_data
+COPY interfaces   ${COLCON_WS}/src/cyclo_intelligence/interfaces
+COPY shared       ${COLCON_WS}/src/cyclo_intelligence/shared
+
+# See Dockerfile.arm64 for why we point rosdep at the nested
+# rosbag_recorder path explicitly — catkin_pkg's package walker stops
+# at cyclo_data/package.xml and would otherwise miss the C++ package
+# nested under cyclo_data/recorder/.
+RUN apt-get update && \
+    rosdep update && \
+    rosdep install -i \
+      --from-paths src src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder \
+      --rosdistro $ROS_DISTRO -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Align fastcdr/fastrtps stack with the (newer) rosbridge-msgs that
+# rosdep just pulled — see Dockerfile.arm64 for the symbol-lookup
+# error this avoids.
+RUN apt-get update && \
+    apt-get install -y --only-upgrade \
+        ros-jazzy-fastcdr \
+        ros-jazzy-fastrtps \
+        ros-jazzy-rmw-fastrtps-cpp \
+        ros-jazzy-rmw-fastrtps-shared-cpp \
+        ros-jazzy-rosidl-typesupport-fastrtps-c \
+        ros-jazzy-rosidl-typesupport-fastrtps-cpp \
+        ros-jazzy-rosidl-dynamic-typesupport-fastrtps && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --break-system-packages \
+        setuptools==68.1.2 'numpy<2' \
+        psutil matplotlib pandas huggingface_hub \
+        mcap mcap-ros2-support pyarrow
+
+# Same nested-package caveat as the rosdep step (see Dockerfile.arm64).
+# --symlink-install re-enabled (D17) — see Dockerfile.arm64 for the
+# full rationale. Explicit --paths to avoid colcon walker stepping
+# into the upstream lerobot / Isaac-GR00T submodules.
+RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    cd ${COLCON_WS} && \
+    colcon build \
+      --symlink-install \
+      --paths \
+        src/cyclo_intelligence/orchestrator \
+        src/cyclo_intelligence/cyclo_data \
+        src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder \
+        src/cyclo_intelligence/interfaces \
+        src/cyclo_intelligence/shared \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
+    echo "source ${COLCON_WS}/install/setup.bash" >> /root/.bashrc && \
+    echo "alias cb='cd ${COLCON_WS} && colcon build --symlink-install'" >> /root/.bashrc && \
+    echo "alias orchestrator='ros2 launch orchestrator orchestrator_bringup.launch.py'" >> /root/.bashrc && \
+    echo "alias cyclo_data='ros2 run cyclo_data cyclo_data_node'" >> /root/.bashrc && \
+    echo "export ROS_DOMAIN_ID=30" >> /root/.bashrc && \
+    echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp" >> /root/.bashrc && \
+    echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'" >> /root/.bashrc && \
+    echo "alias zenoh='ros2 run rmw_zenoh_cpp rmw_zenohd'" >> /root/.bashrc
+
+RUN mkdir -p /var/run/agent && chmod 777 /var/run/agent
+
+# See Dockerfile.arm64 for context (talos → cyclo_manager rename).
+RUN git clone -b main https://github.com/ROBOTIS-GIT/cyclo_manager.git /opt/cyclo_manager
+ENV PYTHONPATH=/opt/cyclo_manager:${PYTHONPATH}
+RUN pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
+
+COPY --from=ui-builder /ui/build /usr/share/nginx/html
+COPY orchestrator/ui/nginx.conf /etc/nginx/conf.d/default.conf
+RUN rm -f /etc/nginx/sites-enabled/default
+
+COPY docker/s6-agent /etc/s6-overlay/s6-rc.d/s6-agent
+COPY docker/s6-services /etc/s6-overlay/s6-rc.d/
+
+RUN mkdir -p /usr/local/lib/s6-services && \
+    cp /etc/s6-overlay/s6-rc.d/common/ros2_service_run.sh /usr/local/lib/s6-services/ && \
+    cp /etc/s6-overlay/s6-rc.d/common/ros2_service_finish.sh /usr/local/lib/s6-services/ && \
+    rm -rf /etc/s6-overlay/s6-rc.d/common && \
+    chmod +x /usr/local/lib/s6-services/ros2_service_run.sh \
+             /usr/local/lib/s6-services/ros2_service_finish.sh
+
+RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data && \
+    chown -R nobody:nogroup /var/log/orchestrator /var/log/cyclo_data && \
+    chmod -R 02755 /var/log/orchestrator /var/log/cyclo_data
+
+COPY docker/supervisor_api /opt/supervisor_api
+RUN pip install --no-cache-dir --break-system-packages \
+        -r /opt/supervisor_api/requirements.txt
+
+RUN touch /run/nginx.pid && chown nobody:nogroup /run/nginx.pid
+
+ENTRYPOINT ["/init"]

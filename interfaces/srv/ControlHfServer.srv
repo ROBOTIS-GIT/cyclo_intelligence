@@ -1,0 +1,9 @@
+string mode       # upload, download, cancel
+string repo_id    # user_id/repo_name
+string local_dir  # local path of the dataset or model
+string repo_type  # dataset, model
+string author
+string endpoint   # HuggingFace endpoint URL; empty = use active endpoint
+---
+bool success
+string message

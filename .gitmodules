@@ -1,0 +1,9 @@
+[submodule "cyclo_brain/policy/lerobot/lerobot"]
+	path = cyclo_brain/policy/lerobot/lerobot
+	url = https://github.com/huggingface/lerobot.git
+[submodule "cyclo_brain/sdk/zenoh_ros2_sdk"]
+	path = cyclo_brain/sdk/zenoh_ros2_sdk
+	url = https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk.git
+[submodule "cyclo_brain/policy/groot/Isaac-GR00T"]
+	path = cyclo_brain/policy/groot/Isaac-GR00T
+	url = https://github.com/NVIDIA/Isaac-GR00T.git

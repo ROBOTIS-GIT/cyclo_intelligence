@@ -1,0 +1,8 @@
+---
+# Parallel arrays: endpoints[i] has labels[i] and user_ids[i].
+string[] endpoints
+string[] labels
+string[] user_ids
+string active
+bool success
+string message

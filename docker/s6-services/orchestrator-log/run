@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# orchestrator log consumer — wraps s6-log via logutil-service.
+
+exec logutil-service /var/log/orchestrator

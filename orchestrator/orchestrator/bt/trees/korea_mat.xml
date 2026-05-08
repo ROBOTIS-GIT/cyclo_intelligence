@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="3" main_tree_to_execute="InferenceLoopExample">
+  <BehaviorTree ID="InferenceLoopExample">
+    <Sequence name="Main">
+
+      <!-- Phase 1: Load model and immediately pause (runs once) -->
+      <SendCommand name="LoadModel"
+        command="START_INFERENCE"
+        policy_path="/workspace/checkpoints/ROBOTIS/ffw_sg2_0316_all_100k"
+        task_instruction="Pick up the pouch with your right hand first, then pick up the pouch with your left hand"
+        control_hz="15"
+        wait_until_ready="true"/>
+      <SendCommand name="PauseAfterLoad"
+        command="STOP_INFERENCE"/>
+
+      <!-- Phase 2: Infinite loop -->
+      <Loop name="InfiniteLoop">
+        <Sequence name="OneIteration">
+          <MoveHead name="LookDown"
+            head_positions="0.69369,0.0"
+            duration="2.0"/>
+          <SendCommand name="ResumeInference"
+            command="RESUME_INFERENCE"
+            task_instruction="Shake the right hand in the air, then go to the initial position with both arms"/>
+          <InferenceUntilStatic name="WaitForStatic"
+            position_change_threshold="0.05"
+            static_duration="2.0"/>
+          <SendCommand name="PauseInference"
+            command="STOP_INFERENCE"/>
+
+          <!-- Move to ready pose -->
+          <MoveArms name="ReadyPose"
+            left_positions="0.75,0.0,0.0,-2.3,0.0,0.0,0.0,0.0"
+            right_positions="0.75,0.0,0.0,-2.3,0.0,0.0,0.0,0.0"
+            duration="2.0"/>
+          <MoveHead name="LookDown"
+            head_positions="0.69369,0.0"
+            duration="2.0"/>
+
+          <Rotate name="TurnLeft"
+            angle_deg="90.0"/>
+
+          <!-- Resume inference -->
+          <SendCommand name="ResumeInference"
+            command="RESUME_INFERENCE"
+            task_instruction="Pick up the pouch with your right hand first, then pick up the pouch with your left hand"/>
+          <InferenceUntilGripperClose name="WaitForGrip"
+            position_change_threshold="0.05"
+            static_duration="3.0"/>
+          <SendCommand name="PauseInference"
+            command="STOP_INFERENCE"/>
+
+          <Rotate name="TurnRight"
+            angle_deg="-90.0"/>
+          <SendCommand name="ResumeInference"
+            command="RESUME_INFERENCE"
+            task_instruction="Put the pouch into the box with your right hand first, then put the pouch into the box with your left hand"/>
+          <InferenceUntilGripperOpen name="WaitForRelease"
+            position_change_threshold="0.05"
+            static_duration="1.5"/>
+          <SendCommand name="PauseInference"
+            command="STOP_INFERENCE"/>
+
+          <SendCommand name="ResumeInference"
+            command="RESUME_INFERENCE"
+            task_instruction="Grasp the box with your right hand first, then relocate the box to the conveyor belt"/>
+          <InferenceUntilPositionWithGripper name="WaitForGripAndPosition"
+            left_positions="0.622484610034031,0.20556540980158128,-0.26517494448082485,-1.898169398534522,0.03471829955081799,-0.3815897052114586,0.34545625093844506,0.10737865515199488"
+            right_positions="0.7755351463003398,-0.17293236538429532,0.12276639993047272,-2.197055967674115,-0.06678808539755217,-0.19231085705625692,-0.09371513097671479,0.11504855909142309"
+            tolerance="1.5"
+            check_delay="5.0"/>
+          <SendCommand name="PauseInference"
+            command="STOP_INFERENCE"/>
+
+          <MoveArms name="ReadyPose"
+            left_positions="0.75,0.0,0.0,-2.3,0.0,0.0,0.0,0.0"
+            right_positions="0.75,0.0,0.0,-2.3,0.0,0.0,0.0,0.0"
+            duration="2.0"/>
+          <MoveHead name="LookForward"
+            head_positions="0.0,0.0"
+            duration="2.0"/>
+        </Sequence>
+      </Loop>
+
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Action ID="SendCommand">
+      <input_port name="command" default="STOP_INFERENCE">
+        Command to send (START_INFERENCE, STOP_INFERENCE, RESUME_INFERENCE, etc.)
+      </input_port>
+      <input_port name="policy_path" default="">
+        Path to the policy model (for START_INFERENCE).
+      </input_port>
+      <input_port name="task_instruction" default="">
+        Task instruction for language-conditioned policies.
+      </input_port>
+      <input_port name="task_name" default="">
+        Task name identifier.
+      </input_port>
+      <input_port name="wait_until_ready" default="false">
+        If true, wait for model loading to complete before returning SUCCESS.
+      </input_port>
+    </Action>
+    <Action ID="Rotate">
+      <input_port name="angle_deg" default="90.0">
+        Desired rotation angle in degrees.
+        Positive for CCW, negative for CW.
+      </input_port>
+    </Action>
+    <Action ID="MoveHead">
+      <input_port name="head_positions" default="0.0,0.0">
+        Target positions for head joints (comma-separated).
+      </input_port>
+      <input_port name="position_threshold" default="0.01">
+        Position tolerance for completion.
+      </input_port>
+      <input_port name="duration" default="5.0">
+        Trajectory duration in seconds.
+      </input_port>
+    </Action>
+    <Action ID="MoveArms">
+      <input_port name="left_positions" default="0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0">
+        Target positions for left arm joints (comma-separated).
+      </input_port>
+      <input_port name="right_positions" default="0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0">
+        Target positions for right arm joints (comma-separated).
+      </input_port>
+      <input_port name="position_threshold" default="0.01">
+        Position tolerance for completion.
+      </input_port>
+      <input_port name="duration" default="2.0">
+        Trajectory duration in seconds.
+      </input_port>
+    </Action>
+    <Action ID="MoveLift">
+      <input_port name="lift_position" default="0.0">
+        Target position for lift joint.
+      </input_port>
+      <input_port name="position_threshold" default="0.01">
+        Position tolerance for completion.
+      </input_port>
+      <input_port name="duration" default="5.0">
+        Trajectory duration in seconds.
+      </input_port>
+    </Action>
+    <Action ID="Wait">
+      <input_port name="duration" default="5.0">
+        Duration to wait in seconds.
+      </input_port>
+    </Action>
+    <Action ID="InferenceUntilGripperClose">
+      <input_port name="position_change_threshold" default="0.05">
+        Max position change (rad) to be considered stable.
+      </input_port>
+      <input_port name="static_duration" default="3.0">
+        Seconds arms must be stable before SUCCESS.
+      </input_port>
+      <input_port name="history_window" default="1.0">
+        Rolling window (seconds) for position change calculation.
+      </input_port>
+      <input_port name="gripper_closed_threshold" default="0.7">
+        Position above which gripper is considered closed (0.0=open, 1.0=closed).
+      </input_port>
+      <input_port name="gripper_open_threshold" default="0.3">
+        Position below which gripper is considered open (0.0=open, 1.0=closed).
+      </input_port>
+    </Action>
+    <Action ID="InferenceUntilGripperOpen">
+      <input_port name="position_change_threshold" default="0.05">
+        Max position change (rad) to be considered stable.
+      </input_port>
+      <input_port name="static_duration" default="3.0">
+        Seconds arms must be stable before SUCCESS.
+      </input_port>
+      <input_port name="history_window" default="1.0">
+        Rolling window (seconds) for position change calculation.
+      </input_port>
+      <input_port name="gripper_closed_threshold" default="0.7">
+        Position above which gripper is considered closed (0.0=open, 1.0=closed).
+      </input_port>
+      <input_port name="gripper_open_threshold" default="0.3">
+        Position below which gripper is considered open (0.0=open, 1.0=closed).
+      </input_port>
+    </Action>
+    <Action ID="InferenceUntilStatic">
+      <input_port name="position_change_threshold" default="0.05">
+        Max position change (rad) to be considered stable.
+      </input_port>
+      <input_port name="static_duration" default="3.0">
+        Seconds arms must be stable before SUCCESS.
+      </input_port>
+      <input_port name="history_window" default="1.0">
+        Rolling window (seconds) for position change calculation.
+      </input_port>
+    </Action>
+    <Action ID="InferenceUntilPositionWithGripper">
+      <input_port name="left_positions" default="0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0">
+        Target positions for left arm joints (comma-separated).
+      </input_port>
+      <input_port name="right_positions" default="0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0">
+        Target positions for right arm joints (comma-separated).
+      </input_port>
+      <input_port name="tolerance" default="0.1">
+        Euclidean distance tolerance for position matching (radians).
+      </input_port>
+      <input_port name="gripper_closed_threshold" default="0.7">
+        Position above which gripper is considered closed (0.0=open, 1.0=closed).
+      </input_port>
+      <input_port name="gripper_open_threshold" default="0.3">
+        Position below which gripper is considered open (0.0=open, 1.0=closed).
+      </input_port>
+      <input_port name="check_delay" default="5.0">
+        Seconds to wait before checking position (allows initial movement).
+      </input_port>
+    </Action>
+    <Control ID="Loop">
+      Repeats its single child forever. Returns RUNNING on child SUCCESS,
+      propagates FAILURE.
+    </Control>
+  </TreeNodesModel>
+
+</root>

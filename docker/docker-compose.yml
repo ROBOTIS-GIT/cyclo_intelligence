@@ -1,0 +1,294 @@
+# cyclo_intelligence — Docker Compose
+#
+# Two services:
+#   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
+#                         cyclo_data + UI + nginx + s6-agent. Always
+#                         started first.
+#   lerobot              policy container (PLAN §4.8) — pulled /
+#                         started on demand by the UI via
+#                         supervisor_api. May be brought up manually
+#                         for Step 4 verification.
+#
+# Usage: prefer the container.sh wrapper — it auto-detects ARCH from
+# `uname -m` (physical_ai_tools convention) and sets the compose env:
+#   docker/container.sh start              # → cyclo_intelligence only
+#   docker/container.sh start-lerobot      # → lerobot (no ROBOT_TYPE
+#                                          #    needed; passed at LOAD)
+#   docker/container.sh enter              # → bash inside cyclo_intelligence
+#   docker/container.sh logs               # → compose logs -f
+#   docker/container.sh stop               # → compose down
+#
+# Direct compose (ARCH defaults to arm64 since Jetson is the primary
+# target, matching physical_ai_tools/docker/docker-compose.yml):
+#   docker compose -f docker/docker-compose.yml up -d --build cyclo_intelligence
+#   docker compose -f docker/docker-compose.yml up -d --build lerobot
+
+# Explicit project name. Without this, compose defaults the project to
+# the parent dir name ('docker') — same default used by every other
+# repo whose compose file sits under <repo>/docker/, including
+# physical_ai_tools and the talos suite (zenoh_daemon, ai_worker,
+# novnc-server, talos_ui). Sharing the project name means compose
+# treats those containers as 'orphans' of our project and
+# --remove-orphans wipes them. Pin our own name so down/up only ever
+# touches cyclo_intelligence's own containers.
+name: cyclo_intelligence
+
+services:
+  # ============================================================
+  # cyclo_intelligence main container (PLAN §4.5).
+  # Multi-stage image (docker/Dockerfile.{arm64,amd64}) carries the
+  # UI static assets, the ROS2 workspace (orchestrator + cyclo_data
+  # + interfaces + shared), nginx, rosbridge, web_video_server, and
+  # the s6-agent / supervisor_api control plane.
+  # ============================================================
+  cyclo_intelligence:
+    container_name: cyclo_intelligence
+    image: robotis/cyclo-intelligence:${VERSION:-1.0.0}-${ARCH:-arm64}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.${ARCH:-arm64}
+      # Tegra (Jetson) 5.15.x kernels ship without iptable_raw, so
+      # BuildKit can't create the per-step bridge network. host net
+      # during build is functionally identical for our needs and skips
+      # the iptables raw-table requirement entirely.
+      network: host
+
+    # SYS_NICE + rtprio so orchestrator's control thread can request
+    # real-time priority. memlock matches the value physical_ai_tools
+    # uses in production.
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+
+    # Host network + IPC so rmw_zenoh on the orchestrator side can
+    # reach the policy containers (and anything else on the host).
+    network_mode: host
+    ipc: host
+
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      - ZENOH_ROUTER_IP=127.0.0.1
+      - ZENOH_ROUTER_PORT=7447
+      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Live-edit the ROS2 workspace at runtime so a 'colcon build'
+      # inside the container sees host-side edits. The container copy
+      # at build time still lives in the image; this mount shadows it.
+      - ..:/root/ros2_ws/src/cyclo_intelligence
+      # URDF + mesh assets for the UI's 3D viewer. Source of truth is
+      # shared/robot_configs/ (consolidated from the legacy
+      # rosbag_recorder/config/ location — URDFs describe the robot,
+      # not the recorder, so they belong with the other shared
+      # robot-config assets next to parameter_loader.py). nginx serves
+      # /urdf/* from /usr/share/nginx/html/urdf/, so these have to be
+      # bind-mounted at request time (not baked).
+      - ../shared/shared/robot_configs/urdf:/usr/share/nginx/html/urdf/urdf:ro
+      - ../shared/shared/robot_configs/ffw_description:/usr/share/nginx/html/urdf/ffw_description:ro
+      # supervisor_api manages lerobot / groot lifecycle via Docker SDK
+      # (PLAN §4.8). Socket mount makes that possible without DinD.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # s6-agent UDS — cyclo_manager FastAPI listens here for
+      # system-wide control requests from the host side.
+      - /var/run/robotis/agent_sockets/cyclo_intelligence:/var/run/agent
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    privileged: true
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  # ============================================================
+  # LeRobot two-process policy container (Step 4 §5.5).
+  # s6-overlay supervises inference-server (Process A) and
+  # control-publisher (Process B); they communicate over Zenoh
+  # inside the container and both talk to the host via rmw_zenoh.
+  # Not in depends_on — PLAN §4.8 says lerobot is pulled/started
+  # on demand.
+  # ============================================================
+  lerobot:
+    container_name: lerobot_server
+    image: robotis/lerobot-zenoh:${VERSION:-1.0.0}-${ARCH:-arm64}
+    build:
+      context: ../cyclo_brain/policy/lerobot
+      dockerfile: Dockerfile.${ARCH:-arm64}
+      # See cyclo_intelligence.build.network for why.
+      network: host
+      args:
+        GPU_ARCH: ${GPU_ARCH:-default}
+
+    # Process B tries SCHED_FIFO — let the kernel actually grant it
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+
+    # Share host network + IPC so rmw_zenoh can reach orchestrator on
+    # the same host, and /dev/shm is shared for Zenoh shared-memory
+    # transport between the two in-container processes.
+    network_mode: host
+    ipc: host
+
+    # robot_type is *not* baked here. Process A receives it on
+    # InferenceCommand.LOAD and broadcasts to Process B over the
+    # cyclo/policy/lerobot/configure Zenoh topic, so the same container
+    # can serve multiple robots without restart.
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      - ZENOH_ROUTER_IP=127.0.0.1
+      - ZENOH_ROUTER_PORT=7447
+      - ZENOH_SDK_PATH=/zenoh_sdk
+      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
+      - ZENOH_TRANSPORT_SHM_ENABLED=true
+      - ZENOH_SHM_ENABLED=true
+      - ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+      - POST_PROCESSING_SDK_PATH=/post_processing_sdk
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      # Live-edit SDKs (mounted read-only so the container can't mutate
+      # the host tree accidentally).
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../cyclo_brain/sdk/post_processing:/post_processing_sdk:ro
+      # Live-edit Process A + B. Without this, the baked /app/runtime/
+      # from a stale image build ignores the Phase 4 VLA-semantic yaml
+      # schema and creates zero ROS publishers — chunks get computed but
+      # never reach the robot.
+      - ../cyclo_brain/policy/lerobot/runtime:/app/runtime:ro
+      # zenoh_ros2_sdk message-definition cache. Host-managed (see
+      # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
+      # doesn't have to git-fetch the upstream `master` branch (gone)
+      # and so docker-cp ownership games go away. Two containers share
+      # one cache.
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      # orchestrator keeps the canonical command_topic_list / joint_order
+      # YAML. control_publisher reads it on configure (D16).
+      # Per-robot YAMLs moved to shared/robot_configs/ (consolidated with
+      # URDF + meshes under one robot-description tree). The mount destination
+      # /orchestrator_config stays — control_publisher's path resolver
+      # still reads `/orchestrator_config/<robot>_config.yaml`.
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  # ============================================================
+  # GR00T N1.6 two-process policy container (D10-groot).
+  # Mirrors lerobot's s6-overlay layout (inference-server /
+  # control-publisher), same configure-on-LOAD pattern (D16) — no
+  # ROBOT_TYPE compose env. Pulled / started on demand by the UI
+  # via supervisor_api (PLAN §4.8).
+  # ============================================================
+  groot:
+    container_name: groot_server
+    image: robotis/groot-zenoh:${VERSION:-1.0.0}-${ARCH:-arm64}
+    build:
+      context: ../cyclo_brain/policy/groot
+      dockerfile: Dockerfile.${ARCH:-arm64}
+      # See cyclo_intelligence.build.network for why.
+      network: host
+      args:
+        GPU_ARCH: ${GPU_ARCH:-default}
+
+    # Process B tries SCHED_FIFO — let the kernel actually grant it
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+
+    # Share host network + IPC so rmw_zenoh can reach orchestrator on
+    # the same host, and /dev/shm is shared for Zenoh shared-memory
+    # transport between the two in-container processes.
+    network_mode: host
+    ipc: host
+
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      - ZENOH_ROUTER_IP=127.0.0.1
+      - ZENOH_ROUTER_PORT=7447
+      - ZENOH_SDK_PATH=/zenoh_sdk
+      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
+      - ZENOH_TRANSPORT_SHM_ENABLED=true
+      - ZENOH_SHM_ENABLED=true
+      - ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+      - POST_PROCESSING_SDK_PATH=/post_processing_sdk
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      # Live-edit SDKs (mounted read-only so the container can't mutate
+      # the host tree accidentally).
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../cyclo_brain/sdk/post_processing:/post_processing_sdk:ro
+      # Live-edit Process A + B + inference engine. Without this, the
+      # baked /app/runtime/ from the image build (Apr 2026) ignores the
+      # Phase 4 VLA-semantic yaml schema and creates zero ROS publishers
+      # — chunks get computed but never reach the robot.
+      - ../cyclo_brain/policy/groot/runtime:/app/runtime:ro
+      # zenoh_ros2_sdk message-definition cache. Host-managed (see
+      # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
+      # doesn't have to git-fetch the upstream `master` branch (gone)
+      # and so docker-cp ownership games go away. Two containers share
+      # one cache.
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      # orchestrator keeps the canonical command_topic_list / joint_order
+      # YAML. control_publisher reads it on configure (D16).
+      # Per-robot YAMLs moved to shared/robot_configs/ (consolidated with
+      # URDF + meshes under one robot-description tree). The mount destination
+      # /orchestrator_config stays — control_publisher's path resolver
+      # still reads `/orchestrator_config/<robot>_config.yaml`.
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
