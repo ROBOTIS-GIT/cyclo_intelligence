@@ -16,7 +16,7 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
     BrowserItem,
@@ -242,19 +242,32 @@ class Communicator:
     # ========== Service Callbacks ==========
 
     def get_image_topic_list_callback(self, request, response):
-        camera_topic_list = []
-        for topic_name in self.camera_topics.values():
-            # Return full topic path (e.g. .../image_raw/compressed) so the viewer uses the correct topic
-            camera_topic_list.append(topic_name)
+        # Walk the yaml's observation.images in insertion order so the
+        # topic list and the rotation_deg list stay parallel-indexed.
+        # camera_topics keeps the same order (Python 3.7+ dict
+        # preserves insertion); going back to image_groups gives us
+        # rotation_deg without an extra lookup.
+        image_groups = robot_schema.get_image_topics(self.robot_section)
+        camera_topic_list: List[str] = []
+        rotation_deg_list: List[int] = []
+        for cam_name, cfg in image_groups.items():
+            # Skip cams that aren't part of the recording inventory
+            # (camera_topics is filtered by recording role).
+            if cam_name not in self.camera_topics:
+                continue
+            camera_topic_list.append(cfg['topic'])
+            rotation_deg_list.append(int(cfg.get('rotation_deg', 0) or 0))
 
         if len(camera_topic_list) == 0:
             self.node.get_logger().error('No image topics found')
             response.image_topic_list = []
+            response.rotation_deg_list = []
             response.success = False
             response.message = 'Please check image topics in your robot configuration.'
             return response
 
         response.image_topic_list = camera_topic_list
+        response.rotation_deg_list = rotation_deg_list
         response.success = True
         response.message = 'Image topic list retrieved successfully'
         return response

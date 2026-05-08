@@ -96,6 +96,9 @@ export default function DatasetConvertSection({ isEditable = true }) {
   // Discover camera names on first expand of the camera-options panel.
   // Robot type is already pinned by the time we reach this UI, so we
   // just trust whatever cameras the orchestrator currently advertises.
+  // Seed the rotation dropdowns with the yaml defaults
+  // (observation.images.<cam>.rotation_deg) — the user sees the value
+  // that will actually be applied if they don't override it.
   useEffect(() => {
     if (!showCameraOptions || cameraNames.length > 0) return;
     let cancelled = false;
@@ -103,16 +106,17 @@ export default function DatasetConvertSection({ isEditable = true }) {
       try {
         const result = await getImageTopicList();
         const topics = result?.image_topic_list || [];
+        const yamlRotations = result?.rotation_deg_list || [];
         const names = topics.map(extractCameraName).filter(Boolean);
         if (!cancelled && names.length > 0) {
           setCameraNames(names);
-          // Initialise rotations dict to {cam: 0} for known cameras
-          // so the dropdown renders the "0°" baseline.
           setCameraRotations((prev) => {
             const next = { ...prev };
-            for (const name of names) {
-              if (!(name in next)) next[name] = 0;
-            }
+            names.forEach((name, idx) => {
+              if (!(name in next)) {
+                next[name] = Number(yamlRotations[idx] || 0);
+              }
+            });
             return next;
           });
         }
@@ -188,11 +192,12 @@ export default function DatasetConvertSection({ isEditable = true }) {
 
     const fire = async () => {
       try {
-        // Drop zero-rotation entries — they're the no-op default and
-        // there's no point round-tripping them through ROS.
-        const rotations = Object.fromEntries(
-          Object.entries(cameraRotations).filter(([, deg]) => Number(deg) !== 0)
-        );
+        // Send every cameraRotations entry — including 0 — so the
+        // server can tell "user explicitly picked 0" apart from "user
+        // didn't touch this camera". The orchestrator merge does
+        // {**yaml_defaults, **ui_rotations}, so a missing key falls
+        // back to the yaml's rotation_deg; an explicit 0 wins over it.
+        const rotations = { ...cameraRotations };
         const imageResize =
           Number(resizeHeight) > 0 && Number(resizeWidth) > 0
             ? { height: Number(resizeHeight), width: Number(resizeWidth) }

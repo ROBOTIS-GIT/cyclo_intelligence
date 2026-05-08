@@ -58,12 +58,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# Step 3 consolidated rosbag_to_lerobot_converter.py into to_lerobot_v21.py
-# (the v2.1 path now hosts the converter class). v30 imports from there.
-from .to_lerobot_v21 import (
+# Shared rosbag-extraction / stats / feature-building lives in
+# base_converter.py. v3.0 inherits the base directly (sibling of v2.1)
+# rather than chaining through v21 — formats are independent now.
+from .base_converter import (
     ConversionConfig,
     EpisodeData,
-    RosbagToLerobotConverter,
+    RosbagToLerobotConverterBase,
     StalenessMetrics,
 )
 
@@ -147,11 +148,13 @@ class EpisodeMetadata:
         return result
 
 
-class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
+class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
     """
     Converts ROSbag recordings with MP4 videos to LeRobot v3.0 dataset format.
 
-    Extends v2.1 converter with:
+    Sibling of the v2.1 converter — both inherit shared rosbag
+    extraction / stats logic from RosbagToLerobotConverterBase. Adds
+    v3.0-specific writers:
     - File-based aggregation (multiple episodes per file)
     - Chunked Parquet episodes metadata
     - Video concatenation
@@ -238,20 +241,6 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
 
         self._log_info(f"Successfully converted {len(episodes_data)} episodes to v3.0")
         return True
-
-    def _collect_tasks(self, episodes_data: List[EpisodeData]):
-        # Match v2.1 — first-appearance order so tasks.jsonl /
-        # tasks.parquet agrees with episodes.jsonl when the episode
-        # ordering isn't alphabetical (e.g. after a merge).
-        seen: set = set()
-        for ep in episodes_data:
-            for task in ep.tasks:
-                if task in seen:
-                    continue
-                seen.add(task)
-                idx = len(self._tasks)
-                self._tasks[idx] = task
-                self._task_to_index[task] = idx
 
     def _write_aggregated_data(self, episodes_data: List[EpisodeData]):
         """Write episode data to aggregated Parquet files."""
