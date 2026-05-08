@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:${VERSION:-1.0.0}-${ARCH:-arm64}
+    image: robotis/cyclo-intelligence:${VERSION:-0.1.0}-${ARCH:-arm64}
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -126,7 +126,7 @@ services:
   # ============================================================
   lerobot:
     container_name: lerobot_server
-    image: robotis/lerobot-zenoh:${VERSION:-1.0.0}-${ARCH:-arm64}
+    image: robotis/lerobot-zenoh:1.0.0-${ARCH:-arm64}
     build:
       context: ../cyclo_brain/policy/lerobot
       dockerfile: Dockerfile.${ARCH:-arm64}
@@ -216,7 +216,7 @@ services:
   # ============================================================
   groot:
     container_name: groot_server
-    image: robotis/groot-zenoh:${VERSION:-1.0.0}-${ARCH:-arm64}
+    image: robotis/groot-zenoh:1.1.0-${ARCH:-arm64}
     build:
       context: ../cyclo_brain/policy/groot
       dockerfile: Dockerfile.${ARCH:-arm64}
