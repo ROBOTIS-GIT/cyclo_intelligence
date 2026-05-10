@@ -18,22 +18,7 @@ import React from 'react';
 import { Handle, Position } from '@xyflow/react';
 import clsx from 'clsx';
 
-function getParamSummary(params) {
-  const keys = Object.keys(params);
-  if (keys.length === 0) return null;
-
-  // Show the most important param (first non-trivial one)
-  const priorityKeys = ['command', 'angle_deg', 'duration', 'lift_position'];
-  for (const key of priorityKeys) {
-    if (params[key] !== undefined) {
-      return `${key}: ${params[key]}`;
-    }
-  }
-  return `${keys[0]}: ${params[keys[0]]}`;
-}
-
 export default function BTActionNode({ data }) {
-  const paramSummary = getParamSummary(data.params || {});
   const isActive = data.isActive;
   const isSelected = data.isSelected;
 
@@ -55,11 +40,6 @@ export default function BTActionNode({ data }) {
       <div className="text-sm font-medium text-gray-800 truncate">
         {data.label}
       </div>
-      {paramSummary && (
-        <div className="text-xs text-gray-500 mt-1 truncate">
-          {paramSummary}
-        </div>
-      )}
       <Handle type="source" position={Position.Bottom} className={clsx(isActive ? '!bg-orange-500' : '!bg-green-500')} />
     </div>
   );

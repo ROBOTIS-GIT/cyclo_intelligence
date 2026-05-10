@@ -252,8 +252,12 @@ export default function BTManagerPage({ isActive = true }) {
     }));
   }, [nodes, activeNodeNames, selectedNodeId]);
 
-  const statusColor = btStatus === 'running' ? 'bg-green-500' : 'bg-gray-400';
-  const statusLabel = btStatus === 'running' ? 'Running' : 'Stopped';
+  const statusColor =
+    btStatus === 'running' ? 'bg-green-500' :
+    btStatus === 'completed' ? 'bg-yellow-400' : 'bg-gray-400';
+  const statusLabel =
+    btStatus === 'running' ? 'Running' :
+    btStatus === 'completed' ? 'Completed' : 'Stopped';
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -333,10 +337,10 @@ export default function BTManagerPage({ isActive = true }) {
         <div className="flex items-center gap-3">
           <button
             onClick={handleStart}
-            disabled={btStatus === 'running' || !treeXml}
+            disabled={btStatus === 'running' || btStatus === 'completed' || !treeXml}
             className={clsx(
               'flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium transition-colors',
-              (btStatus === 'running' || !treeXml)
+              (btStatus === 'running' || btStatus === 'completed' || !treeXml)
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 : 'bg-green-600 hover:bg-green-700 text-white'
             )}
