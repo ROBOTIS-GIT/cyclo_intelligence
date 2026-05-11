@@ -26,15 +26,17 @@ import {
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdPlayArrow, MdStop, MdUploadFile, MdSave } from 'react-icons/md';
+import { MdPlayArrow, MdStop, MdUploadFile, MdSave, MdUndo, MdRedo } from 'react-icons/md';
 
 import BTControlNode from '../components/bt/BTControlNode';
 import BTActionNode from '../components/bt/BTActionNode';
 import BTParamPanel from '../components/bt/BTParamPanel';
 import TreeListModal from '../features/btmanager/components/TreeListModal';
 import { parseBTXml } from '../utils/btTreeParser';
+import { serializeBTXml } from '../utils/btXmlSerializer';
 import { setTreeXml, setTreeFileName, setBtStatus, setActiveNodeNames, setSelectedNodeId } from '../features/btmanager/btmanagerSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { useBTHistory } from '../hooks/useBTHistory';
 
 const nodeTypes = {
   btControl: BTControlNode,
@@ -64,6 +66,36 @@ export default function BTManagerPage({ isActive = true }) {
   const edgesRef = useRef(edges);
   nodesRef.current = nodes;
   edgesRef.current = edges;
+
+  // Undo/redo history — snapshots are serialized XML strings
+  const getHistorySnapshot = useCallback(
+    () => (xmlDoc ? serializeBTXml(xmlDoc) : null),
+    [xmlDoc],
+  );
+  const applyHistorySnapshot = useCallback((xml) => {
+    try {
+      const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(xml);
+      setNodes(newNodes);
+      setEdges(newEdges);
+      setXmlDoc(doc);
+      nodeElementMapRef.current = nodeElementMap;
+      setParseError(null);
+      dispatch(setSelectedNodeId(null));
+    } catch (err) {
+      setParseError(err.message);
+    }
+  }, [setNodes, setEdges, dispatch]);
+  const {
+    capture: captureHistory,
+    undo: undoHistory,
+    redo: redoHistory,
+    reset: resetHistory,
+    canUndo,
+    canRedo,
+  } = useBTHistory({
+    getSnapshot: getHistorySnapshot,
+    applySnapshot: applyHistorySnapshot,
+  });
 
   // Parse XML and update flow whenever treeXml changes
   useEffect(() => {
@@ -125,6 +157,7 @@ export default function BTManagerPage({ isActive = true }) {
         nodeElementMapRef.current = new Map();
       }
 
+      resetHistory();
       dispatch(setSelectedNodeId(null));
       dispatch(setTreeXml(xmlContent));
       dispatch(setTreeFileName(fileName));
@@ -132,7 +165,7 @@ export default function BTManagerPage({ isActive = true }) {
     } catch (err) {
       toast.error(`Failed to load file: ${err.message}`);
     }
-  }, [rosbridgeUrl, dispatch, setNodes, setEdges]);
+  }, [rosbridgeUrl, dispatch, setNodes, setEdges, resetHistory]);
 
   // Node click handler for param editing
   const handleNodeClick = useCallback((event, node) => {
@@ -156,16 +189,26 @@ export default function BTManagerPage({ isActive = true }) {
     const parentEl = nodeElementMapRef.current.get(parentId);
     if (!parentEl) return;
 
+    // Skip if order didn't actually change — avoids a no-op history entry.
+    const newOrder = sorted.map((n) => nodeElementMapRef.current.get(n.id));
+    const currentOrder = [...parentEl.children];
+    const changed =
+      newOrder.length !== currentOrder.length ||
+      newOrder.some((el, i) => el !== currentOrder[i]);
+    if (!changed) return;
+
+    captureHistory();
     sorted.forEach((n) => {
       const el = nodeElementMapRef.current.get(n.id);
       if (el) parentEl.appendChild(el); // moves existing child to end
     });
-  }, []);
+  }, [captureHistory]);
 
   // Param change handler: update xmlDoc DOM + nodes state directly (no Redux treeXml change)
   const handleParamChange = useCallback((nodeId, paramName, value) => {
-    // Update XML DOM
     const el = nodeElementMapRef.current.get(nodeId);
+    if (el && el.getAttribute(paramName) === String(value)) return; // no-op
+    captureHistory();
     if (el) {
       el.setAttribute(paramName, value);
     }
@@ -177,7 +220,7 @@ export default function BTManagerPage({ isActive = true }) {
           : n
       )
     );
-  }, [setNodes]);
+  }, [setNodes, captureHistory]);
 
   // Delete key handler: cascade-delete selected nodes and sync XML DOM
   useEffect(() => {
@@ -203,6 +246,8 @@ export default function BTManagerPage({ isActive = true }) {
         }
       }
 
+      captureHistory();
+
       // Remove top-level deleted elements from XML DOM (children cascade automatically)
       const map = nodeElementMapRef.current;
       toDeleteIds.forEach((id) => {
@@ -224,7 +269,26 @@ export default function BTManagerPage({ isActive = true }) {
 
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [setNodes, setEdges, dispatch]);
+  }, [setNodes, setEdges, dispatch, captureHistory]);
+
+  // Undo/redo keybindings: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y
+  useEffect(() => {
+    const handler = (e) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redoHistory();
+        else undoHistory();
+      } else if (key === 'y' && !e.shiftKey) {
+        e.preventDefault();
+        redoHistory();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [undoHistory, redoHistory]);
 
   // Helper: get HTTP server base URL from rosbridgeUrl
   const getHttpBaseUrl = useCallback(() => {
@@ -238,9 +302,7 @@ export default function BTManagerPage({ isActive = true }) {
     const name = saveFileName.trim();
     if (!name) return;
 
-    const content = xmlDoc
-      ? new XMLSerializer().serializeToString(xmlDoc)
-      : treeXml;
+    const content = xmlDoc ? serializeBTXml(xmlDoc) : treeXml;
     if (!content) return;
 
     try {
@@ -271,9 +333,7 @@ export default function BTManagerPage({ isActive = true }) {
     }
     try {
       // Serialize current xmlDoc (reflects any node deletions) or fall back to raw XML
-      const currentXml = xmlDoc
-        ? new XMLSerializer().serializeToString(xmlDoc)
-        : treeXml;
+      const currentXml = xmlDoc ? serializeBTXml(xmlDoc) : treeXml;
 
       // 1. Launch BT node if not running
       const baseUrl = getHttpBaseUrl();
@@ -418,6 +478,32 @@ export default function BTManagerPage({ isActive = true }) {
           <span className="text-sm text-gray-500">
             {treeFileName || 'No file loaded'}
           </span>
+          <button
+            onClick={undoHistory}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+            className={clsx(
+              'flex items-center justify-center w-9 h-9 rounded-lg transition-colors duration-150',
+              canUndo
+                ? 'bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer'
+                : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+            )}
+          >
+            <MdUndo size={18} />
+          </button>
+          <button
+            onClick={redoHistory}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Shift+Z)"
+            className={clsx(
+              'flex items-center justify-center w-9 h-9 rounded-lg transition-colors duration-150',
+              canRedo
+                ? 'bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer'
+                : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+            )}
+          >
+            <MdRedo size={18} />
+          </button>
           <button
             onClick={() => {
               setSaveFileName(treeFileName ? treeFileName.replace(/\.xml$/i, '') : '');
