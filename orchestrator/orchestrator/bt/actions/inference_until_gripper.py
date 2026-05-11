@@ -152,7 +152,7 @@ class InferenceUntilGripper(BaseAction):
         if not self.joint_positions:
             return
 
-        current_time = time.time()
+        current_time = time.monotonic()
         current_positions = {}
         for joint_name in self.monitored_joints:
             if joint_name in self.joint_positions:
@@ -198,7 +198,7 @@ class InferenceUntilGripper(BaseAction):
         is_static = self._is_static()
         self._tick_count += 1
 
-        now = time.time()
+        now = time.monotonic()
         relaxed_duration = self.static_duration * 2
 
         # Periodic debug log
@@ -329,7 +329,7 @@ class InferenceUntilStatic(BaseAction):
         if not self.joint_positions:
             return
 
-        current_time = time.time()
+        current_time = time.monotonic()
         current_positions = {}
         for joint_name in self.monitored_joints:
             if joint_name in self.joint_positions:
@@ -369,7 +369,7 @@ class InferenceUntilStatic(BaseAction):
 
         is_static = self._is_static()
         self._tick_count += 1
-        now = time.time()
+        now = time.monotonic()
 
         if self._tick_count % 50 == 0:
             max_change = self._calculate_max_position_change()

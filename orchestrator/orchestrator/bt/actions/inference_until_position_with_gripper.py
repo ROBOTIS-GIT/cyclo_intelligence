@@ -200,7 +200,7 @@ class InferenceUntilPositionWithGripper(BaseAction):
 
     def tick(self) -> NodeStatus:
         if self.start_time is None:
-            self.start_time = time.time()
+            self.start_time = time.monotonic()
             self.log_info(
                 f'Started position and gripper monitoring '
                 f'with {self.check_delay}s delay'
@@ -208,7 +208,7 @@ class InferenceUntilPositionWithGripper(BaseAction):
 
         self._check_gripper_state_change()
 
-        elapsed_time = time.time() - self.start_time
+        elapsed_time = time.monotonic() - self.start_time
         self._tick_count += 1
 
         if elapsed_time < self.check_delay:
