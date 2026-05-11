@@ -32,26 +32,25 @@ cyclo_brain/
 │   └── zenoh_ros2_sdk/        Submodule (ROBOTIS-GIT). Mounted into
 │                               policy containers at /zenoh_sdk.
 └── policy/
-    ├── lerobot/               LeRobot backend container.
+    ├── common/
+    │   ├── runtime/          Process A (inference_server.py) + Process B
+    │   │                      (control_publisher.py) + InferenceEngine
+    │   │                      ABC. Bind-mounted into every policy
+    │   │                      container at /policy_runtime, so backends
+    │   │                      share one supervisor pair.
+    │   └── s6-services/      Single s6 unit tree used by every policy
+    │                          container (inference-server / control-
+    │                          publisher / user longruns).
+    ├── lerobot/              LeRobot backend container.
     │   ├── Dockerfile.{arm64,amd64}
-    │   ├── entrypoint.sh  →   (removed in Step 4-E — s6-overlay /init
-    │   │                       is the entrypoint now)
-    │   ├── s6-services/       inference-server + control-publisher
-    │   │                      longruns, with a user/contents.d/
-    │   │                      bundle that enables both.
-    │   ├── runtime/
-    │   │   ├── inference_server.py    Process A — model load / obs
-    │   │   │                          subscribe / chunk pub.
-    │   │   ├── control_publisher.py   Process B — 100 Hz control
-    │   │   │                          loop / JointTrajectory pub.
-    │   │   └── training.py            Out of Step 4 scope; lifted
-    │   │                              from the legacy training entry.
-    │   ├── scripts/           update_lerobot.sh (Step 7 — submodule
-    │   │                      updater + Docker rebuild helper).
-    │   └── lerobot/           Submodule (huggingface/lerobot).
-    └── groot/                 GR00T backend — same template as
-                               lerobot, pending the N1.5 / 1.6 / 1.7
-                               pin decision.
+    │   ├── lerobot_engine.py  Bind-mounted at /app/lerobot_engine.py;
+    │   │                      implements InferenceEngine.
+    │   ├── lerobot/          huggingface lerobot submodule.
+    │   ├── RESULTS/          Validation outputs from policy load tests.
+    │   └── scripts/
+    └── groot/                GR00T backend (still owns its own runtime/
+                              and s6-services/; common-runtime migration
+                              is a separate phase).
 ```
 
 ## Two-process runtime contract
@@ -103,14 +102,18 @@ publisher (leader / follower topic separation).
 ## Adding a backend
 
 1. Copy `cyclo_brain/policy/lerobot/` to
-   `cyclo_brain/policy/<new>/` — keep the `runtime/` +
-   `s6-services/` split.
+   `cyclo_brain/policy/<new>/`. The runtime + s6 units come from
+   the shared `policy/common/` tree via bind mount — only the
+   backend-specific engine file lives here.
 2. Point the backend's `Dockerfile.arm64` at whatever upstream
    container image makes sense for its dependencies.
-3. Implement `runtime/inference_server.py` with the same
-   `InferenceCommand` enum contract.
-4. `runtime/control_publisher.py` typically doesn't need changes —
-   it's backend-agnostic.
+3. Implement `<new>_engine.py` with `create_engine()` returning an
+   `InferenceEngine` subclass; Process A (`inference_server.py` in
+   `policy/common/runtime/`) imports it by name.
+4. `control_publisher.py` in `policy/common/runtime/` typically
+   doesn't need changes — it's backend-agnostic.
 5. Add a compose service entry (see
-   [`docker/docker-compose.yml`](../docker/docker-compose.yml)).
+   [`docker/docker-compose.yml`](../docker/docker-compose.yml)),
+   mounting `policy/common/runtime/` at `/policy_runtime` and the
+   engine file at `/app/<new>_engine.py`.
 6. Register the backend in `supervisor_api` for on-demand pull.
