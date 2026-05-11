@@ -120,11 +120,15 @@ def load_robot_section(
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     try:
-        return raw["orchestrator"]["ros__parameters"][robot_type]
+        section = raw["orchestrator"]["ros__parameters"][robot_type]
     except KeyError as e:
         raise KeyError(
             f"orchestrator.ros__parameters.{robot_type} missing in {path}: {e}"
         ) from e
+    # Stash the config file's directory so accessors can resolve any
+    # relative paths (e.g. urdf_path) anchored at the yaml location.
+    section["__config_dir__"] = str(path.parent)
+    return section
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +228,24 @@ def get_recording_topics(section: Dict[str, Any]) -> List[str]:
 
 
 def get_urdf_path(section: Dict[str, Any]) -> str:
-    return str(section.get("urdf_path") or "")
+    """Return the URDF path, resolving relative entries against the yaml dir.
+
+    yaml may set ``urdf_path`` as either an absolute path or a path
+    relative to the config file's directory (e.g. ``urdf/<robot>.urdf``).
+    Relative entries are anchored at ``__config_dir__`` (stashed by
+    :func:`load_robot_section`); if that anchor is missing the raw
+    string is returned unchanged.
+    """
+    raw = section.get("urdf_path") or ""
+    if not raw:
+        return ""
+    p = Path(raw)
+    if p.is_absolute():
+        return str(p)
+    config_dir = section.get("__config_dir__")
+    if not config_dir:
+        return str(p)
+    return str((Path(config_dir) / p).resolve())
 
 
 def get_robot_name(section: Dict[str, Any]) -> str:

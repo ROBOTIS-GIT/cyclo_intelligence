@@ -2,7 +2,7 @@ orchestrator:
   ros__parameters:
     ffw_sg2_rev1:
       robot_name: "FFW SG2 Rev1"
-      urdf_path: /root/ros2_ws/install/shared/share/shared/robot_configs/urdf/ffw_sg2_follower.urdf
+      urdf_path: urdf/ffw_sg2_follower.urdf
 
       # ────────────────────────────────────────────────────────────────
       # Observation — every signal the policy reads from the robot.

@@ -275,6 +275,20 @@ export function useRosServiceCaller() {
     }
   }, [callService]);
 
+  const getRobotInfo = useCallback(async () => {
+    try {
+      const result = await callService(
+        '/get_robot_info',
+        'interfaces/srv/GetRobotInfo',
+        {}
+      );
+      return result;
+    } catch (error) {
+      console.error('Failed to get robot info:', error);
+      throw new Error(`${error.message || error}`);
+    }
+  }, [callService]);
+
   const getRobotTypeList = useCallback(async () => {
     try {
       const result = await callService(
@@ -823,6 +837,7 @@ export function useRosServiceCaller() {
     callService,
     sendRecordCommand,
     getImageTopicList,
+    getRobotInfo,
     getRobotTypeList,
     setRobotType,
     registerHFUser,

@@ -1,29 +1,54 @@
 orchestrator:
   ros__parameters:
     omy_f3m:
-      observation_list:
-        - cam_wrist
-        - state
+      robot_name: "OMY F3M"
 
-      camera_topic_list:
-        - cam_wrist:/camera/cam_wrist/color/image_rect_raw/compressed
+      # ────────────────────────────────────────────────────────────────
+      # Observation — every signal the policy reads from the robot.
+      # Recording subscribes to all topics referenced here. Inference
+      # Process A subscribes to these same topics for live obs.
+      # ────────────────────────────────────────────────────────────────
+      observation:
+        images:
+          cam_wrist:
+            topic: /camera/cam_wrist/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
 
-      joint_topic_list:
-        - follower:/joint_states
-        - leader:/leader/joint_trajectory
+        state:
+          arm:
+            topic: /joint_states
+            msg_type: sensor_msgs/msg/JointState
+            joint_names:
+              - joint1
+              - joint2
+              - joint3
+              - joint4
+              - joint5
+              - joint6
+              - rh_r1_joint
 
-      joint_list:
-        - leader
+      # ────────────────────────────────────────────────────────────────
+      # Action — every modality the policy commands. Each entry's topic
+      # is BOTH the inference command target (Process B publishes here)
+      # AND the rosbag record target.
+      # ────────────────────────────────────────────────────────────────
+      action:
+        arm:
+          topic: /leader/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - joint1
+            - joint2
+            - joint3
+            - joint4
+            - joint5
+            - joint6
+            - rh_r1_joint
 
-      rosbag_extra_topic_list:
-        - /tf
-
-      joint_order:
-        leader:
-          - joint1
-          - joint2
-          - joint3
-          - joint4
-          - joint5
-          - joint6
-          - rh_r1_joint
+      # ────────────────────────────────────────────────────────────────
+      # Recording — auxiliary topics that need to be in the bag but are
+      # NOT VLA training data.
+      # ────────────────────────────────────────────────────────────────
+      recording:
+        extra_topics:
+          - /tf

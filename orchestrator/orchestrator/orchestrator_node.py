@@ -41,6 +41,7 @@ from interfaces.srv import (
     GetModelWeightList,
     GetPolicyList,
     GetReplayData,
+    GetRobotInfo,
     GetRobotTypeList,
     GetTrainingInfo,
     GetUserList,
@@ -309,6 +310,7 @@ class OrchestratorNode(Node):
         service_definitions = [
             ('/task/command', SendCommand, self.user_interaction_callback),
             ('/get_robot_types', GetRobotTypeList, self.get_robot_types_callback),
+            ('/get_robot_info', GetRobotInfo, self.get_robot_info_callback),
             ('/set_robot_type', SetRobotType, self.set_robot_type_callback),
             ('/register_hf_user', SetHFUser, self.set_hf_user_callback),
             ('/get_registered_hf_user', GetHFUser, self.get_hf_user_callback),
@@ -1430,6 +1432,22 @@ class OrchestratorNode(Node):
         response.robot_types = self.robot_type_list
         response.success = True
         response.message = 'Robot type list retrieved successfully'
+        return response
+
+    def get_robot_info_callback(self, request, response):
+        if self.robot_section is None:
+            response.robot_type = ''
+            response.robot_name = ''
+            response.urdf_path = ''
+            response.success = False
+            response.message = 'Robot type has not been set yet'
+            return response
+
+        response.robot_type = getattr(self, 'robot_type', '') or ''
+        response.robot_name = robot_schema.get_robot_name(self.robot_section)
+        response.urdf_path = robot_schema.get_urdf_path(self.robot_section)
+        response.success = True
+        response.message = 'Robot info retrieved successfully'
         return response
 
     def get_available_list_callback(self, request, response):
