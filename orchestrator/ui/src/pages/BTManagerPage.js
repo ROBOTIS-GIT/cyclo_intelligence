@@ -279,20 +279,44 @@ export default function BTManagerPage({ isActive = true }) {
     if (!tag || !findNodeMeta(tag)) return;
     event.preventDefault();
 
-    // Resolve the parent node from the DOM element under the drop point.
-    const nodeEl = event.target.closest?.('.react-flow__node');
-    if (!nodeEl) {
+    // ReactFlow tags each node with [data-id]; try DOM resolution first
+    // (works when target is the node wrapper or any descendant).
+    let parentId =
+      event.target.closest?.('[data-id]')?.getAttribute('data-id') ?? null;
+
+    // Fallback: bounding-box hit test against every rendered node. Survives
+    // cases where the drop's target is the canvas itself or a child element
+    // (Handle/SVG) that stopped propagation.
+    if (!parentId) {
+      for (const n of nodesRef.current) {
+        const el = document.querySelector(`[data-id="${n.id}"]`);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (
+          event.clientX >= r.left && event.clientX <= r.right &&
+          event.clientY >= r.top && event.clientY <= r.bottom
+        ) {
+          parentId = n.id;
+          break;
+        }
+      }
+    }
+
+    const parentNode = parentId
+      ? nodesRef.current.find((n) => n.id === parentId)
+      : null;
+
+    if (!parentNode) {
       toast.error('Drop onto a Control node (Sequence / Loop) to add a child');
       return;
     }
-    const parentId = nodeEl.getAttribute('data-id');
-    const parentNode = nodesRef.current.find((n) => n.id === parentId);
-    if (!parentNode) return;
     if (!isControlTag(parentNode.data.nodeType)) {
-      toast.error(`${parentNode.data.label || parentNode.data.nodeType} is an Action — only Control nodes can have children`);
+      toast.error(
+        `${parentNode.data.label || parentNode.data.nodeType} is an Action — only Control nodes can have children`
+      );
       return;
     }
-    handleAddChild(parentId, tag);
+    handleAddChild(parentNode.id, tag);
   }, [handleAddChild]);
 
   // Delete key handler: cascade-delete selected nodes and sync XML DOM
