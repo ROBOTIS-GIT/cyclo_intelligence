@@ -14,10 +14,10 @@
 //
 // Author: Claude (generated)
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDispatch } from 'react-redux';
 import { MdClose } from 'react-icons/md';
-import { setSelectedNodeId, updateNodeParam } from '../../features/btmanager/btmanagerSlice';
+import { setSelectedNodeId } from '../../features/btmanager/btmanagerSlice';
 
 const NUMBER_PARAMS = new Set([
   'duration', 'angle_deg', 'lift_position', 'control_hz', 'position_threshold',
@@ -27,17 +27,32 @@ const BOOL_PARAMS = new Set(['wait_until_ready']);
 
 const COMMAND_OPTIONS = ['START_INFERENCE', 'STOP_INFERENCE', 'RESUME_INFERENCE'];
 
-export default function BTParamPanel({ nodes, selectedNodeId }) {
+export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
   const dispatch = useDispatch();
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+
+  // Local param state — isolates keystrokes from parent re-renders (preserves cursor)
+  const [localParams, setLocalParams] = useState({});
+
+  // Reset local state only when switching to a different node
+  useEffect(() => {
+    if (selectedNode) {
+      setLocalParams(selectedNode.data.params || {});
+    }
+  }, [selectedNodeId]); // intentionally excludes selectedNode to avoid resetting mid-edit
+
   if (!selectedNode) return null;
 
-  const { label, nodeType, params = {} } = selectedNode.data;
-  const paramEntries = Object.entries(params);
+  const { label, nodeType } = selectedNode.data;
+  const paramEntries = Object.entries(localParams);
 
   const handleChange = (paramName, value) => {
-    dispatch(updateNodeParam({ nodeId: selectedNodeId, paramName, paramValue: value }));
+    setLocalParams((prev) => ({ ...prev, [paramName]: value }));
+  };
+
+  const handleBlur = (paramName) => {
+    onParamChange(selectedNodeId, paramName, localParams[paramName]);
   };
 
   const renderInput = (key, value) => {
@@ -45,7 +60,11 @@ export default function BTParamPanel({ nodes, selectedNodeId }) {
       return (
         <select
           value={value}
-          onChange={(e) => handleChange(key, e.target.value)}
+          onChange={(e) => {
+            handleChange(key, e.target.value);
+            // select has no meaningful blur event for this; sync immediately
+            onParamChange(selectedNodeId, key, e.target.value);
+          }}
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
         >
           {COMMAND_OPTIONS.map((opt) => (
@@ -61,7 +80,11 @@ export default function BTParamPanel({ nodes, selectedNodeId }) {
           <input
             type="checkbox"
             checked={value === 'true' || value === true}
-            onChange={(e) => handleChange(key, e.target.checked ? 'true' : 'false')}
+            onChange={(e) => {
+              const v = e.target.checked ? 'true' : 'false';
+              handleChange(key, v);
+              onParamChange(selectedNodeId, key, v);
+            }}
             className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-400"
           />
           <span className="text-sm text-gray-600">{value === 'true' || value === true ? 'true' : 'false'}</span>
@@ -76,6 +99,7 @@ export default function BTParamPanel({ nodes, selectedNodeId }) {
           step="any"
           value={value}
           onChange={(e) => handleChange(key, e.target.value)}
+          onBlur={() => handleBlur(key)}
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
         />
       );
@@ -85,6 +109,7 @@ export default function BTParamPanel({ nodes, selectedNodeId }) {
       <textarea
         value={value}
         onChange={(e) => handleChange(key, e.target.value)}
+        onBlur={() => handleBlur(key)}
         rows={String(value).length > 60 ? 3 : 1}
         className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 resize-y"
       />

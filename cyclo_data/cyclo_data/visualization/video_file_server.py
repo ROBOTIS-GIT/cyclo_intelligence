@@ -365,6 +365,10 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._handle_bt_shutdown()
             return
 
+        if parsed_path == '/bt/save_tree':
+            self._handle_bt_save_tree()
+            return
+
         self._send_json_error(404, "Unknown POST endpoint")
 
     def _handle_bt_node_status(self):
@@ -446,6 +450,58 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
 
         except Exception as e:
             self._send_json_error(500, f"Failed to launch BT node: {str(e)}")
+
+    def _handle_bt_save_tree(self):
+        """Handle POST /bt/save_tree — save XML content to the BT trees directory."""
+        import re
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self._send_json_error(400, 'Empty request body')
+                return
+
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            filename = data.get('filename', '').strip()
+            xml_content = data.get('content', '')
+
+            # Validate filename: alphanumeric, dash, underscore, dot only; must end with .xml
+            if not filename:
+                self._send_json_error(400, 'filename is required')
+                return
+            if not filename.endswith('.xml'):
+                filename += '.xml'
+            if not re.match(r'^[\w\-]+\.xml$', filename):
+                self._send_json_error(400, f'Invalid filename: {filename!r}')
+                return
+
+            # Resolve trees directory the same way as list_trees_callback
+            import orchestrator as _orch_pkg
+            pkg_root = os.path.dirname(os.path.realpath(_orch_pkg.__file__))
+            trees_dir = os.path.join(pkg_root, 'bt', 'trees')
+
+            if not os.path.isdir(trees_dir):
+                self._send_json_error(500, f'Trees directory not found: {trees_dir}')
+                return
+
+            save_path = os.path.join(trees_dir, filename)
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(xml_content)
+
+            result = json.dumps({
+                'success': True,
+                'message': f'Saved: {filename}',
+                'full_path': save_path,
+            }).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(result)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(result)
+
+        except Exception as e:
+            self._send_json_error(500, f'Failed to save tree: {str(e)}')
 
     def _handle_bt_shutdown(self):
         """Handle POST /bt/shutdown — shutdown the BT node process."""

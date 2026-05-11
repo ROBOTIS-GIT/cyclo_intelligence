@@ -14,7 +14,7 @@
 //
 // Author: Seongwoo Kim
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   ReactFlow,
@@ -26,7 +26,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdPlayArrow, MdStop, MdUploadFile } from 'react-icons/md';
+import { MdPlayArrow, MdStop, MdUploadFile, MdSave } from 'react-icons/md';
 
 import BTControlNode from '../components/bt/BTControlNode';
 import BTActionNode from '../components/bt/BTActionNode';
@@ -56,25 +56,39 @@ export default function BTManagerPage({ isActive = true }) {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [parseError, setParseError] = useState(null);
   const [showTreeList, setShowTreeList] = useState(false);
+  const [xmlDoc, setXmlDoc] = useState(null);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveFileName, setSaveFileName] = useState('');
+  const nodeElementMapRef = useRef(new Map());
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
 
   // Parse XML and update flow whenever treeXml changes
   useEffect(() => {
     if (!treeXml) {
       setNodes([]);
       setEdges([]);
+      setXmlDoc(null);
+      nodeElementMapRef.current = new Map();
       setParseError(null);
       return;
     }
 
     try {
-      const { nodes: newNodes, edges: newEdges } = parseBTXml(treeXml);
+      const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(treeXml);
       setNodes(newNodes);
       setEdges(newEdges);
+      setXmlDoc(doc);
+      nodeElementMapRef.current = nodeElementMap;
       setParseError(null);
     } catch (err) {
       setParseError(err.message);
       setNodes([]);
       setEdges([]);
+      setXmlDoc(null);
+      nodeElementMapRef.current = new Map();
     }
   }, [treeXml, setNodes, setEdges]);
 
@@ -83,12 +97,9 @@ export default function BTManagerPage({ isActive = true }) {
     if (!item || !item.full_path) return;
 
     try {
-      // Extract host from rosbridgeUrl (ws://host:9090 -> host)
       const urlMatch = rosbridgeUrl.match(/ws:\/\/([^:]+):/);
       const host = urlMatch ? urlMatch[1] : 'localhost';
-      const videoServerPort = 8082;
-
-      const fileUrl = `http://${host}:${videoServerPort}${item.full_path}`;
+      const fileUrl = `http://${host}:8082${item.full_path}`;
       const response = await fetch(fileUrl);
 
       if (!response.ok) {
@@ -98,18 +109,122 @@ export default function BTManagerPage({ isActive = true }) {
       const xmlContent = await response.text();
       const fileName = item.name || item.full_path.split('/').pop();
 
+      // Parse directly so the canvas always resets even when treeXml content is unchanged
+      try {
+        const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(xmlContent);
+        setNodes(newNodes);
+        setEdges(newEdges);
+        setXmlDoc(doc);
+        nodeElementMapRef.current = nodeElementMap;
+        setParseError(null);
+      } catch (parseErr) {
+        setParseError(parseErr.message);
+        setNodes([]);
+        setEdges([]);
+        setXmlDoc(null);
+        nodeElementMapRef.current = new Map();
+      }
+
+      dispatch(setSelectedNodeId(null));
       dispatch(setTreeXml(xmlContent));
       dispatch(setTreeFileName(fileName));
       toast.success(`Loaded: ${fileName}`);
     } catch (err) {
       toast.error(`Failed to load file: ${err.message}`);
     }
-  }, [rosbridgeUrl, dispatch]);
+  }, [rosbridgeUrl, dispatch, setNodes, setEdges]);
 
   // Node click handler for param editing
   const handleNodeClick = useCallback((event, node) => {
     dispatch(setSelectedNodeId(node.id));
   }, [dispatch]);
+
+  // Node drag stop: reorder XML DOM children to match visual left-to-right order
+  const handleNodeDragStop = useCallback((_event, draggedNode) => {
+    const parentEdge = edgesRef.current.find((e) => e.target === draggedNode.id);
+    if (!parentEdge) return; // root node has no siblings
+
+    const parentId = parentEdge.source;
+    const siblingIds = edgesRef.current
+      .filter((e) => e.source === parentId)
+      .map((e) => e.target);
+
+    const sorted = nodesRef.current
+      .filter((n) => siblingIds.includes(n.id))
+      .sort((a, b) => a.position.x - b.position.x);
+
+    const parentEl = nodeElementMapRef.current.get(parentId);
+    if (!parentEl) return;
+
+    sorted.forEach((n) => {
+      const el = nodeElementMapRef.current.get(n.id);
+      if (el) parentEl.appendChild(el); // moves existing child to end
+    });
+  }, []);
+
+  // Param change handler: update xmlDoc DOM + nodes state directly (no Redux treeXml change)
+  const handleParamChange = useCallback((nodeId, paramName, value) => {
+    // Update XML DOM
+    const el = nodeElementMapRef.current.get(nodeId);
+    if (el) {
+      el.setAttribute(paramName, value);
+    }
+    // Update nodes state in-place so BTParamPanel reflects the value without re-parse
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, params: { ...n.data.params, [paramName]: value } } }
+          : n
+      )
+    );
+  }, [setNodes]);
+
+  // Delete key handler: cascade-delete selected nodes and sync XML DOM
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+
+      const currentNodes = nodesRef.current;
+      const currentEdges = edgesRef.current;
+      const selectedIds = new Set(currentNodes.filter((n) => n.selected).map((n) => n.id));
+      if (selectedIds.size === 0) return;
+
+      // BFS to find all descendants
+      const toDeleteIds = new Set(selectedIds);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const edge of currentEdges) {
+          if (toDeleteIds.has(edge.source) && !toDeleteIds.has(edge.target)) {
+            toDeleteIds.add(edge.target);
+            changed = true;
+          }
+        }
+      }
+
+      // Remove top-level deleted elements from XML DOM (children cascade automatically)
+      const map = nodeElementMapRef.current;
+      toDeleteIds.forEach((id) => {
+        const el = map.get(id);
+        if (el && el.parentNode) {
+          const parentEl = el.parentNode;
+          const parentId = [...map.entries()].find(([, e]) => e === parentEl)?.[0];
+          if (!parentId || !toDeleteIds.has(parentId)) {
+            parentEl.removeChild(el);
+          }
+        }
+        map.delete(id);
+      });
+
+      setNodes((ns) => ns.filter((n) => !toDeleteIds.has(n.id)));
+      setEdges((es) => es.filter((e) => !toDeleteIds.has(e.source) && !toDeleteIds.has(e.target)));
+      dispatch(setSelectedNodeId(null));
+    };
+
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [setNodes, setEdges, dispatch]);
 
   // Helper: get HTTP server base URL from rosbridgeUrl
   const getHttpBaseUrl = useCallback(() => {
@@ -118,6 +233,36 @@ export default function BTManagerPage({ isActive = true }) {
     return `http://${host}:8082`;
   }, [rosbridgeUrl]);
 
+  // Save As handler
+  const handleSaveAs = useCallback(async () => {
+    const name = saveFileName.trim();
+    if (!name) return;
+
+    const content = xmlDoc
+      ? new XMLSerializer().serializeToString(xmlDoc)
+      : treeXml;
+    if (!content) return;
+
+    try {
+      const baseUrl = getHttpBaseUrl();
+      const res = await fetch(`${baseUrl}/bt/save_tree`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: name, content }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message);
+        setShowSaveDialog(false);
+        setSaveFileName('');
+      } else {
+        toast.error(data.message || 'Save failed');
+      }
+    } catch (err) {
+      toast.error(`Save failed: ${err.message}`);
+    }
+  }, [saveFileName, xmlDoc, treeXml, getHttpBaseUrl]);
+
   // BT Start - launch node, load XML, and run
   const handleStart = useCallback(async () => {
     if (!treeXml) {
@@ -125,6 +270,11 @@ export default function BTManagerPage({ isActive = true }) {
       return;
     }
     try {
+      // Serialize current xmlDoc (reflects any node deletions) or fall back to raw XML
+      const currentXml = xmlDoc
+        ? new XMLSerializer().serializeToString(xmlDoc)
+        : treeXml;
+
       // 1. Launch BT node if not running
       const baseUrl = getHttpBaseUrl();
       const launchRes = await fetch(`${baseUrl}/bt/launch`, {
@@ -148,7 +298,7 @@ export default function BTManagerPage({ isActive = true }) {
       const result = await callService(
         '/bt/load_and_run',
         'interfaces/srv/LoadAndRunTree',
-        { tree_xml: treeXml },
+        { tree_xml: currentXml },
         30000
       );
       if (result.success) {
@@ -161,7 +311,7 @@ export default function BTManagerPage({ isActive = true }) {
     } catch (err) {
       toast.error(`Failed to start BT: ${err.message}`);
     }
-  }, [callService, dispatch, treeXml, getHttpBaseUrl]);
+  }, [callService, dispatch, treeXml, xmlDoc, getHttpBaseUrl]);
 
   // BT Stop - stop tree and shutdown node
   const handleStop = useCallback(async () => {
@@ -269,6 +419,23 @@ export default function BTManagerPage({ isActive = true }) {
             {treeFileName || 'No file loaded'}
           </span>
           <button
+            onClick={() => {
+              setSaveFileName(treeFileName ? treeFileName.replace(/\.xml$/i, '') : '');
+              setShowSaveDialog(true);
+            }}
+            disabled={!treeXml}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg',
+              'text-sm font-medium transition-colors duration-150',
+              treeXml
+                ? 'bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer'
+                : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+            )}
+          >
+            <MdSave size={18} />
+            Save As
+          </button>
+          <button
             onClick={() => setShowTreeList(true)}
             className={clsx(
               'flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer',
@@ -308,10 +475,11 @@ export default function BTManagerPage({ isActive = true }) {
             nodeTypes={nodeTypes}
             fitView
             fitViewOptions={{ padding: 0.2 }}
-            nodesDraggable={false}
+            nodesDraggable={true}
             nodesConnectable={false}
             elementsSelectable={true}
             onNodeClick={handleNodeClick}
+            onNodeDragStop={handleNodeDragStop}
             minZoom={0.3}
             maxZoom={2}
             zoomOnScroll={false}
@@ -328,6 +496,7 @@ export default function BTManagerPage({ isActive = true }) {
           <BTParamPanel
             nodes={annotatedNodes}
             selectedNodeId={selectedNodeId}
+            onParamChange={handleParamChange}
           />
         )}
       </div>
@@ -375,6 +544,50 @@ export default function BTManagerPage({ isActive = true }) {
         onClose={() => setShowTreeList(false)}
         onSelect={handleServerFileSelect}
       />
+
+      {/* Save As Dialog */}
+      {showSaveDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-6 w-80">
+            <h2 className="text-base font-semibold text-gray-800 mb-4">Save Tree As</h2>
+            <div className="flex items-center gap-1 border border-gray-300 rounded-lg px-3 py-2 focus-within:ring-2 focus-within:ring-blue-400">
+              <input
+                autoFocus
+                type="text"
+                value={saveFileName}
+                onChange={(e) => setSaveFileName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveAs();
+                  if (e.key === 'Escape') setShowSaveDialog(false);
+                }}
+                placeholder="filename"
+                className="flex-1 text-sm outline-none"
+              />
+              <span className="text-sm text-gray-400">.xml</span>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowSaveDialog(false)}
+                className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveAs}
+                disabled={!saveFileName.trim()}
+                className={clsx(
+                  'px-4 py-2 text-sm font-medium rounded-lg transition-colors',
+                  saveFileName.trim()
+                    ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                )}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

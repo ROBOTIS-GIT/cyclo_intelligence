@@ -59,9 +59,11 @@ export function parseBTXml(xmlString) {
   const nodes = [];
   const edges = [];
   let nodeIdCounter = 0;
+  const nodeElementMap = new Map();
 
   function traverse(element, parentId) {
     const id = `bt_${nodeIdCounter++}`;
+    nodeElementMap.set(id, element);
     const tag = element.tagName;
     const name = element.getAttribute('name') || tag;
     const isControl = CONTROL_TYPES.has(tag);
@@ -103,8 +105,8 @@ export function parseBTXml(xmlString) {
 
   traverse(rootElement, null);
 
-  // Apply dagre layout
-  return applyDagreLayout(nodes, edges);
+  const layout = applyDagreLayout(nodes, edges);
+  return { ...layout, xmlDoc: doc, nodeElementMap };
 }
 
 function applyDagreLayout(nodes, edges) {
