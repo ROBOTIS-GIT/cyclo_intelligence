@@ -121,6 +121,17 @@ from robot_client.messages import ACTION_CHUNK_DEF  # noqa: E402
 logger = get_logger("control_publisher")
 
 
+# -- Mixins --------------------------------------------------------------------
+# Placed after the sys.path / SDK imports above so the mixin modules find
+# zenoh_ros2_sdk / post_processing / robot_client.messages / schema on
+# their own imports. Bare imports — runtime is bind-mounted at
+# /policy_runtime so sibling lookup just works. See S5 design note in
+# docs/plans/2026-05-10-cyclo_brain-refactor.md.
+from _cp_lifecycle import LifecycleMixin  # noqa: E402
+from _cp_pipeline import PipelineMixin  # noqa: E402
+from _cp_publishers import PublishersMixin  # noqa: E402
+
+
 # -- Constants -----------------------------------------------------------------
 
 BACKEND = os.environ.get("POLICY_BACKEND", "").strip()
@@ -165,7 +176,7 @@ def _try_rt_priority(prio: int = RT_PRIO) -> None:
 # -- ControlPublisher ----------------------------------------------------------
 
 
-class ControlPublisher:
+class ControlPublisher(LifecycleMixin, PipelineMixin, PublishersMixin):
 
     def __init__(
         self,
@@ -277,180 +288,9 @@ class ControlPublisher:
                     pass
                 setattr(self, attr, None)
 
-    def configure(self, robot_type: str) -> None:
-        """Build per-robot publishers + ActionChunkProcessor for ``robot_type``.
-
-        Idempotent for the same robot_type. Switching robot types tears down
-        the previous setup before rebuilding.
-        """
-        with self._config_lock:
-            if self._configured and self._robot_type == robot_type:
-                logger.info(f"already configured for {robot_type}, skipping")
-                return
-            if self._configured:
-                logger.info(
-                    f"reconfiguring from {self._robot_type} → {robot_type}"
-                )
-                self._teardown_robot_specific_locked()
-
-            section = robot_schema.load_robot_section(robot_type)
-            action_groups = robot_schema.get_action_groups(section)
-
-            self._command_topics = {
-                f"leader_{m}": cfg["topic"] for m, cfg in action_groups.items()
-            }
-            self._command_msg_types = {
-                f"leader_{m}": cfg["msg_type"] for m, cfg in action_groups.items()
-            }
-            self._joint_order = {
-                f"joint_order.leader_{m}": list(cfg["joint_names"])
-                for m, cfg in action_groups.items()
-            }
-            self._action_keys = sorted(action_groups.keys())
-            self._action_joint_map = build_action_joint_map(
-                self._action_keys, self._joint_order
-            )
-            self._preview_joint_names = []
-            for m in self._action_keys:
-                self._preview_joint_names.extend(
-                    self._joint_order.get(f"joint_order.leader_{m}", [])
-                )
-            logger.info(f"action_keys={self._action_keys}")
-            logger.info(f"action_joint_map={self._action_joint_map}")
-
-            self._processor = ActionChunkProcessor(
-                inference_hz=INFERENCE_HZ,
-                control_hz=CONTROL_HZ,
-                chunk_align_window_s=CHUNK_ALIGN_WINDOW_S,
-            )
-            self._setup_robot_specific_locked()
-
-            self._robot_type = robot_type
-            self._configured = True
-            logger.info(f"configured for {robot_type}")
-
-    def deconfigure(self) -> None:
-        """Tear down per-robot publishers + processor. Safe to call when
-        already deconfigured (no-op)."""
-        with self._config_lock:
-            if not self._configured:
-                return
-            self._teardown_robot_specific_locked()
-            self._processor = None
-            self._action_joint_map = None
-            self._joint_order = {}
-            self._action_keys = []
-            self._command_topics = {}
-            self._command_msg_types = {}
-            self._preview_joint_names = []
-            prev = self._robot_type
-            self._robot_type = None
-            self._configured = False
-            self._a_honoring = False
-            logger.info(f"deconfigured (was {prev})")
-
-    def _setup_robot_specific_locked(self) -> None:
-        """Create command publishers + chunk subscriber + trigger publisher.
-
-        Caller must hold _config_lock.
-        """
-        common = self._common_kwargs()
-
-        for name, topic in self._command_topics.items():
-            msg_type = self._command_msg_types[name]
-            self._command_pubs[name] = ROS2Publisher(
-                topic=topic, msg_type=msg_type, **common
-            )
-            logger.info(f"command pub: {name} → {topic} ({msg_type})")
-
-        self._chunk_sub = ROS2Subscriber(
-            topic=CHUNK_TOPIC,
-            msg_type="interfaces/msg/ActionChunk",
-            msg_definition=ACTION_CHUNK_DEF,
-            callback=self._on_chunk,
-            **common,
-        )
-        self._trigger_pub = ROS2Publisher(
-            topic=TRIGGER_TOPIC,
-            msg_type="std_msgs/msg/UInt64",
-            **common,
-        )
-        self._trajectory_preview_pub = ROS2Publisher(
-            topic="/inference/trajectory_preview",
-            msg_type="trajectory_msgs/msg/JointTrajectory",
-            **common,
-        )
-        logger.info(f"chunk sub:   {CHUNK_TOPIC}")
-        logger.info(f"trigger pub: {TRIGGER_TOPIC}")
-        logger.info(
-            "trajectory preview pub: /inference/trajectory_preview "
-            f"({len(self._preview_joint_names)} joints)"
-        )
-
-        self._requesting = False
-        self._request_sent_at = 0.0
-        self._seq_id = 0
-
-    def _teardown_robot_specific_locked(self) -> None:
-        """Close command publishers + chunk sub + trigger pub.
-
-        Caller must hold _config_lock.
-        """
-        for pub in self._command_pubs.values():
-            try:
-                pub.close()
-            except Exception:
-                pass
-        self._command_pubs.clear()
-        for attr in ("_chunk_sub", "_trigger_pub", "_trajectory_preview_pub"):
-            handle = getattr(self, attr, None)
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-                setattr(self, attr, None)
-
-    # -- Configure handler ----------------------------------------------------
-
-    def _on_configure(self, msg) -> None:
-        """Process A → B configure broadcast. Empty robot_type = deconfigure."""
-        try:
-            robot_type = (getattr(msg, "data", "") or "").strip()
-            if robot_type:
-                logger.info(f"configure msg received: robot_type={robot_type}")
-                self.configure(robot_type)
-            else:
-                logger.info("deconfigure msg received")
-                self.deconfigure()
-        except Exception as e:
-            logger.error(f"configure handler failed: {e}", exc_info=True)
-
-    def _on_lifecycle(self, msg) -> None:
-        """Process A → B lifecycle broadcast.
-
-        Tracks whether Process A is honoring triggers. When entering the
-        honoring state ("running"), drop any in-flight trigger we may
-        have sent during a non-honoring state — otherwise the next tick
-        wouldn't refire until the stale trigger times out
-        (REQUEST_TIMEOUT_S), producing a multi-second resume latency.
-        """
-        try:
-            state = (getattr(msg, "data", "") or "").strip()
-            new_honoring = (state == "running")
-            with self._config_lock:
-                was_honoring = self._a_honoring
-                self._a_honoring = new_honoring
-                if new_honoring and not was_honoring and self._requesting:
-                    logger.info(
-                        f"lifecycle: {state} — clearing stale in-flight "
-                        f"trigger seq={self._seq_id}"
-                    )
-                    self._requesting = False
-                else:
-                    logger.info(f"lifecycle: {state}")
-        except Exception as e:
-            logger.error(f"lifecycle handler failed: {e}", exc_info=True)
+    # configure / deconfigure / _setup_robot_specific_locked /
+    # _teardown_robot_specific_locked / _on_configure / _on_lifecycle
+    # live in _cp_lifecycle.LifecycleMixin (S5 split).
 
     def run(self) -> None:
         _try_rt_priority()
@@ -505,144 +345,11 @@ class ControlPublisher:
             ):
                 self._send_trigger_locked()
 
-    def _on_chunk(self, msg) -> None:
-        with self._config_lock:
-            if not self._configured or self._processor is None:
-                return
-            try:
-                seq_id = int(getattr(msg, "seq_id", 0))
-                chunk_size = int(msg.chunk_size)
-                action_dim = int(msg.action_dim)
-                data = np.asarray(msg.data, dtype=np.float64)
-                if data.size != chunk_size * action_dim:
-                    logger.warning(
-                        f"chunk seq={seq_id} size mismatch: data.size={data.size} "
-                        f"!= {chunk_size} * {action_dim}"
-                    )
-                    return
-                chunk = data.reshape(chunk_size, action_dim)
-                n_pushed = self._processor.push_chunk(chunk)
-                logger.info(
-                    f"chunk rx seq={seq_id} T={chunk_size} D={action_dim} → "
-                    f"pushed={n_pushed} buffer={self._processor.buffer_size}"
-                )
-                self._publish_trajectory_preview_locked(chunk)
-            except Exception as e:
-                logger.error(f"chunk decode failed: {e}", exc_info=True)
-            finally:
-                self._requesting = False
+    # _on_chunk / _send_trigger_locked live in _cp_pipeline.PipelineMixin (S5 split).
 
-    def _send_trigger_locked(self) -> None:
-        if self._trigger_pub is None:
-            return
-        self._seq_id += 1
-        try:
-            self._trigger_pub.publish(data=self._seq_id)
-            self._requesting = True
-            self._request_sent_at = time.time()
-            logger.debug(f"trigger pub seq={self._seq_id}")
-        except Exception as e:
-            logger.error(f"trigger publish failed: {e}", exc_info=True)
-
-    def _publish_trajectory_preview_locked(self, chunk: np.ndarray) -> None:
-        """Emit the full predicted action chunk as JointTrajectory.
-
-        Publishes to ``/inference/trajectory_preview``
-        (trajectory_msgs/msg/JointTrajectory). Consumer: the UI's 3D
-        viewer in orchestrator. This is a UI-only auxiliary; the real
-        100 Hz robot commands go out on per-modality topics built in
-        ``_setup_robot_specific_locked``. ``chunk`` is (T, D) where D
-        matches ``len(self._preview_joint_names)``. Caller holds
-        ``_config_lock``.
-        """
-        if self._trajectory_preview_pub is None:
-            return
-        joint_names = self._preview_joint_names
-        if not joint_names:
-            return
-        n_names = len(joint_names)
-        JointTrajectoryPoint = self._msg_classes["JointTrajectoryPoint"]
-        Header = self._msg_classes["Header"]
-        Time = self._msg_classes["Time"]
-        Duration = self._msg_classes["Duration"]
-        try:
-            empty = np.zeros(0, dtype=np.float64)
-            zero_duration = Duration(sec=0, nanosec=0)
-            points = []
-            for row in chunk:
-                # Defensive trim — D should already equal n_names but the
-                # model is the source of truth and we'd rather emit
-                # something than crash on a one-off mismatch.
-                positions = np.asarray(row[:n_names], dtype=np.float64)
-                points.append(
-                    JointTrajectoryPoint(
-                        positions=positions,
-                        velocities=empty,
-                        accelerations=empty,
-                        effort=empty,
-                        time_from_start=zero_duration,
-                    )
-                )
-            self._trajectory_preview_pub.publish(
-                header=Header(stamp=Time(sec=0, nanosec=0), frame_id=""),
-                joint_names=list(joint_names),
-                points=points,
-            )
-        except Exception as e:
-            logger.error(f"trajectory preview publish failed: {e}", exc_info=True)
-
-    def _publish_action_locked(self, action: np.ndarray) -> None:
-        try:
-            segments = split_action(
-                action, self._action_joint_map, self._joint_order
-            )
-        except Exception as e:
-            logger.error(f"split_action failed: {e}", exc_info=True)
-            return
-
-        for publisher_key, values in segments.items():
-            pub = self._command_pubs.get(publisher_key)
-            if pub is None:
-                continue
-
-            try:
-                msg_type = self._command_msg_types.get(publisher_key, "")
-                if msg_type == "geometry_msgs/msg/Twist":
-                    self._publish_twist(pub, values)
-                else:
-                    joint_names = self._joint_order.get(
-                        f"joint_order.{publisher_key}", []
-                    )
-                    self._publish_joint_trajectory(pub, joint_names, values)
-            except Exception as e:
-                logger.error(
-                    f"publish {publisher_key} failed: {e}", exc_info=True
-                )
-
-    def _publish_twist(self, pub: ROS2Publisher, values: np.ndarray) -> None:
-        Vector3 = self._Vector3
-        linear = Vector3(
-            x=float(values[0]) if len(values) > 0 else 0.0,
-            y=float(values[1]) if len(values) > 1 else 0.0,
-            z=0.0,
-        )
-        angular = Vector3(
-            x=0.0,
-            y=0.0,
-            z=float(values[2]) if len(values) > 2 else 0.0,
-        )
-        pub.publish(linear=linear, angular=angular)
-
-    def _publish_joint_trajectory(
-        self,
-        pub: ROS2Publisher,
-        joint_names,
-        values: np.ndarray,
-    ) -> None:
-        header, points = make_joint_trajectory(
-            self._msg_classes, joint_names, values
-        )
-        pub.publish(header=header, joint_names=list(joint_names), points=points)
+    # _publish_action_locked / _publish_twist / _publish_joint_trajectory /
+    # _publish_trajectory_preview_locked live in _cp_publishers.PublishersMixin
+    # (S5 split).
 
 
 # -- Main ----------------------------------------------------------------------
