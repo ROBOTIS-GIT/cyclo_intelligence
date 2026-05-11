@@ -36,6 +36,9 @@ Configuration via environment variables:
 - ``REQUEST_TIMEOUT_S`` — chunk-arrival deadline before we drop the
   in-flight ``_requesting`` flag (default 5 s; bump for slow VLAs like
   GR00T post-TRT-load by setting e.g. ``REQUEST_TIMEOUT_S=8.0``).
+
+See ``docs/specs/policy-runtime-contracts.md`` for the full topic /
+srv / mount contract reference.
 """
 
 from __future__ import annotations
@@ -542,9 +545,15 @@ class ControlPublisher:
             logger.error(f"trigger publish failed: {e}", exc_info=True)
 
     def _publish_trajectory_preview_locked(self, chunk: np.ndarray) -> None:
-        """Emit the full predicted action chunk as a JointTrajectory for the
-        UI's 3D viz. ``chunk`` is shape (T, D) where D matches
-        ``len(self._preview_joint_names)``. Caller holds _config_lock.
+        """Emit the full predicted action chunk as JointTrajectory.
+
+        Publishes to ``/inference/trajectory_preview``
+        (trajectory_msgs/msg/JointTrajectory). Consumer: the UI's 3D
+        viewer in orchestrator. This is a UI-only auxiliary; the real
+        100 Hz robot commands go out on per-modality topics built in
+        ``_setup_robot_specific_locked``. ``chunk`` is (T, D) where D
+        matches ``len(self._preview_joint_names)``. Caller holds
+        ``_config_lock``.
         """
         if self._trajectory_preview_pub is None:
             return

@@ -39,6 +39,9 @@ Configuration via environment variables:
   (default ``"create_engine"``).
 - ``ZENOH_ROUTER_IP`` / ``ZENOH_ROUTER_PORT`` / ``ROS_DOMAIN_ID`` —
   Zenoh wiring (defaults match docker-compose).
+
+See ``docs/specs/policy-runtime-contracts.md`` for the full topic /
+srv / mount contract reference.
 """
 
 from __future__ import annotations
@@ -352,7 +355,15 @@ class InferenceServer:
         return self._make_response(success=True, message="unloaded")
 
     def _cmd_update_instruction(self, request):
-        """Re-condition language-conditioned policies without lifecycle change."""
+        """Update the current task_instruction without reloading weights.
+
+        InferenceCommand variant ``CMD_UPDATE_INSTRUCTION=6``. Engines
+        with language conditioning (smolvla, pi0, eo1, xvla, wallx)
+        read the new instruction on the next ``get_action_chunk``
+        call. Engines without language conditioning (act, diffusion,
+        multi_task_dit) ignore it. The response carries no action_keys
+        and no policy reload occurs.
+        """
         if not self._loaded:
             return self._make_response(success=False, message="LOAD first")
         if not self._running:
