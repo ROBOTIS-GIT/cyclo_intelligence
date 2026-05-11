@@ -16,7 +16,7 @@
 #
 # Author: Seongwoo Kim
 
-"""Inference action that runs until arms reach target positions and gripper state changes."""
+"""Action that waits until arms reach target positions and gripper state changes."""
 
 import math
 import time
@@ -42,15 +42,29 @@ RIGHT_JOINT_NAMES = [
     'arm_r_joint5', 'arm_r_joint6', 'arm_r_joint7', 'gripper_r_joint1',
 ]
 
+GRIPPER_CHECK_OPTIONS = ('none', 'left', 'right', 'both')
 
-class InferenceUntilPositionWithGripper(BaseAction):
-    """Action that runs until arms reach target positions AND gripper state changes.
+_SIDE_TO_JOINT = {
+    'left': 'gripper_l_joint1',
+    'right': 'gripper_r_joint1',
+}
+
+
+class WaitUntilPoseAndGripperChange(BaseAction):
+    """Wait until arms reach target positions, optionally gated by gripper state change.
 
     Returns SUCCESS when:
-    1. Gripper state change detected (closed -> open or open -> closed)
-    2. AND Euclidean distance between current and target positions <= tolerance
+    1. Euclidean distance between current and target positions <= tolerance
+    2. AND every gripper side selected by `gripper_check` has transitioned
+       between open and closed at least once
 
-    Position checking starts after check_delay seconds to allow initial movement.
+    `gripper_check` values:
+    - 'none'  : ignore grippers; pose alone triggers SUCCESS
+    - 'left'  : require left  gripper open<->closed transition
+    - 'right' : require right gripper open<->closed transition
+    - 'both'  : require BOTH grippers to transition (AND)
+
+    Position checking starts after `check_delay` seconds to allow initial movement.
     """
 
     def __init__(
@@ -62,8 +76,9 @@ class InferenceUntilPositionWithGripper(BaseAction):
         gripper_closed_threshold: float = GRIPPER_CLOSED_THRESHOLD,  # noqa: F405
         gripper_open_threshold: float = GRIPPER_OPEN_THRESHOLD,  # noqa: F405
         check_delay: float = 5.0,
+        gripper_check: str = 'none',
     ):
-        super().__init__(node, name='InferenceUntilPositionWithGripper')
+        super().__init__(node, name='WaitUntilPoseAndGripperChange')
 
         default_positions = [0.0] * 8
         self.left_positions = left_positions or default_positions
@@ -80,18 +95,25 @@ class InferenceUntilPositionWithGripper(BaseAction):
                 f'got {len(self.right_positions)}'
             )
 
+        if gripper_check not in GRIPPER_CHECK_OPTIONS:
+            raise ValueError(
+                f'gripper_check must be one of {GRIPPER_CHECK_OPTIONS}, '
+                f'got {gripper_check!r}'
+            )
+
         self.tolerance = tolerance
         self.gripper_closed_threshold = gripper_closed_threshold
         self.gripper_open_threshold = gripper_open_threshold
         self.check_delay = check_delay
+        self.gripper_check = gripper_check
 
         # Joint state tracking
         self.joint_state = None
 
-        # Gripper state tracking
-        self.gripper_state_changed = False
-        self.initial_gripper_state = None
-        self.previous_gripper_state = None
+        # Per-side gripper state tracking (only updated for monitored sides)
+        self.initial_gripper_state = {'left': None, 'right': None}
+        self.previous_gripper_state = {'left': None, 'right': None}
+        self.gripper_state_changed = {'left': False, 'right': False}
 
         # Time tracking
         self.start_time = None
@@ -112,61 +134,84 @@ class InferenceUntilPositionWithGripper(BaseAction):
             f'Initialized with tolerance={tolerance:.3f}, '
             f'closed_thr={gripper_closed_threshold:.3f}, '
             f'open_thr={gripper_open_threshold:.3f}, '
-            f'check_delay={check_delay:.1f}s'
+            f'check_delay={check_delay:.1f}s, '
+            f'gripper_check={gripper_check}'
         )
 
     def _joint_state_callback(self, msg):
         self.joint_state = msg
 
-    def _get_gripper_state(self) -> str:
+    def _sides_to_monitor(self) -> tuple:
+        """Return the gripper sides that participate in the success condition."""
+        if self.gripper_check == 'left':
+            return ('left',)
+        if self.gripper_check == 'right':
+            return ('right',)
+        if self.gripper_check == 'both':
+            return ('left', 'right')
+        return ()
+
+    def _get_gripper_state(self, side: str) -> str:
+        """Classify one side's gripper as 'open' / 'closed' / 'unknown'.
+
+        Returns the previous state inside the dead-band between thresholds
+        (when there is one), otherwise 'unknown'.
+        """
         if self.joint_state is None:
+            return 'unknown'
+        joint_name = _SIDE_TO_JOINT.get(side)
+        if joint_name is None:
             return 'unknown'
 
         name_to_idx = {
             name: i for i, name in enumerate(self.joint_state.name)
         }
-
-        right_idx = name_to_idx.get('gripper_r_joint1')
-        if right_idx is None:
+        idx = name_to_idx.get(joint_name)
+        if idx is None:
             return 'unknown'
 
-        right_pos = self.joint_state.position[right_idx]
-
-        if right_pos < self.gripper_open_threshold:
+        pos = self.joint_state.position[idx]
+        if pos < self.gripper_open_threshold:
             return 'open'
-        elif right_pos > self.gripper_closed_threshold:
+        if pos > self.gripper_closed_threshold:
             return 'closed'
-        else:
-            return (
-                self.previous_gripper_state
-                if self.previous_gripper_state
-                else 'unknown'
-            )
+        prev = self.previous_gripper_state[side]
+        return prev if prev else 'unknown'
 
     def _check_gripper_state_change(self):
-        current_state = self._get_gripper_state()
-        if current_state == 'unknown':
-            return
+        """Update per-side latched flags for every monitored gripper side."""
+        for side in self._sides_to_monitor():
+            state = self._get_gripper_state(side)
+            if state == 'unknown':
+                continue
 
-        if self.initial_gripper_state is None:
-            self.initial_gripper_state = current_state
-            self.previous_gripper_state = current_state
-            self.log_info(f'Initial gripper state: {current_state}')
-            return
+            if self.initial_gripper_state[side] is None:
+                self.initial_gripper_state[side] = state
+                self.previous_gripper_state[side] = state
+                self.log_info(f'Initial {side} gripper state: {state}')
+                continue
 
-        if self.previous_gripper_state != current_state:
-            self.log_info(
-                f'Gripper state changed: '
-                f'{self.previous_gripper_state} -> {current_state}'
-            )
-            self.previous_gripper_state = current_state
+            if self.previous_gripper_state[side] != state:
+                self.log_info(
+                    f'{side.capitalize()} gripper state changed: '
+                    f'{self.previous_gripper_state[side]} -> {state}'
+                )
+                self.previous_gripper_state[side] = state
 
-            if ((self.initial_gripper_state == 'open'
-                 and current_state == 'closed')
-                or (self.initial_gripper_state == 'closed'
-                    and current_state == 'open')):
-                self.gripper_state_changed = True
-                self.log_info('Gripper state change detected!')
+                initial = self.initial_gripper_state[side]
+                if ((initial == 'open' and state == 'closed')
+                        or (initial == 'closed' and state == 'open')):
+                    if not self.gripper_state_changed[side]:
+                        self.log_info(
+                            f'{side.capitalize()} gripper transition detected!'
+                        )
+                    self.gripper_state_changed[side] = True
+
+    def _gripper_condition_met(self) -> bool:
+        sides = self._sides_to_monitor()
+        if not sides:
+            return True  # 'none' — pose-only success
+        return all(self.gripper_state_changed[s] for s in sides)
 
     def _calculate_euclidean_distance(self) -> float:
         if self.joint_state is None:
@@ -216,17 +261,19 @@ class InferenceUntilPositionWithGripper(BaseAction):
                 remaining = self.check_delay - elapsed_time
                 self.log_info(
                     f'Waiting {remaining:.1f}s before position check '
-                    f'(gripper_changed: {self.gripper_state_changed})'
+                    f'(gripper_changed={dict(self.gripper_state_changed)})'
                 )
             return NodeStatus.RUNNING
 
         distance = self._calculate_euclidean_distance()
         position_reached = distance <= self.tolerance
+        gripper_ok = self._gripper_condition_met()
 
-        if self.gripper_state_changed and position_reached:
+        if gripper_ok and position_reached:
             self.log_info(
-                f'Both conditions met! Distance: {distance:.4f} '
-                f'<= {self.tolerance:.4f} (after {elapsed_time:.1f}s)'
+                f'Conditions met (gripper_check={self.gripper_check})! '
+                f'Distance: {distance:.4f} <= {self.tolerance:.4f} '
+                f'(after {elapsed_time:.1f}s)'
             )
             return NodeStatus.SUCCESS
 
@@ -234,7 +281,8 @@ class InferenceUntilPositionWithGripper(BaseAction):
             self.log_info(
                 f'Status - Distance: {distance:.4f} '
                 f'(tolerance: {self.tolerance:.4f}), '
-                f'Gripper changed: {self.gripper_state_changed}, '
+                f'Gripper changed: {dict(self.gripper_state_changed)} '
+                f'(check={self.gripper_check}), '
                 f'elapsed: {elapsed_time:.1f}s'
             )
 
@@ -244,7 +292,7 @@ class InferenceUntilPositionWithGripper(BaseAction):
         super().reset()
         self.joint_state = None
         self.start_time = None
-        self.gripper_state_changed = False
-        self.initial_gripper_state = None
-        self.previous_gripper_state = None
+        self.initial_gripper_state = {'left': None, 'right': None}
+        self.previous_gripper_state = {'left': None, 'right': None}
+        self.gripper_state_changed = {'left': False, 'right': False}
         self._tick_count = 0

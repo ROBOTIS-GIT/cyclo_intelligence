@@ -23,16 +23,16 @@ from typing import Dict  # noqa: I100
 from typing import TYPE_CHECKING  # noqa: I100
 from typing import Type  # noqa: I100
 
-from orchestrator.bt.actions import InferenceUntilGripperClose
-from orchestrator.bt.actions import InferenceUntilGripperOpen
-from orchestrator.bt.actions import InferenceUntilPositionWithGripper
-from orchestrator.bt.actions import InferenceUntilStatic
 from orchestrator.bt.actions import MoveArms
 from orchestrator.bt.actions import MoveHead
 from orchestrator.bt.actions import MoveLift
 from orchestrator.bt.actions import Rotate
 from orchestrator.bt.actions import SendCommandAction
 from orchestrator.bt.actions import Wait
+from orchestrator.bt.actions import WaitUntilArmsStatic
+from orchestrator.bt.actions import WaitUntilGripperClosed
+from orchestrator.bt.actions import WaitUntilGripperOpened
+from orchestrator.bt.actions import WaitUntilPoseAndGripperChange
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.constants import GRIPPER_CLOSED_THRESHOLD
 from orchestrator.bt.constants import GRIPPER_OPEN_THRESHOLD
@@ -70,10 +70,10 @@ class TreeLoader:
             'MoveLift': MoveLift,
             'SendCommand': SendCommandAction,
             'Wait': Wait,
-            'InferenceUntilGripperClose': InferenceUntilGripperClose,
-            'InferenceUntilGripperOpen': InferenceUntilGripperOpen,
-            'InferenceUntilPositionWithGripper': InferenceUntilPositionWithGripper,
-            'InferenceUntilStatic': InferenceUntilStatic,
+            'WaitUntilGripperClosed': WaitUntilGripperClosed,
+            'WaitUntilGripperOpened': WaitUntilGripperOpened,
+            'WaitUntilPoseAndGripperChange': WaitUntilPoseAndGripperChange,
+            'WaitUntilArmsStatic': WaitUntilArmsStatic,
         }
 
     def load_tree_from_string(
@@ -259,7 +259,7 @@ class TreeLoader:
             return action
 
         elif action_class in (
-            InferenceUntilGripperClose, InferenceUntilGripperOpen
+            WaitUntilGripperClosed, WaitUntilGripperOpened
         ):
             action = action_class(
                 node=self.node,
@@ -280,7 +280,7 @@ class TreeLoader:
             action.name = name
             return action
 
-        elif action_class == InferenceUntilStatic:
+        elif action_class == WaitUntilArmsStatic:
             action = action_class(
                 node=self.node,
                 position_change_threshold=params.get(
@@ -292,7 +292,7 @@ class TreeLoader:
             action.name = name
             return action
 
-        elif action_class == InferenceUntilPositionWithGripper:
+        elif action_class == WaitUntilPoseAndGripperChange:
             default_positions = [0.0] * 8
             action = action_class(
                 node=self.node,
@@ -312,6 +312,7 @@ class TreeLoader:
                     GRIPPER_OPEN_THRESHOLD,
                 ),
                 check_delay=params.get('check_delay', 5.0),
+                gripper_check=params.get('gripper_check', 'none'),
             )
             action.name = name
             return action

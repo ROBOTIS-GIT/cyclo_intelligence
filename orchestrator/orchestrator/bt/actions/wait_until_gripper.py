@@ -16,7 +16,7 @@
 #
 # Author: Seongwoo Kim
 
-"""Inference actions that run until arms stabilize AND gripper reaches target."""
+"""Actions that wait until arms stabilize and/or grippers reach a target state."""
 
 import time
 from typing import TYPE_CHECKING
@@ -41,7 +41,7 @@ RIGHT_JOINT_NAMES = [
 ]
 
 
-class InferenceUntilGripper(BaseAction):
+class WaitUntilGripperState(BaseAction):
     """Base action that runs until arms stabilize AND gripper reaches target.
 
     Returns SUCCESS when:
@@ -58,7 +58,7 @@ class InferenceUntilGripper(BaseAction):
         history_window: float = INFERENCE_HISTORY_WINDOW,  # noqa: F405
         gripper_closed_threshold: float = GRIPPER_CLOSED_THRESHOLD,  # noqa: F405
         gripper_open_threshold: float = GRIPPER_OPEN_THRESHOLD,  # noqa: F405
-        name: str = 'InferenceUntilGripper',
+        name: str = 'WaitUntilGripperState',
     ):
         super().__init__(node, name=name)
         self.target_gripper_state = target_gripper_state
@@ -277,7 +277,7 @@ class InferenceUntilGripper(BaseAction):
         self._tick_count = 0
 
 
-class InferenceUntilStatic(BaseAction):
+class WaitUntilArmsStatic(BaseAction):
     """Action that runs until both arms stop moving (no gripper condition).
 
     Returns SUCCESS when arm position change stays below threshold
@@ -291,7 +291,7 @@ class InferenceUntilStatic(BaseAction):
         static_duration: float = INFERENCE_STATIC_DURATION,  # noqa: F405
         history_window: float = INFERENCE_HISTORY_WINDOW,  # noqa: F405
     ):
-        super().__init__(node, name='InferenceUntilStatic')
+        super().__init__(node, name='WaitUntilArmsStatic')
         self.position_change_threshold = position_change_threshold
         self.static_duration = static_duration
         self.history_window = history_window
@@ -404,7 +404,7 @@ class InferenceUntilStatic(BaseAction):
         self._tick_count = 0
 
 
-class InferenceUntilGripperClose(InferenceUntilGripper):
+class WaitUntilGripperClosed(WaitUntilGripperState):
     """Inference that succeeds when grippers close AND arms stabilize."""
 
     def __init__(
@@ -424,11 +424,11 @@ class InferenceUntilGripperClose(InferenceUntilGripper):
             history_window=history_window,
             gripper_closed_threshold=gripper_closed_threshold,
             gripper_open_threshold=gripper_open_threshold,
-            name='InferenceUntilGripperClose',
+            name='WaitUntilGripperClosed',
         )
 
 
-class InferenceUntilGripperOpen(InferenceUntilGripper):
+class WaitUntilGripperOpened(WaitUntilGripperState):
     """Inference that succeeds when grippers open AND arms stabilize."""
 
     def __init__(
@@ -448,5 +448,5 @@ class InferenceUntilGripperOpen(InferenceUntilGripper):
             history_window=history_window,
             gripper_closed_threshold=gripper_closed_threshold,
             gripper_open_threshold=gripper_open_threshold,
-            name='InferenceUntilGripperOpen',
+            name='WaitUntilGripperOpened',
         )

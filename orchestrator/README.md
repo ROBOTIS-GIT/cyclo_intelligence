@@ -36,8 +36,8 @@ orchestrator/
 │     ├── constants.py         Tree-loading magic strings.
 │     ├── actions/             8 action nodes (move_arms, move_head,
 │     │                        move_lift, rotate, wait,
-│     │                        send_command, inference_until_gripper,
-│     │                        inference_until_position_with_gripper).
+│     │                        send_command, wait_until_gripper,
+│     │                        wait_until_pose).
 │     ├── controls/            loop / sequence / base_control.
 │     ├── trees/               Robot-specific tree XML
 │     │                        (ffw_sg2_rev1.xml, korea_mat.xml).

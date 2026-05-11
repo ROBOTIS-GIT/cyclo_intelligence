@@ -25,7 +25,13 @@ const NUMBER_PARAMS = new Set([
 
 const BOOL_PARAMS = new Set(['wait_until_ready']);
 
-const COMMAND_OPTIONS = ['START_INFERENCE', 'STOP_INFERENCE', 'RESUME_INFERENCE'];
+// Enum params surface as <select> dropdowns. Keep value lists in sync with
+// the Python action definitions (e.g. send_command.COMMAND_MAP,
+// wait_until_pose.GRIPPER_CHECK_OPTIONS).
+const ENUM_PARAMS = {
+  command: ['START_INFERENCE', 'STOP_INFERENCE', 'RESUME_INFERENCE'],
+  gripper_check: ['none', 'left', 'right', 'both'],
+};
 
 export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
   const dispatch = useDispatch();
@@ -56,7 +62,7 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
   };
 
   const renderInput = (key, value) => {
-    if (key === 'command') {
+    if (ENUM_PARAMS[key]) {
       return (
         <select
           value={value}
@@ -67,7 +73,7 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
           }}
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
         >
-          {COMMAND_OPTIONS.map((opt) => (
+          {ENUM_PARAMS[key].map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
         </select>
