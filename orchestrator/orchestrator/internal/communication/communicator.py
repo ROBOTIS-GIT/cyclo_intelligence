@@ -87,7 +87,13 @@ class Communicator:
         self.rosbag_extra_topics = robot_schema.get_recording_extra_topics(
             robot_section
         )
-        self._all_topics = robot_schema.get_recording_topics(robot_section)
+        # Recording format v2: images and camera_info are not written to
+        # MCAP. Image topics go to per-camera MJPEG-in-MP4 files; camera_info
+        # is captured as a one-shot yaml snapshot per episode.
+        self.camera_info_topics: Dict[str, str] = (
+            robot_schema.get_camera_info_topics(robot_section)
+        )
+        self._mcap_topics = robot_schema.get_mcap_record_topics(robot_section)
 
         # Initialize DataEditor for dataset editing
         self.data_editor = DataEditor()
@@ -96,7 +102,9 @@ class Communicator:
         node.get_logger().info(f'Camera topics: {self.camera_topics}')
         node.get_logger().info(f'State topics: {self.state_topics}')
         node.get_logger().info(f'Action topics: {self.action_topics}')
+        node.get_logger().info(f'Camera info topics: {self.camera_info_topics}')
         node.get_logger().info(f'Rosbag extra topics: {self.rosbag_extra_topics}')
+        node.get_logger().info(f'MCAP topics (v2): {self._mcap_topics}')
 
         self.heartbeat_qos_profile = QoSProfile(
             depth=1,
@@ -117,9 +125,17 @@ class Communicator:
         # Joystick handler callback for immediate processing
         self._joystick_handler: Optional[Callable[[str], None]] = None
 
-    def get_all_topics(self):
-        """Full rosbag topic inventory: images + state + action + extras."""
-        return list(self._all_topics)
+    def get_mcap_topics(self):
+        """Topics to record in the per-episode MCAP (no images / camera_info)."""
+        return list(self._mcap_topics)
+
+    def get_video_topics(self) -> Dict[str, str]:
+        """``{cam_name: image_topic}`` — destinations for the MP4 recorder."""
+        return dict(self.camera_topics)
+
+    def get_camera_info_topics(self) -> Dict[str, str]:
+        """``{cam_name: camera_info_topic}`` — one-shot snapshot sources."""
+        return dict(self.camera_info_topics)
 
     def init_subscribers(self):
         """Initialize only joystick trigger subscriber."""

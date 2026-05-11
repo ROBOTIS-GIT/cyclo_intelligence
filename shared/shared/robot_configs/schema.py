@@ -210,11 +210,71 @@ def get_recording_extra_topics(section: Dict[str, Any]) -> List[str]:
     return [t for t in extras if t]
 
 
-def get_recording_topics(section: Dict[str, Any]) -> List[str]:
-    """Full topic list for rosbag recording: images + state + action + extras.
+def get_camera_info_topics(section: Dict[str, Any]) -> Dict[str, str]:
+    """Pair each camera with its camera_info topic from ``recording.extra_topics``.
 
-    Order is deterministic (yaml insertion order, then extras appended) so
-    the recorder's topic inventory is reproducible across runs.
+    Strategy: take the image topic for ``<cam_name>`` and look for any extras
+    entry whose path starts with the image topic stem. e.g.
+    ``/zed/zed_node/left/image_rect_color/compressed`` pairs with
+    ``/zed/zed_node/left/camera_info``. Cameras without a matching extras
+    entry are simply omitted (no error — some sims publish images without
+    camera_info).
+    """
+    images = get_image_topics(section)
+    extras = get_recording_extra_topics(section)
+    info_topics: Dict[str, str] = {}
+    for cam_name, cfg in images.items():
+        image_topic = cfg["topic"]
+        # Strip the trailing image-related suffix (``image_raw``,
+        # ``image_rect_color``, ``compressed``, etc.) until we reach the
+        # camera namespace prefix. The convention is that camera_info lives
+        # on a sibling topic under the same namespace.
+        parts = image_topic.rstrip("/").split("/")
+        # Trim trailing ``compressed`` first if present, then trim the
+        # ``image_*`` element.
+        if parts and parts[-1] == "compressed":
+            parts.pop()
+        if parts and parts[-1].startswith("image"):
+            parts.pop()
+        prefix = "/".join(parts)
+        if not prefix:
+            continue
+        for extra in extras:
+            if extra == f"{prefix}/camera_info" or extra.endswith("/camera_info") and extra.startswith(prefix + "/"):
+                info_topics[cam_name] = extra
+                break
+    return info_topics
+
+
+def get_mcap_record_topics(section: Dict[str, Any]) -> List[str]:
+    """Topics to record into the per-episode MCAP (no images, no camera_info).
+
+    Recording format version 2 routes images to per-camera MP4 files and
+    camera_info to one-shot yaml snapshots, so the MCAP only carries the
+    timeseries the policy actually consumes (state + action) plus /tf for
+    debug visualisation. Order is deterministic (state groups → action
+    groups → extras minus camera_info).
+    """
+    info_topics = set(get_camera_info_topics(section).values())
+    topics: List[str] = []
+    for cfg in get_state_groups(section).values():
+        topics.append(cfg["topic"])
+    for cfg in get_action_groups(section).values():
+        topics.append(cfg["topic"])
+    for extra in get_recording_extra_topics(section):
+        if extra in info_topics:
+            continue
+        topics.append(extra)
+    return topics
+
+
+def get_recording_topics(section: Dict[str, Any]) -> List[str]:
+    """DEPRECATED — recording format v1 full topic list.
+
+    Recording format v2 splits image / camera_info / MCAP. New code should
+    call :func:`get_mcap_record_topics`, :func:`get_image_topics`, and
+    :func:`get_camera_info_topics` directly. This helper is retained only
+    to ease grep-based discovery during the migration.
     """
     topics: List[str] = []
     for cfg in get_image_topics(section).values():

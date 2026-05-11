@@ -96,9 +96,14 @@ export default function DatasetConvertSection({ isEditable = true }) {
   // Discover camera names on first expand of the camera-options panel.
   // Robot type is already pinned by the time we reach this UI, so we
   // just trust whatever cameras the orchestrator currently advertises.
-  // Seed the rotation dropdowns with the yaml defaults
-  // (observation.images.<cam>.rotation_deg) — the user sees the value
-  // that will actually be applied if they don't override it.
+  //
+  // Rotation default = 0. The recorder already applied the yaml's
+  // ``rotation_deg`` at H.264 transcode time (see
+  // cyclo_data/recorder/transcoder.py), so the source MP4 the convert
+  // step reads is already correctly oriented. UI rotation here is a
+  // user-side *override* — apply N extra degrees beyond whatever's
+  // already baked in. Defaulting to 0 means "use what the recorder did"
+  // which is correct for >99% of cases.
   useEffect(() => {
     if (!showCameraOptions || cameraNames.length > 0) return;
     let cancelled = false;
@@ -106,15 +111,14 @@ export default function DatasetConvertSection({ isEditable = true }) {
       try {
         const result = await getImageTopicList();
         const topics = result?.image_topic_list || [];
-        const yamlRotations = result?.rotation_deg_list || [];
         const names = topics.map(extractCameraName).filter(Boolean);
         if (!cancelled && names.length > 0) {
           setCameraNames(names);
           setCameraRotations((prev) => {
             const next = { ...prev };
-            names.forEach((name, idx) => {
+            names.forEach((name) => {
               if (!(name in next)) {
-                next[name] = Number(yamlRotations[idx] || 0);
+                next[name] = 0;
               }
             });
             return next;

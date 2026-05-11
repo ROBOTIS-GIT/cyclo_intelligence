@@ -33,11 +33,15 @@ Session-state boundary (REVIEW §9.3):
 from pathlib import Path
 from typing import Optional
 
+from cyclo_data.recorder.camera_info_snapshot import CameraInfoSnapshot
 from cyclo_data.recorder.rosbag_control import RosbagControl
 from cyclo_data.recorder.session_manager import DataManager
+from cyclo_data.recorder.transcoder import TranscodeWorker
+from cyclo_data.recorder.video_recorder import VideoRecorder
 from orchestrator.internal.device_manager.cpu_checker import CPUChecker
 from orchestrator.internal.device_manager.ram_checker import RAMChecker
 from orchestrator.internal.device_manager.storage_checker import StorageChecker
+from shared.robot_configs import schema as robot_schema
 
 from interfaces.msg import DataOperationStatus, RecordingStatus
 from interfaces.srv import RecordingCommand
@@ -73,6 +77,18 @@ class RecordingService:
 
         self._data_manager: Optional[DataManager] = None
         self._robot_type: str = ''
+        # Recording format v2: per-camera MP4 + one-shot camera_info yaml,
+        # both spun up alongside the MCAP writer on START and torn down on
+        # STOP / FINISH / RERECORD / CANCEL.
+        self._video_recorder: Optional[VideoRecorder] = None
+        self._camera_info: Optional[CameraInfoSnapshot] = None
+        self._last_video_stats: dict = {}
+        self._last_camera_info_files: dict = {}
+        self._last_camera_rotations: dict = {}
+        # Background transcoder converts each episode's raw MJPEG MP4s
+        # into H.264 after STOP. One pool per service instance, lazily
+        # initialised on first STOP so process startup stays cheap.
+        self._transcoder: Optional[TranscodeWorker] = None
 
         # Idle-state metrics: filled into the 5 Hz status publish before any
         # session_manager exists so the UI's CPU/RAM/Storage panel keeps
@@ -268,6 +284,35 @@ class RecordingService:
         response.message = f'Topics refreshed ({len(topics)} topics)'
         return response
 
+    def _resolve_video_topics(self, robot_type: str):
+        """Return ``(image_topics, camera_info_topics, rotations)`` for a robot.
+
+        ``image_topics`` and ``camera_info_topics`` are ``{cam_name: topic}``
+        dicts. ``rotations`` is ``{cam_name: degrees}`` (0/90/180/270) so
+        the recorder can stash it in ``episode_info.json`` and the
+        background transcoder can apply ``-vf transpose=N`` later.
+
+        Loads the robot section from the yaml on every call rather than
+        caching — recording is infrequent enough that the IO is
+        negligible.
+        """
+        try:
+            section = robot_schema.load_robot_section(robot_type)
+        except Exception as exc:
+            self._node.get_logger().error(
+                f'Failed to load robot section for {robot_type!r}: {exc!r}')
+            return {}, {}, {}
+        image_groups = robot_schema.get_image_topics(section)
+        image_topics = {
+            cam: cfg['topic'] for cam, cfg in image_groups.items()
+        }
+        rotations = {
+            cam: int(cfg.get('rotation_deg', 0) or 0)
+            for cam, cfg in image_groups.items()
+        }
+        camera_info_topics = robot_schema.get_camera_info_topics(section)
+        return image_topics, camera_info_topics, rotations
+
     def _do_start(self, request, response):
         if not request.robot_type:
             response.success = False
@@ -288,7 +333,7 @@ class RecordingService:
         else:
             self._node.get_logger().warn(
                 'START: topics[] empty — skipping prepare. '
-                'Caller should populate from orchestrator.Communicator.get_all_topics().')
+                'Caller should populate from orchestrator.Communicator.get_mcap_topics().')
 
         rosbag_path = dm.get_save_rosbag_path(allow_idle=True)
         if not rosbag_path:
@@ -296,7 +341,35 @@ class RecordingService:
             response.message = 'Failed to resolve rosbag path'
             return response
 
+        # Recording format v2: per-camera MP4 writers + one-shot
+        # camera_info snapshotter live in ``videos/`` and ``camera_info/``
+        # subdirs of the rosbag episode dir. Spin them up AFTER the
+        # rosbag service starts — rosbag_recorder's storage plugin
+        # treats the URI as a fresh bag root and may rewrite it on open,
+        # which would wipe any subdirectory we created first.
         self._rosbag.start_rosbag(rosbag_uri=rosbag_path)
+
+        episode_dir = Path(rosbag_path)
+        episode_dir.mkdir(parents=True, exist_ok=True)
+        image_topics, camera_info_topics, rotations = self._resolve_video_topics(
+            request.robot_type)
+        # Stash camera rotations on the instance so the next
+        # save_robotis_metadata call can persist them into the episode
+        # manifest — the background transcoder reads it from there.
+        self._last_camera_rotations = rotations
+        if image_topics:
+            self._video_recorder = VideoRecorder(
+                node=self._node, cameras=image_topics,
+                callback_group=getattr(self._node, 'io_callback_group', None),
+            )
+            self._video_recorder.start(episode_dir)
+        if camera_info_topics:
+            self._camera_info = CameraInfoSnapshot(
+                node=self._node, camera_info_topics=camera_info_topics,
+                callback_group=getattr(self._node, 'io_callback_group', None),
+            )
+            self._camera_info.start(episode_dir)
+
         dm.start_recording()
         self._rosbag.publish_action_event('start')
 
@@ -307,6 +380,91 @@ class RecordingService:
         response.success = True
         response.message = 'Recording started'
         return response
+
+    def _ensure_transcoder(self) -> TranscodeWorker:
+        if self._transcoder is None:
+            self._transcoder = TranscodeWorker(logger=self._node.get_logger())
+        return self._transcoder
+
+    def _submit_transcode(self, episode_dir):
+        """Fire-and-forget queue a finished episode for H.264 transcoding.
+
+        Defensive: any failure to enqueue is logged but never propagated
+        — STOP/FINISH must always succeed from the caller's perspective.
+        The pending raw MJPEG remains on disk so a future ``submit_pending_recovery``
+        call (on next service start) will retry.
+        """
+        try:
+            worker = self._ensure_transcoder()
+        except Exception as exc:
+            self._node.get_logger().error(
+                f"Transcoder pool unavailable: {exc!r}; "
+                f"episode {episode_dir} will need manual transcode"
+            )
+            return
+        try:
+            worker.submit(episode_dir, on_complete=self._on_transcode_done)
+        except Exception as exc:
+            self._node.get_logger().error(
+                f"Transcoder submit failed for {episode_dir}: {exc!r}"
+            )
+
+    def _on_transcode_done(self, result):
+        if result.success:
+            self._node.get_logger().info(
+                f"Transcode done: {result.episode_dir.name} "
+                f"({len(result.cameras_done)} cameras, "
+                f"{result.elapsed_sec:.1f}s, {result.encoder})"
+            )
+        else:
+            self._node.get_logger().error(
+                f"Transcode failed: {result.episode_dir.name} "
+                f"failures={result.cameras_failed} error={result.error}"
+            )
+
+    def resume_pending_transcodes(self, workspace_root):
+        """Called by cyclo_data_node on startup — process any episodes
+        left in pending/running state after a previous crash."""
+        try:
+            worker = self._ensure_transcoder()
+            futures = worker.submit_pending_recovery(
+                workspace_root, on_complete=self._on_transcode_done,
+            )
+            if futures:
+                self._node.get_logger().info(
+                    f"Resumed {len(futures)} pending transcode job(s) under {workspace_root}"
+                )
+        except Exception as exc:
+            self._node.get_logger().error(
+                f"Transcoder resume scan failed: {exc!r}"
+            )
+
+    def _teardown_video_recorders(self):
+        """Stop VideoRecorder + CameraInfoSnapshot if active.
+
+        Stats / produced-file lists are stashed on the instance so the
+        next ``save_robotis_metadata`` call can include them in
+        ``episode_info.json``.
+        """
+        self._last_video_stats = {}
+        self._last_camera_info_files = {}
+        if self._video_recorder is not None:
+            try:
+                self._last_video_stats = self._video_recorder.stop() or {}
+            except Exception as exc:  # pragma: no cover - defensive
+                self._node.get_logger().error(
+                    f'VideoRecorder.stop raised: {exc!r}')
+            self._video_recorder = None
+        if self._camera_info is not None:
+            try:
+                produced = self._camera_info.stop() or {}
+                self._last_camera_info_files = {
+                    cam: str(p) for cam, p in produced.items()
+                }
+            except Exception as exc:  # pragma: no cover - defensive
+                self._node.get_logger().error(
+                    f'CameraInfoSnapshot.stop raised: {exc!r}')
+            self._camera_info = None
 
     def _do_stop_and_save(self, request, response, command_name: str, event: str):
         """STOP / FINISH / MOVE_TO_NEXT — save metadata, stop rosbag,
@@ -321,10 +479,24 @@ class RecordingService:
             f'{command_name}: episode={self._data_manager._record_episode_count} '
             f'status={self._data_manager.get_status()}')
 
-        if request.urdf_path:
-            self._data_manager.save_robotis_metadata(urdf_path=request.urdf_path)
-
+        episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
         self._rosbag.stop_rosbag()
+        self._teardown_video_recorders()
+
+        if request.urdf_path:
+            self._data_manager.save_robotis_metadata(
+                urdf_path=request.urdf_path,
+                video_stats=self._last_video_stats,
+                camera_info_files=self._last_camera_info_files,
+                camera_rotations=self._last_camera_rotations,
+            )
+
+        # Fire the H.264 transcode in the background. The episode dir is
+        # captured before stop_recording() bumps the episode counter so
+        # we hand off the right path.
+        if episode_dir.exists() and (episode_dir / 'videos').exists():
+            self._submit_transcode(episode_dir)
+
         self._data_manager.stop_recording()
         self._rosbag.publish_action_event(event)
 
@@ -348,11 +520,17 @@ class RecordingService:
             response.message = 'RERECORD: no active recording session'
             return response
 
+        self._rosbag.stop_rosbag()
+        self._teardown_video_recorders()
+
         if request.urdf_path:
             self._data_manager.save_robotis_metadata(
-                urdf_path=request.urdf_path, needs_review=True)
+                urdf_path=request.urdf_path, needs_review=True,
+                video_stats=self._last_video_stats,
+                camera_info_files=self._last_camera_info_files,
+                camera_rotations=self._last_camera_rotations,
+            )
 
-        self._rosbag.stop_rosbag()
         self._data_manager.stop_recording()
         self._rosbag.publish_action_event(event)
 

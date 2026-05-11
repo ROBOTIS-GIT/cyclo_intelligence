@@ -71,6 +71,13 @@ const initialState = {
   hasRawImages: false,
   rawImageTopics: [],
   mcapFile: '',
+
+  // Recording format v2 transcode state. ``done`` (default) means the
+  // source MP4 is H.264 and ready to play; ``pending`` / ``running`` /
+  // ``failed`` mean the ReplayPage should show a status overlay and
+  // refuse to start playback (MJPEG-in-MP4 isn't Chromium-decodable).
+  transcodingStatus: 'done',
+  transcodingCamerasFailed: {},
 };
 
 const replaySlice = createSlice({
@@ -115,6 +122,9 @@ const replaySlice = createSlice({
       state.hasRawImages = data.has_raw_images || false;
       state.rawImageTopics = data.raw_image_topics || [];
       state.mcapFile = data.mcap_file || '';
+      // Recording format v2 transcode state
+      state.transcodingStatus = data.transcoding_status || 'done';
+      state.transcodingCamerasFailed = data.transcoding_cameras_failed || {};
       state.isLoaded = true;
       state.isLoading = false;
       state.error = null;

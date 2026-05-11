@@ -232,7 +232,7 @@ class OrchestratorNode(Node):
         call sites stay one-liners.
         """
         topics = (
-            self.communicator.get_all_topics()
+            self.communicator.get_mcap_topics()
             if include_topics and self.communicator is not None
             else []
         )
@@ -851,7 +851,7 @@ class OrchestratorNode(Node):
                     response.success = False
                     response.message = 'Communicator not initialized'
                     return response
-                rosbag_topics = self.communicator.get_all_topics()
+                rosbag_topics = self.communicator.get_mcap_topics()
                 cd_result = self._cyclo_data.send_recording_command(
                     command=RecordingCommand.Request.REFRESH_TOPICS,
                     topics=rosbag_topics,
@@ -887,7 +887,7 @@ class OrchestratorNode(Node):
                     response.success = False
                     response.message = 'Communicator not initialized'
                     return response
-                rosbag_topics = self.communicator.get_all_topics()
+                rosbag_topics = self.communicator.get_mcap_topics()
                 urdf_path = self.params.get('urdf_path', '') if self.params else ''
 
                 cd_result = self._cyclo_data.send_recording_command(
@@ -1623,7 +1623,7 @@ class OrchestratorNode(Node):
             # C2d-5 — prior versions called self.communicator.prepare_rosbag
             # directly; that path now lives behind RecordingCommand.REFRESH_TOPICS.
             if self.communicator is not None:
-                rosbag_topics = self.communicator.get_all_topics()
+                rosbag_topics = self.communicator.get_mcap_topics()
                 cd_result = self._cyclo_data.send_recording_command(
                     command=RecordingCommand.Request.REFRESH_TOPICS,
                     topics=rosbag_topics,

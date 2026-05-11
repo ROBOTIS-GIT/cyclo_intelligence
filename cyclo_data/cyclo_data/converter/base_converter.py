@@ -158,6 +158,10 @@ class EpisodeData:
     video_files: Dict[str, Path] = field(default_factory=dict)
     tasks: List[str] = field(default_factory=list)
     length: int = 0
+    # Absolute MCAP log_time (seconds since epoch) for each row of
+    # ``timestamps``. Populated by ``_resample_to_fps`` so the video
+    # sync step can map per-camera MP4 frames onto the same grid.
+    grid_log_times_sec: List[float] = field(default_factory=list)
 
 
 class RosbagToLerobotConverterBase:
@@ -193,6 +197,7 @@ class RosbagToLerobotConverterBase:
         self._state_joint_names: List[str] = []
         self._action_joint_names: List[str] = []
         self._camera_mapping: Dict[str, str] = {}  # topic -> camera_name
+        self._camera_rotations: Dict[str, int] = {}  # camera_name -> rotation_deg
         self._joint_order: List[str] = []  # Ordered list of joints to include
         self._joint_order_by_group: Dict[str, List[str]] = {}  # group_key -> joint names
         self._state_topic_key_map: Dict[str, str] = {}  # topic -> group key
@@ -295,6 +300,12 @@ class RosbagToLerobotConverterBase:
 
         for cam_name, cfg in image_groups.items():
             self._camera_mapping[cfg["topic"]] = cam_name
+            # ``rotation_deg`` is consumed at recording time by the
+            # transcoder, not here. Kept on ``self._camera_rotations``
+            # only as informational metadata.
+            self._camera_rotations[cam_name] = int(
+                cfg.get("rotation_deg") or 0
+            )
 
         # _joint_order_by_group keyed by ``leader_<modality>`` — preserved
         # for _resolve_filter_target_names and the per-group merge logic.
@@ -461,6 +472,14 @@ class RosbagToLerobotConverterBase:
             self._log_error(f"Bag path does not exist: {bag_path}")
             return None
 
+        # Refuse to convert episodes whose background H.264 transcode
+        # isn't finished — converting against the raw MJPEG source would
+        # silently drop the yaml-driven rotation (and any other future
+        # transcode-time treatment), producing a misoriented LeRobot
+        # dataset. Better to fail loud and let the caller wait/retry.
+        if not self._can_convert_transcode_state(bag_path):
+            return None
+
         self._log_info(f"Converting rosbag: {bag_path} (episode {episode_index})")
 
         # Load per-episode robot_config.yaml if exists and no global config was loaded
@@ -485,8 +504,20 @@ class RosbagToLerobotConverterBase:
         video_files = self._find_video_files(bag_path)
         episode_data.video_files = video_files
 
-        # Align parquet rows to video frame count (LeRobot requires 1:1 match)
-        if video_files:
+        # Recording format v2 path: every camera has a sidecar parquet
+        # under ``videos/<cam>_timestamps.parquet``. Build a synced MP4
+        # per camera so that frame N == grid step N (LeRobot's video
+        # reader assumes 1:1 with the parquet rows). For each grid
+        # step we pick the most recent MP4 frame with ``recv_ns`` <=
+        # ``grid_log_time``; both are subscriber-side clocks so they
+        # share an origin.
+        episode_data = self._sync_videos_to_grid(bag_path, episode_data)
+
+        # Legacy fallback: when no sidecars exist (recordings made by
+        # the v1 pipeline that called rosbag2mp4 before this rewrite)
+        # the synced MP4 step is a no-op and the parquet rows still
+        # need a 1:1 trim against the raw MP4 frame count.
+        if video_files and not self._episode_has_sidecars(bag_path):
             video_frame_counts = {}
             for cam_name, vpath in video_files.items():
                 fc = self._get_video_frame_count(vpath)
@@ -505,6 +536,9 @@ class RosbagToLerobotConverterBase:
                     episode_data.timestamps = episode_data.timestamps[:target_frames]
                     episode_data.observation_state = episode_data.observation_state[:target_frames]
                     episode_data.action = episode_data.action[:target_frames]
+                    episode_data.grid_log_times_sec = (
+                        episode_data.grid_log_times_sec[:target_frames]
+                    )
                     episode_data.length = target_frames
 
         task_markers = self._metadata_manager.get_task_markers(bag_path)
@@ -1216,6 +1250,7 @@ class RosbagToLerobotConverterBase:
                 action = np.zeros(len(state), dtype=np.float32)
 
             episode.timestamps.append(relative_time)
+            episode.grid_log_times_sec.append(target_time)
             episode.observation_state.append(state)
             episode.action.append(action)
 
@@ -1307,6 +1342,144 @@ class RosbagToLerobotConverterBase:
         staleness_ms = (target_time - best_time) * 1000.0
         return best_value, staleness_ms
 
+    def _can_convert_transcode_state(self, bag_path: Path) -> bool:
+        """Return True iff the episode is safe to feed to LeRobot conversion.
+
+        For recording format v2 episodes the background transcoder bakes
+        the yaml ``rotation_deg`` (and future transcode-time treatments)
+        into the H.264 source MP4. Converting before the transcode has
+        finished would silently drop those — so we refuse and log a
+        clear actionable error per status.
+
+        Pre-v2 episodes (no ``transcoding_status`` field, no
+        ``recorder_format_version`` field) are accepted unconditionally
+        for backward compatibility.
+        """
+        info = bag_path / "episode_info.json"
+        if not info.exists():
+            return True  # not a v2 episode; nothing to gate on
+        try:
+            import json as _json
+            with open(info) as f:
+                meta = _json.load(f) or {}
+        except Exception:
+            return True
+        # No status field at all → legacy episode, allow.
+        if "transcoding_status" not in meta:
+            return True
+
+        status = meta.get("transcoding_status")
+        if status in ("done", "not_required"):
+            return True
+        if status in ("pending", "running"):
+            self._log_error(
+                f"{bag_path.name}: SKIPPED — transcode is still {status!r}. "
+                "Wait for the background transcoder to finish (check "
+                "episode_info.json) and re-run conversion."
+            )
+            return False
+        if status == "failed":
+            cams_failed = meta.get("transcoding_cameras_failed", {})
+            self._log_error(
+                f"{bag_path.name}: SKIPPED — previous transcode failed for "
+                f"cameras {list(cams_failed.keys()) or 'unknown'}. Inspect "
+                f"the recording, fix the cause, then re-trigger the "
+                f"transcoder (or delete episode_info.json's transcoding_status "
+                f"to retry from raw MJPEG)."
+            )
+            return False
+        # Unknown status string — be conservative and refuse.
+        self._log_error(
+            f"{bag_path.name}: SKIPPED — unrecognised transcoding_status={status!r}"
+        )
+        return False
+
+    def _episode_has_sidecars(self, bag_path: Path) -> bool:
+        """True if ``videos/<cam>_timestamps.parquet`` exists for any cam."""
+        videos = bag_path / "videos"
+        if not videos.exists():
+            return False
+        return any(videos.glob("*_timestamps.parquet"))
+
+    def _sync_videos_to_grid(
+        self, bag_path: Path, episode: EpisodeData,
+    ) -> EpisodeData:
+        """Re-pack each camera's MJPEG MP4 to one frame per grid step.
+
+        Reads ``videos/<cam>_timestamps.parquet`` written by the
+        recorder, maps the EpisodeData log-time grid (sub-second
+        UNIX seconds) onto frame indices via causal lookup, then
+        runs ``video_sync.remux_selected_frames`` to produce a
+        ``videos/<cam>_synced.mp4``. The synced MP4 replaces the raw
+        recording in ``episode.video_files`` so downstream copy is
+        identical to the old rosbag2mp4 flow.
+        """
+        if not episode.video_files or not episode.grid_log_times_sec:
+            return episode
+        if not self._episode_has_sidecars(bag_path):
+            return episode
+        from cyclo_data.converter.video_sync import remux_selected_frames
+        from cyclo_data.reader.frame_timestamps import (
+            FrameTimestamps,
+            load_frame_timestamps,
+        )
+
+        grid_ns = np.asarray(
+            [int(t * 1_000_000_000) for t in episode.grid_log_times_sec],
+            dtype=np.int64,
+        )
+        videos_dir = bag_path / "videos"
+        synced: Dict[str, Path] = {}
+        # UI-supplied rotation is treated as an *additional* override on
+        # top of whatever the recorder/transcoder already baked into the
+        # source MP4. The yaml's ``rotation_deg`` is applied at H.264
+        # transcode time in ``cyclo_data/recorder/transcoder.py``, so by
+        # the time we get here the source is already correctly oriented
+        # and UI default 0 means "leave as-is" — exactly what we want.
+        ui_rotations = self.config.camera_rotations or {}
+        for cam_name, src_path in episode.video_files.items():
+            sidecar = videos_dir / f"{cam_name}_timestamps.parquet"
+            if not sidecar.exists():
+                self._log_warning(
+                    f"{cam_name}: no sidecar {sidecar.name}; leaving raw MP4"
+                )
+                synced[cam_name] = src_path
+                continue
+            try:
+                ft = load_frame_timestamps(sidecar, cam_name)
+            except Exception as exc:
+                self._log_error(
+                    f"{cam_name}: failed to read {sidecar.name}: {exc!r}"
+                )
+                synced[cam_name] = src_path
+                continue
+            if ft.num_frames == 0:
+                self._log_warning(f"{cam_name}: empty sidecar; skipping sync")
+                synced[cam_name] = src_path
+                continue
+            indices = ft.map_to_grid(grid_ns)
+            out_path = videos_dir / f"{cam_name}_synced.mp4"
+            rotation_extra = int(ui_rotations.get(cam_name, 0) or 0)
+            try:
+                remux_selected_frames(
+                    src_path, indices, out_path,
+                    target_fps=int(self.config.fps),
+                    rotation_deg=rotation_extra,
+                )
+                self._log_info(
+                    f"{cam_name}: synced MP4 {indices.size} frames "
+                    f"-> {out_path.name} (UI extra rotation={rotation_extra}°)"
+                )
+                synced[cam_name] = out_path
+            except Exception as exc:
+                self._log_error(
+                    f"{cam_name}: remux failed ({exc!r}); leaving raw MP4"
+                )
+                synced[cam_name] = src_path
+
+        episode.video_files = synced
+        return episode
+
     def _find_video_files(self, bag_path: Path) -> Dict[str, Path]:
         """Find MP4 video files in the rosbag directory.
 
@@ -1322,6 +1495,12 @@ class RosbagToLerobotConverterBase:
                 continue
 
             for mp4_file in sorted(search_path.glob("*.mp4")):
+                # ``<cam>_synced.mp4`` is a derivative produced by
+                # ``_sync_videos_to_grid`` on the previous conversion run;
+                # skip it during initial discovery so we always start from
+                # the recorder's raw MP4.
+                if mp4_file.stem.endswith("_synced"):
+                    continue
                 camera_name = self._get_camera_name_for_video(mp4_file.stem)
                 if camera_name not in video_files:
                     video_files[camera_name] = mp4_file

@@ -95,11 +95,48 @@ def _convert_single_episode_worker(
 ):
     """Top-level function for ProcessPoolExecutor (must be picklable).
 
-    Creates a fresh RosbagToMp4Converter instance in each worker process
-    and converts a single episode to MP4 format. Selection knobs
-    (selected_cameras / camera_rotations / image_resize) drop or
-    transform per-camera output during the encode.
+    Recording format v2 fast path: the recorder already wrote per-camera
+    MJPEG MP4s and Parquet sidecars at record time, so Stage 1 collapses
+    into a hardlink pass that materialises ``<episode>_converted/`` for
+    Stages 2/3. The synced-to-grid MP4 is produced lazily inside
+    ``base_converter._sync_videos_to_grid`` at LeRobot conversion time.
+
+    Legacy v1 episodes (images embedded in MCAP, no sidecars) still go
+    through the old ``rosbag2mp4`` encoder.
     """
+    import os
+    import shutil
+    src = Path(episode_dir)
+    dst = Path(output_dir)
+    videos_dir = src / 'videos'
+    has_sidecars = (
+        videos_dir.exists()
+        and any(videos_dir.glob('*_timestamps.parquet'))
+    )
+    if has_sidecars:
+        dst.mkdir(parents=True, exist_ok=True)
+        for src_file in src.rglob('*'):
+            if src_file.is_dir():
+                continue
+            rel = src_file.relative_to(src)
+            # Don't drag any stale ``*_synced.mp4`` from a previous
+            # conversion attempt into the new _converted/ — they'll be
+            # produced fresh by ``_sync_videos_to_grid``.
+            if src_file.suffix == '.mp4' and src_file.stem.endswith('_synced'):
+                continue
+            dst_file = dst / rel
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            if dst_file.exists():
+                dst_file.unlink()
+            try:
+                os.link(src_file, dst_file)
+            except OSError:
+                shutil.copy2(src_file, dst_file)
+        return str(episode_dir), True, {}
+
+    # Recording format v1 fallback (images-in-MCAP). The rosbag2mp4 +
+    # video_encoder modules will be removed once no v1 episodes need to
+    # be converted; until then they remain reachable through this branch.
     from cyclo_data.converter.rosbag2mp4 import RosbagToMp4Converter
     converter = RosbagToMp4Converter(
         fps=fps,
@@ -110,7 +147,6 @@ def _convert_single_episode_worker(
         image_resize=tuple(image_resize) if image_resize else None,
     )
     results = converter.convert_episode(str(episode_dir), str(output_dir))
-    # Check if any camera conversion succeeded
     success = any(
         result.success for result in results.values()
         if hasattr(result, 'success')

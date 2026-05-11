@@ -427,6 +427,21 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         for camera_name, videos in camera_videos.items():
             self._write_aggregated_videos_for_camera(output_dir, camera_name, videos)
 
+        # Clean up any ``<cam>_synced.mp4`` scratch files left behind by
+        # ``_sync_videos_to_grid``. They were the source for the copy /
+        # concat above so they're no longer needed; keeping them clutters
+        # the user's rosbag2/ source tree.
+        for episode in episodes_data:
+            for video_path in episode.video_files.values():
+                p = Path(video_path)
+                if p.stem.endswith("_synced") and p.exists():
+                    try:
+                        p.unlink()
+                    except OSError as exc:
+                        self._log_warning(
+                            f"Failed to clean up {p.name}: {exc}"
+                        )
+
     def _write_aggregated_videos_for_camera(
         self,
         output_dir: Path,

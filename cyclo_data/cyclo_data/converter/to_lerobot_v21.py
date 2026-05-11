@@ -203,13 +203,24 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         parquet_path = data_chunk_dir / f"episode_{ep_idx:06d}.parquet"
         self._write_parquet(episode, parquet_path)
 
-        # Copy video files
+        # Copy video files. ``_sync_videos_to_grid`` may have produced
+        # intermediate ``<cam>_synced.mp4`` files in the source rosbag
+        # videos/ dir; once the copy lands they're scratch and should
+        # be cleaned up rather than littering the user's dataset tree.
+        synced_to_delete: list[Path] = []
         for camera_name, src_video in episode.video_files.items():
             video_dir = video_chunk_dir / f"observation.images.{camera_name}"
             video_dir.mkdir(parents=True, exist_ok=True)
             dst_video = video_dir / f"episode_{ep_idx:06d}.mp4"
             shutil.copy2(src_video, dst_video)
             self._log_info(f"Copied video: {src_video.name} -> {dst_video}")
+            if Path(src_video).stem.endswith("_synced"):
+                synced_to_delete.append(Path(src_video))
+        for tmp in synced_to_delete:
+            try:
+                tmp.unlink()
+            except OSError as exc:
+                self._log_warning(f"Failed to clean up {tmp.name}: {exc}")
 
         # Write episode metadata
         episode_dict = {

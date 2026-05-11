@@ -317,7 +317,14 @@ class DataManager:
         except Exception as e:
             print(f'[ROBOTIS] Failed to write README.md at {task_dir}: {e}')
 
-    def save_robotis_metadata(self, urdf_path: str = None, needs_review: bool = False):
+    def save_robotis_metadata(
+        self,
+        urdf_path: str = None,
+        needs_review: bool = False,
+        video_stats: dict | None = None,
+        camera_info_files: dict | None = None,
+        camera_rotations: dict | None = None,
+    ):
         """
         Save URDF and metadata for ROBOTIS format.
 
@@ -327,6 +334,8 @@ class DataManager:
         Args:
             urdf_path: Path to URDF file to copy.
             needs_review: If True, marks episode as needing review (e.g., cancelled recording).
+            video_stats: ``{cam_name: {frames_received, frames_written, ...}}`` from VideoRecorder.
+            camera_info_files: ``{cam_name: yaml_path}`` from CameraInfoSnapshot.
         """
         rosbag_path = self.get_save_rosbag_path()
         if rosbag_path is None:
@@ -364,14 +373,52 @@ class DataManager:
         # rate for MP4 encoding + LeRobot info.json. That value rides
         # on the StartConversion srv (request.fps), so it doesn't
         # belong in the per-episode recording metadata.
+        # Recording format v2 (images-as-MP4 + camera_info-as-yaml + MCAP
+        # without images). format_version: 'robotis_v2'. Older recordings
+        # used 'robotis_v1' (images embedded in MCAP) — the converter
+        # branches on this field. video_files / camera_info_files are
+        # paths relative to the episode dir so the manifest survives a
+        # move of the parent workspace tree.
+        videos_dir = os.path.join(rosbag_path, 'videos')
+        video_files = {}
+        if os.path.isdir(videos_dir):
+            for entry in sorted(os.listdir(videos_dir)):
+                full = os.path.join(videos_dir, entry)
+                if entry.endswith('.mp4') and os.path.isfile(full):
+                    cam = entry[:-4]
+                    video_files[cam] = os.path.relpath(full, rosbag_path)
+        camera_info_rel = {}
+        if camera_info_files:
+            for cam, path in camera_info_files.items():
+                try:
+                    camera_info_rel[cam] = os.path.relpath(path, rosbag_path)
+                except ValueError:
+                    camera_info_rel[cam] = path
+
+        # ``transcoding_status`` default depends on whether this episode
+        # actually has any cameras to transcode. The TranscodeWorker
+        # patches this field again once it runs.
+        initial_status = 'pending' if video_files else 'not_required'
+
         meta_data = {
             'task_instruction': self.current_instruction,
             'robot_type': self._robot_type,
             'episode_index': self._record_episode_count,
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-            'format_version': 'robotis_v1',
+            'format_version': 'robotis_v2',
+            'recorder_format_version': 2,
             'device_serial': socket.gethostname(),
             'needs_review': needs_review,
+            'video_files': video_files,
+            'camera_info_files': camera_info_rel,
+            'video_stats': video_stats or {},
+            # ``camera_rotations`` is ``{cam_name: degrees}`` (0/90/180/270)
+            # straight from the robot config yaml. The background
+            # transcoder reads this when re-encoding to H.264 and applies
+            # ``-vf transpose=N`` so the stored MP4 has the correct
+            # orientation (e.g. wrist cameras mounted upside down at 270°).
+            'camera_rotations': dict(camera_rotations or {}),
+            'transcoding_status': initial_status,
         }
 
         meta_data_path = os.path.join(rosbag_path, 'episode_info.json')
