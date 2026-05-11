@@ -429,6 +429,31 @@ class LeRobotEngine(InferenceEngine):
             state_parts.append(np.asarray(positions, dtype=np.float32))
 
         flat_state = np.concatenate(state_parts)
+        # TODO(ROBOTIS): replace zero-padding with real values. Some
+        # training datasets carry extra state dimensions (e.g. EE pose
+        # from forward-kinematics) that the robot_config's joint
+        # topics don't surface. The right fix is one of:
+        #   (a) compute EE pose via FK from the upper_body joint state,
+        #   (b) extend ffw_sg2_rev1_config.yaml with an EE pose
+        #       observation entry and a matching subscriber path,
+        #   (c) retrain without the extra dims.
+        # Until then, pad zeros so inference can at least run.
+        try:
+            expected = int(
+                self._policy.config.input_features[_STATE_KEY].shape[0]
+            )
+        except Exception:
+            expected = flat_state.size
+        if flat_state.size < expected:
+            pad = np.zeros(expected - flat_state.size, dtype=np.float32)
+            logger.warning(
+                "state dim mismatch: got %d, policy expects %d — "
+                "padding %d zeros (see TODO in _build_observation)",
+                flat_state.size,
+                expected,
+                expected - flat_state.size,
+            )
+            flat_state = np.concatenate([flat_state, pad])
         batch[_STATE_KEY] = (
             torch.from_numpy(flat_state).unsqueeze(0).to(self._device)
         )
