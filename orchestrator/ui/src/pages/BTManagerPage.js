@@ -31,12 +31,14 @@ import { MdPlayArrow, MdStop, MdUploadFile, MdSave, MdUndo, MdRedo } from 'react
 import BTControlNode from '../components/bt/BTControlNode';
 import BTActionNode from '../components/bt/BTActionNode';
 import BTParamPanel from '../components/bt/BTParamPanel';
+import BTNodeContextMenu from '../components/bt/BTNodeContextMenu';
 import TreeListModal from '../features/btmanager/components/TreeListModal';
 import { parseBTXml } from '../utils/btTreeParser';
 import { serializeBTXml } from '../utils/btXmlSerializer';
 import { setTreeXml, setTreeFileName, setBtStatus, setActiveNodeNames, setSelectedNodeId } from '../features/btmanager/btmanagerSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { useBTHistory } from '../hooks/useBTHistory';
+import { findNodeMeta } from '../constants/btNodeCatalog';
 
 const nodeTypes = {
   btControl: BTControlNode,
@@ -61,6 +63,7 @@ export default function BTManagerPage({ isActive = true }) {
   const [xmlDoc, setXmlDoc] = useState(null);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveFileName, setSaveFileName] = useState('');
+  const [contextMenu, setContextMenu] = useState(null);
   const nodeElementMapRef = useRef(new Map());
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -221,6 +224,52 @@ export default function BTManagerPage({ isActive = true }) {
       )
     );
   }, [setNodes, captureHistory]);
+
+  // Right-click a node → open context menu (only Control nodes accept children)
+  const handleNodeContextMenu = useCallback((event, node) => {
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY, parentNode: node });
+  }, []);
+
+  // Add a child node of the chosen tag under `parentNodeId`.
+  // The XML DOM is mutated, then the tree is re-parsed end-to-end so dagre
+  // re-lays-out the canvas — this matches the same path undo/redo uses
+  // (applySnapshot in useBTHistory).
+  const handleAddChild = useCallback((parentNodeId, tag) => {
+    const parentEl = nodeElementMapRef.current.get(parentNodeId);
+    const meta = findNodeMeta(tag);
+    if (!parentEl || !meta || !xmlDoc) return;
+
+    captureHistory();
+
+    // Auto-name: {tag}_{n} where n is one past the max existing index for this tag.
+    const existing = xmlDoc.getElementsByTagName(tag);
+    let maxIdx = 0;
+    for (const el of existing) {
+      const m = (el.getAttribute('name') || '').match(new RegExp(`^${tag}_(\\d+)$`));
+      if (m) maxIdx = Math.max(maxIdx, parseInt(m[1], 10));
+    }
+    const autoName = `${tag}_${maxIdx + 1}`;
+
+    const newEl = xmlDoc.createElement(tag);
+    newEl.setAttribute('name', autoName);
+    Object.entries(meta.params).forEach(([k, v]) => newEl.setAttribute(k, v));
+    parentEl.appendChild(newEl);
+
+    // Re-parse the mutated doc so dagre + nodeElementMap stay consistent.
+    const xml = serializeBTXml(xmlDoc);
+    const parsed = parseBTXml(xml);
+    setNodes(parsed.nodes);
+    setEdges(parsed.edges);
+    setXmlDoc(parsed.xmlDoc);
+    nodeElementMapRef.current = parsed.nodeElementMap;
+
+    // Find the new node (matches the just-added XML element by tag+name) and select it.
+    const newNode = parsed.nodes.find(
+      (n) => n.data.nodeType === tag && n.data.label === autoName
+    );
+    if (newNode) dispatch(setSelectedNodeId(newNode.id));
+  }, [xmlDoc, captureHistory, setNodes, setEdges, dispatch]);
 
   // Delete key handler: cascade-delete selected nodes and sync XML DOM
   useEffect(() => {
@@ -565,6 +614,8 @@ export default function BTManagerPage({ isActive = true }) {
             nodesConnectable={false}
             elementsSelectable={true}
             onNodeClick={handleNodeClick}
+            onNodeContextMenu={handleNodeContextMenu}
+            onPaneContextMenu={(e) => e.preventDefault()}
             onNodeDragStop={handleNodeDragStop}
             minZoom={0.3}
             maxZoom={2}
@@ -586,6 +637,16 @@ export default function BTManagerPage({ isActive = true }) {
           />
         )}
       </div>
+
+      {contextMenu && (
+        <BTNodeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          parentNode={contextMenu.parentNode}
+          onAddChild={handleAddChild}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
 
       {/* Bottom Control Bar */}
       <div className="flex items-center justify-between px-6 py-3 border-t border-gray-200 bg-white">
