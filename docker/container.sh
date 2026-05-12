@@ -57,8 +57,10 @@ set -- "${NEW_ARGS[@]}"
 for d in workspace huggingface; do
     [ -d "${SCRIPT_DIR}/${d}" ] || mkdir -p "${SCRIPT_DIR}/${d}"
 done
-mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
-    || sudo mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
+CYCLO_AGENT_SOCKETS_DIR="${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}"
+export CYCLO_AGENT_SOCKETS_DIR
+mkdir -p "$CYCLO_AGENT_SOCKETS_DIR" 2>/dev/null \
+    || sudo mkdir -p "$CYCLO_AGENT_SOCKETS_DIR" 2>/dev/null \
     || true
 
 # X11 forwarding for UI windows (rviz, plotjuggler, etc.) when started

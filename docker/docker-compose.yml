@@ -102,7 +102,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # s6-agent UDS — cyclo_manager FastAPI listens here for
       # system-wide control requests from the host side.
-      - /var/run/robotis/agent_sockets/cyclo_intelligence:/var/run/agent
+      - ${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}:/var/run/agent
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 

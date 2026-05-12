@@ -27,10 +27,26 @@ from cyclo_data.recorder.session_manager import DataManager
 
 class HfApiWorker:
 
+    # Cap the progress queue so a slow consumer cannot let the producer
+    # grow it without bound during long HF uploads / downloads.
+    _PROGRESS_QUEUE_MAX = 200
+    # Cap on items drained per check_task_status() call so a flooded queue
+    # never makes one status check O(N) over the entire backlog.
+    _PROGRESS_DRAIN_BATCH = 50
+    # Bound the request / result queues. By design at most one request is
+    # in flight (the service rejects a second one), so 10 is generous
+    # head-room; the cap mostly prevents a buggy producer / stuck
+    # consumer from growing the queue without bound across a long-lived
+    # worker.
+    _INPUT_QUEUE_MAX = 10
+    _OUTPUT_QUEUE_MAX = 10
+
     def __init__(self):
-        self.input_queue = multiprocessing.Queue()
-        self.output_queue = multiprocessing.Queue()
-        self.progress_queue = multiprocessing.Queue()
+        self.input_queue = multiprocessing.Queue(maxsize=self._INPUT_QUEUE_MAX)
+        self.output_queue = multiprocessing.Queue(maxsize=self._OUTPUT_QUEUE_MAX)
+        self.progress_queue = multiprocessing.Queue(
+            maxsize=self._PROGRESS_QUEUE_MAX
+        )
         self.process = None
         self.logger = logging.getLogger('HfApiWorker')
 
@@ -118,15 +134,24 @@ class HfApiWorker:
         return self.process and self.process.is_alive()
 
     def send_request(self, request_data):
-        if self.is_alive():
-            self.input_queue.put(request_data)
-            self.is_processing = True
-            self.current_task = request_data
-            self.start_time = time.time()
-            return True
-        else:
+        if not self.is_alive():
             self.logger.error('Cannot send request, HF API worker process is not running.')
             return False
+        try:
+            self.input_queue.put_nowait(request_data)
+        except queue.Full:
+            # By design only one request is in flight; reaching the cap
+            # means a stuck consumer or a bug — refuse loudly rather
+            # than block the service callback.
+            self.logger.error(
+                'HF API input_queue is full (cap=%d); request dropped.',
+                self._INPUT_QUEUE_MAX,
+            )
+            return False
+        self.is_processing = True
+        self.current_task = request_data
+        self.start_time = time.time()
+        return True
 
     def get_result(self, block=False, timeout=0.1):
         try:
@@ -154,10 +179,10 @@ class HfApiWorker:
         if not self.is_alive():
             self.logger.error('HF API worker process died')
             result['status'] = 'Failed'
-
-        if not self.is_processing:
             result['message'] = 'HF API worker process died'
             return result
+
+        if not self.is_processing:
             result['status'] = 'Idle'
             return result
 
@@ -250,10 +275,9 @@ class HfApiWorker:
         """Get the latest progress information from worker process and clear queue."""
         latest_progress = None
         try:
-            # Drain the queue and keep only the latest progress data
-            while True:
+            for _ in range(self._PROGRESS_DRAIN_BATCH):
                 try:
-                    latest_progress = self.progress_queue.get(block=False, timeout=0.01)
+                    latest_progress = self.progress_queue.get_nowait()
                 except queue.Empty:
                     break
         except Exception as e:
@@ -285,9 +309,10 @@ class HfApiWorker:
                     # Log periodic status
                     current_time = time.time()
                     if current_time - last_log_time > 30.0:  # Log every 30 seconds
-                        msg = f'Worker still alive, processed {request_count} requests so far'
-                        logger.info(msg)
-                        logger.info(f'Input queue size: {input_queue.qsize()}')
+                        logger.debug(
+                            'Worker still alive, processed %d requests, input qsize=%d',
+                            request_count, input_queue.qsize(),
+                        )
                         last_log_time = current_time
 
                     # Check for new requests

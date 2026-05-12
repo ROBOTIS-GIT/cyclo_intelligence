@@ -30,6 +30,7 @@ Session-state boundary (REVIEW §9.3):
   flags before invoking us and after our response returns.
 """
 
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -90,6 +91,15 @@ class RecordingService:
         # initialised on first STOP so process startup stays cheap.
         self._transcoder: Optional[TranscodeWorker] = None
 
+        # The 5 Hz _publish_recording_status timer runs on io_callback_group
+        # (Reentrant) while _callback runs on state_callback_group
+        # (MutuallyExclusive). Under MultiThreadedExecutor the timer can
+        # therefore observe a torn TOCTOU on _data_manager (one read sees
+        # a manager, the next sees None as a callback completes teardown).
+        # _session_lock just brackets the pointer reads/writes — DataManager
+        # has its own internal _state_lock so we never need to nest locks.
+        self._session_lock = threading.Lock()
+
         # Idle-state metrics: filled into the 5 Hz status publish before any
         # session_manager exists so the UI's CPU/RAM/Storage panel keeps
         # rendering live values between recordings. Once a DataManager is
@@ -128,14 +138,16 @@ class RecordingService:
                 pass
             self._status_timer = None
         # Best-effort teardown of a live session before node destroy.
-        if self._data_manager is not None:
+        with self._session_lock:
+            dm = self._data_manager
+            self._data_manager = None
+        if dm is not None:
             try:
-                if self._data_manager.is_recording():
-                    self._data_manager.stop_recording()
+                if dm.is_recording():
+                    dm.stop_recording()
             except Exception as exc:  # noqa: BLE001
                 self._node.get_logger().warning(
                     f'DataManager stop on shutdown failed: {exc}')
-            self._data_manager = None
         self._rosbag.shutdown()
 
     # ------------------------------------------------------------------
@@ -143,43 +155,51 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
-        self._robot_type = robot_type
+        with self._session_lock:
+            self._robot_type = robot_type
+            existing = self._data_manager
         candidate = DataManager(
             save_root_path=self.DEFAULT_SAVE_ROOT_PATH,
             robot_type=robot_type,
             task_info=task_info,
         )
-        if (self._data_manager is None
-                or getattr(self._data_manager, '_save_repo_name', None)
+        if (existing is None
+                or getattr(existing, '_save_repo_name', None)
                 != candidate._save_repo_name):
-            self._data_manager = candidate
+            with self._session_lock:
+                self._data_manager = candidate
             self._node.get_logger().info(
                 f'DataManager initialised: repo={candidate._save_repo_name} '
                 f'robot_type={robot_type}')
-        else:
-            # Same task as before — reuse existing manager but refresh
-            # its task_info so per-session knobs (e.g. UI's
-            # include_robotis_license checkbox) flipped between
-            # episodes are picked up on the next save_robotis_metadata.
-            self._data_manager.update_task_info(task_info)
-        return self._data_manager
+            return candidate
+        # Same task as before — reuse existing manager but refresh
+        # its task_info so per-session knobs (e.g. UI's
+        # include_robotis_license checkbox) flipped between
+        # episodes are picked up on the next save_robotis_metadata.
+        existing.update_task_info(task_info)
+        return existing
 
     def _clear_data_manager(self) -> None:
-        if self._data_manager is not None:
-            self._node.get_logger().info(
-                f'DataManager cleared (repo={self._data_manager._save_repo_name})')
+        with self._session_lock:
+            dm = self._data_manager
             self._data_manager = None
+        if dm is not None:
+            self._node.get_logger().info(
+                f'DataManager cleared (repo={dm._save_repo_name})')
 
     # ------------------------------------------------------------------
     # Status fan-out
     # ------------------------------------------------------------------
 
     def _publish_recording_status(self) -> None:
-        if self._data_manager is not None:
+        # Snapshot once — a concurrent _callback teardown could otherwise
+        # null self._data_manager between this check and the method call.
+        with self._session_lock:
+            dm = self._data_manager
+            robot_type = self._robot_type
+        if dm is not None:
             try:
-                status: RecordingStatus = (
-                    self._data_manager.get_current_record_status()
-                )
+                status: RecordingStatus = dm.get_current_record_status()
             except Exception as exc:  # noqa: BLE001
                 self._node.get_logger().warn(
                     f'DataManager.get_current_record_status() raised: {exc}')
@@ -198,8 +218,8 @@ class RecordingService:
             total_storage, used_storage = StorageChecker.get_storage_gb('/')
             status.used_storage_size = float(used_storage)
             status.total_storage_size = float(total_storage)
-        if self._robot_type and not status.robot_type:
-            status.robot_type = self._robot_type
+        if robot_type and not status.robot_type:
+            status.robot_type = robot_type
         self._recording_status_pub.publish(status)
 
     def _publish_umbrella_status(self, status: int, stage: str, message: str) -> None:

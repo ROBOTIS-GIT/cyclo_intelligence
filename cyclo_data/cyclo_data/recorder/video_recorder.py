@@ -158,76 +158,88 @@ class VideoRecorder:
             return {}
 
         streams = list(self._streams.values())
-
-        # Phase 1: destroy subscriptions so no new frames enter the queues.
-        for stream in streams:
-            if stream.subscription is not None:
-                self._node.destroy_subscription(stream.subscription)
-                stream.subscription = None
-
-        # Phase 2: push sentinels so each worker drains its queue and exits.
-        for stream in streams:
-            try:
-                stream.queue.put(None, timeout=2.0)
-            except Full:
-                try:
-                    stream.queue.get_nowait()
-                except Empty:
-                    pass
-                try:
-                    stream.queue.put_nowait(None)
-                except Full:
-                    pass
-
-        # Phase 3: join workers in parallel by joining each with a short
-        # poll, then proceeding to the next. Workers run concurrently in
-        # OS threads so this fans out automatically.
-        for stream in streams:
-            if stream.worker is not None:
-                stream.worker.join(timeout=10.0)
-                if stream.worker.is_alive():
-                    self._node.get_logger().error(
-                        f"VideoRecorder: {stream.name} worker did not exit within 10s"
-                    )
-
-        # Phase 4: close ffmpeg stdin so each subprocess hits EOF and
-        # finalises its MP4. The waits below sum up but each ffmpeg is
-        # already draining concurrently — the first wait absorbs the
-        # bulk of finalisation latency for all cameras.
-        for stream in streams:
-            if stream.process is not None and stream.process.stdin is not None:
-                try:
-                    if not stream.process.stdin.closed:
-                        stream.process.stdin.close()
-                except BrokenPipeError:
-                    pass
-        for stream in streams:
-            if stream.process is not None:
-                self._close_ffmpeg(stream)
-
-        # Phase 5: finalise parquet writers + collect stats.
         stats: Dict[str, Dict[str, int]] = {}
-        for stream in streams:
-            if stream.writer is not None:
-                try:
-                    stream.writer.close()
-                except Exception as exc:  # pragma: no cover - defensive
-                    self._node.get_logger().error(
-                        f"VideoRecorder: {stream.name} parquet close failed: {exc!r}"
-                    )
-                stream.writer = None
-            stats[stream.name] = {
-                "frames_received": stream.frames_received,
-                "frames_written": stream.frames_written,
-                "frames_dropped_queue": stream.frames_dropped_queue,
-                "frames_dropped_invalid": stream.frames_dropped_invalid,
-            }
-            self._node.get_logger().info(
-                f"VideoRecorder: {stream.name} stats {stats[stream.name]}"
-            )
 
-        self._streams.clear()
-        self._running = False
+        try:
+            # Phase 1: destroy subscriptions so no new frames enter the queues.
+            for stream in streams:
+                if stream.subscription is not None:
+                    self._node.destroy_subscription(stream.subscription)
+                    stream.subscription = None
+
+            # Phase 2: push sentinels so each worker drains its queue and exits.
+            for stream in streams:
+                try:
+                    stream.queue.put(None, timeout=2.0)
+                except Full:
+                    try:
+                        stream.queue.get_nowait()
+                    except Empty:
+                        pass
+                    try:
+                        stream.queue.put_nowait(None)
+                    except Full:
+                        pass
+
+            # Phase 3: join workers in parallel by joining each with a short
+            # poll, then proceeding to the next. Workers run concurrently in
+            # OS threads so this fans out automatically.
+            for stream in streams:
+                if stream.worker is not None:
+                    stream.worker.join(timeout=10.0)
+                    if stream.worker.is_alive():
+                        self._node.get_logger().error(
+                            f"VideoRecorder: {stream.name} worker did not exit within 10s"
+                        )
+        finally:
+            # Phases 4 + 5 must always run so ffmpeg subprocesses never leak
+            # and parquet writers always flush, even if an earlier phase
+            # raised. ffmpeg without stdin.close() would block forever
+            # waiting for EOF, exceeding the ~30s service deadline.
+
+            # Phase 4: close ffmpeg stdin so each subprocess hits EOF and
+            # finalises its MP4. The waits below sum up but each ffmpeg is
+            # already draining concurrently — the first wait absorbs the
+            # bulk of finalisation latency for all cameras.
+            for stream in streams:
+                if stream.process is not None and stream.process.stdin is not None:
+                    try:
+                        if not stream.process.stdin.closed:
+                            stream.process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+            for stream in streams:
+                if stream.process is not None:
+                    try:
+                        self._close_ffmpeg(stream)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self._node.get_logger().error(
+                            f"VideoRecorder: {stream.name} ffmpeg close failed: {exc!r}"
+                        )
+
+            # Phase 5: finalise parquet writers + collect stats.
+            for stream in streams:
+                if stream.writer is not None:
+                    try:
+                        stream.writer.close()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self._node.get_logger().error(
+                            f"VideoRecorder: {stream.name} parquet close failed: {exc!r}"
+                        )
+                    stream.writer = None
+                stats[stream.name] = {
+                    "frames_received": stream.frames_received,
+                    "frames_written": stream.frames_written,
+                    "frames_dropped_queue": stream.frames_dropped_queue,
+                    "frames_dropped_invalid": stream.frames_dropped_invalid,
+                }
+                self._node.get_logger().info(
+                    f"VideoRecorder: {stream.name} stats {stats[stream.name]}"
+                )
+
+            self._streams.clear()
+            self._running = False
+
         return stats
 
     # ------------------------------------------------------------------

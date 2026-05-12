@@ -18,6 +18,8 @@
 
 """Singleton blackboard for sharing data across behavior tree nodes."""
 
+import threading
+
 
 class Blackboard:
     """Singleton blackboard for shared data storage."""
@@ -29,11 +31,18 @@ class Blackboard:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._data = {}
+            # BT actions tick from different ROS callback threads under
+            # MultiThreadedExecutor — without this lock concurrent
+            # set_value / get / clear on the shared dict can raise during
+            # a resize. RLock so a setter may inadvertently call get
+            # while holding the lock without self-deadlock.
+            cls._instance._lock = threading.RLock()
         return cls._instance
 
     def set_value(self, key: str, value):
         """Set a value in the blackboard."""
-        self._data[key] = value
+        with self._lock:
+            self._data[key] = value
 
     def set(self, key: str, value):  # noqa: A003
         """Set a value in the blackboard (deprecated, use set_value)."""
@@ -41,12 +50,15 @@ class Blackboard:
 
     def get(self, key: str, default=None):
         """Get a value from the blackboard."""
-        return self._data.get(key, default)
+        with self._lock:
+            return self._data.get(key, default)
 
     def has(self, key: str) -> bool:
         """Check if a key exists in the blackboard."""
-        return key in self._data
+        with self._lock:
+            return key in self._data
 
     def clear(self):
         """Clear all data from the blackboard."""
-        self._data.clear()
+        with self._lock:
+            self._data.clear()

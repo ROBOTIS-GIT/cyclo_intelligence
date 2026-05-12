@@ -534,10 +534,7 @@ class ReplayDataHandler:
                 f"Loaded replay data: {len(result['video_files'])} videos, "
                 f"{len(result['frame_timestamps'])} frames, "
                 f"{len(result['joint_timestamps'])} joint samples, "
-                f"{len(result['action_timestamps'])} action samples, "
-                f"has_raw_images={result['has_raw_images']}, "
-                f"raw_image_topics={[t['topic'] for t in result['raw_image_topics']]}, "
-                f"mcap_file={result['mcap_file']}"
+                f"{len(result['action_timestamps'])} action samples"
             )
 
         except Exception as e:

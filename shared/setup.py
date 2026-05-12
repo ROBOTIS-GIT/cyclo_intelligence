@@ -20,9 +20,8 @@ package_name = 'shared'
 #   │   │   ├── *_config.yaml     ← per-robot config
 #   │   │   ├── urdf/             ← URDF XML per robot type
 #   │   │   └── ffw_description/  ← mesh tree referenced by URDFs
-#   │   ├── io/
-#   │   │   └── file_io.py
-#   │   └── logger/
+#   │   └── io/
+#   │       └── file_io.py
 #   ├── package.xml
 #   ├── resource/                 ← ament index marker (repo-level)
 #   └── setup.py

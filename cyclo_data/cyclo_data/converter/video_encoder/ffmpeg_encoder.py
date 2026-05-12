@@ -181,17 +181,33 @@ class FFmpegEncoder(VideoEncoder):
             self.encoding_completed = True
             self.encoding_finished_at = time.time()
 
-        except Exception as e:
-            print(f'Exception occurred: {str(e)}')
+        except BaseException as e:
+            # Catch BaseException (incl. KeyboardInterrupt / SystemExit) so
+            # the ffmpeg subprocess never outlives an aborted encode.
+            if not isinstance(e, Exception):
+                # Re-raise control-flow exceptions after cleanup runs in
+                # the finally block below.
+                pass
+            else:
+                print(f'Exception occurred: {str(e)}')
             self.is_encoding = False
             self.encoding_completed = False
-            if self.process:
-                self.process.kill()
-                self.process.wait()
-                self.process = None
             raise
         finally:
+            # Always terminate ffmpeg here — the happy path already
+            # waited and the process is harmless to kill, but on any
+            # exception (including BrokenPipeError, KeyboardInterrupt)
+            # this is the only path that prevents a leaked subprocess.
+            proc = self.process
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
             if self.clear_after_encode:
                 self.clear_buffer()
-            if self.process:
-                self.process = None
+            self.process = None

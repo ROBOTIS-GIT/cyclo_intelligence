@@ -16,6 +16,7 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
@@ -121,6 +122,10 @@ class Communicator:
             'updated': False,
             'mode': None
         }
+        # Protects joystick_state — orchestrator_node's timer callback
+        # and joystick_trigger_callback both run under
+        # MultiThreadedExecutor and would otherwise race on the dict.
+        self._joystick_lock = threading.Lock()
 
         # Joystick handler callback for immediate processing
         self._joystick_handler: Optional[Callable[[str], None]] = None
@@ -241,14 +246,32 @@ class Communicator:
     def joystick_trigger_callback(self, msg: String):
         """Handle joystick trigger for recording control."""
         self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
-        self.joystick_state['updated'] = True
-        self.joystick_state['mode'] = msg.data
+        with self._joystick_lock:
+            self.joystick_state['updated'] = True
+            self.joystick_state['mode'] = msg.data
 
         # Call registered handler immediately if available
-        if self._joystick_handler is not None:
-            self._joystick_handler(msg.data)
+        handler = self._joystick_handler
+        if handler is not None:
+            handler(msg.data)
             # Mark as processed to prevent duplicate handling in timer callback
-            self.joystick_state['updated'] = False
+            with self._joystick_lock:
+                self.joystick_state['updated'] = False
+
+    def consume_joystick_update(self):
+        """Atomically read-and-clear ``joystick_state``.
+
+        Returns ``(updated, mode)``. If ``updated`` is True the caller
+        owns this event and the flag is reset to False before return.
+        Used by orchestrator_node's timer pump to avoid a TOCTOU race
+        with ``joystick_trigger_callback`` under MultiThreadedExecutor.
+        """
+        with self._joystick_lock:
+            updated = self.joystick_state['updated']
+            mode = self.joystick_state['mode']
+            if updated:
+                self.joystick_state['updated'] = False
+        return updated, mode
 
     def heartbeat_timer_callback(self):
         """Publish heartbeat."""

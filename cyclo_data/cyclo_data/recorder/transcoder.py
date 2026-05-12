@@ -172,6 +172,12 @@ class TranscodeWorker:
     ) -> Future:
         """Queue ``episode_dir`` for transcoding. Idempotent."""
         episode_dir = Path(episode_dir).resolve()
+        # Clean up orphan .h264.tmp here on the submit side instead of
+        # in every _run_one — the only producers of orphan tmps are
+        # crash-mid-transcode (handled by submit_pending_recovery) and
+        # a same-key retry after failure. Both go through submit(), so
+        # the worker thread doesn't have to glob on every job.
+        self._cleanup_orphan_tmps(episode_dir)
         key = str(episode_dir)
         with self._lock:
             if self._shutdown:
@@ -247,6 +253,24 @@ class TranscodeWorker:
     # Internals
     # ------------------------------------------------------------------
 
+    def _cleanup_orphan_tmps(self, episode_dir: Path) -> None:
+        """Remove ``<cam>.h264.tmp`` left behind by a crashed prior encode.
+
+        Called from submit() so the hot worker thread doesn't pay for a
+        glob on every job — fresh recordings created via VideoRecorder
+        cannot have orphans (the videos/ dir is brand new), so the cost
+        only matters during recovery + retry.
+        """
+        videos_dir = episode_dir / "videos"
+        if not videos_dir.exists():
+            return
+        for stale in videos_dir.glob("*.h264.tmp"):
+            try:
+                stale.unlink()
+                self._log_info(f"transcode: cleaned orphan {stale.name}")
+            except OSError:
+                pass
+
     def _log_info(self, msg: str) -> None:
         if self._logger is not None:
             self._logger.info(msg)
@@ -312,17 +336,11 @@ class TranscodeWorker:
             except Exception:
                 rotations = {}
 
-        # 1) Clean up any orphan ``.h264.tmp`` from a previous crash so
-        #    a retry isn't fooled by stale partials.
-        if videos_dir.exists():
-            for stale in videos_dir.glob("*.h264.tmp"):
-                try:
-                    stale.unlink()
-                    self._log_info(f"transcode: cleaned orphan {stale.name}")
-                except OSError:
-                    pass
+        # Orphan ``.h264.tmp`` cleanup happens at submit() time now
+        # (see TranscodeWorker._cleanup_orphan_tmps) so this worker
+        # thread can skip the per-job glob.
 
-        # 2) Discover cameras: any <cam>.mp4 that has a paired sidecar.
+        # Discover cameras: any <cam>.mp4 that has a paired sidecar.
         cameras: list[str] = []
         if videos_dir.exists():
             for mp4 in sorted(videos_dir.glob("*.mp4")):
@@ -506,21 +524,33 @@ def _sidecar_row_count(sidecar: Path) -> int:
     return int(pq.read_metadata(str(sidecar)).num_rows)
 
 
+_FFPROBE_FRAME_COUNT_TIMEOUT = 30  # seconds
+
+
 def _mp4_frame_count(mp4: Path) -> int:
     """Return the frame count of an MP4 via ffprobe.
 
     Uses ``-count_frames`` which is slow on huge files but exact, so
     the verify pass refuses to ship a transcode that doesn't match
-    the sidecar.
+    the sidecar. Raises ``RuntimeError`` on timeout or parse failure so
+    the caller can fail this single camera without blocking the worker
+    pool.
     """
-    out = subprocess.run(
-        [
-            _FFPROBE, "-v", "error", "-select_streams", "v:0",
-            "-count_frames", "-show_entries", "stream=nb_read_frames",
-            "-of", "default=nw=1:nk=1", str(mp4),
-        ],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        out = subprocess.run(
+            [
+                _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-count_frames", "-show_entries", "stream=nb_read_frames",
+                "-of", "default=nw=1:nk=1", str(mp4),
+            ],
+            capture_output=True, text=True,
+            timeout=_FFPROBE_FRAME_COUNT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe frame-count timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
+            f"for {mp4.name}"
+        ) from exc
     try:
         return int(out.stdout.strip())
     except ValueError as exc:

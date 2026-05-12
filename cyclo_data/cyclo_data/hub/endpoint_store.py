@@ -31,10 +31,12 @@ Schema on disk::
       }
     }
 
-The file lives at ``/root/.cache/huggingface/hf_endpoints.json`` inside
-the container, which is bind-mounted from ``docker/huggingface/`` on the host.
+The file lives under the HuggingFace cache directory (``$HF_HOME`` if set,
+otherwise ``~/.cache/huggingface``) as ``hf_endpoints.json``. Inside the
+container this resolves to ``/root/.cache/huggingface/hf_endpoints.json``,
+which is bind-mounted from ``docker/huggingface/`` on the host.
 ``.gitignore`` already excludes ``docker/huggingface/`` so the file is never
-committed.
+committed. Set ``CYCLO_HF_ENDPOINT_STORE`` to override the path entirely.
 """
 
 from __future__ import annotations
@@ -49,8 +51,13 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
 
-_DEFAULT_PATH = Path('/root/.cache/huggingface/hf_endpoints.json')
 _ENV_PATH_OVERRIDE = 'CYCLO_HF_ENDPOINT_STORE'
+
+
+def _default_path() -> Path:
+    hf_home = os.environ.get('HF_HOME')
+    base = Path(hf_home) if hf_home else Path.home() / '.cache' / 'huggingface'
+    return base / 'hf_endpoints.json'
 
 
 @dataclass
@@ -75,7 +82,7 @@ def _resolve_path(path: Optional[Path]) -> Path:
     override = os.environ.get(_ENV_PATH_OVERRIDE)
     if override:
         return Path(override)
-    return _DEFAULT_PATH
+    return _default_path()
 
 
 class HFEndpointStore:

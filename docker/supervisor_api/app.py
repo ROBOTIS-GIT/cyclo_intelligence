@@ -23,9 +23,19 @@ Thin FastAPI layer sitting between the UI (via nginx /api/) and:
       out-of-image (lerobot — and groot once D10-groot lands).
 
 Run as:
-    uvicorn supervisor_api.app:app --host 127.0.0.1 --port 8100
+    uvicorn supervisor_api.app:app \
+        --host "${CYCLO_SUPERVISOR_API_HOST:-127.0.0.1}" \
+        --port "${CYCLO_SUPERVISOR_API_PORT:-8100}"
 
 nginx proxies /api/ → 127.0.0.1:8100 (Step 6-E).
+
+Environment overrides:
+    CYCLO_SUPERVISOR_API_HOST         bind host (default 127.0.0.1)
+    CYCLO_SUPERVISOR_API_PORT         bind port (default 8100)
+    CYCLO_SUPERVISOR_API_REPO_MOUNT   in-container path of the repo bind-mount
+                                      (default /root/ros2_ws/src/cyclo_intelligence)
+    CYCLO_SUPERVISOR_API_COMPOSE_FILE absolute path to docker-compose.yml inside
+                                      this container (default <repo-mount>/docker/docker-compose.yml)
 """
 
 from __future__ import annotations
@@ -136,13 +146,18 @@ class BackendStatus(BaseModel):
 # -- Backend (policy container) wiring -----------------------------------------
 
 
-# Compose file path inside this container — the cyclo_intelligence service
-# bind-mounts the repo root at /root/ros2_ws/src/cyclo_intelligence (live
-# edits during dev).
-_COMPOSE_FILE_IN_CONTAINER = (
-    "/root/ros2_ws/src/cyclo_intelligence/docker/docker-compose.yml"
+# Compose file + repo-mount paths inside this container — the cyclo_intelligence
+# service bind-mounts the repo root at /root/ros2_ws/src/cyclo_intelligence by
+# default (live edits during dev). Override both with env vars when the mount
+# point differs (e.g. running supervisor_api on the host for debugging).
+_CYCLO_REPO_MOUNT = os.environ.get(
+    "CYCLO_SUPERVISOR_API_REPO_MOUNT",
+    "/root/ros2_ws/src/cyclo_intelligence",
 )
-_CYCLO_REPO_MOUNT = "/root/ros2_ws/src/cyclo_intelligence"
+_COMPOSE_FILE_IN_CONTAINER = os.environ.get(
+    "CYCLO_SUPERVISOR_API_COMPOSE_FILE",
+    f"{_CYCLO_REPO_MOUNT}/docker/docker-compose.yml",
+)
 
 
 def _detect_arch() -> str:

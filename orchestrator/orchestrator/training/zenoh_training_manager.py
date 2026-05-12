@@ -73,6 +73,11 @@ class ZenohTrainingManager:
         self._total_steps = 0
         self._current_loss = float('nan')
         self._training_completed = False
+        # _on_status_update fires on the Zenoh subscriber thread while
+        # get_current_training_status / the train() polling loop read the
+        # same fields from the training thread / a timer. Without this
+        # lock the consumer can read a torn (step, loss, status) tuple.
+        self._status_lock = threading.Lock()
 
         self.resume = False
         self.resume_model_path = None
@@ -96,29 +101,34 @@ class ZenohTrainingManager:
     def _on_status_update(self, status_data: dict):
         new_status = status_data.get('status', 'unknown')
 
-        if 'step' in status_data:
-            self._current_step = status_data.get('step', 0)
-        if 'total_steps' in status_data:
-            self._total_steps = status_data.get('total_steps', 0)
-        if 'loss' in status_data:
-            loss_value = status_data.get('loss')
-            if loss_value is not None and loss_value != 0:
-                self._current_loss = float(loss_value)
+        with self._status_lock:
+            if 'step' in status_data:
+                self._current_step = status_data.get('step', 0)
+            if 'total_steps' in status_data:
+                self._total_steps = status_data.get('total_steps', 0)
+            if 'loss' in status_data:
+                loss_value = status_data.get('loss')
+                if loss_value is not None and loss_value != 0:
+                    self._current_loss = float(loss_value)
 
-        if self._current_status == 'training' and new_status == 'idle':
-            self._training_completed = True
-            logger.info('Training completed (state changed to idle)')
-        elif new_status == 'error':
-            self._training_completed = True
-            logger.error('Training failed with error')
+            if self._current_status == 'training' and new_status == 'idle':
+                self._training_completed = True
+                logger.info('Training completed (state changed to idle)')
+            elif new_status == 'error':
+                self._training_completed = True
+                logger.error('Training failed with error')
 
-        self._current_status = new_status
+            self._current_status = new_status
+            callback = self._status_callback
 
-        if self._status_callback:
-            self._status_callback(status_data)
+        # Invoke the optional user callback outside the lock so it can't
+        # deadlock if the callback re-enters the manager.
+        if callback:
+            callback(status_data)
 
     def set_status_callback(self, callback: Callable):
-        self._status_callback = callback
+        with self._status_lock:
+            self._status_callback = callback
 
     @staticmethod
     def get_available_list() -> tuple[list[str], list[str]]:
@@ -169,8 +179,9 @@ class ZenohTrainingManager:
     def get_current_training_status(self) -> TrainingStatus:
         status = TrainingStatus()
         status.training_info = self.training_info
-        status.current_step = self._current_step
-        status.current_loss = self._current_loss
+        with self._status_lock:
+            status.current_step = self._current_step
+            status.current_loss = self._current_loss
         return status
 
     def train(self) -> ServiceResponse:
@@ -184,8 +195,9 @@ class ZenohTrainingManager:
                     request_id=''
                 )
 
-        self._training_completed = False
-        self._current_status = 'idle'
+        with self._status_lock:
+            self._training_completed = False
+            self._current_status = 'idle'
 
         if self.resume and self.resume_model_path:
             response = self.client.resume_training(self.resume_model_path)
@@ -209,25 +221,31 @@ class ZenohTrainingManager:
         timeout = 3600
         start_time = time.time()
 
-        while not self._training_completed:
+        while True:
+            with self._status_lock:
+                if self._training_completed:
+                    break
             time.sleep(1)
 
             if time.time() - start_time > timeout:
                 logger.warning(f'Training timeout after {timeout}s')
                 break
 
-        final_response = ServiceResponse(
-            success=self._current_status == 'idle',
-            message=f'Training {self._current_status}',
-            data={
-                'status': self._current_status,
-                'step': self._current_step,
-                'loss': self._current_loss
-            },
-            request_id=''
-        )
+        with self._status_lock:
+            final_status = self._current_status
+            final_step = self._current_step
+            final_loss = self._current_loss
 
-        return final_response
+        return ServiceResponse(
+            success=final_status == 'idle',
+            message=f'Training {final_status}',
+            data={
+                'status': final_status,
+                'step': final_step,
+                'loss': final_loss,
+            },
+            request_id='',
+        )
 
     def stop(self) -> ServiceResponse:
         self.stop_event.set()
