@@ -21,8 +21,15 @@ const CONTROL_TYPES = new Set(['Sequence', 'Loop', 'Fallback', 'Parallel']);
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 80;
 
+// Attributes that are internal metadata, not BT node parameters
+const INTERNAL_ATTRS = new Set(['ID', 'name', 'bt_x', 'bt_y']);
+
 /**
- * Parse BT XML string into React Flow nodes and edges.
+ * Parse BT XML string into React Flow nodes, edges, and a nodeDataMap.
+ *
+ * nodeDataMap: Map<id, {tag, name, params}> — used as primary state after load.
+ * bt_x / bt_y XML attributes override dagre positions when present (set by
+ * serializeFromGraph on save, so position is preserved across load/save cycles).
  */
 export function parseBTXml(xmlString) {
   const parser = new DOMParser();
@@ -45,7 +52,6 @@ export function parseBTXml(xmlString) {
   }
 
   if (!rootElement) {
-    // Fallback: use the first BehaviorTree
     const firstBT = behaviorTrees[0];
     if (firstBT && firstBT.children.length > 0) {
       rootElement = firstBT.children[0];
@@ -53,13 +59,14 @@ export function parseBTXml(xmlString) {
   }
 
   if (!rootElement) {
-    return { nodes: [], edges: [] };
+    return { nodes: [], edges: [], xmlDoc: doc, nodeElementMap: new Map(), nodeDataMap: new Map() };
   }
 
   const nodes = [];
   const edges = [];
   let nodeIdCounter = 0;
   const nodeElementMap = new Map();
+  const nodeDataMap = new Map();
 
   function traverse(element, parentId) {
     const id = `bt_${nodeIdCounter++}`;
@@ -68,24 +75,26 @@ export function parseBTXml(xmlString) {
     const name = element.getAttribute('name') || tag;
     const isControl = CONTROL_TYPES.has(tag);
 
-    // Collect params (skip ID and name)
     const params = {};
     for (const attr of element.attributes) {
-      if (attr.name !== 'ID' && attr.name !== 'name') {
+      if (!INTERNAL_ATTRS.has(attr.name)) {
         params[attr.name] = attr.value;
       }
     }
 
+    const storedX = element.getAttribute('bt_x');
+    const storedY = element.getAttribute('bt_y');
+
     nodes.push({
       id,
       type: isControl ? 'btControl' : 'btAction',
-      data: {
-        label: name,
-        nodeType: tag,
-        params,
-      },
-      position: { x: 0, y: 0 }, // Will be set by dagre
+      data: { label: name, nodeType: tag, params },
+      position: { x: 0, y: 0 },
+      _storedX: storedX,
+      _storedY: storedY,
     });
+
+    nodeDataMap.set(id, { tag, name, params });
 
     if (parentId) {
       edges.push({
@@ -97,7 +106,6 @@ export function parseBTXml(xmlString) {
       });
     }
 
-    // Recurse into children (skip non-element nodes)
     for (const child of element.children) {
       traverse(child, id);
     }
@@ -106,7 +114,7 @@ export function parseBTXml(xmlString) {
   traverse(rootElement, null);
 
   const layout = applyDagreLayout(nodes, edges);
-  return { ...layout, xmlDoc: doc, nodeElementMap };
+  return { ...layout, xmlDoc: doc, nodeElementMap, nodeDataMap };
 }
 
 function applyDagreLayout(nodes, edges) {
@@ -124,7 +132,10 @@ function applyDagreLayout(nodes, edges) {
 
   dagre.layout(g);
 
-  const layoutNodes = nodes.map((node) => {
+  const layoutNodes = nodes.map(({ _storedX, _storedY, ...node }) => {
+    if (_storedX !== null && _storedX !== '' && _storedY !== null && _storedY !== '') {
+      return { ...node, position: { x: parseFloat(_storedX), y: parseFloat(_storedY) } };
+    }
     const pos = g.node(node.id);
     return {
       ...node,

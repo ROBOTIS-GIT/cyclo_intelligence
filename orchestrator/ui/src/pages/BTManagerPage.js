@@ -20,6 +20,7 @@ import {
   ReactFlow,
   Controls,
   Background,
+  addEdge,
   useNodesState,
   useEdgesState,
 } from '@xyflow/react';
@@ -34,7 +35,7 @@ import BTParamPanel from '../components/bt/BTParamPanel';
 import BTNodePalette, { PALETTE_DRAG_MIME } from '../components/bt/BTNodePalette';
 import TreeListModal from '../features/btmanager/components/TreeListModal';
 import { parseBTXml } from '../utils/btTreeParser';
-import { serializeBTXml } from '../utils/btXmlSerializer';
+import { serializeFromGraph } from '../utils/btXmlSerializer';
 import { setTreeXml, setTreeFileName, setBtStatus, setActiveNodeNames, setSelectedNodeId } from '../features/btmanager/btmanagerSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { useBTHistory } from '../hooks/useBTHistory';
@@ -58,35 +59,51 @@ export default function BTManagerPage({ isActive = true }) {
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  // nodeDataMap: Map<id, {tag, name, params}> — primary source of truth for node content
+  const [nodeDataMap, setNodeDataMap] = useState(new Map());
   const [parseError, setParseError] = useState(null);
   const [showTreeList, setShowTreeList] = useState(false);
-  const [xmlDoc, setXmlDoc] = useState(null);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveFileName, setSaveFileName] = useState('');
-  const nodeElementMapRef = useRef(new Map());
+
+  // ReactFlow instance for coordinate conversion on drop
+  const reactFlowRef = useRef(null);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
+  const nodeDataMapRef = useRef(nodeDataMap);
   nodesRef.current = nodes;
   edgesRef.current = edges;
+  nodeDataMapRef.current = nodeDataMap;
 
-  // Undo/redo history — snapshots are serialized XML strings
-  const getHistorySnapshot = useCallback(
-    () => (xmlDoc ? serializeBTXml(xmlDoc) : null),
-    [xmlDoc],
-  );
-  const applyHistorySnapshot = useCallback((xml) => {
+  // ── History ──────────────────────────────────────────────────────────────
+  // Snapshots are JSON strings encoding {nodes, edges, nodeDataMap}.
+  // isActive / isSelected are annotation-only and excluded.
+
+  const getHistorySnapshot = useCallback(() => {
+    if (nodes.length === 0) return null;
+    return JSON.stringify({
+      nodes: nodes.map(({ data: { isActive: _a, isSelected: _s, ...d }, ...n }) => ({
+        ...n,
+        data: d,
+      })),
+      edges,
+      nodeDataMap: [...nodeDataMap.entries()],
+    });
+  }, [nodes, edges, nodeDataMap]);
+
+  const applyHistorySnapshot = useCallback((snap) => {
     try {
-      const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(xml);
-      setNodes(newNodes);
-      setEdges(newEdges);
-      setXmlDoc(doc);
-      nodeElementMapRef.current = nodeElementMap;
+      const { nodes: n, edges: e, nodeDataMap: ndm } = JSON.parse(snap);
+      setNodes(n);
+      setEdges(e);
+      setNodeDataMap(new Map(ndm));
       setParseError(null);
       dispatch(setSelectedNodeId(null));
     } catch (err) {
       setParseError(err.message);
     }
   }, [setNodes, setEdges, dispatch]);
+
   const {
     capture: captureHistory,
     undo: undoHistory,
@@ -99,65 +116,48 @@ export default function BTManagerPage({ isActive = true }) {
     applySnapshot: applyHistorySnapshot,
   });
 
-  // Parse XML and update flow whenever treeXml changes
+  // ── Initial load from Redux treeXml (e.g. on page mount) ─────────────────
   useEffect(() => {
     if (!treeXml) {
       setNodes([]);
       setEdges([]);
-      setXmlDoc(null);
-      nodeElementMapRef.current = new Map();
+      setNodeDataMap(new Map());
       setParseError(null);
       return;
     }
-
     try {
-      const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(treeXml);
-      setNodes(newNodes);
-      setEdges(newEdges);
-      setXmlDoc(doc);
-      nodeElementMapRef.current = nodeElementMap;
+      const { nodes: n, edges: e, nodeDataMap: ndm } = parseBTXml(treeXml);
+      setNodes(n);
+      setEdges(e);
+      setNodeDataMap(ndm);
       setParseError(null);
     } catch (err) {
       setParseError(err.message);
       setNodes([]);
       setEdges([]);
-      setXmlDoc(null);
-      nodeElementMapRef.current = new Map();
+      setNodeDataMap(new Map());
     }
-  }, [treeXml, setNodes, setEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount to restore Redux-persisted tree
 
-  // Handle tree selection from TreeListModal
+  // ── Handle tree selection from TreeListModal ──────────────────────────────
   const handleServerFileSelect = useCallback(async (item) => {
     if (!item || !item.full_path) return;
-
     try {
       const urlMatch = rosbridgeUrl.match(/ws:\/\/([^:]+):/);
       const host = urlMatch ? urlMatch[1] : 'localhost';
       const fileUrl = `http://${host}:8082${item.full_path}`;
       const response = await fetch(fileUrl);
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch file: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
 
       const xmlContent = await response.text();
       const fileName = item.name || item.full_path.split('/').pop();
 
-      // Parse directly so the canvas always resets even when treeXml content is unchanged
-      try {
-        const { nodes: newNodes, edges: newEdges, xmlDoc: doc, nodeElementMap } = parseBTXml(xmlContent);
-        setNodes(newNodes);
-        setEdges(newEdges);
-        setXmlDoc(doc);
-        nodeElementMapRef.current = nodeElementMap;
-        setParseError(null);
-      } catch (parseErr) {
-        setParseError(parseErr.message);
-        setNodes([]);
-        setEdges([]);
-        setXmlDoc(null);
-        nodeElementMapRef.current = new Map();
-      }
+      const { nodes: n, edges: e, nodeDataMap: ndm } = parseBTXml(xmlContent);
+      setNodes(n);
+      setEdges(e);
+      setNodeDataMap(ndm);
+      setParseError(null);
 
       resetHistory();
       dispatch(setSelectedNodeId(null));
@@ -169,102 +169,12 @@ export default function BTManagerPage({ isActive = true }) {
     }
   }, [rosbridgeUrl, dispatch, setNodes, setEdges, resetHistory]);
 
-  // Node click handler for param editing
+  // ── Node click handler ────────────────────────────────────────────────────
   const handleNodeClick = useCallback((event, node) => {
     dispatch(setSelectedNodeId(node.id));
   }, [dispatch]);
 
-  // Node drag stop: reorder XML DOM children to match visual left-to-right order
-  const handleNodeDragStop = useCallback((_event, draggedNode) => {
-    const parentEdge = edgesRef.current.find((e) => e.target === draggedNode.id);
-    if (!parentEdge) return; // root node has no siblings
-
-    const parentId = parentEdge.source;
-    const siblingIds = edgesRef.current
-      .filter((e) => e.source === parentId)
-      .map((e) => e.target);
-
-    const sorted = nodesRef.current
-      .filter((n) => siblingIds.includes(n.id))
-      .sort((a, b) => a.position.x - b.position.x);
-
-    const parentEl = nodeElementMapRef.current.get(parentId);
-    if (!parentEl) return;
-
-    // Skip if order didn't actually change — avoids a no-op history entry.
-    const newOrder = sorted.map((n) => nodeElementMapRef.current.get(n.id));
-    const currentOrder = [...parentEl.children];
-    const changed =
-      newOrder.length !== currentOrder.length ||
-      newOrder.some((el, i) => el !== currentOrder[i]);
-    if (!changed) return;
-
-    captureHistory();
-    sorted.forEach((n) => {
-      const el = nodeElementMapRef.current.get(n.id);
-      if (el) parentEl.appendChild(el); // moves existing child to end
-    });
-  }, [captureHistory]);
-
-  // Param change handler: update xmlDoc DOM + nodes state directly (no Redux treeXml change)
-  const handleParamChange = useCallback((nodeId, paramName, value) => {
-    const el = nodeElementMapRef.current.get(nodeId);
-    if (el && el.getAttribute(paramName) === String(value)) return; // no-op
-    captureHistory();
-    if (el) {
-      el.setAttribute(paramName, value);
-    }
-    // Update nodes state in-place so BTParamPanel reflects the value without re-parse
-    setNodes((ns) =>
-      ns.map((n) =>
-        n.id === nodeId
-          ? { ...n, data: { ...n.data, params: { ...n.data.params, [paramName]: value } } }
-          : n
-      )
-    );
-  }, [setNodes, captureHistory]);
-
-  // Add a child node of the chosen tag under `parentNodeId`.
-  // The XML DOM is mutated, then the tree is re-parsed end-to-end so dagre
-  // re-lays-out the canvas — this matches the same path undo/redo uses
-  // (applySnapshot in useBTHistory).
-  const handleAddChild = useCallback((parentNodeId, tag) => {
-    const parentEl = nodeElementMapRef.current.get(parentNodeId);
-    const meta = findNodeMeta(tag);
-    if (!parentEl || !meta || !xmlDoc) return;
-
-    captureHistory();
-
-    // Auto-name: {tag}_{n} where n is one past the max existing index for this tag.
-    const existing = xmlDoc.getElementsByTagName(tag);
-    let maxIdx = 0;
-    for (const el of existing) {
-      const m = (el.getAttribute('name') || '').match(new RegExp(`^${tag}_(\\d+)$`));
-      if (m) maxIdx = Math.max(maxIdx, parseInt(m[1], 10));
-    }
-    const autoName = `${tag}_${maxIdx + 1}`;
-
-    const newEl = xmlDoc.createElement(tag);
-    newEl.setAttribute('name', autoName);
-    Object.entries(meta.params).forEach(([k, v]) => newEl.setAttribute(k, v));
-    parentEl.appendChild(newEl);
-
-    // Re-parse the mutated doc so dagre + nodeElementMap stay consistent.
-    const xml = serializeBTXml(xmlDoc);
-    const parsed = parseBTXml(xml);
-    setNodes(parsed.nodes);
-    setEdges(parsed.edges);
-    setXmlDoc(parsed.xmlDoc);
-    nodeElementMapRef.current = parsed.nodeElementMap;
-
-    // Find the new node (matches the just-added XML element by tag+name) and select it.
-    const newNode = parsed.nodes.find(
-      (n) => n.data.nodeType === tag && n.data.label === autoName
-    );
-    if (newNode) dispatch(setSelectedNodeId(newNode.id));
-  }, [xmlDoc, captureHistory, setNodes, setEdges, dispatch]);
-
-  // Drag-and-drop from BTNodePalette → drop onto a Control node to add a child.
+  // ── Drag-and-drop from palette: drop anywhere to create a disconnected node
   const handleCanvasDragOver = useCallback((event) => {
     if (event.dataTransfer.types.includes(PALETTE_DRAG_MIME)) {
       event.preventDefault();
@@ -279,47 +189,66 @@ export default function BTManagerPage({ isActive = true }) {
     if (!tag || !findNodeMeta(tag)) return;
     event.preventDefault();
 
-    // ReactFlow tags each node with [data-id]; try DOM resolution first
-    // (works when target is the node wrapper or any descendant).
-    let parentId =
-      event.target.closest?.('[data-id]')?.getAttribute('data-id') ?? null;
+    // Convert screen coordinates to ReactFlow canvas coordinates
+    const position = reactFlowRef.current
+      ? reactFlowRef.current.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      : { x: 100 + Math.random() * 200, y: 100 + Math.random() * 200 };
 
-    // Fallback: bounding-box hit test against every rendered node. Survives
-    // cases where the drop's target is the canvas itself or a child element
-    // (Handle/SVG) that stopped propagation.
-    if (!parentId) {
-      for (const n of nodesRef.current) {
-        const el = document.querySelector(`[data-id="${n.id}"]`);
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (
-          event.clientX >= r.left && event.clientX <= r.right &&
-          event.clientY >= r.top && event.clientY <= r.bottom
-        ) {
-          parentId = n.id;
-          break;
-        }
-      }
+    // Auto-name: {tag}_{n}
+    let maxIdx = 0;
+    for (const { name } of nodeDataMapRef.current.values()) {
+      const m = name.match(new RegExp(`^${tag}_(\\d+)$`));
+      if (m) maxIdx = Math.max(maxIdx, parseInt(m[1], 10));
     }
+    const autoName = `${tag}_${maxIdx + 1}`;
+    const id = `bt_${Date.now()}`;
+    const meta = findNodeMeta(tag);
+    const params = meta ? { ...meta.params } : {};
 
-    const parentNode = parentId
-      ? nodesRef.current.find((n) => n.id === parentId)
-      : null;
+    captureHistory();
+    setNodes((prev) => [
+      ...prev,
+      {
+        id,
+        type: isControlTag(tag) ? 'btControl' : 'btAction',
+        position,
+        data: { label: autoName, nodeType: tag, params },
+      },
+    ]);
+    setNodeDataMap((prev) => new Map(prev).set(id, { tag, name: autoName, params }));
+    dispatch(setSelectedNodeId(id));
+  }, [captureHistory, setNodes, dispatch]);
 
-    if (!parentNode) {
-      toast.error('Drop onto a Control node (Sequence / Loop) to add a child');
-      return;
-    }
-    if (!isControlTag(parentNode.data.nodeType)) {
-      toast.error(
-        `${parentNode.data.label || parentNode.data.nodeType} is an Action — only Control nodes can have children`
-      );
-      return;
-    }
-    handleAddChild(parentNode.id, tag);
-  }, [handleAddChild]);
+  // ── Manual edge connection ────────────────────────────────────────────────
+  const handleConnect = useCallback((connection) => {
+    captureHistory();
+    setEdges((prev) => addEdge({ ...connection, type: 'smoothstep', animated: false }, prev));
+  }, [captureHistory, setEdges]);
 
-  // Delete key handler: cascade-delete selected nodes and sync XML DOM
+  // ── Node drag stop: just capture history (ReactFlow updates position) ─────
+  const handleNodeDragStop = useCallback(() => {
+    captureHistory();
+  }, [captureHistory]);
+
+  // ── Param change: update nodeDataMap + nodes state ────────────────────────
+  const handleParamChange = useCallback((nodeId, paramName, value) => {
+    captureHistory();
+    setNodeDataMap((prev) => {
+      const next = new Map(prev);
+      const entry = next.get(nodeId);
+      if (entry) next.set(nodeId, { ...entry, params: { ...entry.params, [paramName]: value } });
+      return next;
+    });
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, params: { ...n.data.params, [paramName]: value } } }
+          : n
+      )
+    );
+  }, [setNodes, captureHistory]);
+
+  // ── Delete key: remove selected nodes + their edges ───────────────────────
   useEffect(() => {
     const handler = (e) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return;
@@ -330,45 +259,23 @@ export default function BTManagerPage({ isActive = true }) {
       const selectedIds = new Set(currentNodes.filter((n) => n.selected).map((n) => n.id));
       if (selectedIds.size === 0) return;
 
-      // BFS to find all descendants
-      const toDeleteIds = new Set(selectedIds);
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const edge of currentEdges) {
-          if (toDeleteIds.has(edge.source) && !toDeleteIds.has(edge.target)) {
-            toDeleteIds.add(edge.target);
-            changed = true;
-          }
-        }
-      }
-
       captureHistory();
-
-      // Remove top-level deleted elements from XML DOM (children cascade automatically)
-      const map = nodeElementMapRef.current;
-      toDeleteIds.forEach((id) => {
-        const el = map.get(id);
-        if (el && el.parentNode) {
-          const parentEl = el.parentNode;
-          const parentId = [...map.entries()].find(([, e]) => e === parentEl)?.[0];
-          if (!parentId || !toDeleteIds.has(parentId)) {
-            parentEl.removeChild(el);
-          }
-        }
-        map.delete(id);
+      setNodes((ns) => ns.filter((n) => !selectedIds.has(n.id)));
+      setEdges((es) =>
+        es.filter((e) => !selectedIds.has(e.source) && !selectedIds.has(e.target))
+      );
+      setNodeDataMap((prev) => {
+        const next = new Map(prev);
+        selectedIds.forEach((id) => next.delete(id));
+        return next;
       });
-
-      setNodes((ns) => ns.filter((n) => !toDeleteIds.has(n.id)));
-      setEdges((es) => es.filter((e) => !toDeleteIds.has(e.source) && !toDeleteIds.has(e.target)));
       dispatch(setSelectedNodeId(null));
     };
-
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [setNodes, setEdges, dispatch, captureHistory]);
 
-  // Undo/redo keybindings: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y
+  // ── Undo/redo keybindings ─────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e) => {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
@@ -387,19 +294,24 @@ export default function BTManagerPage({ isActive = true }) {
     return () => document.removeEventListener('keydown', handler);
   }, [undoHistory, redoHistory]);
 
-  // Helper: get HTTP server base URL from rosbridgeUrl
+  // ── HTTP base URL helper ──────────────────────────────────────────────────
   const getHttpBaseUrl = useCallback(() => {
     const urlMatch = rosbridgeUrl.match(/ws:\/\/([^:]+):/);
     const host = urlMatch ? urlMatch[1] : 'localhost';
     return `http://${host}:8082`;
   }, [rosbridgeUrl]);
 
-  // Save As handler
+  // ── Serialize current graph to BT XML ────────────────────────────────────
+  const getSerializedXml = useCallback(() => {
+    return serializeFromGraph(nodes, edges, nodeDataMap);
+  }, [nodes, edges, nodeDataMap]);
+
+  // ── Save As ───────────────────────────────────────────────────────────────
   const handleSaveAs = useCallback(async () => {
     const name = saveFileName.trim();
     if (!name) return;
 
-    const content = xmlDoc ? serializeBTXml(xmlDoc) : treeXml;
+    const content = getSerializedXml();
     if (!content) return;
 
     try {
@@ -420,19 +332,17 @@ export default function BTManagerPage({ isActive = true }) {
     } catch (err) {
       toast.error(`Save failed: ${err.message}`);
     }
-  }, [saveFileName, xmlDoc, treeXml, getHttpBaseUrl]);
+  }, [saveFileName, getSerializedXml, getHttpBaseUrl]);
 
-  // BT Start - launch node, load XML, and run
+  // ── BT Start ──────────────────────────────────────────────────────────────
   const handleStart = useCallback(async () => {
-    if (!treeXml) {
+    if (nodes.length === 0) {
       toast.error('No tree loaded');
       return;
     }
     try {
-      // Serialize current xmlDoc (reflects any node deletions) or fall back to raw XML
-      const currentXml = xmlDoc ? serializeBTXml(xmlDoc) : treeXml;
+      const currentXml = getSerializedXml();
 
-      // 1. Launch BT node if not running
       const baseUrl = getHttpBaseUrl();
       const launchRes = await fetch(`${baseUrl}/bt/launch`, {
         method: 'POST',
@@ -445,13 +355,11 @@ export default function BTManagerPage({ isActive = true }) {
         return;
       }
 
-      // 2. Wait for BT node to fully initialize
       const isAlreadyRunning = launchData.message.includes('already running');
       if (!isAlreadyRunning) {
         await new Promise((resolve) => setTimeout(resolve, 8000));
       }
 
-      // 3. Load XML and start execution
       const result = await callService(
         '/bt/load_and_run',
         'interfaces/srv/LoadAndRunTree',
@@ -468,26 +376,18 @@ export default function BTManagerPage({ isActive = true }) {
     } catch (err) {
       toast.error(`Failed to start BT: ${err.message}`);
     }
-  }, [callService, dispatch, treeXml, xmlDoc, getHttpBaseUrl]);
+  }, [callService, dispatch, nodes.length, getSerializedXml, getHttpBaseUrl]);
 
-  // BT Stop - stop tree and shutdown node
+  // ── BT Stop ───────────────────────────────────────────────────────────────
   const handleStop = useCallback(async () => {
     try {
-      // 1. Stop BT execution
       try {
-        await callService(
-          '/bt/set_running',
-          'std_srvs/srv/SetBool',
-          { data: false }
-        );
+        await callService('/bt/set_running', 'std_srvs/srv/SetBool', { data: false });
       } catch {
-        // BT node may already be gone, continue to shutdown
+        // BT node may already be gone
       }
-
-      // 2. Shutdown BT node process
       const baseUrl = getHttpBaseUrl();
       await fetch(`${baseUrl}/bt/shutdown`, { method: 'POST' });
-
       dispatch(setBtStatus('stopped'));
       dispatch(setActiveNodeNames([]));
       toast.success('BT stopped');
@@ -496,7 +396,7 @@ export default function BTManagerPage({ isActive = true }) {
     }
   }, [callService, dispatch, getHttpBaseUrl]);
 
-  // Subscribe to BT status topic
+  // ── BT status / active-nodes subscription ────────────────────────────────
   useEffect(() => {
     if (!rosbridgeUrl || !isActive) return;
 
@@ -515,12 +415,9 @@ export default function BTManagerPage({ isActive = true }) {
           name: '/bt/status',
           messageType: 'std_msgs/msg/String',
         });
-
         statusTopic.subscribe((msg) => {
           dispatch(setBtStatus(msg.data));
-          if (msg.data !== 'running') {
-            dispatch(setActiveNodeNames([]));
-          }
+          if (msg.data !== 'running') dispatch(setActiveNodeNames([]));
         });
 
         activeNodesTopic = new ROSLIB.Topic({
@@ -528,7 +425,6 @@ export default function BTManagerPage({ isActive = true }) {
           name: '/bt/active_nodes',
           messageType: 'std_msgs/msg/String',
         });
-
         activeNodesTopic.subscribe((msg) => {
           const names = msg.data ? msg.data.split(',') : [];
           dispatch(setActiveNodeNames(names));
@@ -539,14 +435,13 @@ export default function BTManagerPage({ isActive = true }) {
     };
 
     setupSubscription();
-
     return () => {
       if (statusTopic) statusTopic.unsubscribe();
       if (activeNodesTopic) activeNodesTopic.unsubscribe();
     };
   }, [rosbridgeUrl, isActive, dispatch]);
 
-  // Annotate nodes with isActive flag based on active node IDs
+  // ── Annotate nodes with isActive / isSelected ────────────────────────────
   const annotatedNodes = useMemo(() => {
     const activeSet = new Set(activeNodeNames);
     return nodes.map((node) => ({
@@ -565,6 +460,8 @@ export default function BTManagerPage({ isActive = true }) {
   const statusLabel =
     btStatus === 'running' ? 'Running' :
     btStatus === 'completed' ? 'Completed' : 'Stopped';
+
+  const hasTree = nodes.length > 0;
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -606,11 +503,11 @@ export default function BTManagerPage({ isActive = true }) {
               setSaveFileName(treeFileName ? treeFileName.replace(/\.xml$/i, '') : '');
               setShowSaveDialog(true);
             }}
-            disabled={!treeXml}
+            disabled={!hasTree}
             className={clsx(
               'flex items-center gap-2 px-4 py-2 rounded-lg',
               'text-sm font-medium transition-colors duration-150',
-              treeXml
+              hasTree
                 ? 'bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer'
                 : 'bg-gray-100 text-gray-400 cursor-not-allowed'
             )}
@@ -640,45 +537,48 @@ export default function BTManagerPage({ isActive = true }) {
           onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
         >
-        {parseError ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-red-500 text-center">
-              <p className="font-semibold">Parse Error</p>
-              <p className="text-sm mt-1">{parseError}</p>
+          {parseError ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-red-500 text-center">
+                <p className="font-semibold">Parse Error</p>
+                <p className="text-sm mt-1">{parseError}</p>
+              </div>
             </div>
-          </div>
-        ) : nodes.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-gray-400">
-            <div className="text-center">
-              <p className="text-lg">No behavior tree loaded</p>
-              <p className="text-sm mt-1">Click "Load XML" to select a tree file</p>
+          ) : nodes.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-gray-400">
+              <div className="text-center">
+                <p className="text-lg">No behavior tree loaded</p>
+                <p className="text-sm mt-1">Click "Load XML" or drag nodes from the palette</p>
+              </div>
             </div>
-          </div>
-        ) : (
-          <ReactFlow
-            nodes={annotatedNodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            nodeTypes={nodeTypes}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            nodesDraggable={true}
-            nodesConnectable={false}
-            elementsSelectable={true}
-            onNodeClick={handleNodeClick}
-            onNodeDragStop={handleNodeDragStop}
-            minZoom={0.3}
-            maxZoom={2}
-            zoomOnScroll={false}
-            panOnScroll={true}
-            zoomOnPinch={true}
-            zoomActivationKeyCode="Control"
-          >
-            <Controls showInteractive={false} />
-            <Background color="#e5e7eb" gap={16} />
-          </ReactFlow>
-        )}
+          ) : (
+            <ReactFlow
+              nodes={annotatedNodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              nodeTypes={nodeTypes}
+              onInit={(instance) => { reactFlowRef.current = instance; }}
+              onConnect={handleConnect}
+              onNodeClick={handleNodeClick}
+              onNodeDragStop={handleNodeDragStop}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              nodesDraggable={true}
+              nodesConnectable={true}
+              elementsSelectable={true}
+              deleteKeyCode={null}
+              minZoom={0.3}
+              maxZoom={2}
+              zoomOnScroll={false}
+              panOnScroll={true}
+              zoomOnPinch={true}
+              zoomActivationKeyCode="Control"
+            >
+              <Controls showInteractive={false} />
+              <Background color="#e5e7eb" gap={16} />
+            </ReactFlow>
+          )}
         </div>
         {selectedNodeId && (
           <BTParamPanel
@@ -689,16 +589,15 @@ export default function BTManagerPage({ isActive = true }) {
         )}
       </div>
 
-
       {/* Bottom Control Bar */}
       <div className="flex items-center justify-between px-6 py-3 border-t border-gray-200 bg-white">
         <div className="flex items-center gap-3">
           <button
             onClick={handleStart}
-            disabled={btStatus === 'running' || btStatus === 'completed' || !treeXml}
+            disabled={btStatus === 'running' || btStatus === 'completed' || !hasTree}
             className={clsx(
               'flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium transition-colors',
-              (btStatus === 'running' || btStatus === 'completed' || !treeXml)
+              (btStatus === 'running' || btStatus === 'completed' || !hasTree)
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 : 'bg-green-600 hover:bg-green-700 text-white'
             )}

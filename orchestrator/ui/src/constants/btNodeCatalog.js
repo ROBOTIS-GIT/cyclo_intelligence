@@ -60,11 +60,11 @@ export const BT_NODE_CATALOG = [
     },
   },
   { tag: 'Wait', category: 'action', params: { duration: '5.0' } },
-  { tag: 'WaitUntilGripperClosed', category: 'action', params: {} },
-  { tag: 'WaitUntilGripperOpened', category: 'action', params: {} },
-  { tag: 'WaitUntilArmsStatic',    category: 'action', params: {} },
+  { tag: 'GripperClosed', category: 'action', params: {} },
+  { tag: 'GripperOpened', category: 'action', params: {} },
+  { tag: 'ArmsStatic',    category: 'action', params: {} },
   {
-    tag: 'WaitUntilPoseAndGripperChange',
+    tag: 'PoseGripperChange',
     category: 'action',
     params: {
       left_positions: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',

@@ -70,10 +70,10 @@ class TreeLoader:
             'MoveLift': MoveLift,
             'SendCommand': SendCommandAction,
             'Wait': Wait,
-            'WaitUntilGripperClosed': WaitUntilGripperClosed,
-            'WaitUntilGripperOpened': WaitUntilGripperOpened,
-            'WaitUntilPoseAndGripperChange': WaitUntilPoseAndGripperChange,
-            'WaitUntilArmsStatic': WaitUntilArmsStatic,
+            'GripperClosed': WaitUntilGripperClosed,
+            'GripperOpened': WaitUntilGripperOpened,
+            'PoseGripperChange': WaitUntilPoseAndGripperChange,
+            'ArmsStatic': WaitUntilArmsStatic,
         }
 
     def load_tree_from_string(
