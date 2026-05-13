@@ -20,18 +20,44 @@ import { MdClose } from 'react-icons/md';
 import { setSelectedNodeId } from '../../features/btmanager/btmanagerSlice';
 
 const NUMBER_PARAMS = new Set([
-  'duration', 'angle_deg', 'lift_position', 'control_hz', 'position_threshold',
+  'duration', 'angle_deg', 'lift_position', 'control_hz', 'inference_hz',
+  'chunk_align_window_s', 'position_threshold',
 ]);
 
-const BOOL_PARAMS = new Set(['wait_until_ready']);
+const BOOL_PARAMS = new Set([]);
 
 // Enum params surface as <select> dropdowns. Keep value lists in sync with
 // the Python action definitions (e.g. send_command.COMMAND_MAP,
 // wait_until_pose.GRIPPER_CHECK_OPTIONS).
 const ENUM_PARAMS = {
-  command: ['START_INFERENCE', 'STOP_INFERENCE', 'RESUME_INFERENCE'],
+  command: ['LOAD', 'RESUME', 'STOP', 'CLEAR'],
+  model: ['groot', 'lerobot'],
   gripper_check: ['none', 'left', 'right', 'both'],
 };
+
+// SendCommand inputs that are meaningful per command. Anything outside
+// the set for the current command is rendered disabled — the value stays
+// in params so flipping back to LOAD restores the user's earlier entries.
+// 'command' itself is always editable.
+const SEND_COMMAND_ACTIVE_FIELDS = {
+  LOAD: new Set([
+    'command', 'model', 'policy_path', 'task_instruction',
+    'inference_hz', 'control_hz', 'chunk_align_window_s',
+  ]),
+  // Resume re-conditions language mid-run; the other LOAD inputs are
+  // already baked into the loaded policy.
+  RESUME: new Set(['command', 'task_instruction']),
+  STOP: new Set(['command']),
+  CLEAR: new Set(['command']),
+};
+
+function isSendCommandFieldDisabled(nodeType, key, params) {
+  if (nodeType !== 'SendCommand') return false;
+  const cmd = String(params.command || 'LOAD').toUpperCase();
+  const active = SEND_COMMAND_ACTIVE_FIELDS[cmd];
+  if (!active) return false;
+  return !active.has(key);
+}
 
 export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
   const dispatch = useDispatch();
@@ -61,17 +87,22 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
     onParamChange(selectedNodeId, paramName, localParams[paramName]);
   };
 
-  const renderInput = (key, value) => {
+  const renderInput = (key, value, disabled = false) => {
+    const disabledCls = disabled
+      ? ' bg-gray-100 text-gray-400 cursor-not-allowed'
+      : '';
+
     if (ENUM_PARAMS[key]) {
       return (
         <select
           value={value}
+          disabled={disabled}
           onChange={(e) => {
             handleChange(key, e.target.value);
             // select has no meaningful blur event for this; sync immediately
             onParamChange(selectedNodeId, key, e.target.value);
           }}
-          className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+          className={`w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400${disabledCls}`}
         >
           {ENUM_PARAMS[key].map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
@@ -82,9 +113,10 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
 
     if (BOOL_PARAMS.has(key)) {
       return (
-        <label className="flex items-center gap-2 cursor-pointer">
+        <label className={`flex items-center gap-2 ${disabled ? 'cursor-not-allowed text-gray-400' : 'cursor-pointer'}`}>
           <input
             type="checkbox"
+            disabled={disabled}
             checked={value === 'true' || value === true}
             onChange={(e) => {
               const v = e.target.checked ? 'true' : 'false';
@@ -104,9 +136,10 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
           type="number"
           step="any"
           value={value}
+          disabled={disabled}
           onChange={(e) => handleChange(key, e.target.value)}
           onBlur={() => handleBlur(key)}
-          className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+          className={`w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400${disabledCls}`}
         />
       );
     }
@@ -114,10 +147,11 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
     return (
       <textarea
         value={value}
+        disabled={disabled}
         onChange={(e) => handleChange(key, e.target.value)}
         onBlur={() => handleBlur(key)}
         rows={String(value).length > 60 ? 3 : 1}
-        className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 resize-y"
+        className={`w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 resize-y${disabledCls}`}
       />
     );
   };
@@ -143,14 +177,21 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
         {paramEntries.length === 0 ? (
           <p className="text-sm text-gray-400">No parameters</p>
         ) : (
-          paramEntries.map(([key, value]) => (
-            <div key={key}>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                {key}
-              </label>
-              {renderInput(key, value)}
-            </div>
-          ))
+          paramEntries.map(([key, value]) => {
+            const disabled = isSendCommandFieldDisabled(nodeType, key, localParams);
+            return (
+              <div key={key}>
+                <label
+                  className={`block text-xs font-medium mb-1 ${
+                    disabled ? 'text-gray-400' : 'text-gray-600'
+                  }`}
+                >
+                  {key}
+                </label>
+                {renderInput(key, value, disabled)}
+              </div>
+            );
+          })
         )}
       </div>
     </div>

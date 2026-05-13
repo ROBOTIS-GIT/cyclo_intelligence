@@ -1264,6 +1264,7 @@ class OrchestratorNode(Node):
                                 task_instruction=task_instruction,
                             )
                             if result.success:
+                                self.on_inference = True
                                 self._publish_inference_phase(InferenceStatus.INFERENCING)
                             response.success = result.success
                             response.message = result.message or 'Inference resumed'

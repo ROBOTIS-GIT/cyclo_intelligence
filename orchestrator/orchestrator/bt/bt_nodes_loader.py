@@ -248,12 +248,13 @@ class TreeLoader:
                 task_instruction = ', '.join(task_instruction)
             action = action_class(
                 node=self.node,
-                command=params.get('command', 'STOP_INFERENCE'),
+                command=params.get('command', 'LOAD'),
+                model=params.get('model', ''),
                 policy_path=params.get('policy_path', ''),
                 task_instruction=task_instruction,
-                task_name=params.get('task_name', ''),
-                control_hz=params.get('control_hz', 0),
-                wait_until_ready=params.get('wait_until_ready', False),
+                inference_hz=params.get('inference_hz', 15),
+                control_hz=params.get('control_hz', 100),
+                chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
             )
             action.name = name
             return action
