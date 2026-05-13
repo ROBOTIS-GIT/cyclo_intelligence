@@ -166,13 +166,14 @@ RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
 # bashrc defaults for interactive shells
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
     echo "source ${COLCON_WS}/install/setup.bash" >> /root/.bashrc && \
-    echo "alias cb='cd ${COLCON_WS} && colcon build --symlink-install'" >> /root/.bashrc && \
-    echo "alias orchestrator='ros2 launch orchestrator orchestrator_bringup.launch.py'" >> /root/.bashrc && \
-    echo "alias cyclo_data='ros2 run cyclo_data cyclo_data_node'" >> /root/.bashrc && \
     echo "export ROS_DOMAIN_ID=30" >> /root/.bashrc && \
     echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp" >> /root/.bashrc && \
     echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'" >> /root/.bashrc && \
-    echo "alias zenoh='ros2 run rmw_zenoh_cpp rmw_zenohd'" >> /root/.bashrc
+    echo "alias zenoh='ros2 run rmw_zenoh_cpp rmw_zenohd'" >> /root/.bashrc && \
+    echo "alias cb='cd ${COLCON_WS} && colcon build --symlink-install --paths src/cyclo_intelligence/orchestrator src/cyclo_intelligence/cyclo_data src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder src/cyclo_intelligence/interfaces src/cyclo_intelligence/shared --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> /root/.bashrc && \
+    echo "alias orchestrator='ros2 launch orchestrator orchestrator_bringup.launch.py'" >> /root/.bashrc && \
+    echo "alias cyclo_data='ros2 run cyclo_data cyclo_data_node'" >> /root/.bashrc && \
+    echo "alias cyclo_intelligence='ros2 launch orchestrator cyclo_intelligence_bringup.launch.py'" >> /root/.bashrc
 
 # s6-agent Unix Domain Socket
 RUN mkdir -p /var/run/agent && chmod 777 /var/run/agent
@@ -204,9 +205,9 @@ RUN mkdir -p /usr/local/lib/s6-services && \
              /usr/local/lib/s6-services/ros2_service_finish.sh
 
 # Log directories — logutil-service runs as 'nobody' by default
-RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data && \
-    chown -R nobody:nogroup /var/log/orchestrator /var/log/cyclo_data && \
-    chmod -R 02755 /var/log/orchestrator /var/log/cyclo_data
+RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence && \
+    chown -R nobody:nogroup /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence && \
+    chmod -R 02755 /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence
 
 # supervisor_api (Step 6-D) — FastAPI control plane that nginx /api/
 # reverse-proxies to (port 8100). Registered as an s6 longrun; the

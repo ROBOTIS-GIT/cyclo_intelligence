@@ -604,10 +604,23 @@ class RecordingService:
     def _do_stop_and_save(self, request, response, command_name: str, event: str):
         """STOP / FINISH / MOVE_TO_NEXT — save metadata, stop rosbag,
         stop DataManager, fire action_event.
+
+        No-op (without raising) when no recording is active. The
+        inference page's Clear button forwards FINISH to land here even
+        when only inference (no recording) was running; without this
+        guard the 'finish' action_event would fire and the UI's
+        ACTION_VOICE_MAP would play "Recording finished" — confusing in
+        an inference-only context.
         """
         if self._data_manager is None:
-            response.success = False
-            response.message = f'{command_name}: no active recording session'
+            response.success = True
+            response.message = f'{command_name}: no DataManager — no-op'
+            return response
+        if not self._data_manager.is_recording():
+            response.success = True
+            response.message = (
+                f'{command_name}: no active recording — no-op'
+            )
             return response
 
         self._node.get_logger().info(

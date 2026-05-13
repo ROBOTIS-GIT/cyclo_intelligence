@@ -1429,9 +1429,14 @@ class OrchestratorNode(Node):
                             self._apply_cyclo_data_response(cd_result, response)
 
                     elif request.command == SendCommand.Request.CANCEL_INFERENCE_RECORD:
-                        self.get_logger().info('Cancelling recording during inference (forwarder)')
+                        # Inference page's Record-Discard — drop the
+                        # episode entirely (no save). Same semantics as
+                        # the record page's Discard, just forwarded
+                        # under a different SendCommand so the orchestrator
+                        # leaves the inference session alive.
+                        self.get_logger().info('Discarding recording during inference (forwarder)')
                         cd_result = self._forward_recording(
-                            RecordingCommand.Request.RERECORD,
+                            RecordingCommand.Request.CANCEL,
                             task_info=request.task_info,
                         )
                         if (cd_result.success
@@ -1440,7 +1445,7 @@ class OrchestratorNode(Node):
                             self._set_session_active(on_recording=False)
                             response.success = True
                             response.message = (
-                                cd_result.response.message or 'Recording cancelled'
+                                cd_result.response.message or 'Recording discarded'
                             )
                         else:
                             self._apply_cyclo_data_response(cd_result, response)
