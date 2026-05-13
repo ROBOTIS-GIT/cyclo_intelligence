@@ -282,6 +282,22 @@ class DataManager:
         print(f'[DataManager] Recording stopped - Episode saved. '
               f'Total episodes: {total}')
 
+    def discard_recording(self):
+        """
+        Stop without saving — flip to idle but leave the episode counter
+        untouched so the discarded slot is reused by the next START.
+
+        Caller is responsible for removing the episode directory on disk
+        (rosbag's stop_and_delete + a defensive rmtree in
+        RecordingService._do_discard).
+        """
+        with self._state_lock:
+            self._status = 'idle'
+            self._start_time_s = 0
+            unchanged = self._record_episode_count
+        print(f'[DataManager] Recording discarded - episode count unchanged '
+              f'({unchanged})')
+
     def is_recording(self):
         """Check if currently recording."""
         with self._state_lock:
@@ -366,7 +382,6 @@ class DataManager:
     def save_robotis_metadata(
         self,
         urdf_path: str = None,
-        needs_review: bool = False,
         video_stats: dict | None = None,
         camera_info_files: dict | None = None,
         camera_rotations: dict | None = None,
@@ -379,7 +394,6 @@ class DataManager:
 
         Args:
             urdf_path: Path to URDF file to copy.
-            needs_review: If True, marks episode as needing review (e.g., cancelled recording).
             video_stats: ``{cam_name: {frames_received, frames_written, ...}}`` from VideoRecorder.
             camera_info_files: ``{cam_name: yaml_path}`` from CameraInfoSnapshot.
         """
@@ -454,7 +468,6 @@ class DataManager:
             'format_version': 'robotis_v2',
             'recorder_format_version': 2,
             'device_serial': socket.gethostname(),
-            'needs_review': needs_review,
             'video_files': video_files,
             'camera_info_files': camera_info_rel,
             'video_stats': video_stats or {},
@@ -473,48 +486,6 @@ class DataManager:
             print(f'[ROBOTIS] Metadata saved to: {meta_data_path}')
         except Exception as e:
             print(f'[ROBOTIS] Failed to save metadata: {e}')
-
-    def toggle_previous_episode_needs_review(self):
-        """Toggle the previous episode's needs_review flag.
-
-        Reads the current needs_review state and flips it.
-        Used when user presses cancel in idle state.
-
-        Returns:
-            Optional[bool]: The new needs_review value, or None if failed.
-        """
-        prev_episode = self._record_episode_count - 1
-        if prev_episode < 0:
-            print('[DataManager] No previous episode to toggle')
-            return None
-
-        episode_path = self._save_rosbag_path + f'/{prev_episode}'
-        meta_data_path = os.path.join(episode_path, 'episode_info.json')
-
-        if not os.path.exists(meta_data_path):
-            # Backward compatibility: check old name
-            legacy_path = os.path.join(episode_path, 'meta_data.json')
-            if os.path.exists(legacy_path):
-                meta_data_path = legacy_path
-            else:
-                print(f'[DataManager] No episode_info.json at: {meta_data_path}')
-                return None
-
-        try:
-            with open(meta_data_path, 'r') as f:
-                meta_data = json.load(f)
-
-            current = meta_data.get('needs_review', False)
-            meta_data['needs_review'] = not current
-
-            _atomic_write_json(meta_data_path, meta_data)
-
-            print(f'[DataManager] Episode {prev_episode} '
-                  f'needs_review: {current} -> {not current}')
-            return not current
-        except Exception as e:
-            print(f'[DataManager] Failed to toggle episode {prev_episode}: {e}')
-            return None
 
     def should_record_rosbag2(self):
         """In simplified mode, always record rosbag2."""

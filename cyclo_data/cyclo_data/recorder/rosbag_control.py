@@ -96,7 +96,13 @@ class RosbagControl:
         self._send_rosbag_command(command=SendCommand.Request.STOP)
 
     def stop_and_delete_rosbag(self) -> None:
-        self._send_rosbag_command(command=SendCommand.Request.STOP_AND_DELETE)
+        # Wait synchronously so the caller knows the bag directory has
+        # actually been removed before it does its own follow-up cleanup
+        # (mp4/yaml left behind by VideoRecorder, defensive rmtree).
+        self._send_rosbag_command(
+            command=SendCommand.Request.STOP_AND_DELETE,
+            wait_for_response=True,
+        )
 
     def finish_rosbag(self) -> None:
         self._send_rosbag_command(command=SendCommand.Request.FINISH)

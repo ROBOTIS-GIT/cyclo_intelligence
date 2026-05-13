@@ -30,6 +30,7 @@ Session-state boundary (REVIEW §9.3):
   flags before invoking us and after our response returns.
 """
 
+import shutil
 import threading
 from pathlib import Path
 from typing import Optional
@@ -78,14 +79,27 @@ class RecordingService:
 
         self._data_manager: Optional[DataManager] = None
         self._robot_type: str = ''
-        # Recording format v2: per-camera MP4 + one-shot camera_info yaml,
-        # both spun up alongside the MCAP writer on START and torn down on
-        # STOP / FINISH / RERECORD / CANCEL.
+        # Recording format v2: per-camera MP4 + camera_info yaml. The
+        # recorder/snapshot instances live from REFRESH_TOPICS (= robot_type
+        # selection) through service shutdown — only the per-episode
+        # writers toggle on START/STOP. ``_video_robot_type`` tracks the
+        # robot_type the current subs were built for so reconfigure only
+        # fires when it actually changes.
         self._video_recorder: Optional[VideoRecorder] = None
         self._camera_info: Optional[CameraInfoSnapshot] = None
+        self._video_robot_type: str = ''
+        self._last_image_topics: dict = {}
+        self._last_camera_info_topics: dict = {}
         self._last_video_stats: dict = {}
         self._last_camera_info_files: dict = {}
         self._last_camera_rotations: dict = {}
+        # rosbag_recorder's `prepare` always destroys + recreates its
+        # subscriptions (service_bag_recorder.cpp:188-192), which resets
+        # the topic monitor's EMA baseline and triggers a fresh wave of
+        # zenoh liveliness declarations. We skip forwarding prepare when
+        # the topic set hasn't changed since the last call so START
+        # doesn't reissue what REFRESH_TOPICS already did.
+        self._last_prepared_topics: tuple = ()
         # Background transcoder converts each episode's raw MJPEG MP4s
         # into H.264 after STOP. One pool per service instance, lazily
         # initialised on first STOP so process startup stays cheap.
@@ -148,6 +162,24 @@ class RecordingService:
             except Exception as exc:  # noqa: BLE001
                 self._node.get_logger().warning(
                     f'DataManager stop on shutdown failed: {exc}')
+        # Release persistent video/camera_info subscriptions held since
+        # REFRESH_TOPICS. rclpy's node.destroy_node() would clean them
+        # up anyway, but doing it explicitly lets leak audits see a
+        # clean state.
+        if self._video_recorder is not None:
+            try:
+                self._video_recorder.close()
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'VideoRecorder.close failed: {exc}')
+            self._video_recorder = None
+        if self._camera_info is not None:
+            try:
+                self._camera_info.close()
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'CameraInfoSnapshot.close failed: {exc}')
+            self._camera_info = None
         self._rosbag.shutdown()
 
     # ------------------------------------------------------------------
@@ -299,10 +331,95 @@ class RecordingService:
             response.success = False
             response.message = 'rosbag_recorder service unavailable'
             return response
-        self._rosbag.prepare_rosbag(topics=topics)
+        self._prepare_rosbag_topics(topics)
+
+        # When the orchestrator forwards REFRESH_TOPICS from
+        # set_robot_type_callback, it carries the freshly-selected
+        # robot_type. That's our trigger to build the persistent
+        # video/camera_info subscriptions so subsequent START commands
+        # don't fire a zenoh declaration storm. Failures here don't
+        # poison the response — rosbag is already prepared, and the
+        # next REFRESH_TOPICS will retry.
+        if request.robot_type:
+            try:
+                self._ensure_video_pipeline(request.robot_type)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().error(
+                    f'REFRESH_TOPICS video pipeline setup failed: {exc!r}')
+
         response.success = True
         response.message = f'Topics refreshed ({len(topics)} topics)'
         return response
+
+    def _prepare_rosbag_topics(self, topics: list) -> None:
+        """Forward `prepare` to rosbag_recorder only when the set changes.
+
+        rosbag_recorder rebuilds its subscriptions on every prepare
+        (service_bag_recorder.cpp:188-192) — that resets the topic
+        monitor's EMA baseline and fires a fresh zenoh liveliness
+        declaration wave. Caching by sorted-tuple lets the no-op case
+        (REFRESH_TOPICS already prepared this set, and START hands us
+        the same one) skip the round-trip entirely.
+        """
+        new_set = tuple(sorted(topics))
+        if new_set == self._last_prepared_topics:
+            return
+        self._rosbag.prepare_rosbag(topics=topics)
+        self._last_prepared_topics = new_set
+
+    def _ensure_video_pipeline(self, robot_type: str) -> None:
+        """Build or reconfigure the persistent video/camera_info subscriptions.
+
+        Called from ``_do_refresh_topics`` whenever the orchestrator
+        forwards a REFRESH_TOPICS with a robot_type. First call builds
+        the subscriptions; subsequent calls with the same robot_type
+        are no-ops; a different robot_type triggers reconfigure on both
+        components.
+        """
+        if not robot_type:
+            return
+        if self._video_robot_type == robot_type and (
+            self._video_recorder is not None or self._camera_info is not None
+        ):
+            return
+
+        image_topics, camera_info_topics, rotations = self._resolve_video_topics(
+            robot_type)
+        self._last_image_topics = image_topics
+        self._last_camera_info_topics = camera_info_topics
+        self._last_camera_rotations = rotations
+
+        if self._video_recorder is None:
+            if image_topics:
+                self._video_recorder = VideoRecorder(
+                    node=self._node, cameras=image_topics,
+                    callback_group=getattr(self._node, 'io_callback_group', None),
+                )
+        else:
+            try:
+                self._video_recorder.reconfigure(image_topics)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().error(
+                    f'VideoRecorder.reconfigure failed: {exc!r}')
+
+        if self._camera_info is None:
+            if camera_info_topics:
+                self._camera_info = CameraInfoSnapshot(
+                    node=self._node, camera_info_topics=camera_info_topics,
+                    callback_group=getattr(self._node, 'io_callback_group', None),
+                )
+        else:
+            try:
+                self._camera_info.reconfigure(camera_info_topics)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().error(
+                    f'CameraInfoSnapshot.reconfigure failed: {exc!r}')
+
+        self._video_robot_type = robot_type
+        self._node.get_logger().info(
+            f'Video pipeline ready for robot_type={robot_type!r} '
+            f'(cameras={len(image_topics)}, '
+            f'camera_info={len(camera_info_topics)})')
 
     def _resolve_video_topics(self, robot_type: str):
         """Return ``(image_topics, camera_info_topics, rotations)`` for a robot.
@@ -345,15 +462,20 @@ class RecordingService:
 
         dm = self._ensure_data_manager(request.task_info, request.robot_type)
 
-        # Prepare first — mirrors orchestrator's START_RECORD flow
-        # (Communicator.prepare_rosbag before start_rosbag).
+        # rosbag_recorder is normally prepared at REFRESH_TOPICS time
+        # (= robot_type selection) — _prepare_rosbag_topics short-circuits
+        # when the topic set hasn't changed, so this call is a no-op in
+        # the common case. If REFRESH_TOPICS never ran (tests, recovery)
+        # and request.topics is empty, warn so the caller knows the bag
+        # will be empty.
         topics = list(request.topics or [])
         if topics:
-            self._rosbag.prepare_rosbag(topics=topics)
-        else:
+            self._prepare_rosbag_topics(topics)
+        elif not self._last_prepared_topics:
             self._node.get_logger().warn(
-                'START: topics[] empty — skipping prepare. '
-                'Caller should populate from orchestrator.Communicator.get_mcap_topics().')
+                'START: topics[] empty and rosbag never prepared — '
+                'caller should populate from '
+                'orchestrator.Communicator.get_mcap_topics().')
 
         rosbag_path = dm.get_save_rosbag_path(allow_idle=True)
         if not rosbag_path:
@@ -371,24 +493,17 @@ class RecordingService:
 
         episode_dir = Path(rosbag_path)
         episode_dir.mkdir(parents=True, exist_ok=True)
-        image_topics, camera_info_topics, rotations = self._resolve_video_topics(
-            request.robot_type)
-        # Stash camera rotations on the instance so the next
-        # save_robotis_metadata call can persist them into the episode
-        # manifest — the background transcoder reads it from there.
-        self._last_camera_rotations = rotations
-        if image_topics:
-            self._video_recorder = VideoRecorder(
-                node=self._node, cameras=image_topics,
-                callback_group=getattr(self._node, 'io_callback_group', None),
-            )
-            self._video_recorder.start(episode_dir)
-        if camera_info_topics:
-            self._camera_info = CameraInfoSnapshot(
-                node=self._node, camera_info_topics=camera_info_topics,
-                callback_group=getattr(self._node, 'io_callback_group', None),
-            )
-            self._camera_info.start(episode_dir)
+
+        # Subscriptions were built up-front in REFRESH_TOPICS, so START
+        # only opens the per-episode writers. Defensive ensure for the
+        # rare case where START arrived without a preceding
+        # REFRESH_TOPICS (tests, recovery paths) — same robot_type re-
+        # entry is a no-op inside _ensure_video_pipeline.
+        self._ensure_video_pipeline(request.robot_type)
+        if self._video_recorder is not None:
+            self._video_recorder.start_episode(episode_dir)
+        if self._camera_info is not None:
+            self._camera_info.start_episode(episode_dir)
 
         dm.start_recording()
         self._rosbag.publish_action_event('start')
@@ -459,32 +574,32 @@ class RecordingService:
                 f"Transcoder resume scan failed: {exc!r}"
             )
 
-    def _teardown_video_recorders(self):
-        """Stop VideoRecorder + CameraInfoSnapshot if active.
+    def _stop_episode_writers(self):
+        """End the current episode, keeping subscribers alive.
 
         Stats / produced-file lists are stashed on the instance so the
         next ``save_robotis_metadata`` call can include them in
-        ``episode_info.json``.
+        ``episode_info.json``. The recorder/snapshot instances remain
+        for the next episode — only ``close()`` (on shutdown) or
+        ``reconfigure()`` (on robot_type change) tears their subs down.
         """
         self._last_video_stats = {}
         self._last_camera_info_files = {}
         if self._video_recorder is not None:
             try:
-                self._last_video_stats = self._video_recorder.stop() or {}
+                self._last_video_stats = self._video_recorder.stop_episode() or {}
             except Exception as exc:  # pragma: no cover - defensive
                 self._node.get_logger().error(
-                    f'VideoRecorder.stop raised: {exc!r}')
-            self._video_recorder = None
+                    f'VideoRecorder.stop_episode raised: {exc!r}')
         if self._camera_info is not None:
             try:
-                produced = self._camera_info.stop() or {}
+                produced = self._camera_info.stop_episode() or {}
                 self._last_camera_info_files = {
                     cam: str(p) for cam, p in produced.items()
                 }
             except Exception as exc:  # pragma: no cover - defensive
                 self._node.get_logger().error(
-                    f'CameraInfoSnapshot.stop raised: {exc!r}')
-            self._camera_info = None
+                    f'CameraInfoSnapshot.stop_episode raised: {exc!r}')
 
     def _do_stop_and_save(self, request, response, command_name: str, event: str):
         """STOP / FINISH / MOVE_TO_NEXT — save metadata, stop rosbag,
@@ -501,7 +616,7 @@ class RecordingService:
 
         episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
         self._rosbag.stop_rosbag()
-        self._teardown_video_recorders()
+        self._stop_episode_writers()
 
         if request.urdf_path:
             self._data_manager.save_robotis_metadata(
@@ -534,18 +649,26 @@ class RecordingService:
         return response
 
     def _do_cancel_with_review(self, request, response, event: str):
-        """RERECORD — save current episode with needs_review=True, then stop."""
+        """RERECORD — stop current episode and save (no review flag).
+
+        Historically this also stamped ``needs_review=True`` on the
+        episode_info.json, but that field has been removed (downstream
+        tooling never consumed it). RERECORD now behaves like STOP
+        save-wise; the path is kept distinct because the action_event
+        the orchestrator publishes here is ``cancel`` rather than
+        ``finish``, which other consumers may still discriminate on.
+        """
         if self._data_manager is None:
             response.success = False
             response.message = 'RERECORD: no active recording session'
             return response
 
         self._rosbag.stop_rosbag()
-        self._teardown_video_recorders()
+        self._stop_episode_writers()
 
         if request.urdf_path:
             self._data_manager.save_robotis_metadata(
-                urdf_path=request.urdf_path, needs_review=True,
+                urdf_path=request.urdf_path,
                 video_stats=self._last_video_stats,
                 camera_info_files=self._last_camera_info_files,
                 camera_rotations=self._last_camera_rotations,
@@ -556,36 +679,87 @@ class RecordingService:
 
         self._publish_umbrella_status(
             DataOperationStatus.CANCELLED, 'RERECORD',
-            'Recording cancelled — data saved with review flag')
+            'Recording cancelled — data saved')
 
         response.success = True
-        response.message = 'Recording cancelled (saved with review flag)'
+        response.message = 'Recording cancelled (data saved)'
         return response
 
     def _do_cancel(self, request, response):
-        """CANCEL — two modes (matches orchestrator):
-          * Active recording → same as RERECORD (save with review flag).
-          * No active recording → toggle previous episode's needs_review.
+        """CANCEL — discard the active episode entirely.
+
+        On active recording: delete the on-disk bag + mp4/yaml
+        siblings and leave the episode counter where it was so the
+        slot is reused next START.
+
+        On idle (no active recording): there's nothing to discard.
+        Previously this path toggled the prior episode's
+        ``needs_review`` flag, but that flag was removed (downstream
+        never read it), so idle CANCEL now responds with a no-op.
         """
         if self._data_manager is None:
             response.success = False
-            response.message = 'CANCEL: no DataManager yet — nothing to toggle'
+            response.message = 'CANCEL: no DataManager yet'
             return response
 
         if self._data_manager.is_recording():
-            return self._do_cancel_with_review(request, response, event='cancel')
+            return self._do_discard(request, response, event='cancel')
 
-        toggled = self._data_manager.toggle_previous_episode_needs_review()
-        if toggled is None:
-            response.success = False
-            response.message = 'No previous episode to toggle'
-            return response
-        self._rosbag.publish_action_event('review_on' if toggled else 'review_off')
         response.success = True
-        response.message = f'Previous episode needs_review: {toggled}'
+        response.message = 'CANCEL: no active recording — nothing to discard'
         self._publish_umbrella_status(
-            DataOperationStatus.IDLE, 'CANCEL_TOGGLE_REVIEW',
-            response.message)
+            DataOperationStatus.IDLE, 'CANCEL', response.message)
+        return response
+
+    def _do_discard(self, request, response, event: str):
+        """Active-recording CANCEL — drop the episode without saving.
+
+        Order matters: drain VideoRecorder/CameraInfoSnapshot writers
+        first so no ffmpeg subprocess is still holding files open in
+        ``episode_dir``, then tell rosbag_recorder to stop and delete
+        the bag (which removes ``episode_dir`` outright), then defensively
+        rmtree anything that survived (e.g. if rosbag's delete was
+        partial). Finally flip DataManager to idle *without* bumping
+        the episode counter so the next START reuses the same slot.
+        """
+        if self._data_manager is None:
+            response.success = False
+            response.message = 'CANCEL: no active recording session'
+            return response
+
+        episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
+
+        # 1. Close mp4/parquet writers + ffmpeg before the bag dir is
+        #    deleted underneath them.
+        self._stop_episode_writers()
+
+        # 2. rosbag_recorder stops + removes its bag directory
+        #    (= episode_dir). Synchronous so we don't race with step 3.
+        try:
+            self._rosbag.stop_and_delete_rosbag()
+        except Exception as exc:  # noqa: BLE001
+            self._node.get_logger().warning(
+                f'stop_and_delete_rosbag failed: {exc!r}')
+
+        # 3. Belt-and-braces: if anything (videos/, camera_info/, stray
+        #    .mcap.tmp from a crash) survived, sweep it.
+        if episode_dir.exists():
+            try:
+                shutil.rmtree(episode_dir)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'episode_dir cleanup failed: {episode_dir}: {exc!r}')
+
+        # 4. Flip session to idle without bumping the episode counter.
+        self._data_manager.discard_recording()
+        self._rosbag.publish_action_event(event)
+
+        self._publish_umbrella_status(
+            DataOperationStatus.CANCELLED, 'CANCEL',
+            f'Recording discarded — episode removed: {episode_dir.name}')
+
+        response.success = True
+        response.message = 'Recording discarded'
         return response
 
     def _do_skip_task(self, request, response):

@@ -18,6 +18,11 @@ A Parquet sidecar (``videos/<cam>_timestamps.parquet``) tracks the
 ``header.stamp`` (publisher clock) and ``recv`` (subscriber clock) of
 every frame written. LeRobot resampling uses ``header_stamp_ns`` to map
 the synced grid to MP4 frame indices.
+
+Subscriptions are created once at ``__init__`` (= when the robot_type
+is first selected) and persist until ``close()``. Episode boundaries
+toggle a ``_recording_active`` gate that the ROS callback checks before
+enqueuing a frame, so creating subs no longer fires on every START.
 """
 
 from __future__ import annotations
@@ -68,12 +73,15 @@ _TIMESTAMP_SCHEMA = pa.schema([
 class _CameraStream:
     name: str
     topic: str
-    mp4_path: Path
-    sidecar_path: Path
 
+    # Persistent — created in __init__/reconfigure, lives until close().
     subscription: Optional[object] = None
-    process: Optional[subprocess.Popen] = None
     queue: Queue = field(default_factory=lambda: Queue(maxsize=_QUEUE_MAX))
+
+    # Per-episode — populated by start_episode, cleared by stop_episode.
+    mp4_path: Optional[Path] = None
+    sidecar_path: Optional[Path] = None
+    process: Optional[subprocess.Popen] = None
     writer: Optional[pq.ParquetWriter] = None
     worker: Optional[threading.Thread] = None
 
@@ -85,7 +93,15 @@ class _CameraStream:
 
 
 class VideoRecorder:
-    """Manages MP4 + Parquet sidecar writers for every camera in an episode."""
+    """Manages MP4 + Parquet sidecar writers for every camera in an episode.
+
+    Subscriptions are created up-front in ``__init__`` and persist until
+    ``close()`` (or a ``reconfigure()`` that swaps the camera set). Each
+    episode's MP4/parquet/worker lifecycle is bracketed by
+    ``start_episode`` / ``stop_episode`` — those toggle the
+    ``_recording_active`` gate that the ROS callback consults to decide
+    whether to enqueue a frame.
+    """
 
     def __init__(
         self,
@@ -102,26 +118,47 @@ class VideoRecorder:
         self._framerate_hint = framerate_hint
 
         self._streams: Dict[str, _CameraStream] = {}
-        self._running = False
+        # Simple bool — read in the ROS callback on every frame, flipped
+        # by start_episode/stop_episode. GIL covers the read/write so no
+        # lock needed.
+        self._recording_active = False
+
+        self._build_streams(self._cameras_spec)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, episode_dir: Path) -> None:
-        """Spin up subscribers + ffmpeg subprocesses for every camera."""
-        if self._running:
-            raise RuntimeError("VideoRecorder already running")
+    def start_episode(self, episode_dir: Path) -> None:
+        """Open MP4/parquet writers and worker threads for the next episode.
+
+        Subscriptions are already live from ``__init__`` — this only spins
+        up the per-episode ffmpeg/parquet/worker triple and flips the
+        gate so the callback starts enqueuing frames.
+        """
+        if self._recording_active:
+            raise RuntimeError("VideoRecorder already recording an episode")
         videos_dir = Path(episode_dir) / "videos"
         videos_dir.mkdir(parents=True, exist_ok=True)
 
-        for cam_name, topic in self._cameras_spec.items():
-            stream = _CameraStream(
-                name=cam_name,
-                topic=topic,
-                mp4_path=videos_dir / f"{cam_name}.mp4",
-                sidecar_path=videos_dir / f"{cam_name}_timestamps.parquet",
-            )
+        for cam_name, stream in self._streams.items():
+            # Reset per-episode state. Drain any stale items from the
+            # queue — should be empty since the gate was off, but a
+            # callback in flight from before the gate flipped could have
+            # raced through.
+            try:
+                while True:
+                    stream.queue.get_nowait()
+            except Empty:
+                pass
+            stream.mp4_path = videos_dir / f"{cam_name}.mp4"
+            stream.sidecar_path = videos_dir / f"{cam_name}_timestamps.parquet"
+            stream.frames_received = 0
+            stream.frames_written = 0
+            stream.frames_dropped_queue = 0
+            stream.frames_dropped_invalid = 0
+            stream.ffmpeg_error = None
+
             self._spawn_ffmpeg(stream)
             stream.writer = pq.ParquetWriter(
                 stream.sidecar_path, _TIMESTAMP_SCHEMA, compression="zstd",
@@ -131,43 +168,31 @@ class VideoRecorder:
                 name=f"video-{cam_name}", daemon=True,
             )
             stream.worker.start()
-            stream.subscription = self._node.create_subscription(
-                CompressedImage,
-                topic,
-                lambda msg, s=stream: self._on_frame(s, msg),
-                _SUB_QOS,
-                callback_group=self._cb_group,
-            )
-            self._streams[cam_name] = stream
             self._node.get_logger().info(
-                f"VideoRecorder: {cam_name} <- {topic} -> {stream.mp4_path.name}"
+                f"VideoRecorder: {cam_name} <- {stream.topic} -> {stream.mp4_path.name}"
             )
-        self._running = True
 
-    def stop(self) -> Dict[str, Dict[str, int]]:
+        self._recording_active = True
+
+    def stop_episode(self) -> Dict[str, Dict[str, int]]:
         """Drain queues, finalize ffmpeg + parquet writers, return stats.
 
-        Performs the per-camera teardown phases in parallel: all
-        subscribers are torn down, then all sentinels are pushed, then we
-        join workers + close stdin + wait for ffmpeg across cameras
-        concurrently. With 4 cameras and bounded per-phase waits, total
-        stop time stays under the ROS service call deadline (~30s)
-        instead of summing per-camera waits.
+        Subscriptions stay alive for the next episode — only the
+        per-episode writers/workers are torn down. The recording gate is
+        flipped first so no further frames enter the queues while we
+        drain.
         """
-        if not self._running:
+        if not self._recording_active:
             return {}
+
+        # Close the gate first so the ROS callback stops enqueuing.
+        self._recording_active = False
 
         streams = list(self._streams.values())
         stats: Dict[str, Dict[str, int]] = {}
 
         try:
-            # Phase 1: destroy subscriptions so no new frames enter the queues.
-            for stream in streams:
-                if stream.subscription is not None:
-                    self._node.destroy_subscription(stream.subscription)
-                    stream.subscription = None
-
-            # Phase 2: push sentinels so each worker drains its queue and exits.
+            # Push sentinels so each worker drains its queue and exits.
             for stream in streams:
                 try:
                     stream.queue.put(None, timeout=2.0)
@@ -181,9 +206,8 @@ class VideoRecorder:
                     except Full:
                         pass
 
-            # Phase 3: join workers in parallel by joining each with a short
-            # poll, then proceeding to the next. Workers run concurrently in
-            # OS threads so this fans out automatically.
+            # Join workers in parallel — they're already running in OS
+            # threads so this fans out automatically.
             for stream in streams:
                 if stream.worker is not None:
                     stream.worker.join(timeout=10.0)
@@ -192,15 +216,11 @@ class VideoRecorder:
                             f"VideoRecorder: {stream.name} worker did not exit within 10s"
                         )
         finally:
-            # Phases 4 + 5 must always run so ffmpeg subprocesses never leak
-            # and parquet writers always flush, even if an earlier phase
-            # raised. ffmpeg without stdin.close() would block forever
-            # waiting for EOF, exceeding the ~30s service deadline.
-
-            # Phase 4: close ffmpeg stdin so each subprocess hits EOF and
-            # finalises its MP4. The waits below sum up but each ffmpeg is
-            # already draining concurrently — the first wait absorbs the
-            # bulk of finalisation latency for all cameras.
+            # The ffmpeg + parquet cleanup must always run so subprocesses
+            # never leak and parquet writers always flush, even if an
+            # earlier phase raised. ffmpeg without stdin.close() would
+            # block forever waiting for EOF, exceeding the ~30s service
+            # deadline.
             for stream in streams:
                 if stream.process is not None and stream.process.stdin is not None:
                     try:
@@ -217,7 +237,6 @@ class VideoRecorder:
                             f"VideoRecorder: {stream.name} ffmpeg close failed: {exc!r}"
                         )
 
-            # Phase 5: finalise parquet writers + collect stats.
             for stream in streams:
                 if stream.writer is not None:
                     try:
@@ -236,15 +255,68 @@ class VideoRecorder:
                 self._node.get_logger().info(
                     f"VideoRecorder: {stream.name} stats {stats[stream.name]}"
                 )
-
-            self._streams.clear()
-            self._running = False
+                # Reset per-episode references so the next start_episode
+                # spins fresh ffmpeg/worker. Subscription + queue stay.
+                stream.worker = None
+                stream.process = None
+                stream.mp4_path = None
+                stream.sidecar_path = None
 
         return stats
+
+    def reconfigure(self, cameras: Dict[str, str]) -> None:
+        """Swap the camera set — destroy current subs, build new ones.
+
+        Only called when the active robot_type changes. Refuses if an
+        episode is in flight; the caller (RecordingService) is responsible
+        for ensuring stop_episode ran first.
+        """
+        if self._recording_active:
+            raise RuntimeError("Cannot reconfigure while recording")
+        self._teardown_subscriptions()
+        self._cameras_spec = dict(cameras)
+        self._build_streams(self._cameras_spec)
+
+    def close(self) -> None:
+        """Tear down all subscriptions — called on node shutdown."""
+        if self._recording_active:
+            try:
+                self.stop_episode()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._node.get_logger().error(
+                    f"VideoRecorder.close: stop_episode raised: {exc!r}"
+                )
+        self._teardown_subscriptions()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _build_streams(self, cameras: Dict[str, str]) -> None:
+        """Create one _CameraStream + subscription per camera."""
+        for cam_name, topic in cameras.items():
+            stream = _CameraStream(name=cam_name, topic=topic)
+            stream.subscription = self._node.create_subscription(
+                CompressedImage,
+                topic,
+                lambda msg, s=stream: self._on_frame(s, msg),
+                _SUB_QOS,
+                callback_group=self._cb_group,
+            )
+            self._streams[cam_name] = stream
+            self._node.get_logger().info(
+                f"VideoRecorder: {cam_name} <- {topic} subscribed (idle)"
+            )
+
+    def _teardown_subscriptions(self) -> None:
+        for stream in self._streams.values():
+            if stream.subscription is not None:
+                try:
+                    self._node.destroy_subscription(stream.subscription)
+                except Exception:  # pragma: no cover - destroy is best-effort
+                    pass
+                stream.subscription = None
+        self._streams.clear()
 
     def _spawn_ffmpeg(self, stream: _CameraStream) -> None:
         # Output dir must exist before ffmpeg opens the file — defend
@@ -278,6 +350,14 @@ class VideoRecorder:
             # duration matches reality. ``cfr`` would force a fixed
             # rate; ``passthrough`` is the right mode for VFR sources.
             "-fps_mode", "passthrough",
+            # Pin the mp4 video-track timescale to 90000 (H.264 RTP
+            # standard). The default ~12800Hz timebase only has ~78μs
+            # resolution, so adjacent frames arriving in the same tick
+            # collide and ffmpeg spams "Non-monotonic DTS ... changing
+            # to N+1" warnings. 90000 also matches what
+            # converter/video_sync.py writes for the final lerobot mp4,
+            # so raw / transcoded / final all share one timescale.
+            "-video_track_timescale", "90000",
             # Don't use +faststart for live capture — it forces ffmpeg to
             # buffer the entire stream in memory or a temp file so it can
             # move the moov atom to the front. Trail the moov instead
@@ -311,6 +391,12 @@ class VideoRecorder:
         proc.stderr.close()
 
     def _on_frame(self, stream: _CameraStream, msg: CompressedImage) -> None:
+        # Subscription is persistent (created in __init__) but the ROS
+        # callback runs whenever a publisher emits, including between
+        # episodes. Drop frames when no episode is active — we don't
+        # want them in the queue.
+        if not self._recording_active:
+            return
         stream.frames_received += 1
         data = bytes(msg.data)
         if len(data) < 2 or data[:2] != _JPEG_SOI:

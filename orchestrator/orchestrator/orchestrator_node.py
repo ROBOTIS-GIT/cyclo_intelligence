@@ -921,6 +921,7 @@ class OrchestratorNode(Node):
                 rosbag_topics = self.communicator.get_mcap_topics()
                 cd_result = self._cyclo_data.send_recording_command(
                     command=RecordingCommand.Request.REFRESH_TOPICS,
+                    robot_type=self.robot_type,
                     topics=rosbag_topics,
                 )
                 self._apply_cyclo_data_response(cd_result, response)
@@ -1253,10 +1254,10 @@ class OrchestratorNode(Node):
                     self._snapshot_session_state()
                 )
                 if not snapshot_on_recording and not snapshot_on_inference:
-                    # Not recording — CANCEL/RERECORD toggles the
-                    # previous episode's needs_review flag. Forward to
-                    # cyclo_data; its CANCEL handler does the toggle +
-                    # publish_action_event (Part C2d-4).
+                    # Not recording — CANCEL/RERECORD have nothing to
+                    # do at idle. Forward anyway so cyclo_data's
+                    # handler can publish the umbrella status response
+                    # consistently with the recording paths below.
                     if request.command in (
                         SendCommand.Request.CANCEL,
                         SendCommand.Request.RERECORD,
@@ -1298,7 +1299,8 @@ class OrchestratorNode(Node):
                         self._apply_cyclo_data_response(cd_result, response)
 
                     elif request.command == SendCommand.Request.RERECORD:
-                        # Cyclo_data saves with needs_review=True; orchestrator
+                        # Stop and save the current episode (no review
+                        # flag — that field was removed); orchestrator
                         # still owns inference teardown + timer_manager.
                         self.get_logger().info('Cancelling current recording (forwarder)')
                         cd_result = self._cyclo_data.send_recording_command(
@@ -1444,33 +1446,65 @@ class OrchestratorNode(Node):
                             self._apply_cyclo_data_response(cd_result, response)
 
                     elif request.command == SendCommand.Request.FINISH:
-                        # Forward FINISH to cyclo_data (→ RosbagControl.finish_rosbag)
-                        # then tear down orchestrator-owned inference state.
-                        self.get_logger().info('Finishing all operations (forwarder)')
+                        # Two UI buttons land here, with different intent:
+                        #
+                        #   * Record page "Save"  → task_type='record'.
+                        #     Stop recording only, leave any active
+                        #     inference session alone. (Old behaviour
+                        #     tore down inference too, which closed
+                        #     RobotClient mid-session when recording was
+                        #     started from the record page during
+                        #     inference.)
+                        #
+                        #   * Inference page "Clear" → task_type='inference'.
+                        #     Tooltip is "Stop inference and unload model";
+                        #     this is the inference end-of-session path
+                        #     and must STOP + UNLOAD + disconnect the
+                        #     container client.
+                        is_inference_clear = (
+                            request.task_info.task_type == 'inference'
+                        )
+                        self.get_logger().info(
+                            'Finishing '
+                            f'{"inference session" if is_inference_clear else "recording"} '
+                            '(forwarder)'
+                        )
                         cd_result = self._forward_recording(
                             RecordingCommand.Request.FINISH,
                             task_info=request.task_info,
                         )
-                        self._teardown_inference_client()
-                        self._set_session_active(
-                            on_recording=False, on_inference=False,
-                        )
-                        if self.timer_manager:
-                            self.timer_manager.stop(timer_name='collection')
-                        # Publish READY so the UI flips out of
-                        # INFERENCING/PAUSED immediately.
-                        self._publish_inference_phase(InferenceStatus.READY)
-                        response.success = True
-                        response.message = (
-                            cd_result.response.message
-                            if (cd_result.response is not None)
-                            else (cd_result.message or 'All operations terminated')
-                        )
+                        if is_inference_clear:
+                            self._teardown_inference_client()
+                            self._set_session_active(
+                                on_recording=False, on_inference=False,
+                            )
+                            if self.timer_manager:
+                                self.timer_manager.stop(timer_name='collection')
+                            # Flip UI out of INFERENCING/PAUSED immediately.
+                            self._publish_inference_phase(InferenceStatus.READY)
+                            response.success = True
+                            response.message = (
+                                cd_result.response.message
+                                if (cd_result.response is not None)
+                                else (cd_result.message or 'Inference cleared')
+                            )
+                        else:
+                            if (cd_result.success
+                                    and cd_result.response is not None
+                                    and cd_result.response.success):
+                                self._set_session_active(on_recording=False)
+                                response.success = True
+                                response.message = (
+                                    cd_result.response.message
+                                    or 'Recording saved'
+                                )
+                            else:
+                                self._apply_cyclo_data_response(
+                                    cd_result, response)
 
                     elif request.command == SendCommand.Request.SKIP_TASK:
-                        # Simplified-mode semantics: skip == cancel-with-review.
-                        # Forward RERECORD (saves with needs_review=True) and
-                        # tear down inference state here.
+                        # Simplified-mode semantics: skip == stop-and-save
+                        # plus tear down inference state.
                         self.get_logger().info('Skipping current recording (forwarder)')
                         cd_result = self._forward_recording(
                             RecordingCommand.Request.RERECORD,
@@ -1490,19 +1524,30 @@ class OrchestratorNode(Node):
                         )
 
                     elif request.command == SendCommand.Request.CANCEL:
-                        # Recording-mode CANCEL == RERECORD semantics (save with
-                        # needs_review) + stop inference.
-                        self.get_logger().info('Cancelling current recording (forwarder)')
+                        # Record-page Discard — drop the active episode
+                        # entirely (no needs_review save). Same task_type
+                        # split as FINISH so an inference session running
+                        # alongside the recording isn't torn down.
+                        is_inference_cancel = (
+                            request.task_info.task_type == 'inference'
+                        )
+                        self.get_logger().info(
+                            'Discarding current recording '
+                            f'({"inference session" if is_inference_cancel else "record-only"})'
+                        )
                         cd_result = self._forward_recording(
-                            RecordingCommand.Request.RERECORD,
+                            RecordingCommand.Request.CANCEL,
                             task_info=request.task_info,
                         )
-                        self._teardown_inference_client()
-                        self._set_session_active(
-                            on_recording=False, on_inference=False,
-                        )
-                        if self.timer_manager:
-                            self.timer_manager.stop(timer_name='collection')
+                        if is_inference_cancel:
+                            self._teardown_inference_client()
+                            self._set_session_active(
+                                on_recording=False, on_inference=False,
+                            )
+                            if self.timer_manager:
+                                self.timer_manager.stop(timer_name='collection')
+                        else:
+                            self._set_session_active(on_recording=False)
                         response.success = True
                         response.message = (
                             cd_result.response.message
@@ -1723,6 +1768,7 @@ class OrchestratorNode(Node):
                 rosbag_topics = self.communicator.get_mcap_topics()
                 cd_result = self._cyclo_data.send_recording_command(
                     command=RecordingCommand.Request.REFRESH_TOPICS,
+                    robot_type=self.robot_type,
                     topics=rosbag_topics,
                 )
                 if cd_result.success and cd_result.response is not None \
