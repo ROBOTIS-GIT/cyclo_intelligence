@@ -294,14 +294,15 @@ export default function BTManagerPage({ isActive = true }) {
         ? { label: autoName, nodeType: tag, params, collapsed: false }
         : { label: autoName, nodeType: tag, params },
     };
-    setNodes((prev) => {
-      const next = [...prev, newNode];
-      // Re-flow the whole graph through dagre so the freshly dropped node
-      // doesn't sit at an arbitrary cursor position. The dropped coords
-      // get overwritten by tidy parent-aligned positions on the spot.
-      // Hidden nodes (under collapsed parents) keep their coords.
-      return layoutVisibleOnly(next, edgesRef.current);
-    });
+    // Skip auto-dagre on drop. The new node has no edges yet, so dagre
+    // treats it as a disconnected component and parks it off to the side
+    // — overwriting the cursor coords the user just chose. That makes
+    // the sibling-x sort in handleConnect later route it to the end of
+    // the parent's children regardless of where the user dropped it.
+    // Instead we keep the cursor position; the real re-flow happens when
+    // the user wires up the edge (handleConnect), and at that point the
+    // dropped x is what feeds into the sibling sort.
+    setNodes((prev) => [...prev, newNode]);
     setNodeDataMap((prev) =>
       new Map(prev).set(
         id,

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <Sequence name="DemoSequence" bt_x="360" bt_y="0">
+    <Sequence name="DemoSequence" bt_x="480" bt_y="0">
       <SendCommand name="LoadModel"
         bt_x="0"
         bt_y="140"
@@ -23,8 +23,9 @@
         enable_lift="true"
         lift_position="-0.1"
         duration="2.0"/>
+      <Rotate name="TurnLeft" bt_x="480" bt_y="140" angle_deg="90.0"/>
       <Loop name="RepeatPick&amp;Place"
-        bt_x="480"
+        bt_x="720"
         bt_y="140"
         bt_collapsed="true"
         max_iterations="5">
@@ -58,7 +59,7 @@
           duration="5.0"/>
       </Loop>
       <SendCommand name="UnloadModel"
-        bt_x="720"
+        bt_x="960"
         bt_y="140"
         command="CLEAR"
         model="groot"
