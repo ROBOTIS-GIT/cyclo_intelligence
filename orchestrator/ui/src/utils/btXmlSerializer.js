@@ -210,13 +210,18 @@ export function serializeFromGraph(nodes, edges, nodeDataMap) {
   function buildEl(nodeId) {
     const data = nodeDataMap.get(nodeId);
     if (!data) return null;
-    const { tag, name, params } = data;
+    const { tag, name, params, collapsed } = data;
     const el = xmlDoc.createElement(tag);
     el.setAttribute('name', name);
     const node = nodeById.get(nodeId);
     if (node) {
       el.setAttribute('bt_x', Math.round(node.position.x).toString());
       el.setAttribute('bt_y', Math.round(node.position.y).toString());
+    }
+    // UI-only metadata: persist collapsed Control nodes so reload picks the
+    // same state. Default false → omit the attribute to keep XML compact.
+    if (collapsed === true) {
+      el.setAttribute('bt_collapsed', 'true');
     }
     Object.entries(params).forEach(([k, v]) => el.setAttribute(k, v));
     (children.get(nodeId) ?? []).forEach((childId) => {

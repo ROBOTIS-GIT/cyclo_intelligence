@@ -23,19 +23,11 @@ from typing import Dict  # noqa: I100
 from typing import TYPE_CHECKING  # noqa: I100
 from typing import Type  # noqa: I100
 
-from orchestrator.bt.actions import MoveArms
-from orchestrator.bt.actions import MoveHead
-from orchestrator.bt.actions import MoveLift
+from orchestrator.bt.actions import JointControl
 from orchestrator.bt.actions import Rotate
 from orchestrator.bt.actions import SendCommandAction
 from orchestrator.bt.actions import Wait
-from orchestrator.bt.actions import WaitUntilArmsStatic
-from orchestrator.bt.actions import WaitUntilGripperClosed
-from orchestrator.bt.actions import WaitUntilGripperOpened
-from orchestrator.bt.actions import WaitUntilPoseAndGripperChange
 from orchestrator.bt.actions.base_action import BaseAction
-from orchestrator.bt.constants import GRIPPER_CLOSED_THRESHOLD
-from orchestrator.bt.constants import GRIPPER_OPEN_THRESHOLD
 from orchestrator.bt.bt_core import BTNode
 from orchestrator.bt.controls import Loop
 from orchestrator.bt.controls import Sequence
@@ -65,15 +57,9 @@ class TreeLoader:
 
         self.action_types: Dict[str, Type[BaseAction]] = {
             'Rotate': Rotate,
-            'MoveHead': MoveHead,
-            'MoveArms': MoveArms,
-            'MoveLift': MoveLift,
+            'JointControl': JointControl,
             'SendCommand': SendCommandAction,
             'Wait': Wait,
-            'GripperClosed': WaitUntilGripperClosed,
-            'GripperOpened': WaitUntilGripperOpened,
-            'PoseGripperChange': WaitUntilPoseAndGripperChange,
-            'ArmsStatic': WaitUntilArmsStatic,
         }
 
     def load_tree_from_string(
@@ -123,7 +109,16 @@ class TreeLoader:
 
         if node_type in self.control_types:
             control_class = self.control_types[node_type]
-            control_node = control_class(self.node, name=node_name)
+            # Control nodes whose XML carries extra params (e.g. Loop's
+            # max_iterations) need those threaded through the ctor. The
+            # generic _parse_node_params skips 'ID' and 'name', so any
+            # remaining attributes are valid control-node kwargs. UI-only
+            # metadata (bt_x / bt_y / bt_collapsed) is filtered out here
+            # so it never reaches the Python ctor signature.
+            raw_params = self._parse_node_params(xml_node)
+            ui_only = ('bt_x', 'bt_y', 'bt_collapsed')
+            control_params = {k: v for k, v in raw_params.items() if k not in ui_only}
+            control_node = control_class(self.node, name=node_name, **control_params)
             control_node.uid = uid
 
             for child_xml in xml_node:
@@ -196,49 +191,63 @@ class TreeLoader:
             action.name = name
             return action
 
-        elif action_class == MoveHead:
-            head_joints = self._get_joint_names_for_group('leader_head')
+        elif action_class == JointControl:
+            # JointControl now toggles each sub-group (head / arms / lift)
+            # independently via enable_* flags. We only forward kwargs for
+            # the groups that are actually enabled so the constructor's
+            # at-least-one-enabled invariant + ValueError surface clearly
+            # if someone drops a misconfigured node.
+            enable_head = bool(params.get('enable_head', False))
+            enable_arms = bool(params.get('enable_arms', False))
+            enable_lift = bool(params.get('enable_lift', False))
 
-            action = action_class(
-                node=self.node,
-                head_positions=params.get('head_positions', [0.0, 0.0]),
-                head_joint_names=head_joints if head_joints else None,
-                position_threshold=params.get('position_threshold', 0.01),
-                duration=params.get('duration', 5.0)
-            )
-            action.name = name
-            return action
+            kwargs = {
+                'node': self.node,
+                'enable_head': enable_head,
+                'enable_arms': enable_arms,
+                'enable_lift': enable_lift,
+            }
 
-        elif action_class == MoveArms:
-            default_positions = [0.0] * 8
-            left_joints = self._get_joint_names_for_group('leader_left')
-            right_joints = self._get_joint_names_for_group('leader_right')
+            if enable_head:
+                kwargs['head_positions'] = params.get(
+                    'head_positions', [0.0, 0.0],
+                )
+                head_joints = self._get_joint_names_for_group('leader_head')
+                if head_joints:
+                    kwargs['head_joint_names'] = head_joints
 
-            action = action_class(
-                node=self.node,
-                left_positions=params.get('left_positions', default_positions),
-                right_positions=params.get(
-                    'right_positions', default_positions
-                ),
-                left_joint_names=left_joints if left_joints else None,
-                right_joint_names=right_joints if right_joints else None,
-                position_threshold=params.get('position_threshold', 0.01),
-                duration=params.get('duration', 2.0)
-            )
-            action.name = name
-            return action
+            if enable_arms:
+                default_positions = [0.0] * 8
+                kwargs['left_positions'] = params.get(
+                    'left_positions', default_positions,
+                )
+                kwargs['right_positions'] = params.get(
+                    'right_positions', default_positions,
+                )
+                left_joints = self._get_joint_names_for_group('leader_left')
+                right_joints = self._get_joint_names_for_group('leader_right')
+                if left_joints:
+                    kwargs['left_joint_names'] = left_joints
+                if right_joints:
+                    kwargs['right_joint_names'] = right_joints
 
-        elif action_class == MoveLift:
-            lift_joints = self._get_joint_names_for_group('leader_lift')
-            lift_joint_name = lift_joints[0] if lift_joints else None
+            if enable_lift:
+                kwargs['lift_position'] = params.get('lift_position', 0.0)
+                lift_joints = self._get_joint_names_for_group('leader_lift')
+                if lift_joints:
+                    kwargs['lift_joint_name'] = lift_joints[0]
 
-            action = action_class(
-                node=self.node,
-                lift_position=params.get('lift_position', 0.0),
-                lift_joint_name=lift_joint_name,
-                position_threshold=params.get('position_threshold', 0.01),
-                duration=params.get('duration', 5.0)
-            )
+            duration = params.get('duration')
+            if duration is not None:
+                kwargs['duration'] = duration
+            # position_threshold isn't exposed in the UI catalog, but if a
+            # hand-edited XML supplies it we still honor it; otherwise the
+            # JointControl class default (0.01) applies.
+            position_threshold = params.get('position_threshold')
+            if position_threshold is not None:
+                kwargs['position_threshold'] = position_threshold
+
+            action = action_class(**kwargs)
             action.name = name
             return action
 
@@ -255,65 +264,6 @@ class TreeLoader:
                 inference_hz=params.get('inference_hz', 15),
                 control_hz=params.get('control_hz', 100),
                 chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
-            )
-            action.name = name
-            return action
-
-        elif action_class in (
-            WaitUntilGripperClosed, WaitUntilGripperOpened
-        ):
-            action = action_class(
-                node=self.node,
-                position_change_threshold=params.get(
-                    'position_change_threshold', 0.05
-                ),
-                static_duration=params.get('static_duration', 3.0),
-                history_window=params.get('history_window', 1.0),
-                gripper_closed_threshold=params.get(
-                    'gripper_closed_threshold',
-                    GRIPPER_CLOSED_THRESHOLD,
-                ),
-                gripper_open_threshold=params.get(
-                    'gripper_open_threshold',
-                    GRIPPER_OPEN_THRESHOLD,
-                ),
-            )
-            action.name = name
-            return action
-
-        elif action_class == WaitUntilArmsStatic:
-            action = action_class(
-                node=self.node,
-                position_change_threshold=params.get(
-                    'position_change_threshold', 0.05
-                ),
-                static_duration=params.get('static_duration', 3.0),
-                history_window=params.get('history_window', 1.0),
-            )
-            action.name = name
-            return action
-
-        elif action_class == WaitUntilPoseAndGripperChange:
-            default_positions = [0.0] * 8
-            action = action_class(
-                node=self.node,
-                left_positions=params.get(
-                    'left_positions', default_positions
-                ),
-                right_positions=params.get(
-                    'right_positions', default_positions
-                ),
-                tolerance=params.get('tolerance', 0.1),
-                gripper_closed_threshold=params.get(
-                    'gripper_closed_threshold',
-                    GRIPPER_CLOSED_THRESHOLD,
-                ),
-                gripper_open_threshold=params.get(
-                    'gripper_open_threshold',
-                    GRIPPER_OPEN_THRESHOLD,
-                ),
-                check_delay=params.get('check_delay', 5.0),
-                gripper_check=params.get('gripper_check', 'none'),
             )
             action.name = name
             return action

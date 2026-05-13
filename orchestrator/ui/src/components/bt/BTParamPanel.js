@@ -21,18 +21,24 @@ import { setSelectedNodeId } from '../../features/btmanager/btmanagerSlice';
 
 const NUMBER_PARAMS = new Set([
   'duration', 'angle_deg', 'lift_position', 'control_hz', 'inference_hz',
-  'chunk_align_window_s', 'position_threshold',
+  'chunk_align_window_s', 'max_iterations',
 ]);
 
-const BOOL_PARAMS = new Set([]);
+// Per-param helper text shown beneath the input. Keep these short — they
+// render directly under the field as a small gray hint.
+const HELP_TEXT = {
+  max_iterations: '0 = loop forever',
+};
+
+// JointControl toggles each sub-group on/off via these flags. Other
+// boolean params can be added here as they come up.
+const BOOL_PARAMS = new Set(['enable_head', 'enable_arms', 'enable_lift']);
 
 // Enum params surface as <select> dropdowns. Keep value lists in sync with
-// the Python action definitions (e.g. send_command.COMMAND_MAP,
-// wait_until_pose.GRIPPER_CHECK_OPTIONS).
+// the Python action definitions (send_command.COMMAND_MAP).
 const ENUM_PARAMS = {
   command: ['LOAD', 'RESUME', 'STOP', 'CLEAR'],
   model: ['groot', 'lerobot'],
-  gripper_check: ['none', 'left', 'right', 'both'],
 };
 
 // SendCommand inputs that are meaningful per command. Anything outside
@@ -51,6 +57,10 @@ const SEND_COMMAND_ACTIVE_FIELDS = {
   CLEAR: new Set(['command']),
 };
 
+// JointControl: each group's positions input is gated on its enable_*
+// flag. enable_* toggles themselves + duration are always editable.
+const truthy = (v) => v === true || v === 'true';
+
 function isSendCommandFieldDisabled(nodeType, key, params) {
   if (nodeType !== 'SendCommand') return false;
   const cmd = String(params.command || 'LOAD').toUpperCase();
@@ -59,18 +69,38 @@ function isSendCommandFieldDisabled(nodeType, key, params) {
   return !active.has(key);
 }
 
-export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
+function isJointControlFieldDisabled(nodeType, key, params) {
+  if (nodeType !== 'JointControl') return false;
+  if (key === 'head_positions') return !truthy(params.enable_head);
+  if (key === 'left_positions' || key === 'right_positions') {
+    return !truthy(params.enable_arms);
+  }
+  if (key === 'lift_position') return !truthy(params.enable_lift);
+  return false;  // enable_*, duration stay editable
+}
+
+function isFieldDisabled(nodeType, key, params) {
+  return (
+    isSendCommandFieldDisabled(nodeType, key, params) ||
+    isJointControlFieldDisabled(nodeType, key, params)
+  );
+}
+
+export default function BTParamPanel({ nodes, selectedNodeId, onParamChange, onNameChange }) {
   const dispatch = useDispatch();
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
   // Local param state — isolates keystrokes from parent re-renders (preserves cursor)
   const [localParams, setLocalParams] = useState({});
+  // Local name buffer — same cursor-preservation trick as localParams.
+  const [localName, setLocalName] = useState('');
 
   // Reset local state only when switching to a different node
   useEffect(() => {
     if (selectedNode) {
       setLocalParams(selectedNode.data.params || {});
+      setLocalName(selectedNode.data.label || '');
     }
   }, [selectedNodeId]); // intentionally excludes selectedNode to avoid resetting mid-edit
 
@@ -78,6 +108,18 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
 
   const { label, nodeType } = selectedNode.data;
   const paramEntries = Object.entries(localParams);
+
+  const commitName = () => {
+    const trimmed = localName.trim();
+    if (!trimmed) {
+      // Reject empty — snap input back to current label.
+      setLocalName(label);
+      return;
+    }
+    if (trimmed !== label) {
+      onNameChange?.(selectedNodeId, trimmed);
+    }
+  };
 
   const handleChange = (paramName, value) => {
     setLocalParams((prev) => ({ ...prev, [paramName]: value }));
@@ -159,10 +201,24 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
   return (
     <div className="absolute right-0 top-0 bottom-0 w-[320px] bg-white border-l border-gray-200 shadow-lg z-10 flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-        <div>
-          <div className="text-sm font-bold text-gray-800">{label}</div>
-          <div className="text-xs text-gray-500">{nodeType}</div>
+      <div className="flex items-start justify-between px-4 py-3 border-b border-gray-200">
+        <div className="flex-1 min-w-0 pr-2">
+          <div className="text-xs text-gray-500 mb-1">{nodeType}</div>
+          <input
+            type="text"
+            value={localName}
+            onChange={(e) => setLocalName(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur();
+              } else if (e.key === 'Escape') {
+                setLocalName(label);
+                e.currentTarget.blur();
+              }
+            }}
+            className="w-full text-sm font-bold text-gray-800 bg-transparent border-0 border-b border-transparent hover:border-gray-300 focus:border-blue-400 focus:outline-none px-0 py-0.5"
+          />
         </div>
         <button
           onClick={() => dispatch(setSelectedNodeId(null))}
@@ -178,7 +234,8 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
           <p className="text-sm text-gray-400">No parameters</p>
         ) : (
           paramEntries.map(([key, value]) => {
-            const disabled = isSendCommandFieldDisabled(nodeType, key, localParams);
+            const disabled = isFieldDisabled(nodeType, key, localParams);
+            const help = HELP_TEXT[key];
             return (
               <div key={key}>
                 <label
@@ -189,6 +246,9 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange }) {
                   {key}
                 </label>
                 {renderInput(key, value, disabled)}
+                {help && !disabled && (
+                  <div className="mt-1 text-xs text-gray-500">{help}</div>
+                )}
               </div>
             );
           })

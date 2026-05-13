@@ -27,14 +27,14 @@ import {
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdPlayArrow, MdStop, MdUploadFile, MdSave, MdUndo, MdRedo } from 'react-icons/md';
+import { MdPlayArrow, MdStop, MdUploadFile, MdSave, MdUndo, MdRedo, MdAutoFixHigh } from 'react-icons/md';
 
 import BTControlNode from '../components/bt/BTControlNode';
 import BTActionNode from '../components/bt/BTActionNode';
 import BTParamPanel from '../components/bt/BTParamPanel';
 import BTNodePalette, { PALETTE_DRAG_MIME } from '../components/bt/BTNodePalette';
 import TreeListModal from '../features/btmanager/components/TreeListModal';
-import { parseBTXml } from '../utils/btTreeParser';
+import { parseBTXml, applyDagreLayout } from '../utils/btTreeParser';
 import { serializeFromGraph } from '../utils/btXmlSerializer';
 import { setTreeXml, setTreeFileName, setBtStatus, setActiveNodeNames, setSelectedNodeId } from '../features/btmanager/btmanagerSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -45,6 +45,50 @@ const nodeTypes = {
   btControl: BTControlNode,
   btAction: BTActionNode,
 };
+
+// BFS down the edges to enumerate every node reachable from `rootId`.
+// Used to mark a collapsed Control node's whole subtree as hidden.
+function collectDescendants(rootId, edges) {
+  const out = new Set();
+  const queue = [rootId];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const e of edges) {
+      if (e.source === id && !out.has(e.target)) {
+        out.add(e.target);
+        queue.push(e.target);
+      }
+    }
+  }
+  return out;
+}
+
+// Walk the graph and return the set of node ids that should be rendered
+// hidden because some ancestor Control node is collapsed.
+function computeHiddenIds(nodes, edges) {
+  const hidden = new Set();
+  for (const n of nodes) {
+    if (n.type === 'btControl' && n.data && n.data.collapsed) {
+      for (const id of collectDescendants(n.id, edges)) hidden.add(id);
+    }
+  }
+  return hidden;
+}
+
+// Run dagre over just the visible slice of the tree, then splice the
+// resulting positions back into the full nodes array. Hidden nodes keep
+// their old coords so they sit ready underneath the collapsed parent for
+// when the user expands it again.
+function layoutVisibleOnly(nodes, edges) {
+  const hidden = computeHiddenIds(nodes, edges);
+  const visibleNodes = nodes.filter((n) => !hidden.has(n.id));
+  const visibleEdges = edges.filter(
+    (e) => !hidden.has(e.source) && !hidden.has(e.target)
+  );
+  const laid = applyDagreLayout(visibleNodes, visibleEdges, { respectStored: false });
+  const byId = new Map(laid.nodes.map((n) => [n.id, n]));
+  return nodes.map((n) => (byId.has(n.id) ? byId.get(n.id) : n));
+}
 
 export default function BTManagerPage({ isActive = true }) {
   const dispatch = useDispatch();
@@ -140,6 +184,39 @@ export default function BTManagerPage({ isActive = true }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount to restore Redux-persisted tree
 
+  // ── Persist working tree to Redux so it survives page switches ────────────
+  // The graph state (nodes/edges/nodeDataMap) lives in local useState, which
+  // is torn down on unmount. Without this, navigating away and back to the BT
+  // Manager wipes the user's in-progress tree. We serialise on a small debounce
+  // so a flurry of edits doesn't dispatch on every keystroke, and again on
+  // unmount to catch whatever's still in the debounce window.
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const t = setTimeout(() => {
+      try {
+        dispatch(setTreeXml(serializeFromGraph(nodes, edges, nodeDataMap)));
+      } catch {
+        // Partial graphs (e.g. mid-drag, disconnected nodes) can throw here.
+        // Drop the snapshot rather than nuking the previously-good treeXml.
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [nodes, edges, nodeDataMap, dispatch]);
+
+  useEffect(() => {
+    return () => {
+      const n = nodesRef.current;
+      const e = edgesRef.current;
+      const m = nodeDataMapRef.current;
+      if (n.length === 0) return;
+      try {
+        dispatch(setTreeXml(serializeFromGraph(n, e, m)));
+      } catch {
+        // Same swallow as the debounced path — preserve last good state.
+      }
+    };
+  }, [dispatch]);
+
   // ── Handle tree selection from TreeListModal ──────────────────────────────
   const handleServerFileSelect = useCallback(async (item) => {
     if (!item || !item.full_path) return;
@@ -206,29 +283,110 @@ export default function BTManagerPage({ isActive = true }) {
     const params = meta ? { ...meta.params } : {};
 
     captureHistory();
-    setNodes((prev) => [
-      ...prev,
-      {
+    const isControl = isControlTag(tag);
+    const newNode = {
+      id,
+      type: isControl ? 'btControl' : 'btAction',
+      position,
+      // Control nodes carry a collapsed flag so the +/- toggle has somewhere
+      // to write. Action nodes don't need it.
+      data: isControl
+        ? { label: autoName, nodeType: tag, params, collapsed: false }
+        : { label: autoName, nodeType: tag, params },
+    };
+    setNodes((prev) => {
+      const next = [...prev, newNode];
+      // Re-flow the whole graph through dagre so the freshly dropped node
+      // doesn't sit at an arbitrary cursor position. The dropped coords
+      // get overwritten by tidy parent-aligned positions on the spot.
+      // Hidden nodes (under collapsed parents) keep their coords.
+      return layoutVisibleOnly(next, edgesRef.current);
+    });
+    setNodeDataMap((prev) =>
+      new Map(prev).set(
         id,
-        type: isControlTag(tag) ? 'btControl' : 'btAction',
-        position,
-        data: { label: autoName, nodeType: tag, params },
-      },
-    ]);
-    setNodeDataMap((prev) => new Map(prev).set(id, { tag, name: autoName, params }));
+        isControl
+          ? { tag, name: autoName, params, collapsed: false }
+          : { tag, name: autoName, params },
+      )
+    );
     dispatch(setSelectedNodeId(id));
   }, [captureHistory, setNodes, dispatch]);
 
   // ── Manual edge connection ────────────────────────────────────────────────
   const handleConnect = useCallback((connection) => {
     captureHistory();
-    setEdges((prev) => addEdge({ ...connection, type: 'smoothstep', animated: false }, prev));
-  }, [captureHistory, setEdges]);
+    setEdges((prev) => {
+      const nextEdges = addEdge({ ...connection, type: 'smoothstep', animated: false }, prev);
+      // After the new edge lands the topology changed, so re-flow nodes
+      // around it. setNodes runs separately because we need the latest
+      // edge list to compute the layout.
+      const laidOut = layoutVisibleOnly(nodesRef.current, nextEdges);
+      setNodes(laidOut);
+      return nextEdges;
+    });
+  }, [captureHistory, setEdges, setNodes]);
 
   // ── Node drag stop: just capture history (ReactFlow updates position) ─────
   const handleNodeDragStop = useCallback(() => {
     captureHistory();
   }, [captureHistory]);
+
+  // ── Manual auto-layout (toolbar button) ───────────────────────────────────
+  // respectStored:false discards both XML-loaded coords and any manual drags
+  // so a fresh dagre pass wins. Undo restores the prior coords because we
+  // capture history first. Hidden nodes (under collapsed parents) skip
+  // layout so they don't get re-positioned out from under the user.
+  const handleAutoLayout = useCallback(() => {
+    if (nodesRef.current.length === 0) return;
+    captureHistory();
+    setNodes(layoutVisibleOnly(nodesRef.current, edgesRef.current));
+  }, [captureHistory, setNodes]);
+
+  // ── Collapse/expand toggle on Control nodes ───────────────────────────────
+  // Flips data.collapsed on the target Control node in both nodes[] and
+  // nodeDataMap, then re-flows the now-visible slice so the layout closes
+  // up the gap (collapse) or fans the children back out (expand).
+  const handleToggleCollapse = useCallback((nodeId) => {
+    const target = nodesRef.current.find((n) => n.id === nodeId);
+    if (!target || target.type !== 'btControl') return;
+    captureHistory();
+    const nextCollapsed = !target.data?.collapsed;
+    setNodeDataMap((prev) => {
+      const next = new Map(prev);
+      const entry = next.get(nodeId);
+      if (entry) next.set(nodeId, { ...entry, collapsed: nextCollapsed });
+      return next;
+    });
+    setNodes((ns) => {
+      const flipped = ns.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, collapsed: nextCollapsed } }
+          : n
+      );
+      return layoutVisibleOnly(flipped, edgesRef.current);
+    });
+  }, [setNodes, captureHistory]);
+
+  // ── Node name change: update nodeDataMap.name + nodes[].data.label ────────
+  // Empty input is ignored (the inspector resets to the previous value via
+  // its localName state reset on selection change).
+  const handleNameChange = useCallback((nodeId, newName) => {
+    const trimmed = (newName ?? '').trim();
+    if (!trimmed) return;
+    captureHistory();
+    setNodeDataMap((prev) => {
+      const next = new Map(prev);
+      const entry = next.get(nodeId);
+      if (entry) next.set(nodeId, { ...entry, name: trimmed });
+      return next;
+    });
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === nodeId ? { ...n, data: { ...n.data, label: trimmed } } : n
+      )
+    );
+  }, [setNodes, captureHistory]);
 
   // ── Param change: update nodeDataMap + nodes state ────────────────────────
   const handleParamChange = useCallback((nodeId, paramName, value) => {
@@ -248,7 +406,11 @@ export default function BTManagerPage({ isActive = true }) {
     );
   }, [setNodes, captureHistory]);
 
-  // ── Delete key: remove selected nodes + their edges ───────────────────────
+  // ── Delete key: remove selected nodes and/or edges ────────────────────────
+  // ReactFlow's default onEdgesChange manages `edge.selected` for us, so we
+  // just have to read both selection flags here. Edge-only and mixed
+  // selections are handled in a single transaction so undo restores both
+  // at once.
   useEffect(() => {
     const handler = (e) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return;
@@ -256,24 +418,40 @@ export default function BTManagerPage({ isActive = true }) {
 
       const currentNodes = nodesRef.current;
       const currentEdges = edgesRef.current;
-      const selectedIds = new Set(currentNodes.filter((n) => n.selected).map((n) => n.id));
-      if (selectedIds.size === 0) return;
+      const selectedNodeIds = new Set(
+        currentNodes.filter((n) => n.selected).map((n) => n.id)
+      );
+      const selectedEdgeIds = new Set(
+        currentEdges.filter((eg) => eg.selected).map((eg) => eg.id)
+      );
+      if (selectedNodeIds.size === 0 && selectedEdgeIds.size === 0) return;
 
       captureHistory();
-      setNodes((ns) => ns.filter((n) => !selectedIds.has(n.id)));
-      setEdges((es) =>
-        es.filter((e) => !selectedIds.has(e.source) && !selectedIds.has(e.target))
+      const remainingNodes = currentNodes.filter((n) => !selectedNodeIds.has(n.id));
+      const remainingEdges = currentEdges.filter(
+        (eg) =>
+          !selectedEdgeIds.has(eg.id) &&
+          !selectedNodeIds.has(eg.source) &&
+          !selectedNodeIds.has(eg.target)
       );
-      setNodeDataMap((prev) => {
-        const next = new Map(prev);
-        selectedIds.forEach((id) => next.delete(id));
-        return next;
-      });
-      dispatch(setSelectedNodeId(null));
+      // Re-flow what's left so the deleted node/edge's old slot doesn't
+      // leave a visible gap in the tree.
+      setNodes(layoutVisibleOnly(remainingNodes, remainingEdges));
+      setEdges(remainingEdges);
+      if (selectedNodeIds.size > 0) {
+        setNodeDataMap((prev) => {
+          const next = new Map(prev);
+          selectedNodeIds.forEach((id) => next.delete(id));
+          return next;
+        });
+      }
+      if (selectedNodeIds.has(selectedNodeId)) {
+        dispatch(setSelectedNodeId(null));
+      }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [setNodes, setEdges, dispatch, captureHistory]);
+  }, [setNodes, setEdges, dispatch, captureHistory, selectedNodeId]);
 
   // ── Undo/redo keybindings ─────────────────────────────────────────────────
   useEffect(() => {
@@ -396,6 +574,18 @@ export default function BTManagerPage({ isActive = true }) {
     }
   }, [callService, dispatch, getHttpBaseUrl]);
 
+  // ── Auto-stop when the tree finishes on its own ──────────────────────────
+  // BehaviorTreeNode publishes /bt/status='completed' once the root returns
+  // SUCCESS or FAILURE, but leaves the BT process alive — the user otherwise
+  // has to click Stop manually to free the slot. Treat 'completed' as an
+  // implicit Stop so the button state flips back to Start-ready and the BT
+  // node is torn down at the same time.
+  useEffect(() => {
+    if (btStatus === 'completed') {
+      handleStop();
+    }
+  }, [btStatus, handleStop]);
+
   // ── BT status / active-nodes subscription ────────────────────────────────
   useEffect(() => {
     if (!rosbridgeUrl || !isActive) return;
@@ -441,18 +631,55 @@ export default function BTManagerPage({ isActive = true }) {
     };
   }, [rosbridgeUrl, isActive, dispatch]);
 
-  // ── Annotate nodes with isActive / isSelected ────────────────────────────
+  // ── Annotate nodes for ReactFlow render ──────────────────────────────────
+  // Layers on:
+  //   isActive / isSelected — visual highlight from BT runtime + inspector
+  //   hidden                — ReactFlow skips the node and its edges; flipped
+  //                           on for any descendant of a collapsed Control
+  //   childCount            — drives the BTControlNode +/- button disabled
+  //                           state and the "N hidden" badge
+  //   onToggleCollapse      — pass-through so BTControlNode can call back
+  //                           without prop drilling
   const annotatedNodes = useMemo(() => {
     const activeSet = new Set(activeNodeNames);
-    return nodes.map((node) => ({
-      ...node,
-      data: {
-        ...node.data,
-        isActive: activeSet.has(node.id),
-        isSelected: node.id === selectedNodeId,
-      },
-    }));
-  }, [nodes, activeNodeNames, selectedNodeId]);
+    const hiddenIds = computeHiddenIds(nodes, edges);
+    const childrenById = new Map(nodes.map((n) => [n.id, []]));
+    const childCount = new Map();
+    for (const e of edges) {
+      if (childrenById.has(e.source)) childrenById.get(e.source).push(e.target);
+      childCount.set(e.source, (childCount.get(e.source) ?? 0) + 1);
+    }
+    // Bubble active-state up from leaves to ancestor Control nodes so the
+    // user can tell a Loop/Sequence is "live" even when collapsed — the
+    // active leaf itself is hidden under the +/- toggle, but the Control
+    // wrapper still pulses.
+    const hasActiveDescendant = (rootId) => {
+      const queue = [...(childrenById.get(rootId) || [])];
+      while (queue.length) {
+        const id = queue.shift();
+        if (activeSet.has(id)) return true;
+        const kids = childrenById.get(id);
+        if (kids && kids.length) queue.push(...kids);
+      }
+      return false;
+    };
+    return nodes.map((node) => {
+      const directly = activeSet.has(node.id);
+      const isControl = node.type === 'btControl';
+      const isActive = directly || (isControl && hasActiveDescendant(node.id));
+      return {
+        ...node,
+        hidden: hiddenIds.has(node.id),
+        data: {
+          ...node.data,
+          isActive,
+          isSelected: node.id === selectedNodeId,
+          childCount: childCount.get(node.id) ?? 0,
+          onToggleCollapse: handleToggleCollapse,
+        },
+      };
+    });
+  }, [nodes, edges, activeNodeNames, selectedNodeId, handleToggleCollapse]);
 
   const statusColor =
     btStatus === 'running' ? 'bg-green-500' :
@@ -497,6 +724,19 @@ export default function BTManagerPage({ isActive = true }) {
             )}
           >
             <MdRedo size={18} />
+          </button>
+          <button
+            onClick={handleAutoLayout}
+            disabled={!hasTree}
+            title="Auto Layout"
+            className={clsx(
+              'flex items-center justify-center w-9 h-9 rounded-lg transition-colors duration-150',
+              hasTree
+                ? 'bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer'
+                : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+            )}
+          >
+            <MdAutoFixHigh size={18} />
           </button>
           <button
             onClick={() => {
@@ -585,6 +825,7 @@ export default function BTManagerPage({ isActive = true }) {
             nodes={annotatedNodes}
             selectedNodeId={selectedNodeId}
             onParamChange={handleParamChange}
+            onNameChange={handleNameChange}
           />
         )}
       </div>

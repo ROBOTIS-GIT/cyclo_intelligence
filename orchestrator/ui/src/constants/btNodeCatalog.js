@@ -24,28 +24,30 @@
 export const BT_NODE_CATALOG = [
   // Controls
   { tag: 'Sequence', category: 'control', params: {} },
-  { tag: 'Loop',     category: 'control', params: {} },
+  // Loop.max_iterations: 0 (or any non-positive) means "loop forever";
+  // a positive integer caps the run to that many child-success cycles.
+  { tag: 'Loop',     category: 'control', params: { max_iterations: '0' } },
 
   // Actions — defaults mirror Python __init__ values
   { tag: 'Rotate', category: 'action', params: { angle_deg: '90.0' } },
+  // JointControl runs one or more sub-groups (head / arms / lift) at
+  // once. Each enable_* toggle decides whether its positions get
+  // published; BTParamPanel greys out the matching positions input when
+  // its toggle is off. position_threshold sticks to the backend default
+  // (0.01) — no UI knob.
   {
-    tag: 'MoveHead',
-    category: 'action',
-    params: { head_positions: '0.0, 0.0', duration: '5.0' },
-  },
-  {
-    tag: 'MoveArms',
+    tag: 'JointControl',
     category: 'action',
     params: {
+      enable_head: 'true',
+      head_positions: '0.0, 0.0',
+      enable_arms: 'false',
       left_positions: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',
       right_positions: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',
+      enable_lift: 'false',
+      lift_position: '0.0',
       duration: '2.0',
     },
-  },
-  {
-    tag: 'MoveLift',
-    category: 'action',
-    params: { lift_position: '0.0', duration: '5.0' },
   },
   {
     tag: 'SendCommand',
@@ -61,20 +63,6 @@ export const BT_NODE_CATALOG = [
     },
   },
   { tag: 'Wait', category: 'action', params: { duration: '5.0' } },
-  { tag: 'GripperClosed', category: 'action', params: {} },
-  { tag: 'GripperOpened', category: 'action', params: {} },
-  { tag: 'ArmsStatic',    category: 'action', params: {} },
-  {
-    tag: 'PoseGripperChange',
-    category: 'action',
-    params: {
-      left_positions: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',
-      right_positions: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',
-      tolerance: '0.1',
-      check_delay: '5.0',
-      gripper_check: 'none',
-    },
-  },
 ];
 
 export const findNodeMeta = (tag) =>

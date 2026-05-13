@@ -28,34 +28,79 @@ if TYPE_CHECKING:
 
 
 class Loop(BaseControl):
-    """Repeat a single child forever, returning RUNNING on each success."""
+    """Repeat a Sequence-like run of children N times (or forever).
 
-    def __init__(self, node: 'Node', name: str = 'Loop'):
+    Behaves like a Sequence within one iteration — ticks children left to
+    right and bails out on the first FAILURE — but on completing the full
+    children list once, that counts as one iteration. max_iterations <= 0
+    keeps looping forever (the original behavior). Any positive integer
+    caps the run to that many full passes; the Nth completed pass returns
+    SUCCESS up to the parent.
+    """
+
+    def __init__(self, node: 'Node', name: str = 'Loop', max_iterations: int = 0):
         """Initialize the Loop control node."""
         super().__init__(node, name)
+        try:
+            self.max_iterations = int(max_iterations)
+        except (TypeError, ValueError):
+            self.max_iterations = 0
+        self._iteration_count = 0
+        self._current_child_index = 0
 
     def get_active_node_ids(self):
         """Return the currently active leaf node UID."""
-        if self.children:
-            return self.children[0].get_active_node_ids()
-        return []
+        if not self.children:
+            return []
+        # Mid-iteration: highlight the child that's running. After a full
+        # pass the index has rolled back to 0 so we point at the first
+        # child by convention.
+        idx = (
+            self._current_child_index
+            if self._current_child_index < len(self.children)
+            else 0
+        )
+        return self.children[idx].get_active_node_ids()
 
     def tick(self) -> NodeStatus:
-        """Tick the child; reset and repeat on SUCCESS, propagate FAILURE."""
+        """Sequence-tick children; one full pass = one iteration."""
         if not self.children:
             self.log_error('No child node')
             return NodeStatus.FAILURE
 
-        child = self.children[0]
-        status = child.tick()
+        while self._current_child_index < len(self.children):
+            child = self.children[self._current_child_index]
+            status = child.tick()
 
-        if status == NodeStatus.RUNNING:
-            return NodeStatus.RUNNING
-        elif status == NodeStatus.SUCCESS:
-            self.log_info(f'Child {child.name} succeeded, restarting')
+            if status == NodeStatus.RUNNING:
+                return NodeStatus.RUNNING
+            if status == NodeStatus.FAILURE:
+                self.log_warn(f'Child {child.name} failed, stopping')
+                child.reset()
+                return NodeStatus.FAILURE
+
+            # SUCCESS — advance to the next child within this iteration.
             child.reset()
-            return NodeStatus.RUNNING
-        else:
-            self.log_warn(f'Child {child.name} failed, stopping')
-            child.reset()
-            return NodeStatus.FAILURE
+            self._current_child_index += 1
+
+        # Finished one full pass of all children.
+        self._iteration_count += 1
+        progress = (
+            f'{self._iteration_count}/{self.max_iterations}'
+            if self.max_iterations > 0
+            else f'{self._iteration_count}'
+        )
+        if self.max_iterations > 0 and self._iteration_count >= self.max_iterations:
+            self.log_info(f'Reached max_iterations={self.max_iterations}, stopping')
+            return NodeStatus.SUCCESS
+
+        # Roll back the index so the next tick starts the next iteration.
+        self._current_child_index = 0
+        self.log_info(f'Iteration {progress} complete, restarting')
+        return NodeStatus.RUNNING
+
+    def reset(self):
+        """Reset children + iteration counter + child index."""
+        super().reset()
+        self._iteration_count = 0
+        self._current_child_index = 0

@@ -44,14 +44,7 @@ DEFAULT_ROTATION_ANGLE_DEG = 90.0  # degrees
 ANGLE_NORMALIZATION_180 = 180
 ANGLE_NORMALIZATION_360 = 360
 
-# Inference Until Gripper Parameters
-GRIPPER_OPEN_THRESHOLD = 0.3  # Position below which gripper is open (0.0 = fully open)
-GRIPPER_CLOSED_THRESHOLD = 0.7  # Position above which gripper is closed (1.0 = fully closed)
-INFERENCE_POSITION_CHANGE_THRESHOLD = 0.05  # Max position change (rad) for stability
-INFERENCE_STATIC_DURATION = 3.0  # Seconds arms must be stable
-INFERENCE_HISTORY_WINDOW = 1.0  # Rolling window (seconds) for change calculation
-
-# Default Durations
+# Default Durations — used per joint group inside JointControl.GROUP_DEFAULTS
 DEFAULT_MOVE_ARMS_DURATION_SEC = 2.0
 DEFAULT_MOVE_HEAD_DURATION_SEC = 5.0
 DEFAULT_MOVE_LIFT_DURATION_SEC = 5.0

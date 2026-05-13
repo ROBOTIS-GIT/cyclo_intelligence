@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="DemoSequence" bt_x="360" bt_y="0">
+      <SendCommand name="LoadModel"
+        bt_x="0"
+        bt_y="140"
+        command="LOAD"
+        model="groot"
+        policy_path="/workspace/model/GR00T-N1.6_CartoningFoodProduct_model"
+        task_instruction="Pick up the pouch with your right hand first, then pick up the pouch with your left hand"
+        inference_hz="15"
+        control_hz="100"
+        chunk_align_window_s="0.3"/>
+      <JointControl name="InitPosition"
+        bt_x="240"
+        bt_y="140"
+        enable_head="true"
+        head_positions="0.5, 0.0"
+        enable_arms="true"
+        left_positions="0.75, 0.0, 0.0, -2.3, 0.0, 0.0, 0.0, 0.0"
+        right_positions="0.75, 0.0, 0.0, -2.3, 0.0, 0.0, 0.0, 0.0"
+        enable_lift="true"
+        lift_position="-0.1"
+        duration="2.0"/>
+      <Loop name="RepeatPick&amp;Place"
+        bt_x="480"
+        bt_y="140"
+        bt_collapsed="true"
+        max_iterations="5">
+        <SendCommand name="ResumeInference"
+          bt_x="120"
+          bt_y="280"
+          command="RESUME"
+          model="groot"
+          policy_path=""
+          task_instruction="Pick up the pouch with your right hand first, then pick up the pouch with your left hand"
+          inference_hz="15"
+          control_hz="100"
+          chunk_align_window_s="0.3"/>
+        <Wait name="HoldInference" bt_x="360" bt_y="280" duration="10.0"/>
+        <SendCommand name="StopInference"
+          bt_x="600"
+          bt_y="280"
+          command="STOP"
+          model="groot"
+          policy_path=""
+          task_instruction=""
+          inference_hz="15"
+          control_hz="100"
+          chunk_align_window_s="0.3"/>
+        <JointControl name="InitArms"
+          bt_x="840"
+          bt_y="280"
+          enable_arms="true"
+          left_positions="0.75, 0.0, 0.0, -2.3, 0.0, 0.0, 0.0, 0.0"
+          right_positions="0.75, 0.0, 0.0, -2.3, 0.0, 0.0, 0.0, 0.0"
+          duration="5.0"/>
+      </Loop>
+      <SendCommand name="UnloadModel"
+        bt_x="720"
+        bt_y="140"
+        command="CLEAR"
+        model="groot"
+        policy_path=""
+        task_instruction=""
+        inference_hz="15"
+        control_hz="100"
+        chunk_align_window_s="0.3"/>
+    </Sequence>
+  </BehaviorTree>
+</root>

@@ -25,30 +25,71 @@ const TYPE_ICONS = {
   Parallel: '⇉',
 };
 
-export default function BTControlNode({ data }) {
+export default function BTControlNode({ id, data }) {
   const icon = TYPE_ICONS[data.nodeType] || '□';
   const isActive = data.isActive;
   const isSelected = data.isSelected;
+  const collapsed = !!data.collapsed;
+  const childCount = data.childCount ?? 0;
+  const hasChildren = childCount > 0;
 
   return (
     <div
       className={clsx(
-        'px-4 py-3 rounded-lg border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
-        isActive
-          ? 'border-orange-500 bg-orange-50 ring-2 ring-orange-300 animate-pulse'
-          : isSelected
-            ? 'border-blue-600 bg-blue-100 ring-2 ring-blue-300'
-            : 'border-blue-500 bg-blue-50'
+        'relative px-4 py-3 rounded-lg border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
+        // Selection ring is independent of active state. Active state on
+        // a Control node bubbles up from any active descendant — we keep
+        // the blue palette to preserve the Control identity and only add
+        // animate-pulse so the user can see "something inside here is
+        // running" (especially useful when the Control is collapsed).
+        isSelected
+          ? 'border-blue-600 bg-blue-100 ring-2 ring-blue-300'
+          : 'border-blue-500 bg-blue-50',
+        isActive && 'animate-pulse',
       )}
     >
-      <Handle type="target" position={Position.Top} className={clsx(isActive ? '!bg-orange-500' : '!bg-blue-500')} />
+      <Handle type="target" position={Position.Top} className="!bg-blue-500" />
       <div className="text-xs text-blue-600 font-semibold mb-1">
         {icon} {data.nodeType}
       </div>
       <div className="text-sm font-medium text-gray-800 truncate">
         {data.label}
       </div>
-      <Handle type="source" position={Position.Bottom} className={clsx(isActive ? '!bg-orange-500' : '!bg-blue-500')} />
+      <Handle type="source" position={Position.Bottom} className="!bg-blue-500" />
+
+      {/* Collapse / expand toggle. stopPropagation so the click doesn't
+          double as a node-select. Disabled when this Control node has no
+          children to hide. */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!hasChildren) return;
+          data.onToggleCollapse?.(id);
+        }}
+        disabled={!hasChildren}
+        title={
+          !hasChildren
+            ? 'No children to collapse'
+            : collapsed
+              ? 'Expand'
+              : 'Collapse'
+        }
+        className={clsx(
+          'absolute -right-2 -top-2 w-5 h-5 rounded-full border bg-white shadow text-xs leading-none flex items-center justify-center select-none',
+          hasChildren
+            ? 'border-blue-400 text-blue-600 hover:bg-blue-50 cursor-pointer'
+            : 'border-gray-200 text-gray-300 cursor-not-allowed'
+        )}
+      >
+        {collapsed ? '+' : '−'}
+      </button>
+
+      {collapsed && hasChildren && (
+        <div className="absolute -bottom-2 right-1 text-[10px] text-gray-600 bg-white border border-gray-200 rounded px-1 leading-tight">
+          {childCount} hidden
+        </div>
+      )}
     </div>
   );
 }
