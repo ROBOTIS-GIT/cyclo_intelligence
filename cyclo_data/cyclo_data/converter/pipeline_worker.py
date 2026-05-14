@@ -916,11 +916,22 @@ class Mp4ConversionWorker:
             output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v21'
             repo_id = dataset_path.name
 
-            # Collect _converted folders as bag_paths
-            bag_paths = sorted([
-                d for d in dataset_path.iterdir()
-                if d.is_dir() and d.name.endswith('_converted')
-            ])
+            # Collect _converted folders as bag_paths.
+            # CRITICAL: sort NUMERICALLY by episode number, not
+            # lexicographically. Default ``sorted()`` on dir names gives
+            # ['0_converted', '10_converted', '11_converted', ...,
+            # '1_converted', '20_converted', ...] — and the index that
+            # ``_convert_rosbag_worker`` then assigns becomes the
+            # lerobot ``episode_index``, so raw ep 10 lands at lerobot
+            # ep 1, raw ep 1 lands at lerobot ep 11, etc. Lerobot
+            # episodes were silently reshuffled vs the recording order.
+            bag_paths = sorted(
+                [
+                    d for d in dataset_path.iterdir()
+                    if d.is_dir() and d.name.endswith('_converted')
+                ],
+                key=lambda d: int(d.name[: -len('_converted')]),
+            )
 
             if not bag_paths:
                 return False, f'No _converted folders found in {dataset_path}'
@@ -1038,10 +1049,15 @@ class Mp4ConversionWorker:
             repo_id = dataset_path.name
 
             # Same input as Stage 2 — _converted/ folders from Stage 1.
-            bag_paths = sorted([
-                d for d in dataset_path.iterdir()
-                if d.is_dir() and d.name.endswith('_converted')
-            ])
+            # Numeric sort by episode number (see Stage 2 comment for
+            # the lexicographic-sort bug this avoids).
+            bag_paths = sorted(
+                [
+                    d for d in dataset_path.iterdir()
+                    if d.is_dir() and d.name.endswith('_converted')
+                ],
+                key=lambda d: int(d.name[: -len('_converted')]),
+            )
 
             if not bag_paths:
                 return False, f'No _converted folders found in {dataset_path}'

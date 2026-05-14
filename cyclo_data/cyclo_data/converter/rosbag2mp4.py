@@ -1209,9 +1209,11 @@ class RosbagToMp4Converter:
         camera_name: str = '',
     ) -> bool:
         """Try to encode video with specified encoder."""
+        from .video_sync import _ffmpeg_threads_arg
         cmd = [
             'ffmpeg',
             '-y',
+            *_ffmpeg_threads_arg(),
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}',

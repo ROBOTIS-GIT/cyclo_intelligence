@@ -66,6 +66,9 @@ from .base_converter import (
     EpisodeData,
     RosbagToLerobotConverterBase,
     StalenessMetrics,
+    _conversion_worker_init,
+    _convert_rosbag_worker,
+    _resolve_conversion_worker_count,
 )
 
 
@@ -203,11 +206,86 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
 
         episodes_data: List[EpisodeData] = []
 
-        # Phase 1: Extract data from each rosbag (reuse v2.1 logic)
-        for idx, bag_path in enumerate(bag_paths):
-            episode_data = self.convert_single_rosbag(Path(bag_path), idx)
-            if episode_data is not None:
-                episodes_data.append(episode_data)
+        # Phase 1: Extract data from each rosbag. Matches v2.1's
+        # parallelism (ProcessPoolExecutor up to half the host CPUs) so
+        # v3.0-only runs aren't 8× slower than v2.1-only runs. When v2.1
+        # ran first against the same dataset, _sync_videos_to_grid hits
+        # the synced-MP4 cache sidecar and skips remux entirely.
+        if len(bag_paths) <= 1:
+            # Single episode: skip pool overhead.
+            for idx, bag_path in enumerate(bag_paths):
+                episode_data = self.convert_single_rosbag(Path(bag_path), idx)
+                if episode_data is not None:
+                    episodes_data.append(episode_data)
+        else:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            # Must mirror v2.1's config_dict — every selection knob the
+            # converter reads (camera_rotations / image_resize / selected_*)
+            # has to ride the pickle to the worker process, otherwise
+            # the worker defaults the field and silently drops the UI
+            # value.
+            config_dict = {
+                'repo_id': self.config.repo_id,
+                'output_dir': self.config.output_dir,
+                'fps': self.config.fps,
+                'robot_type': self.config.robot_type,
+                'use_videos': self.config.use_videos,
+                'chunks_size': self.config.chunks_size,
+                'robot_config_path': self.config.robot_config_path,
+                'state_topics': self.config.state_topics,
+                'action_topics': self.config.action_topics,
+                'apply_trim': self.config.apply_trim,
+                'apply_exclude_regions': self.config.apply_exclude_regions,
+                'quality_warning_multiplier': self.config.quality_warning_multiplier,
+                'quality_error_multiplier': self.config.quality_error_multiplier,
+                'selected_cameras': list(self.config.selected_cameras),
+                'camera_rotations': dict(self.config.camera_rotations),
+                'image_resize': (
+                    tuple(self.config.image_resize)
+                    if self.config.image_resize else None
+                ),
+                'selected_state_topics': list(self.config.selected_state_topics),
+                'selected_action_topics': list(self.config.selected_action_topics),
+                'selected_joints': list(self.config.selected_joints),
+                'source_rosbags': list(self.config.source_rosbags),
+            }
+            max_workers = _resolve_conversion_worker_count(len(bag_paths))
+            self._log_info(
+                f"Starting parallel rosbag parsing with {max_workers} workers"
+            )
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_conversion_worker_init,
+            ) as executor:
+                futures = {}
+                for idx, bag_path in enumerate(bag_paths):
+                    future = executor.submit(
+                        _convert_rosbag_worker,
+                        str(bag_path), idx, config_dict,
+                    )
+                    futures[future] = idx
+
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        episode_index, episode_data = future.result()
+                        if episode_data is not None:
+                            episodes_data.append(episode_data)
+                            self._log_info(
+                                f"Episode {episode_index} parsed successfully"
+                            )
+                        else:
+                            self._log_warning(
+                                f"Episode {idx} returned no data"
+                            )
+                    except Exception as e:
+                        self._log_error(
+                            f"Error parsing episode {idx}: {e}"
+                        )
+
+            # Sort by episode_index — as_completed delivers out of order.
+            episodes_data.sort(key=lambda ep: ep.episode_index)
 
         if not episodes_data:
             self._log_error("No episodes were successfully converted")
@@ -427,20 +505,12 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         for camera_name, videos in camera_videos.items():
             self._write_aggregated_videos_for_camera(output_dir, camera_name, videos)
 
-        # Clean up any ``<cam>_synced.mp4`` scratch files left behind by
-        # ``_sync_videos_to_grid``. They were the source for the copy /
-        # concat above so they're no longer needed; keeping them clutters
-        # the user's rosbag2/ source tree.
-        for episode in episodes_data:
-            for video_path in episode.video_files.values():
-                p = Path(video_path)
-                if p.stem.endswith("_synced") and p.exists():
-                    try:
-                        p.unlink()
-                    except OSError as exc:
-                        self._log_warning(
-                            f"Failed to clean up {p.name}: {exc}"
-                        )
+        # ``<cam>_synced.mp4`` files are kept on disk as Phase 1 cache —
+        # the next conversion run hits the ``<cam>_synced.cache.json``
+        # gate in ``_sync_videos_to_grid`` and skips remux entirely.
+        # Disk cost is modest (~2-3 MB per camera per episode);
+        # operators who want to reclaim the space can wipe
+        # ``<episode>/videos/*_synced.*`` after the dataset is final.
 
     def _write_aggregated_videos_for_camera(
         self,

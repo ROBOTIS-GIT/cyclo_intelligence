@@ -927,6 +927,66 @@ class OrchestratorNode(Node):
                 self._apply_cyclo_data_response(cd_result, response)
                 return response
 
+            elif request.command == SendCommand.Request.PREPARE_SESSION:
+                # Solo-recording entry point: cache task_info and prep the
+                # pipeline so the leader joystick can drive episode 0
+                # without anyone clicking the UI's RECORD button first.
+                # Does NOT call cyclo_data START — DataManager / rosbag
+                # stay idle. The joystick's first right-press takes the
+                # not-recording branch and starts episode 0 normally.
+                if self.communicator is None:
+                    response.success = False
+                    response.message = 'Communicator not initialized'
+                    return response
+                if not self.robot_type:
+                    response.success = False
+                    response.message = (
+                        'PREPARE_SESSION requires a robot_type — '
+                        'select the robot first.'
+                    )
+                    return response
+
+                task_info = request.task_info
+                self._last_ui_task_info = task_info
+                task_name = f'{self.robot_type}_{task_info.task_name}'
+                need_new_config = (
+                    getattr(self, '_current_task_name', None) != task_name
+                )
+                if need_new_config:
+                    self.get_logger().info(
+                        f'PREPARE_SESSION: initialising task config '
+                        f'(task={task_name})')
+                    self.init_robot_control_parameters_from_user_task(task_info)
+                    self._current_task_name = task_name
+                else:
+                    self.get_logger().info(
+                        f'PREPARE_SESSION: reusing cached task config '
+                        f'(task={task_name})')
+                if self.timer_manager:
+                    self.timer_manager.start(timer_name='collection')
+
+                # Forward REFRESH_TOPICS so cyclo_data's video pipeline
+                # and rosbag prep are guaranteed to be live before the
+                # first joystick press. Idempotent: video subs only
+                # rebuild on robot_type change; _prepare_rosbag_topics
+                # short-circuits when the set hasn't changed.
+                rosbag_topics = self.communicator.get_mcap_topics()
+                cd_result = self._cyclo_data.send_recording_command(
+                    command=RecordingCommand.Request.REFRESH_TOPICS,
+                    robot_type=self.robot_type,
+                    topics=rosbag_topics,
+                )
+                if cd_result.response is not None and not cd_result.response.success:
+                    self._apply_cyclo_data_response(cd_result, response)
+                    return response
+
+                response.success = True
+                response.message = (
+                    f'Session prepared (task={task_name}). '
+                    'Use the leader joystick to start episode 0.'
+                )
+                return response
+
             elif request.command == SendCommand.Request.START_RECORD:
                 # Forwarder: orchestrator owns on_recording / timer_manager /
                 # params / task_info cache; cyclo_data owns DataManager +
@@ -1185,21 +1245,19 @@ class OrchestratorNode(Node):
                     for i in range(min(len(rot_keys), len(rot_values)))
                     if rot_keys[i]
                 }
-                # Phase 4: yaml's observation.images.<cam>.rotation_deg is
-                # the source of truth for default rotations. UI overrides
-                # win per-key — when the user opens the convert panel and
-                # explicitly picks a value (including 0) it ships in
-                # ui_rotations; cameras the user didn't touch fall back to
-                # the yaml default.
-                yaml_rotations: dict = {}
-                if self.robot_section is not None:
-                    for cam, cfg in robot_schema.get_image_topics(
-                        self.robot_section
-                    ).items():
-                        deg = cfg.get('rotation_deg', 0)
-                        if deg:
-                            yaml_rotations[cam] = int(deg)
-                camera_rotations = {**yaml_rotations, **ui_rotations}
+                # yaml's ``rotation_deg`` is already baked into the raw
+                # H.264 MP4 by the recorder's transcoder
+                # (``cyclo_data/recorder/transcoder.py`` applies
+                # ``-vf transpose=N`` during the live record-time encode).
+                # The conversion's ``_sync_videos_to_grid`` treats whatever
+                # we pass here as an *additional* rotation on top — so
+                # merging the yaml defaults in causes a double rotation
+                # (270° baked + 270° at convert = 540° = visually 180°
+                # flipped + wrong dimensions). Forward only UI overrides;
+                # cameras the user didn't touch get rotation=0 (= no extra
+                # rotation), which is correct because the baseline already
+                # carries the yaml rotation.
+                camera_rotations = dict(ui_rotations)
                 resize_h = int(getattr(request, 'image_resize_height', 0) or 0)
                 resize_w = int(getattr(request, 'image_resize_width', 0) or 0)
                 image_resize = (
@@ -2049,24 +2107,41 @@ class OrchestratorNode(Node):
                     )
             else:
                 self.get_logger().info('Right button: Finishing recording (forwarder)')
-                self._forward_recording(
+                cd_result = self._forward_recording(
                     RecordingCommand.Request.STOP,
                     task_info=self._last_ui_task_info,
                 )
-                # Match the orchestrator's prior behaviour — STOP keeps
-                # on_recording True so subsequent right-clicks still toggle
-                # correctly. The UI can send FINISH when it wants to end
-                # the session.
+                # Flip on_recording back to False so the next right press
+                # takes the START branch. Without this, on_recording stays
+                # True forever and every subsequent right press goes to
+                # STOP — which cyclo_data treats as a no-op once its
+                # DataManager has flipped to idle.
+                if (cd_result.success
+                        and cd_result.response is not None
+                        and cd_result.response.success):
+                    self._set_session_active(on_recording=False)
+                else:
+                    self.get_logger().error(
+                        f'Joystick STOP forward failed: '
+                        f'{cd_result.response.message if cd_result.response else cd_result.message}'
+                    )
 
         elif joystick_mode == 'left':
             # cyclo_data's CANCEL handler picks the right mode: cancel-with-
             # review if actively recording, toggle-review otherwise. Also
             # publishes the right action_event (cancel / review_on / review_off).
             self.get_logger().info('Left button: forwarding CANCEL')
-            self._forward_recording(
+            cd_result = self._forward_recording(
                 RecordingCommand.Request.CANCEL,
                 task_info=self._last_ui_task_info,
             )
+            # Same reason as STOP above — after CANCEL the cyclo_data
+            # session is idle, so orchestrator's on_recording must follow
+            # or the next right press is stuck in the STOP branch.
+            if (cd_result.success
+                    and cd_result.response is not None
+                    and cd_result.response.success):
+                self._set_session_active(on_recording=False)
 
         elif joystick_mode == 'right_long_time':
             self.get_logger().info('Right long press - reserved for future use')

@@ -40,6 +40,29 @@ def _ffmpeg() -> str:
 _H264_ENCODER_CACHE: "list[str] | None" = None
 
 
+def _ffmpeg_threads_arg() -> list[str]:
+    """Return ``["-threads", "N"]`` to cap per-process ffmpeg threading.
+
+    libx264 (and most SW encoders) default to auto-threads = min(cpu_count, 16),
+    so a single ffmpeg can balloon to 8 cores on a Jetson Orin. Combined
+    with multiple parallel conversion workers, the host gets oversubscribed
+    and the ROS control loop starves. We cap to 2 threads per ffmpeg by
+    default; override with ``CYCLO_FFMPEG_THREADS`` (e.g. 1 on hot/thermal-
+    limited boxes, 4 on a dedicated conversion host).
+
+    NVENC / v4l2m2m encoders ignore ``-threads`` (they're H/W accelerated),
+    so the flag is a no-op when those are selected — but we always pass it
+    so libx264 fallback is safe.
+    """
+    import os
+    raw = os.environ.get("CYCLO_FFMPEG_THREADS", "2")
+    try:
+        n = max(1, int(raw))
+    except ValueError:
+        n = 2
+    return ["-threads", str(n)]
+
+
 def _try_encoder(ffmpeg: str, encoder: str, opts: list[str]) -> bool:
     """Smoke-test an encoder by running a 1-frame null-out encode.
 
@@ -118,6 +141,7 @@ def remux_selected_frames(
     output_mp4: Path,
     target_fps: int,
     rotation_deg: int = 0,
+    image_resize: "tuple[int, int] | None" = None,
 ) -> None:
     """Produce ``output_mp4`` containing the listed frames in order.
 
@@ -169,19 +193,39 @@ def remux_selected_frames(
         src_codec = probe.stdout.strip()
 
         if src_codec == "mjpeg":
+            # ``-c:v copy`` doesn't decode so threads matter little, but
+            # we pass the flag anyway for consistency / future codec
+            # changes.
             extract_cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+                *_ffmpeg_threads_arg(),
                 "-i", str(input_mp4),
                 "-c:v", "copy",
+                "-fps_mode", "passthrough",
                 "-f", "image2",
                 "-start_number", "0",
                 str(frames_dir / "f_%08d.jpg"),
             ]
         else:
+            # H.264 source: ffmpeg decodes here, so the auto-thread default
+            # (= cpu_count) blows up to 6+ cores per ffmpeg without the
+            # cap. Observed 264% CPU per extract before the cap.
+            #
+            # CRITICAL: ``-fps_mode passthrough`` preserves the input's
+            # VFR PTS. Without it ffmpeg's image2 muxer DUPLICATES frames
+            # to fill the container's r_frame_rate grid — the recorder's
+            # raw MP4 has r_frame_rate=25/1 (a stale ffmpeg auto-tag) but
+            # only ~15 fps of real packets, so a 223-frame raw produces
+            # 365 JPGs (= 14.56s × 25fps) of duplicated content. The
+            # caller's frame_indices then index into the wrong sequence
+            # and the resulting synced MP4 ends mid-episode (the user's
+            # "video cut off at frame ~135 instead of frame 222" report).
             extract_cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+                *_ffmpeg_threads_arg(),
                 "-i", str(input_mp4),
                 "-q:v", "2",
+                "-fps_mode", "passthrough",
                 "-f", "image2",
                 "-start_number", "0",
                 str(frames_dir / "f_%08d.jpg"),
@@ -251,10 +295,24 @@ def remux_selected_frames(
         # 15. 90000 is the H.264 RTP standard and divides cleanly into
         # every common LeRobot fps.
         encoder, enc_opts = _h264_encoder(ffmpeg)
+        # Build the ``-vf`` chain. Order matters: rotation first (because
+        # transpose changes width/height), then scale so the user's
+        # target dimensions describe the final output, not the
+        # pre-rotation orientation. ``image_resize`` is ``(height, width)``
+        # to match the orchestrator-side ConversionConfig field.
+        vf_filters: list[str] = []
         rot_filter = _rotation_transpose(rotation_deg)
-        vf_args = ["-vf", rot_filter] if rot_filter else []
+        if rot_filter:
+            vf_filters.append(rot_filter)
+        if image_resize is not None:
+            h, w = int(image_resize[0]), int(image_resize[1])
+            if h > 0 and w > 0:
+                # ``scale=W:H`` order; ffmpeg uses W first.
+                vf_filters.append(f"scale={w}:{h}")
+        vf_args = ["-vf", ",".join(vf_filters)] if vf_filters else []
         mux_cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+            *_ffmpeg_threads_arg(),
             "-framerate", str(int(target_fps)),
             "-start_number", "0",
             "-i", str(seq_dir / "seq_%08d.jpg"),

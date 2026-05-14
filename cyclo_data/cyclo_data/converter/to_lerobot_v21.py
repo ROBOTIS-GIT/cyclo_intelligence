@@ -58,7 +58,9 @@ from .base_converter import (  # noqa: F401
     EpisodeData,
     RosbagToLerobotConverterBase,
     StalenessMetrics,
+    _conversion_worker_init,
     _convert_rosbag_worker,
+    _resolve_conversion_worker_count,
 )
 
 
@@ -92,7 +94,12 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
 
         episodes_data: List[EpisodeData] = []
 
-        # Build a picklable config dict for worker processes
+        # Build a picklable config dict for worker processes. CRITICAL:
+        # must include every selection knob the converter consults
+        # in ``_sync_videos_to_grid`` / ``_compute_video_stats`` etc.;
+        # missing camera_rotations / image_resize / selected_* meant the
+        # worker silently defaulted to no rotation, no resize, etc. even
+        # when the UI had set values.
         config_dict = {
             'repo_id': self.config.repo_id,
             'output_dir': self.config.output_dir,
@@ -107,6 +114,19 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
             'apply_exclude_regions': self.config.apply_exclude_regions,
             'quality_warning_multiplier': self.config.quality_warning_multiplier,
             'quality_error_multiplier': self.config.quality_error_multiplier,
+            # Selection knobs (camera/topic/joint filters + per-knob
+            # transforms). Empty/None means "use defaults from the
+            # robot_config", same as legacy behaviour.
+            'selected_cameras': list(self.config.selected_cameras),
+            'camera_rotations': dict(self.config.camera_rotations),
+            'image_resize': (
+                tuple(self.config.image_resize)
+                if self.config.image_resize else None
+            ),
+            'selected_state_topics': list(self.config.selected_state_topics),
+            'selected_action_topics': list(self.config.selected_action_topics),
+            'selected_joints': list(self.config.selected_joints),
+            'source_rosbags': list(self.config.source_rosbags),
         }
 
         if len(bag_paths) <= 1:
@@ -116,16 +136,23 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
                 if episode_data is not None:
                     episodes_data.append(episode_data)
         else:
-            # Parallel episode parsing using ProcessPoolExecutor
-            import os
+            # Parallel episode parsing using ProcessPoolExecutor. Worker
+            # count is capped at half of the host CPUs (override via
+            # CYCLO_CONVERSION_MAX_WORKERS) so the ROS control loop and
+            # camera drivers keep their cores. Worker initializer drops
+            # the niceness so saturated CPUs still favour higher-priority
+            # work.
             from concurrent.futures import ProcessPoolExecutor, as_completed
 
-            max_workers = min(os.cpu_count() or 4, len(bag_paths), 8)
+            max_workers = _resolve_conversion_worker_count(len(bag_paths))
             self._log_info(
                 f"Starting parallel rosbag parsing with {max_workers} workers"
             )
 
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_conversion_worker_init,
+            ) as executor:
                 futures = {}
                 for idx, bag_path in enumerate(bag_paths):
                     future = executor.submit(
@@ -203,24 +230,27 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         parquet_path = data_chunk_dir / f"episode_{ep_idx:06d}.parquet"
         self._write_parquet(episode, parquet_path)
 
-        # Copy video files. ``_sync_videos_to_grid`` may have produced
-        # intermediate ``<cam>_synced.mp4`` files in the source rosbag
-        # videos/ dir; once the copy lands they're scratch and should
-        # be cleaned up rather than littering the user's dataset tree.
-        synced_to_delete: list[Path] = []
+        # Copy video files. ``_sync_videos_to_grid`` produces
+        # ``<cam>_synced.mp4`` files in the source rosbag videos/ dir;
+        # we used to delete them after the copy ("not littering the
+        # tree"). Keeping them is the right call now — they're cache:
+        #
+        # * v3.0's Phase 1 needs the same files. When the request runs
+        #   v2.1 + v3.0 back-to-back, deleting after v2.1 forces v3.0
+        #   to do the same expensive remux all over again.
+        # * Subsequent re-conversions (any combination) hit the
+        #   ``<cam>_synced.cache.json`` gate in ``_sync_videos_to_grid``
+        #   and skip remux entirely.
+        #
+        # Disk cost is modest (~2-3 MB per camera per episode at typical
+        # resolutions). Operators who want a clean tree can wipe
+        # ``<episode>/videos/*_synced.*`` after the dataset is final.
         for camera_name, src_video in episode.video_files.items():
             video_dir = video_chunk_dir / f"observation.images.{camera_name}"
             video_dir.mkdir(parents=True, exist_ok=True)
             dst_video = video_dir / f"episode_{ep_idx:06d}.mp4"
             shutil.copy2(src_video, dst_video)
             self._log_info(f"Copied video: {src_video.name} -> {dst_video}")
-            if Path(src_video).stem.endswith("_synced"):
-                synced_to_delete.append(Path(src_video))
-        for tmp in synced_to_delete:
-            try:
-                tmp.unlink()
-            except OSError as exc:
-                self._log_warning(f"Failed to clean up {tmp.name}: {exc}")
 
         # Write episode metadata
         episode_dict = {

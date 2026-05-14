@@ -62,6 +62,28 @@ _QUEUE_MAX = 512
 # ffmpeg's mjpeg demuxer doesn't desync.
 _JPEG_SOI = b"\xff\xd8"
 
+# Minimal valid 1x1 grayscale JPEG, written into ffmpeg's stdin right
+# before close() so the demuxer can finalise the last real frame.
+#
+# Why: ffmpeg's image2pipe+mjpeg demuxer only commits frame N to the
+# muxer when it sees frame N+1's SOI marker — it uses the next SOI as
+# the byte-boundary for the previous frame. On EOF the last buffered
+# frame is dropped, which makes mp4 frame_count = sidecar rows - 1.
+# Feeding one extra full JPEG before close lets that real last frame
+# get demuxed; this sentinel itself has no next-SOI so the demuxer
+# drops it. Verified empirically (synthetic N=5/10/50/100 all recover
+# to exactly N frames with this trailer).
+_JPEG_SENTINEL = bytes.fromhex(
+    "ffd8"                                                          # SOI
+    "ffe000104a46494600010100000100010000"                          # APP0 (JFIF)
+    "ffdb004300" + "01" * 64                                        # DQT
+    + "ffc0000b08000100010101110000"                                # SOF0 (1x1)
+    + "ffc4001f0000010501010101010100000000000000000102030405060708090a0b"  # DHT (DC)
+    + "ffc40014100100000000000000000000000000000000"                # DHT (AC)
+    + "ffda0008010100003f00" + "00"                                 # SOS + 1 byte ECS
+    + "ffd9"                                                        # EOI
+)
+
 _TIMESTAMP_SCHEMA = pa.schema([
     ("frame_index", pa.int32()),
     ("header_stamp_ns", pa.int64()),
@@ -221,6 +243,19 @@ class VideoRecorder:
             # earlier phase raised. ffmpeg without stdin.close() would
             # block forever waiting for EOF, exceeding the ~30s service
             # deadline.
+            #
+            # Trail one sentinel JPEG into each ffmpeg before close so
+            # the mjpeg image2pipe demuxer can finalise the real last
+            # frame (see _JPEG_SENTINEL docstring for the demuxer quirk
+            # this avoids). The sentinel itself is dropped because no
+            # further SOI follows it.
+            for stream in streams:
+                if stream.process is not None and stream.process.stdin is not None:
+                    try:
+                        if not stream.process.stdin.closed:
+                            stream.process.stdin.write(_JPEG_SENTINEL)
+                    except (BrokenPipeError, OSError):
+                        pass
             for stream in streams:
                 if stream.process is not None and stream.process.stdin is not None:
                     try:

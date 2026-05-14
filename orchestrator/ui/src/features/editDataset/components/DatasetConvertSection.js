@@ -56,85 +56,6 @@ export default function DatasetConvertSection({ isEditable = true }) {
   const [convertV21, setConvertV21] = useState(true);
   const [convertV30, setConvertV30] = useState(true);
 
-  // Camera rotation + image resize (CONVERT_MP4). Cameras are
-  // auto-discovered from the live image-topic list — robot_config
-  // already enumerates them, so the user only needs to specify how
-  // each one should be rotated. Empty rotation per camera = no
-  // rotation; both resize dims 0 = keep native resolution.
-  const [showCameraOptions, setShowCameraOptions] = useState(false);
-  const [cameraNames, setCameraNames] = useState([]);
-  const [cameraRotations, setCameraRotations] = useState({}); // {cam: 0|90|180|270}
-  const [resizeHeight, setResizeHeight] = useState(0);
-  const [resizeWidth, setResizeWidth] = useState(0);
-
-  const { getImageTopicList } = useRosServiceCaller();
-
-  // Map an image topic to a stable camera name. Mirrors
-  // cyclo_data/cyclo_data/reader/video_metadata_extractor.py
-  // extract_camera_name_from_topic() so UI and backend agree.
-  const extractCameraName = (topic) => {
-    const t = String(topic || '');
-    const lower = t.toLowerCase();
-
-    // ZED stereo head — split into left/right.
-    if (lower.includes('zed')) {
-      if (lower.includes('/right/') || lower.includes('_right')) return 'cam_head_right';
-      return 'cam_head_left';
-    }
-
-    // RealSense wrists.
-    if (lower.includes('camera_left')) return 'cam_wrist_left';
-    if (lower.includes('camera_right')) return 'cam_wrist_right';
-
-    // Legacy `/robot/camera/<cam_name>/...` pattern.
-    const m = t.match(/\/robot\/camera\/([^/]+)\//);
-    if (m) return m[1];
-
-    return null;
-  };
-
-  // Discover camera names on first expand of the camera-options panel.
-  // Robot type is already pinned by the time we reach this UI, so we
-  // just trust whatever cameras the orchestrator currently advertises.
-  //
-  // Rotation default = 0. The recorder already applied the yaml's
-  // ``rotation_deg`` at H.264 transcode time (see
-  // cyclo_data/recorder/transcoder.py), so the source MP4 the convert
-  // step reads is already correctly oriented. UI rotation here is a
-  // user-side *override* — apply N extra degrees beyond whatever's
-  // already baked in. Defaulting to 0 means "use what the recorder did"
-  // which is correct for >99% of cases.
-  useEffect(() => {
-    if (!showCameraOptions || cameraNames.length > 0) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const result = await getImageTopicList();
-        const topics = result?.image_topic_list || [];
-        const names = topics.map(extractCameraName).filter(Boolean);
-        if (!cancelled && names.length > 0) {
-          setCameraNames(names);
-          setCameraRotations((prev) => {
-            const next = { ...prev };
-            names.forEach((name) => {
-              if (!(name in next)) {
-                next[name] = 0;
-              }
-            });
-            return next;
-          });
-        }
-      } catch (err) {
-        console.warn('Failed to fetch camera list:', err);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [showCameraOptions, cameraNames.length, getImageTopicList]);
-
-  const handleRotationChange = (camera, value) => {
-    setCameraRotations((prev) => ({ ...prev, [camera]: Number(value) }));
-  };
-
   // ----- isConverting tracks the backend status -------------------------
   // Driven by /data/status (DataOperationStatus, OP_CONVERSION) routed
   // through editDatasetSlice. Conversion is a Data-Tools-side flow,
@@ -196,23 +117,12 @@ export default function DatasetConvertSection({ isEditable = true }) {
 
     const fire = async () => {
       try {
-        // Send every cameraRotations entry — including 0 — so the
-        // server can tell "user explicitly picked 0" apart from "user
-        // didn't touch this camera". The orchestrator merge does
-        // {**yaml_defaults, **ui_rotations}, so a missing key falls
-        // back to the yaml's rotation_deg; an explicit 0 wins over it.
-        const rotations = { ...cameraRotations };
-        const imageResize =
-          Number(resizeHeight) > 0 && Number(resizeWidth) > 0
-            ? { height: Number(resizeHeight), width: Number(resizeWidth) }
-            : null;
-
         const result = await sendRecordCommand('convert_mp4', {
           conversionFps,
           convertV21,
           convertV30,
-          cameraRotations: rotations,
-          imageResize,
+          cameraRotations: {},
+          imageResize: null,
         });
         if (!result?.success) {
           setConvertError(result?.message || 'Conversion failed');
@@ -232,9 +142,6 @@ export default function DatasetConvertSection({ isEditable = true }) {
     conversionFps,
     convertV21,
     convertV30,
-    cameraRotations,
-    resizeHeight,
-    resizeWidth,
   ]);
 
   // ----- file browser callbacks ------------------------------------------
@@ -379,96 +286,6 @@ export default function DatasetConvertSection({ isEditable = true }) {
             Converted datasets are saved under <code>/workspace/lerobot/</code>
             {' '}(folder is created automatically if missing).
           </div>
-        </div>
-
-        {/* Camera options (rotation + resize) ------------------------------ */}
-        <div className="flex flex-col gap-1">
-          <button
-            type="button"
-            onClick={() => setShowCameraOptions((v) => !v)}
-            disabled={isConverting}
-            className="self-start text-sm text-blue-600 hover:underline disabled:text-gray-400"
-          >
-            {showCameraOptions ? '▼' : '▶'} Camera options (rotation + resize)
-          </button>
-
-          {showCameraOptions && (
-            <div className="flex flex-col gap-3 mt-1 p-3 bg-gray-50 rounded-lg border border-gray-200 text-sm">
-              <div className="text-xs text-gray-500">
-                Other selection (which cameras / topics / joints) is read
-                from <code>robot_config.yaml</code>; you only need to specify
-                rotation per camera and an optional resize.
-              </div>
-
-              {/* Per-camera rotation dropdowns. Cameras come from the live
-                  image-topic list once Camera options is expanded. */}
-              <div className="flex flex-col gap-2">
-                <span className="text-gray-600 font-medium">Camera rotation</span>
-                {cameraNames.length === 0 ? (
-                  <span className="text-xs text-gray-500 italic">
-                    Loading camera list…
-                  </span>
-                ) : (
-                  cameraNames.map((cam) => (
-                    <div key={cam} className="flex items-center gap-2">
-                      <code className="text-sm text-gray-700 w-40 shrink-0">{cam}</code>
-                      <select
-                        value={cameraRotations[cam] ?? 0}
-                        onChange={(e) => handleRotationChange(cam, e.target.value)}
-                        disabled={isConverting || !isEditable}
-                        className={clsx(
-                          'p-1.5 border border-gray-300 rounded-md text-sm bg-white',
-                          'focus:outline-none focus:ring-2 focus:ring-blue-500',
-                          (isConverting || !isEditable) && 'bg-gray-100 cursor-not-allowed'
-                        )}
-                      >
-                        <option value={0}>0°</option>
-                        <option value={90}>90° CW</option>
-                        <option value={180}>180°</option>
-                        <option value={270}>270° (90° CCW)</option>
-                      </select>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <label className="flex flex-col gap-1">
-                <span className="text-gray-600 font-medium">Output resize (HxW)</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    value={resizeHeight === 0 ? '' : resizeHeight}
-                    onChange={(e) => setResizeHeight(Number(e.target.value) || 0)}
-                    placeholder="height"
-                    disabled={isConverting || !isEditable}
-                    className={clsx(
-                      'w-24 p-2 border border-gray-300 rounded-md text-sm',
-                      'focus:outline-none focus:ring-2 focus:ring-blue-500',
-                      (isConverting || !isEditable) && 'bg-gray-100 cursor-not-allowed'
-                    )}
-                  />
-                  <span>×</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={resizeWidth === 0 ? '' : resizeWidth}
-                    onChange={(e) => setResizeWidth(Number(e.target.value) || 0)}
-                    placeholder="width"
-                    disabled={isConverting || !isEditable}
-                    className={clsx(
-                      'w-24 p-2 border border-gray-300 rounded-md text-sm',
-                      'focus:outline-none focus:ring-2 focus:ring-blue-500',
-                      (isConverting || !isEditable) && 'bg-gray-100 cursor-not-allowed'
-                    )}
-                  />
-                  <span className="text-xs text-gray-500">
-                    Both 0 = keep native resolution.
-                  </span>
-                </div>
-              </label>
-            </div>
-          )}
         </div>
 
         {/* Convert button -------------------------------------------------- */}

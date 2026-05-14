@@ -244,19 +244,21 @@ class Communicator:
     # ========== Callbacks ==========
 
     def joystick_trigger_callback(self, msg: String):
-        """Handle joystick trigger for recording control."""
-        self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
-        with self._joystick_lock:
-            self.joystick_state['updated'] = True
-            self.joystick_state['mode'] = msg.data
+        """Handle joystick trigger for recording control.
 
-        # Call registered handler immediately if available
+        When a direct handler is registered we invoke it inline and
+        never publish to joystick_state — that avoids the timer pump
+        re-dispatching the same event if the handler raises before the
+        clear-flag step ran.
+        """
+        self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
         handler = self._joystick_handler
         if handler is not None:
             handler(msg.data)
-            # Mark as processed to prevent duplicate handling in timer callback
-            with self._joystick_lock:
-                self.joystick_state['updated'] = False
+            return
+        with self._joystick_lock:
+            self.joystick_state['updated'] = True
+            self.joystick_state['mode'] = msg.data
 
     def consume_joystick_update(self):
         """Atomically read-and-clear ``joystick_state``.

@@ -163,6 +163,9 @@ export function useRosServiceCaller() {
           case 'update_instruction':
             command_enum = TaskCommand.UPDATE_INSTRUCTION;
             break;
+          case 'prepare_session':
+            command_enum = TaskCommand.PREPARE_SESSION;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }

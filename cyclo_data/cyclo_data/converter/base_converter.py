@@ -27,6 +27,7 @@ between LeRobot v2.1 and v3.0. Format-specific writers live in
 
 import bisect
 import json
+import os
 import shutil  # noqa: F401  (re-exported transitively for legacy callers)
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +59,55 @@ def _convert_rosbag_worker(bag_path_str, episode_index, config_dict):
     converter = RosbagToLerobotConverterBase(config, logger=None)
     result = converter.convert_single_rosbag(Path(bag_path_str), episode_index)
     return episode_index, result
+
+
+# Hard ceiling so a 32-core dev host doesn't spawn 16 workers and over-
+# subscribe ffmpeg subprocesses. Conversion is IO + ffmpeg heavy and
+# 8 concurrent episodes already saturate disk + camera ffmpeg threads.
+_CONVERSION_WORKER_CEILING = 8
+
+
+def _resolve_conversion_worker_count(work_units: int) -> int:
+    """Pick the worker count for conversion ProcessPoolExecutor pools.
+
+    Defaults to **half of the visible CPUs** so the other half stays
+    free for the ROS control loop, camera drivers, and any inference
+    container that's running alongside. Without this cap a Jetson Orin
+    (8 cores) would launch 8 episode workers × 4 camera ffmpegs = 32
+    CPU-bound processes and starve the 100 Hz control loop.
+
+    Override with ``CYCLO_CONVERSION_MAX_WORKERS`` when an operator
+    explicitly wants to dedicate the machine to conversion (e.g. CI,
+    benchmark host) or further reduce parallelism on a thermally
+    constrained system.
+    """
+    if work_units <= 1:
+        return 1
+    env_override = os.environ.get('CYCLO_CONVERSION_MAX_WORKERS')
+    if env_override:
+        try:
+            override = max(1, int(env_override))
+            return max(1, min(override, work_units))
+        except ValueError:
+            pass
+    cpu_total = os.cpu_count() or 4
+    half = max(1, cpu_total // 2)
+    return max(1, min(half, work_units, _CONVERSION_WORKER_CEILING))
+
+
+def _conversion_worker_init() -> None:
+    """ProcessPoolExecutor initializer — yield CPU to higher-priority work.
+
+    niceness +10 (default 0; range -20..+19) makes the worker a
+    "background" citizen so the kernel scheduler prefers the ROS
+    control loop and inference container when CPUs are saturated.
+    Best-effort: silently no-op on platforms / containers that block
+    the syscall.
+    """
+    try:
+        os.nice(10)
+    except (OSError, AttributeError):
+        pass
 
 
 @dataclass
@@ -203,9 +253,40 @@ class RosbagToLerobotConverterBase:
         self._state_topic_key_map: Dict[str, str] = {}  # topic -> group key
         self._action_topic_key_map: Dict[str, str] = {}  # topic -> group key
 
-        # Load robot config if provided
-        if config.robot_config_path:
-            self._load_robot_config_file(config.robot_config_path)
+        # Per-episode bisect-keys cache for ``_find_previous_value(_in_list)``.
+        # Previously this lived in a mutable-default-arg dict on the method
+        # (the classic Python footgun) — it survived across episodes within
+        # a worker process and could in principle return stale keys if a
+        # new ``state_messages`` list reused a GC'd address. Instance scope
+        # plus an explicit ``clear()`` in ``_extract_joint_data`` keeps the
+        # per-call lookup speedup with zero risk of cross-episode leakage.
+        self._bisect_keys_cache: Dict[int, List[float]] = {}
+
+        # Load robot config — caller's explicit path wins, otherwise
+        # auto-resolve via the schema (which searches the standard
+        # ORCHESTRATOR_CONFIG_PATH / /orchestrator_config / source-tree
+        # locations). The ROS service callers don't pass
+        # ``robot_config_path`` on every request, so without this
+        # fallback ``_joint_order_by_group`` stays empty and the
+        # downstream ``_build_features`` ``names`` field collapses to
+        # the placeholder ``joint_N`` list — the symptom the user
+        # spotted in v2.1 ``info.json``.
+        robot_config_path = config.robot_config_path
+        if not robot_config_path and config.robot_type and config.robot_type != "unknown":
+            try:
+                resolved = robot_schema.find_robot_config_path(config.robot_type)
+                robot_config_path = str(resolved)
+                self._log_info(
+                    f"robot_config_path auto-resolved for "
+                    f"robot_type={config.robot_type!r}: {robot_config_path}"
+                )
+            except Exception as exc:
+                self._log_warning(
+                    f"robot_config_path auto-resolve failed for "
+                    f"robot_type={config.robot_type!r}: {exc!r}"
+                )
+        if robot_config_path:
+            self._load_robot_config_file(robot_config_path)
 
         # Apply selection knobs after robot_config has populated the
         # discovered defaults — empty selection lists mean "use all
@@ -673,6 +754,13 @@ class RosbagToLerobotConverterBase:
         exclude_regions: List[Dict],
     ) -> Optional[EpisodeData]:
         """Extract joint state and action data from ROSbag."""
+        # Clear the per-instance bisect-keys cache. Each episode builds a
+        # fresh state_messages / action_messages list, but Python may reuse
+        # the previous list's memory address for the new one — without this
+        # reset, ``_find_previous_value(_in_list)`` would silently return
+        # keys belonging to the prior episode and corrupt the resample.
+        self._bisect_keys_cache.clear()
+
         reader = BagReader(bag_path, self.logger)
         if not reader.open():
             self._log_error(f"Failed to open rosbag: {bag_path}")
@@ -1114,7 +1202,6 @@ class RosbagToLerobotConverterBase:
         messages: List[Tuple[float, np.ndarray]],
         target_time: float,
         tolerance: float = float("inf"),
-        _keys_cache: Dict[int, List[float]] = {},
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Find the most recent message value at or before target time (causal sync).
@@ -1125,15 +1212,22 @@ class RosbagToLerobotConverterBase:
         Returns:
             Tuple of (value, staleness_ms) where staleness_ms is how old the value is.
             Returns (None, 0.0) if no valid previous value exists.
+
+        Implementation note: keys cache lives on the instance (cleared by
+        ``_extract_joint_data`` per episode). The previous default-argument
+        dict was shared across all calls in the same worker process and
+        could in principle return stale keys when a new ``state_messages``
+        list reused a GC'd address — instance scope makes that impossible.
         """
         if not messages:
             return None, 0.0
 
         # Cache timestamp keys for repeated lookups on the same list
         list_id = id(messages)
-        if list_id not in _keys_cache or len(_keys_cache[list_id]) != len(messages):
-            _keys_cache[list_id] = [t for t, _ in messages]
-        keys = _keys_cache[list_id]
+        if (list_id not in self._bisect_keys_cache
+                or len(self._bisect_keys_cache[list_id]) != len(messages)):
+            self._bisect_keys_cache[list_id] = [t for t, _ in messages]
+        keys = self._bisect_keys_cache[list_id]
 
         # Binary search: find rightmost index where time <= target_time
         idx = bisect.bisect_right(keys, target_time) - 1
@@ -1306,7 +1400,6 @@ class RosbagToLerobotConverterBase:
         messages: List[Tuple[float, np.ndarray]],
         target_time: float,
         expected_interval_sec: float,
-        _keys_cache: Dict[int, List[float]] = {},
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Find the most recent message value at or before target time (causal sync).
@@ -1321,15 +1414,20 @@ class RosbagToLerobotConverterBase:
 
         Returns:
             Tuple of (value, staleness_ms). Returns (None, 0.0) if no previous value.
+
+        See ``_find_previous_value_in_list`` docstring for the cache rationale
+        — same shared-state bug, same fix (per-instance cache cleared per
+        ``_extract_joint_data`` call).
         """
         if not messages:
             return None, 0.0
 
         # Cache timestamp keys for repeated lookups on the same list
         list_id = id(messages)
-        if list_id not in _keys_cache or len(_keys_cache[list_id]) != len(messages):
-            _keys_cache[list_id] = [t for t, _ in messages]
-        keys = _keys_cache[list_id]
+        if (list_id not in self._bisect_keys_cache
+                or len(self._bisect_keys_cache[list_id]) != len(messages)):
+            self._bisect_keys_cache[list_id] = [t for t, _ in messages]
+        keys = self._bisect_keys_cache[list_id]
 
         # Binary search: find rightmost index where time <= target_time
         idx = bisect.bisect_right(keys, target_time) - 1
@@ -1341,6 +1439,83 @@ class RosbagToLerobotConverterBase:
 
         staleness_ms = (target_time - best_time) * 1000.0
         return best_value, staleness_ms
+
+    def _ensure_video_stats_cached(
+        self, video_path: Path, camera_name: str
+    ) -> None:
+        """Precompute + persist video stats to ``video_stats.json``.
+
+        ``_compute_video_stats`` already looks for a ``video_stats.json``
+        sidecar next to the video file and skips its cv2 decode loop on
+        cache hit. The recording-v2 pipeline doesn't write that file
+        anywhere, so Phase 2 (``_compute_episode_stats``) would otherwise
+        re-decode 100 frames per camera per episode — that's the serial
+        bottleneck that pegged Phase 2 at multi-minute runs.
+
+        By precomputing during ``_sync_videos_to_grid`` (Phase 1) the
+        decode work moves into the parallel pool *and* gets cached
+        forever for subsequent runs.
+
+        Idempotent: bails immediately if the sidecar already has this
+        camera's entry. Best-effort: any failure (cv2 missing,
+        unreadable mp4, json write fails) is logged at warning and the
+        call is a no-op — Phase 2 falls back to its own decode path.
+        """
+        video_path = Path(video_path)
+        if not video_path.exists():
+            return
+        stats_path = video_path.parent / "video_stats.json"
+        existing: Dict[str, Any] = {}
+        if stats_path.exists():
+            try:
+                with open(stats_path, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+            except (OSError, ValueError) as exc:
+                self._log_warning(
+                    f"{camera_name}: video_stats.json unreadable "
+                    f"({exc!r}); regenerating"
+                )
+                loaded = None
+            # Defensive: a stale sidecar that's not a dict (e.g. legacy
+            # list shape, ``null``, hand-edited) would let the downstream
+            # ``existing[camera_name] = stats`` raise TypeError and
+            # propagate to ``_sync_videos_to_grid``'s outer except — which
+            # then falls back to the raw MP4 and corrupts parquet/mp4
+            # length parity. Coerce non-dicts back to {} here.
+            if isinstance(loaded, dict):
+                existing = loaded
+            else:
+                if loaded is not None:
+                    self._log_warning(
+                        f"{camera_name}: video_stats.json was "
+                        f"{type(loaded).__name__}, expected dict; "
+                        "discarding and regenerating"
+                    )
+                existing = {}
+            if camera_name in existing:
+                return
+        # Compute fresh. ``_compute_video_stats`` would itself try the
+        # sidecar first; since we just verified the camera isn't in it,
+        # the call will fall through to decoding.
+        try:
+            stats = self._compute_video_stats(video_path, camera_name)
+        except Exception as exc:  # noqa: BLE001
+            self._log_warning(
+                f"{camera_name}: video_stats precompute raised "
+                f"({exc!r}); Phase 2 will compute lazily"
+            )
+            return
+        if not stats:
+            return
+        existing[camera_name] = stats
+        try:
+            with open(stats_path, "w", encoding="utf-8") as fh:
+                json.dump(existing, fh)
+        except OSError as exc:
+            self._log_warning(
+                f"{camera_name}: failed to write video_stats.json "
+                f"({exc!r}); Phase 2 will recompute"
+            )
 
     def _can_convert_transcode_state(self, bag_path: Path) -> bool:
         """Return True iff the episode is safe to feed to LeRobot conversion.
@@ -1460,16 +1635,80 @@ class RosbagToLerobotConverterBase:
             indices = ft.map_to_grid(grid_ns)
             out_path = videos_dir / f"{cam_name}_synced.mp4"
             rotation_extra = int(ui_rotations.get(cam_name, 0) or 0)
+            target_fps = int(self.config.fps)
+            image_resize = self.config.image_resize  # (height, width) or None
+            resize_key = (
+                list(image_resize) if image_resize else None
+            )
+
+            # Cache reuse: when v2.1 and v3.0 run on the same dataset
+            # back-to-back, v3.0's Phase 1 would otherwise redo the
+            # entire sync remux that v2.1 already produced. The sidecar
+            # records the params that *would* have produced this MP4 —
+            # mismatch on fps / rotation / resize / frame_count
+            # invalidates the cache so changing knobs via the UI always
+            # regenerates.
+            cache_sidecar = videos_dir / f"{cam_name}_synced.cache.json"
+            desired_key = {
+                "target_fps": target_fps,
+                "rotation_deg": rotation_extra,
+                "image_resize": resize_key,
+                "frame_count": int(indices.size),
+            }
+            if (
+                out_path.exists()
+                and cache_sidecar.exists()
+                and out_path.stat().st_size > 0
+            ):
+                try:
+                    cached_key = json.loads(cache_sidecar.read_text())
+                    if cached_key == desired_key:
+                        self._log_info(
+                            f"{cam_name}: reusing cached synced MP4 "
+                            f"({indices.size} frames, fps={target_fps}, "
+                            f"rot={rotation_extra}°)"
+                        )
+                        # Even on cache hit, top up the video_stats.json
+                        # sidecar so Phase 2 stays a cache hit. If a
+                        # previous run wrote synced.mp4 + cache.json but
+                        # not video_stats.json (e.g. ran before this
+                        # precompute was added), this fills the gap.
+                        self._ensure_video_stats_cached(out_path, cam_name)
+                        synced[cam_name] = out_path
+                        continue
+                except (OSError, ValueError) as exc:
+                    self._log_warning(
+                        f"{cam_name}: cache sidecar unreadable "
+                        f"({exc!r}); regenerating"
+                    )
+
             try:
                 remux_selected_frames(
                     src_path, indices, out_path,
-                    target_fps=int(self.config.fps),
+                    target_fps=target_fps,
                     rotation_deg=rotation_extra,
+                    image_resize=image_resize,
                 )
+                # Best-effort sidecar write — failure here just means
+                # the next run won't get a cache hit. Don't fail the
+                # whole conversion over a metadata write.
+                try:
+                    cache_sidecar.write_text(json.dumps(desired_key))
+                except OSError as exc:
+                    self._log_warning(
+                        f"{cam_name}: failed to write cache sidecar "
+                        f"({exc!r}); cache disabled for this run"
+                    )
                 self._log_info(
                     f"{cam_name}: synced MP4 {indices.size} frames "
                     f"-> {out_path.name} (UI extra rotation={rotation_extra}°)"
                 )
+                # Precompute Phase 2's per-camera video stats while we
+                # have a fresh synced.mp4 and a worker process to spare.
+                # Phase 2 (``_compute_episode_stats``) is single-threaded
+                # — caching here moves the decode cost into Phase 1's
+                # parallel pool, plus the result persists across runs.
+                self._ensure_video_stats_cached(out_path, cam_name)
                 synced[cam_name] = out_path
             except Exception as exc:
                 self._log_error(
@@ -1478,7 +1717,109 @@ class RosbagToLerobotConverterBase:
                 synced[cam_name] = src_path
 
         episode.video_files = synced
+
+        # Safety: when remux falls back to the raw MP4 for one or more
+        # cameras (synced.mp4 generation raised or returned the source
+        # path), the per-camera frame counts can disagree:
+        #   - successful synced.mp4 → indices.size frames (= episode.length)
+        #   - fallback raw mp4 → recorder frame count (often < indices.size)
+        # Downstream lerobot loaders demand parquet rows == every camera's
+        # mp4 frames; an off-by-N mismatch raises ``Invalid frame index``
+        # at training time. We align everything to ``min(frame_count)``:
+        #   1. truncate the in-memory episode (timestamps / state / action
+        #      / grid) so parquet rows == min,
+        #   2. trim any mp4 that's still longer (the synced.mp4 outputs
+        #      we generated at the original episode.length) down to min
+        #      via a fast ``-c copy`` stream copy.
+        if episode.length > 0 and synced:
+            counts: Dict[str, int] = {}
+            for cam_name, video_path in synced.items():
+                fc = self._get_video_frame_count(video_path)
+                if fc is not None:
+                    counts[cam_name] = fc
+            if counts:
+                min_frames = min(counts.values())
+                if min_frames < episode.length or any(
+                    c > min_frames for c in counts.values()
+                ):
+                    mismatched = {
+                        cam: c for cam, c in counts.items()
+                        if c != episode.length
+                    }
+                    if mismatched:
+                        self._log_warning(
+                            f"Episode {episode.episode_index}: "
+                            f"camera frame counts disagree with grid "
+                            f"length={episode.length}; aligning all "
+                            f"to min={min_frames}. Disagreement: "
+                            f"{mismatched}"
+                        )
+                    if min_frames < episode.length:
+                        episode.timestamps = episode.timestamps[:min_frames]
+                        if episode.observation_state:
+                            episode.observation_state = (
+                                episode.observation_state[:min_frames]
+                            )
+                        if episode.action:
+                            episode.action = episode.action[:min_frames]
+                        if episode.grid_log_times_sec:
+                            episode.grid_log_times_sec = (
+                                episode.grid_log_times_sec[:min_frames]
+                            )
+                        episode.length = min_frames
+                    # Trim any mp4 longer than min_frames.
+                    for cam_name, video_path in synced.items():
+                        if counts.get(cam_name, min_frames) <= min_frames:
+                            continue
+                        self._trim_video_to_n_frames(video_path, min_frames)
+
         return episode
+
+    def _trim_video_to_n_frames(self, video_path: Path, n: int) -> None:
+        """Truncate ``video_path`` to its first ``n`` frames in place.
+
+        Used as a safety step in ``_sync_videos_to_grid`` to bring
+        per-camera mp4 frame counts into agreement after a fallback
+        pulls episode.length down to a smaller value than the synced
+        mp4 we already generated. ``-c copy`` keeps it a fast remux:
+        no decode, no re-encode, output is bit-identical for the kept
+        frames. Atomic rename to avoid partial files on failure.
+        """
+        video_path = Path(video_path)
+        if not video_path.exists() or n <= 0:
+            return
+        # Keep the ``.mp4`` suffix on the tmp path so ffmpeg can
+        # auto-detect the container. The previous ``.mp4.trim.tmp``
+        # form left ``.tmp`` as the suffix and ffmpeg refused with
+        # "use a standard extension or specify the format manually".
+        tmp_path = video_path.with_name(video_path.stem + ".trim_tmp.mp4")
+        try:
+            import subprocess
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+                "-i", str(video_path),
+                "-frames:v", str(n),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                "-f", "mp4",
+                str(tmp_path),
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                self._log_warning(
+                    f"trim {video_path.name} to {n} frames failed: "
+                    f"{result.stderr[-300:]}"
+                )
+                tmp_path.unlink(missing_ok=True)
+                return
+            tmp_path.replace(video_path)
+        except Exception as exc:  # noqa: BLE001
+            self._log_warning(
+                f"trim {video_path.name} to {n} frames raised: {exc!r}"
+            )
+            tmp_path.unlink(missing_ok=True)
 
     def _find_video_files(self, bag_path: Path) -> Dict[str, Path]:
         """Find MP4 video files in the rosbag directory.
