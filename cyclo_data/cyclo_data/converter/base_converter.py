@@ -46,6 +46,15 @@ from shared.robot_configs import schema as robot_schema
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_FPS = 30
 
+# Floor applied to per-joint observation.state / action std when writing
+# stats. A joint that was not actuated during a recording has true std=0,
+# which makes downstream (x - mean) / std normalization explode to
+# ±Inf / NaN and crashes training. Flooring also tames "noise-only"
+# joints (std well below sensor noise): after normalization their
+# contribution stays bounded instead of being amplified into huge inputs.
+# Joints with real motion sit well above 1e-3 rad so they are unaffected.
+STATS_STD_FLOOR = 1e-3
+
 
 def _convert_rosbag_worker(bag_path_str, episode_index, config_dict):
     """Top-level function for ProcessPoolExecutor (must be picklable).
@@ -2143,7 +2152,7 @@ class RosbagToLerobotConverterBase:
             states = np.array(episode.observation_state)
             stats["observation.state"] = {
                 "mean": np.mean(states, axis=0).tolist(),
-                "std": np.std(states, axis=0).tolist(),
+                "std": np.maximum(np.std(states, axis=0), STATS_STD_FLOOR).tolist(),
                 "min": np.min(states, axis=0).tolist(),
                 "max": np.max(states, axis=0).tolist(),
                 "count": [num_frames],
@@ -2153,7 +2162,7 @@ class RosbagToLerobotConverterBase:
             actions = np.array(episode.action)
             stats["action"] = {
                 "mean": np.mean(actions, axis=0).tolist(),
-                "std": np.std(actions, axis=0).tolist(),
+                "std": np.maximum(np.std(actions, axis=0), STATS_STD_FLOOR).tolist(),
                 "min": np.min(actions, axis=0).tolist(),
                 "max": np.max(actions, axis=0).tolist(),
                 "count": [num_frames],
