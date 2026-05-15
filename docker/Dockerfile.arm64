@@ -7,7 +7,7 @@
 #                                         orchestrator / cyclo_data nodes
 #
 # Build context: cyclo_intelligence/ (repo root)
-#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:arm64 .
+#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:0.1.1-arm64 .
 #
 # lerobot / groot are separate containers (PLAN §4.8 on-demand pull);
 # this image intentionally does NOT bundle PyTorch / CUDA / LeRobot.
