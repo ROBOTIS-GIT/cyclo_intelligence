@@ -26,6 +26,14 @@ branch="jazzy"
 
 mkdir -p "${cache_dir}"
 
+# Mark the cache dir as colcon-invisible. zenoh_cache holds upstream
+# ROS message packages (common_interfaces, rcl_interfaces) that have
+# their own package.xml; without this sentinel, anyone running a plain
+# `colcon build` from the workspace root would discover them and try
+# to (re)build std_msgs / test_msgs / etc. See Dockerfile.arm64 `cb`
+# alias for the build path that's already path-pinned and safe.
+touch "${cache_dir}/COLCON_IGNORE"
+
 # Clone via a throw-away docker container so the resulting tree is
 # owned by uid 0 — matches the in-container root that lerobot/groot
 # run as, sidestepping GitPython's "dubious ownership" check.

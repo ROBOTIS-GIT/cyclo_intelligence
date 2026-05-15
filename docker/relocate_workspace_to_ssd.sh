@@ -7,11 +7,13 @@
 # Run with: sudo bash relocate_workspace_to_ssd.sh
 set -euo pipefail
 
-REPO=/home/robotis/cyclo_intelligence
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO="${CYCLO_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SSD_ROOT="${CYCLO_SSD_ROOT:-/mnt/ssd/cyclo_intelligence}"
 SRC_W=$REPO/docker/workspace
 SRC_H=$REPO/docker/huggingface
-DST_W=/mnt/ssd/cyclo_intelligence/workspace
-DST_H=/mnt/ssd/cyclo_intelligence/huggingface
+DST_W=$SSD_ROOT/workspace
+DST_H=$SSD_ROOT/huggingface
 
 echo "=== 1/6  containers using these mounts: stop them ==="
 for c in cyclo_intelligence groot_server lerobot_server; do
@@ -23,7 +25,7 @@ done
 
 echo "=== 2/6  prepare destination on NVMe ==="
 mkdir -p "$DST_W" "$DST_H"
-chown -R robotis:robotis /mnt/ssd/cyclo_intelligence
+chown -R robotis:robotis "$SSD_ROOT"
 
 echo "=== 3/6  copy workspace -> $DST_W (this is the slow part) ==="
 if [ -d "$SRC_W" ] && [ ! -L "$SRC_W" ]; then
@@ -45,7 +47,7 @@ echo "=== 5/6  symlink $SRC_W -> $DST_W and $SRC_H -> $DST_H ==="
 
 echo "=== 6/6  result ==="
 ls -la "$SRC_W" "$SRC_H"
-df -h / /mnt/ssd | tail -2
+df -h / "$SSD_ROOT" | tail -2
 
 echo
 echo "Done. Restart containers with:"

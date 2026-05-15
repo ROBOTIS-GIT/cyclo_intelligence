@@ -24,8 +24,11 @@ fi
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 export ROS_DISTRO=${ROS_DISTRO:-jazzy}
 export COLCON_WS=${COLCON_WS:-/root/ros2_ws}
-export PATH=/opt/venv/bin:${PATH}
-export PYTHONPATH=/opt/venv/lib/python3.12/site-packages:${PYTHONPATH}
+export VENV_PATH=${VENV_PATH:-/opt/venv}
+export ROS_ROOT=${ROS_ROOT:-/opt/ros}
+export PYTHON_SITE_PACKAGES=${PYTHON_SITE_PACKAGES:-${VENV_PATH}/lib/python3.12/site-packages}
+export PATH=${VENV_PATH}/bin:${PATH}
+export PYTHONPATH=${PYTHON_SITE_PACKAGES}:${PYTHONPATH}
 
 # s6-overlay debug logging
 export S6_VERBOSITY=${S6_VERBOSITY:-1}
@@ -43,7 +46,7 @@ echo "[${SERVICE_NAME}] Process group: ${PGID}"
 echo "${PGID}" > /run/${SERVICE_NAME}.pgid || true
 
 # Source ROS2 environment
-source /opt/ros/${ROS_DISTRO}/setup.bash
+source ${ROS_ROOT}/${ROS_DISTRO}/setup.bash
 source ${COLCON_WS}/install/setup.bash
 
 # Determine the command to execute

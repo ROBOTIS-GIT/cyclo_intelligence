@@ -30,12 +30,11 @@ from trajectory_msgs.msg import JointTrajectory
 from cyclo_data.reader.metadata_manager import MetadataManager
 from cyclo_data.reader.video_metadata_extractor import VideoMetadataExtractor
 
-try:
-    from rosbag_recorder.msg import ImageMetadata
-
-    HAS_IMAGE_METADATA = True
-except ImportError:
-    HAS_IMAGE_METADATA = False
+# NOTE: rosbag_recorder.msg.ImageMetadata + the ``has_raw_images`` /
+# MCAP-direct-streaming path it powered are recording format v1
+# artefacts. Recording format v2 keeps images out of MCAP entirely
+# (they live next to it as per-camera MP4 + Parquet sidecar), so the
+# importer is gone.
 
 
 class ReplayDataHandler:
@@ -141,10 +140,11 @@ class ReplayDataHandler:
             "trim_points": None,
             "exclude_regions": [],
             "frame_counts": {},
-            # MCAP direct streaming fields
-            "has_raw_images": False,
-            "raw_image_topics": [],
-            "mcap_file": "",
+            # Recording format v2 transcode state — UI gates playback on
+            # this so a half-transcoded MJPEG MP4 never reaches an
+            # HTML5 <video> tag (Chromium can't decode MJPEG).
+            "transcoding_status": "done",  # legacy episodes default to ready
+            "transcoding_cameras_failed": {},
         }
 
         # Validate bag path
@@ -176,8 +176,25 @@ class ReplayDataHandler:
             result["message"] = f"No bag file found in: {bag_path}"
             return result
 
-        # Store MCAP filename for browser-side direct reading
-        result["mcap_file"] = mcap_files[0].name
+        # Surface recording format v2 transcode state so the UI can
+        # gate playback (raw MJPEG MP4 doesn't play in Chromium).
+        info_path = bag_path_obj / "episode_info.json"
+        if info_path.exists():
+            try:
+                import json as _json
+                with open(info_path) as f:
+                    info = _json.load(f) or {}
+                # If the episode predates the transcoder ("no field"),
+                # treat as ready — its source MP4 (if any) is whatever
+                # the legacy pipeline produced.
+                result["transcoding_status"] = str(
+                    info.get("transcoding_status", "done")
+                )
+                result["transcoding_cameras_failed"] = dict(
+                    info.get("transcoding_cameras_failed") or {}
+                )
+            except Exception as exc:
+                self._log_error(f"replay: failed to read {info_path.name}: {exc!r}")
 
         try:
             # Read bag file
@@ -196,24 +213,11 @@ class ReplayDataHandler:
             topic_type_map = {t.name: t.type for t in topic_types}
             self._log_info(f"MCAP topics: {topic_type_map}")
 
-            # Detect CompressedImage topics for MCAP direct streaming
-            raw_image_topics = [
-                topic
-                for topic, ttype in topic_type_map.items()
-                if "CompressedImage" in ttype
-            ]
-            if raw_image_topics:
-                result["has_raw_images"] = True
-                result["raw_image_topics"] = [
-                    {
-                        "topic": t,
-                        "camera_name": self._extract_camera_name_from_topic(t),
-                    }
-                    for t in raw_image_topics
-                ]
-
-            # Filter to only read non-image topics (skip CompressedImage/CameraInfo)
-            # This avoids reading hundreds of MB of image data we don't need
+            # Recording format v2 MCAP carries state + action + /tf
+            # only (no CompressedImage, no CameraInfo). The legacy v1
+            # bag may still have those, so the storage filter below is
+            # defensive — it just keeps the topics we care about and
+            # ignores everything else.
             skip_types = {"CompressedImage", "CameraInfo"}
             read_topics = [
                 topic
@@ -247,24 +251,8 @@ class ReplayDataHandler:
 
                 topic_type = topic_type_map.get(topic, "")
 
-                # Handle ImageMetadata messages
-                if HAS_IMAGE_METADATA and "ImageMetadata" in topic_type:
-                    try:
-                        msg = deserialize_message(data, ImageMetadata)
-                        # Extract source topic from metadata topic name
-                        source_topic = topic.replace("/metadata", "")
-
-                        if source_topic not in image_metadata_by_topic:
-                            image_metadata_by_topic[source_topic] = []
-
-                        image_metadata_by_topic[source_topic].append(
-                            (msg.frame_index, timestamp_sec)
-                        )
-                    except Exception as e:
-                        self._log_error(f"Failed to deserialize ImageMetadata: {e}")
-
                 # Handle JointState messages - check if it's action or state
-                elif topic_type == "sensor_msgs/msg/JointState":
+                if topic_type == "sensor_msgs/msg/JointState":
                     try:
                         msg = deserialize_message(data, JointState)
                         if self._is_action_topic(topic, metadata):
@@ -306,20 +294,73 @@ class ReplayDataHandler:
                 for cam_name, topic_path in metadata["camera_topics"].items():
                     camera_name_map[topic_path] = cam_name
 
-            # Process video files
+            # Recording format v2: every recorded camera has a Parquet
+            # sidecar with per-frame ``header_stamp_ns`` / ``recv_ns`` so
+            # we can populate ``image_metadata_by_topic`` directly without
+            # touching the (now-absent) MCAP ImageMetadata channel.
             videos_dir = bag_path_obj / "videos"
+            try:
+                from cyclo_data.reader.frame_timestamps import (
+                    load_frame_timestamps,
+                )
+            except Exception:
+                load_frame_timestamps = None  # type: ignore[assignment]
+            sidecar_by_camera: Dict[str, Any] = {}
+            if videos_dir.exists() and load_frame_timestamps is not None:
+                for sidecar in sorted(
+                    videos_dir.glob("*_timestamps.parquet")
+                ):
+                    cam_name = sidecar.stem[: -len("_timestamps")]
+                    try:
+                        sidecar_by_camera[cam_name] = load_frame_timestamps(
+                            sidecar, cam_name
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self._log_error(
+                            f"replay: failed to read {sidecar.name}: {exc!r}"
+                        )
+
+            # Process video files
             if videos_dir.exists():
                 for video_file in sorted(videos_dir.glob("*.mp4")):
+                    if video_file.stem.endswith("_synced"):
+                        # Skip converter-side derivatives that happen to
+                        # live in the same dir.
+                        continue
                     result["video_files"].append(f"videos/{video_file.name}")
 
                     # Find matching topic
                     video_name = video_file.stem
                     matching_topic = None
-                    for topic in image_metadata_by_topic.keys():
-                        sanitized = topic.replace("/", "_").lstrip("_")
-                        if sanitized == video_name:
-                            matching_topic = topic
-                            break
+                    if video_name in sidecar_by_camera:
+                        # v2 path: per-camera sidecar is the source of
+                        # truth. Fold its rows into image_metadata_by_topic
+                        # keyed by the video filename (no source topic in
+                        # the v2 MCAP) so the rest of this method works
+                        # unchanged.
+                        ft = sidecar_by_camera[video_name]
+                        # Use header.stamp seconds (publisher clock) so
+                        # the timeline lines up with anything that
+                        # publishes header.stamp in the MCAP.
+                        per_frame = [
+                            (int(idx), stamp / 1e9)
+                            for idx, stamp in zip(
+                                ft.frame_index, ft.header_stamp_ns
+                            )
+                        ]
+                        if per_frame:
+                            image_metadata_by_topic[video_name] = per_frame
+                            matching_topic = video_name
+                            if per_frame[0][1] > 0:
+                                min_time = min(min_time, per_frame[0][1])
+                            if per_frame[-1][1] > 0:
+                                max_time = max(max_time, per_frame[-1][1])
+                    if matching_topic is None:
+                        for topic in image_metadata_by_topic.keys():
+                            sanitized = topic.replace("/", "_").lstrip("_")
+                            if sanitized == video_name:
+                                matching_topic = topic
+                                break
 
                     result["video_topics"].append(matching_topic or video_name)
 
@@ -493,10 +534,7 @@ class ReplayDataHandler:
                 f"Loaded replay data: {len(result['video_files'])} videos, "
                 f"{len(result['frame_timestamps'])} frames, "
                 f"{len(result['joint_timestamps'])} joint samples, "
-                f"{len(result['action_timestamps'])} action samples, "
-                f"has_raw_images={result['has_raw_images']}, "
-                f"raw_image_topics={[t['topic'] for t in result['raw_image_topics']]}, "
-                f"mcap_file={result['mcap_file']}"
+                f"{len(result['action_timestamps'])} action samples"
             )
 
         except Exception as e:

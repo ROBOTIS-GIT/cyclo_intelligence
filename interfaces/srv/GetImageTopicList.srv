@@ -1,4 +1,10 @@
 ---
 string[] image_topic_list
+# Per-camera rotation degrees from robot_config yaml's
+# observation.images.<cam>.rotation_deg, parallel-indexed with
+# image_topic_list. 0 when the yaml omits the field. Lets the convert
+# UI surface the yaml default in its dropdown so the user knows what
+# rotation will be applied if they don't override it.
+int32[] rotation_deg_list
 bool success
 string message

@@ -1,9 +1,7 @@
 #!/bin/bash
 #
-# cyclo_intelligence container helper — mirrors the physical_ai_tools
-# docker/container.sh pattern (auto-detects ARCH from uname -m). Step 6
-# expands this from lerobot-only to also managing the main
-# cyclo_intelligence service.
+# cyclo_intelligence container helper. It auto-detects ARCH from uname -m
+# and manages the main runtime plus optional policy containers.
 #
 # Usage:
 #   docker/container.sh start              # → cyclo_intelligence
@@ -64,8 +62,10 @@ set -- "${NEW_ARGS[@]}"
 for d in workspace huggingface; do
     [ -d "${SCRIPT_DIR}/${d}" ] || mkdir -p "${SCRIPT_DIR}/${d}"
 done
-mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
-    || sudo mkdir -p /var/run/robotis/agent_sockets/cyclo_intelligence 2>/dev/null \
+CYCLO_AGENT_SOCKETS_DIR="${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}"
+export CYCLO_AGENT_SOCKETS_DIR
+mkdir -p "$CYCLO_AGENT_SOCKETS_DIR" 2>/dev/null \
+    || sudo mkdir -p "$CYCLO_AGENT_SOCKETS_DIR" 2>/dev/null \
     || true
 
 # X11 forwarding for UI windows (rviz, plotjuggler, etc.) when started
@@ -113,7 +113,7 @@ Flags (any start* command):
 
 Environment:
   GPU_ARCH         default | blackwell   (optional, amd64 only)
-  VERSION          image tag version (default: 0.1.0 for cyclo)
+  VERSION          image tag version (default: 0.1.1 for cyclo)
   ROS_DOMAIN_ID    default 30
 EOF
 }

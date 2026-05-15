@@ -165,7 +165,7 @@ async def test_service_call(host: str, port: int, service: str, service_type: st
 def run_tests(host: str, port: int, bag_path: str = None):
     """Run all tests."""
     print("\n" + "="*60)
-    print("Physical AI Server Connection Test")
+    print("Cyclo Intelligence Orchestrator Connection Test")
     print("="*60 + "\n")
 
     all_passed = True

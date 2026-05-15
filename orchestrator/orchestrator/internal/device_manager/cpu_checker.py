@@ -16,6 +16,7 @@
 #
 # Author: Dongyun Kim
 
+import threading
 from collections import deque
 
 import psutil
@@ -26,16 +27,18 @@ class CPUChecker:
     def __init__(self, window_size: int = 30):
         self.window_size = window_size
         self.cpu_samples = deque(maxlen=window_size)
+        # Multi-threaded executor callbacks can call get_cpu_usage()
+        # concurrently. deque.append is atomic under the GIL but
+        # sum(deque) iterates and can raise / return torn results
+        # if a concurrent append occurs mid-iteration.
+        self._lock = threading.Lock()
         psutil.cpu_percent(interval=None)
 
     def get_cpu_usage(self) -> float:
         try:
             current_cpu = psutil.cpu_percent(interval=None)
-            self.cpu_samples.append(current_cpu)
-            if len(self.cpu_samples) > 0:
+            with self._lock:
+                self.cpu_samples.append(current_cpu)
                 return sum(self.cpu_samples) / len(self.cpu_samples)
-            else:
-                return 0.0
-
         except Exception:
             return 0.0

@@ -23,6 +23,13 @@ uint8 REFRESH_TOPICS = 15
 # instruction; lifecycle stays at INFERENCING. No-op (failure response)
 # for backends without language conditioning.
 uint8 UPDATE_INSTRUCTION = 16
+# PREPARE_SESSION: cache task_info on the orchestrator and stand up the
+# recording infrastructure (REFRESH_TOPICS forward, video pipeline,
+# collection timer) without actually starting an episode. The leader
+# joystick can then drive episode 0 onwards from the first right-press
+# — without this, the joystick handler refuses the first press because
+# _last_ui_task_info is None.
+uint8 PREPARE_SESSION = 17
 
 uint8 command
 TaskInfo task_info

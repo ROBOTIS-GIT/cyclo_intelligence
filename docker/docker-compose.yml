@@ -10,7 +10,7 @@
 #                         for Step 4 verification.
 #
 # Usage: prefer the container.sh wrapper — it auto-detects ARCH from
-# `uname -m` (physical_ai_tools convention) and sets the compose env:
+# `uname -m` and sets the compose env:
 #   docker/container.sh start              # → cyclo_intelligence only
 #   docker/container.sh start-lerobot      # → lerobot (no ROBOT_TYPE
 #                                          #    needed; passed at LOAD)
@@ -19,14 +19,14 @@
 #   docker/container.sh stop               # → compose down
 #
 # Direct compose (ARCH defaults to arm64 since Jetson is the primary
-# target, matching physical_ai_tools/docker/docker-compose.yml):
+# target):
 #   docker compose -f docker/docker-compose.yml up -d --build cyclo_intelligence
 #   docker compose -f docker/docker-compose.yml up -d --build lerobot
 
 # Explicit project name. Without this, compose defaults the project to
 # the parent dir name ('docker') — same default used by every other
 # repo whose compose file sits under <repo>/docker/, including
-# physical_ai_tools and the talos suite (zenoh_daemon, ai_worker,
+# other ROBOTIS container suites (zenoh_daemon, ai_worker,
 # novnc-server, talos_ui). Sharing the project name means compose
 # treats those containers as 'orphans' of our project and
 # --remove-orphans wipes them. Pin our own name so down/up only ever
@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:${VERSION:-0.1.0}-${ARCH:-arm64}
+    image: robotis/cyclo-intelligence:${VERSION:-0.1.1}-${ARCH:-arm64}
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -54,8 +54,7 @@ services:
       network: host
 
     # SYS_NICE + rtprio so orchestrator's control thread can request
-    # real-time priority. memlock matches the value physical_ai_tools
-    # uses in production.
+    # real-time priority. memlock matches the production runtime value.
     cap_add:
       - SYS_NICE
     ulimits:
@@ -102,7 +101,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # s6-agent UDS — cyclo_manager FastAPI listens here for
       # system-wide control requests from the host side.
-      - /var/run/robotis/agent_sockets/cyclo_intelligence:/var/run/agent
+      - ${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}:/var/run/agent
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 

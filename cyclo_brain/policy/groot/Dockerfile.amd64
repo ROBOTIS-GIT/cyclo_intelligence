@@ -2,8 +2,8 @@
 # This container provides isolated GR00T environment with Zenoh-based communication
 # for training (finetuning) and inference commands from orchestrator (ROS2)
 #
-# Based on official NVIDIA GR00T Dockerfile with Physical AI Tools integration
-# Build context: physical_ai_tools/cyclo_brain/policy/groot/
+# Based on official NVIDIA GR00T Dockerfile with Cyclo Intelligence integration
+# Build context: cyclo_intelligence/cyclo_brain/policy/groot/
 # Usage: docker build -f Dockerfile.amd64 -t robotis/groot-zenoh:amd64 .
 
 # NVIDIA PyTorch base image (same as official GR00T Dockerfile)

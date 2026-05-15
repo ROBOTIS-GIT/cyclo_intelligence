@@ -80,6 +80,14 @@ class HubService:
         self._idle_count = 0
         self._last_status = None
         self._cancel_in_progress = False
+        # Service callback (_callback) and the 2 Hz _status_timer_callback
+        # are both registered on io_callback_group which is a
+        # ReentrantCallbackGroup — under MultiThreadedExecutor they can
+        # fire concurrently. _state_lock serialises mutations of the
+        # worker handle, idle counter, last-status snapshot and the
+        # cancel flag so the timer can't tear `_api_worker = None` out
+        # from under a check-then-use in _handle_transfer.
+        self._state_lock = threading.Lock()
 
         self._server = node.create_service(
             HfOperation,
@@ -96,20 +104,27 @@ class HubService:
     # ------------------------------------------------------------------
 
     def _init_worker(self):
+        # Build the worker outside the lock — HfApiWorker() forks a child
+        # process and start() blocks on the pipe handshake.
         try:
-            self._api_worker = HfApiWorker()
-            if self._api_worker.start():
-                self._node.get_logger().info('HF API Worker started')
-                self._idle_count = 0
-                self._status_timer = self._node.create_timer(
-                    self.STATUS_PERIOD_SEC,
-                    self._status_timer_callback,
-                    callback_group=self._node.io_callback_group,
-                )
-            else:
+            worker = HfApiWorker()
+            if not worker.start():
                 self._node.get_logger().error('Failed to start HF API Worker')
+                return
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(f'Error initializing HF API Worker: {exc}')
+            return
+
+        timer = self._node.create_timer(
+            self.STATUS_PERIOD_SEC,
+            self._status_timer_callback,
+            callback_group=self._node.io_callback_group,
+        )
+        with self._state_lock:
+            self._api_worker = worker
+            self._status_timer = timer
+            self._idle_count = 0
+        self._node.get_logger().info('HF API Worker started')
 
     def shutdown(self):
         """Explicit cleanup hook invoked by cyclo_data_node on shutdown."""
@@ -134,11 +149,12 @@ class HubService:
             response.message = f'Unknown repo_type: {request.repo_type}'
             return response
 
-        if self._cancel_in_progress:
-            response.success = False
-            response.job_id = ''
-            response.message = 'HF API Worker is currently canceling'
-            return response
+        with self._state_lock:
+            if self._cancel_in_progress:
+                response.success = False
+                response.job_id = ''
+                response.message = 'HF API Worker is currently canceling'
+                return response
 
         if request.operation == HfOperation.Request.CANCEL:
             return self._handle_cancel(response)
@@ -146,8 +162,9 @@ class HubService:
         return self._handle_transfer(request, response, op_str, repo_type_str)
 
     def _handle_cancel(self, response):
-        try:
+        with self._state_lock:
             self._cancel_in_progress = True
+        try:
             self._cleanup_worker_with_threading()
             response.success = True
             response.job_id = ''
@@ -160,7 +177,8 @@ class HubService:
             response.job_id = ''
             response.message = f'Cancel failed: {exc}'
         finally:
-            self._cancel_in_progress = False
+            with self._state_lock:
+                self._cancel_in_progress = False
         return response
 
     def _handle_transfer(self, request, response, op_str, repo_type_str):
@@ -188,17 +206,23 @@ class HubService:
             endpoint = entry.endpoint
             token = entry.token
 
-        if self._api_worker is None or not self._api_worker.is_alive():
+        # Snapshot the handle so the timer can't None it out between
+        # the is_alive / is_busy / send_request calls below.
+        with self._state_lock:
+            worker = self._api_worker
+        if worker is None or not worker.is_alive():
             self._node.get_logger().info('HF API Worker not running, restarting...')
             self._init_worker()
+            with self._state_lock:
+                worker = self._api_worker
 
-        if self._api_worker is None:
+        if worker is None:
             response.success = False
             response.job_id = ''
             response.message = 'HF API Worker could not be started.'
             return response
 
-        if self._api_worker.is_busy():
+        if worker.is_busy():
             self._node.get_logger().warning('HF API Worker is currently busy with another task')
             response.success = False
             response.job_id = ''
@@ -214,7 +238,7 @@ class HubService:
             'endpoint': endpoint,
             'token': token,
         }
-        if self._api_worker.send_request(request_data):
+        if worker.send_request(request_data):
             self._node.get_logger().info(
                 f'HF API request sent: {op_str} {request.repo_id} via {endpoint}')
             response.success = True
@@ -240,31 +264,39 @@ class HubService:
     # ------------------------------------------------------------------
 
     def _status_timer_callback(self):
-        if self._api_worker is None:
+        with self._state_lock:
+            worker = self._api_worker
+        if worker is None:
             return
         try:
-            status = self._api_worker.check_task_status()
+            status = worker.check_task_status()
             self._publish_hf_status(status)
 
-            last = (
-                self._last_status.get('status', 'Unknown')
-                if self._last_status else 'Unknown'
-            )
             current = status.get('status', 'Unknown')
-            if self._last_status is not None and last != current:
+            with self._state_lock:
+                last_status = self._last_status
+                last = (
+                    last_status.get('status', 'Unknown')
+                    if last_status else 'Unknown'
+                )
+                changed = last_status is not None and last != current
+                self._last_status = status
+                if current == 'Idle':
+                    self._idle_count += 1
+                    idle_count = self._idle_count
+                else:
+                    self._idle_count = 0
+                    idle_count = 0
+
+            if changed:
                 self._node.get_logger().info(
                     f'HF API Status changed: {last} -> {current}')
-            self._last_status = status
 
-            if current == 'Idle':
-                self._idle_count += 1
-                if self._idle_count >= self.IDLE_TICKS_BEFORE_SHUTDOWN:
-                    self._node.get_logger().info(
-                        f'HF API Worker idle for {self.IDLE_TICKS_BEFORE_SHUTDOWN} '
-                        'cycles, shutting down worker and timer.')
-                    self._cleanup_worker()
-            else:
-                self._idle_count = 0
+            if current == 'Idle' and idle_count >= self.IDLE_TICKS_BEFORE_SHUTDOWN:
+                self._node.get_logger().info(
+                    f'HF API Worker idle for {self.IDLE_TICKS_BEFORE_SHUTDOWN} '
+                    'cycles, shutting down worker and timer.')
+                self._cleanup_worker()
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(f'Error in HF status timer callback: {exc}')
 
@@ -297,24 +329,34 @@ class HubService:
 
     def _cleanup_worker_with_threading(self):
         """Non-blocking cleanup — matches the orchestrator behaviour."""
+        # Atomically detach the handles so a concurrent _callback /
+        # _status_timer_callback can't grab them mid-teardown. The actual
+        # worker.stop() runs on a daemon thread outside the lock because
+        # it can block on the child-process join.
+        with self._state_lock:
+            timer = self._status_timer
+            worker = self._api_worker
+            self._status_timer = None
+            self._api_worker = None
+
+        if timer is None and worker is None:
+            self._node.get_logger().info('No HF API components to cleanup')
+            return
+
         def cleanup():
             try:
-                self._cleanup_worker()
+                if timer is not None:
+                    timer.cancel()
+                if worker is not None:
+                    worker.stop()
+                self._node.get_logger().info('HF API Worker cleaned up successfully')
             except Exception as exc:  # noqa: BLE001
                 self._node.get_logger().error(f'Error in cleanup thread: {exc}')
 
         try:
-            if self._status_timer is None and self._api_worker is None:
-                self._node.get_logger().info('No HF API components to cleanup')
-                return
-
             self._node.get_logger().info('Starting non-blocking HF API Worker cleanup...')
             thread = threading.Thread(target=cleanup, daemon=True)
             thread.start()
-
-            # Drop references immediately — the cleanup thread finishes on its own.
-            self._status_timer = None
-            self._api_worker = None
 
             # Three "Idle / stop" heartbeats so the UI progress widget resets
             # (preserves the original orchestrator behaviour).
@@ -331,16 +373,27 @@ class HubService:
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(
                 f'Error starting non-blocking HF API Worker cleanup: {exc}')
-            self._cleanup_worker()
+            # Inline fall-back — handles are already detached.
+            try:
+                if timer is not None:
+                    timer.cancel()
+                if worker is not None:
+                    worker.stop()
+            except Exception as inner:  # noqa: BLE001
+                self._node.get_logger().error(
+                    f'Error cleaning up HF API Worker (fallback): {inner}')
 
     def _cleanup_worker(self):
+        with self._state_lock:
+            timer = self._status_timer
+            worker = self._api_worker
+            self._status_timer = None
+            self._api_worker = None
         try:
-            if self._status_timer is not None:
-                self._status_timer.cancel()
-                self._status_timer = None
-            if self._api_worker is not None:
-                self._api_worker.stop()
-                self._api_worker = None
+            if timer is not None:
+                timer.cancel()
+            if worker is not None:
+                worker.stop()
             self._node.get_logger().info('HF API Worker cleaned up successfully')
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(f'Error cleaning up HF API Worker: {exc}')

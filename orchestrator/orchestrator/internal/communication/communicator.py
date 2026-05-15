@@ -16,7 +16,8 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
-from typing import Any, Callable, Dict, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
     BrowserItem,
@@ -87,7 +88,13 @@ class Communicator:
         self.rosbag_extra_topics = robot_schema.get_recording_extra_topics(
             robot_section
         )
-        self._all_topics = robot_schema.get_recording_topics(robot_section)
+        # Recording format v2: images and camera_info are not written to
+        # MCAP. Image topics go to per-camera MJPEG-in-MP4 files; camera_info
+        # is captured as a one-shot yaml snapshot per episode.
+        self.camera_info_topics: Dict[str, str] = (
+            robot_schema.get_camera_info_topics(robot_section)
+        )
+        self._mcap_topics = robot_schema.get_mcap_record_topics(robot_section)
 
         # Initialize DataEditor for dataset editing
         self.data_editor = DataEditor()
@@ -96,7 +103,9 @@ class Communicator:
         node.get_logger().info(f'Camera topics: {self.camera_topics}')
         node.get_logger().info(f'State topics: {self.state_topics}')
         node.get_logger().info(f'Action topics: {self.action_topics}')
+        node.get_logger().info(f'Camera info topics: {self.camera_info_topics}')
         node.get_logger().info(f'Rosbag extra topics: {self.rosbag_extra_topics}')
+        node.get_logger().info(f'MCAP topics (v2): {self._mcap_topics}')
 
         self.heartbeat_qos_profile = QoSProfile(
             depth=1,
@@ -113,13 +122,25 @@ class Communicator:
             'updated': False,
             'mode': None
         }
+        # Protects joystick_state — orchestrator_node's timer callback
+        # and joystick_trigger_callback both run under
+        # MultiThreadedExecutor and would otherwise race on the dict.
+        self._joystick_lock = threading.Lock()
 
         # Joystick handler callback for immediate processing
         self._joystick_handler: Optional[Callable[[str], None]] = None
 
-    def get_all_topics(self):
-        """Full rosbag topic inventory: images + state + action + extras."""
-        return list(self._all_topics)
+    def get_mcap_topics(self):
+        """Topics to record in the per-episode MCAP (no images / camera_info)."""
+        return list(self._mcap_topics)
+
+    def get_video_topics(self) -> Dict[str, str]:
+        """``{cam_name: image_topic}`` — destinations for the MP4 recorder."""
+        return dict(self.camera_topics)
+
+    def get_camera_info_topics(self) -> Dict[str, str]:
+        """``{cam_name: camera_info_topic}`` — one-shot snapshot sources."""
+        return dict(self.camera_info_topics)
 
     def init_subscribers(self):
         """Initialize only joystick trigger subscriber."""
@@ -222,16 +243,36 @@ class Communicator:
     # ========== Callbacks ==========
 
     def joystick_trigger_callback(self, msg: String):
-        """Handle joystick trigger for recording control."""
-        self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
-        self.joystick_state['updated'] = True
-        self.joystick_state['mode'] = msg.data
+        """Handle joystick trigger for recording control.
 
-        # Call registered handler immediately if available
-        if self._joystick_handler is not None:
-            self._joystick_handler(msg.data)
-            # Mark as processed to prevent duplicate handling in timer callback
-            self.joystick_state['updated'] = False
+        When a direct handler is registered we invoke it inline and
+        never publish to joystick_state — that avoids the timer pump
+        re-dispatching the same event if the handler raises before the
+        clear-flag step ran.
+        """
+        self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
+        handler = self._joystick_handler
+        if handler is not None:
+            handler(msg.data)
+            return
+        with self._joystick_lock:
+            self.joystick_state['updated'] = True
+            self.joystick_state['mode'] = msg.data
+
+    def consume_joystick_update(self):
+        """Atomically read-and-clear ``joystick_state``.
+
+        Returns ``(updated, mode)``. If ``updated`` is True the caller
+        owns this event and the flag is reset to False before return.
+        Used by orchestrator_node's timer pump to avoid a TOCTOU race
+        with ``joystick_trigger_callback`` under MultiThreadedExecutor.
+        """
+        with self._joystick_lock:
+            updated = self.joystick_state['updated']
+            mode = self.joystick_state['mode']
+            if updated:
+                self.joystick_state['updated'] = False
+        return updated, mode
 
     def heartbeat_timer_callback(self):
         """Publish heartbeat."""
@@ -241,19 +282,32 @@ class Communicator:
     # ========== Service Callbacks ==========
 
     def get_image_topic_list_callback(self, request, response):
-        camera_topic_list = []
-        for topic_name in self.camera_topics.values():
-            # Return full topic path (e.g. .../image_raw/compressed) so the viewer uses the correct topic
-            camera_topic_list.append(topic_name)
+        # Walk the yaml's observation.images in insertion order so the
+        # topic list and the rotation_deg list stay parallel-indexed.
+        # camera_topics keeps the same order (Python 3.7+ dict
+        # preserves insertion); going back to image_groups gives us
+        # rotation_deg without an extra lookup.
+        image_groups = robot_schema.get_image_topics(self.robot_section)
+        camera_topic_list: List[str] = []
+        rotation_deg_list: List[int] = []
+        for cam_name, cfg in image_groups.items():
+            # Skip cams that aren't part of the recording inventory
+            # (camera_topics is filtered by recording role).
+            if cam_name not in self.camera_topics:
+                continue
+            camera_topic_list.append(cfg['topic'])
+            rotation_deg_list.append(int(cfg.get('rotation_deg', 0) or 0))
 
         if len(camera_topic_list) == 0:
             self.node.get_logger().error('No image topics found')
             response.image_topic_list = []
+            response.rotation_deg_list = []
             response.success = False
             response.message = 'Please check image topics in your robot configuration.'
             return response
 
         response.image_topic_list = camera_topic_list
+        response.rotation_deg_list = rotation_deg_list
         response.success = True
         response.message = 'Image topic list retrieved successfully'
         return response

@@ -16,7 +16,7 @@
 #
 # Author: Dongyun Kim
 
-# physical_ai_tools custom message/service definitions
+# cyclo_intelligence custom message/service definitions
 # Separated from zenoh_ros2_sdk to keep it a generic ROS2 library
 #
 # These definitions are embedded as strings for use with zenoh_ros2_sdk's

@@ -1,0 +1,21 @@
+#!/command/with-contenv bash
+# cyclo_intelligence service — bring up orchestrator + cyclo_data in
+# a single launch. Used as the default unit cyclo_manager / s6-agent
+# starts and stops; the per-component services (orchestrator,
+# cyclo_data) are kept for debugging when only one half is wanted.
+
+set -e
+
+SERVICE_NAME="cyclo_intelligence"
+ROS2_COMMAND="ros2 launch orchestrator cyclo_intelligence_bringup.launch.py"
+COMMON_SCRIPT="/usr/local/lib/s6-services/ros2_service_run.sh"
+
+if [ -f "${COMMON_SCRIPT}" ]; then
+    exec /command/with-contenv env \
+        SERVICE_NAME="${SERVICE_NAME}" \
+        ROS2_COMMAND="${ROS2_COMMAND}" \
+        bash "${COMMON_SCRIPT}"
+else
+    echo "Error: Common script not found at ${COMMON_SCRIPT}" >&2
+    exit 1
+fi

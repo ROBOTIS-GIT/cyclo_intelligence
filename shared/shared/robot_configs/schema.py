@@ -120,11 +120,15 @@ def load_robot_section(
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     try:
-        return raw["orchestrator"]["ros__parameters"][robot_type]
+        section = raw["orchestrator"]["ros__parameters"][robot_type]
     except KeyError as e:
         raise KeyError(
             f"orchestrator.ros__parameters.{robot_type} missing in {path}: {e}"
         ) from e
+    # Stash the config file's directory so accessors can resolve any
+    # relative paths (e.g. urdf_path) anchored at the yaml location.
+    section["__config_dir__"] = str(path.parent)
+    return section
 
 
 # ---------------------------------------------------------------------------
@@ -206,11 +210,71 @@ def get_recording_extra_topics(section: Dict[str, Any]) -> List[str]:
     return [t for t in extras if t]
 
 
-def get_recording_topics(section: Dict[str, Any]) -> List[str]:
-    """Full topic list for rosbag recording: images + state + action + extras.
+def get_camera_info_topics(section: Dict[str, Any]) -> Dict[str, str]:
+    """Pair each camera with its camera_info topic from ``recording.extra_topics``.
 
-    Order is deterministic (yaml insertion order, then extras appended) so
-    the recorder's topic inventory is reproducible across runs.
+    Strategy: take the image topic for ``<cam_name>`` and look for any extras
+    entry whose path starts with the image topic stem. e.g.
+    ``/zed/zed_node/left/image_rect_color/compressed`` pairs with
+    ``/zed/zed_node/left/camera_info``. Cameras without a matching extras
+    entry are simply omitted (no error — some sims publish images without
+    camera_info).
+    """
+    images = get_image_topics(section)
+    extras = get_recording_extra_topics(section)
+    info_topics: Dict[str, str] = {}
+    for cam_name, cfg in images.items():
+        image_topic = cfg["topic"]
+        # Strip the trailing image-related suffix (``image_raw``,
+        # ``image_rect_color``, ``compressed``, etc.) until we reach the
+        # camera namespace prefix. The convention is that camera_info lives
+        # on a sibling topic under the same namespace.
+        parts = image_topic.rstrip("/").split("/")
+        # Trim trailing ``compressed`` first if present, then trim the
+        # ``image_*`` element.
+        if parts and parts[-1] == "compressed":
+            parts.pop()
+        if parts and parts[-1].startswith("image"):
+            parts.pop()
+        prefix = "/".join(parts)
+        if not prefix:
+            continue
+        for extra in extras:
+            if extra == f"{prefix}/camera_info" or extra.endswith("/camera_info") and extra.startswith(prefix + "/"):
+                info_topics[cam_name] = extra
+                break
+    return info_topics
+
+
+def get_mcap_record_topics(section: Dict[str, Any]) -> List[str]:
+    """Topics to record into the per-episode MCAP (no images, no camera_info).
+
+    Recording format version 2 routes images to per-camera MP4 files and
+    camera_info to one-shot yaml snapshots, so the MCAP only carries the
+    timeseries the policy actually consumes (state + action) plus /tf for
+    debug visualisation. Order is deterministic (state groups → action
+    groups → extras minus camera_info).
+    """
+    info_topics = set(get_camera_info_topics(section).values())
+    topics: List[str] = []
+    for cfg in get_state_groups(section).values():
+        topics.append(cfg["topic"])
+    for cfg in get_action_groups(section).values():
+        topics.append(cfg["topic"])
+    for extra in get_recording_extra_topics(section):
+        if extra in info_topics:
+            continue
+        topics.append(extra)
+    return topics
+
+
+def get_recording_topics(section: Dict[str, Any]) -> List[str]:
+    """DEPRECATED — recording format v1 full topic list.
+
+    Recording format v2 splits image / camera_info / MCAP. New code should
+    call :func:`get_mcap_record_topics`, :func:`get_image_topics`, and
+    :func:`get_camera_info_topics` directly. This helper is retained only
+    to ease grep-based discovery during the migration.
     """
     topics: List[str] = []
     for cfg in get_image_topics(section).values():
@@ -224,7 +288,24 @@ def get_recording_topics(section: Dict[str, Any]) -> List[str]:
 
 
 def get_urdf_path(section: Dict[str, Any]) -> str:
-    return str(section.get("urdf_path") or "")
+    """Return the URDF path, resolving relative entries against the yaml dir.
+
+    yaml may set ``urdf_path`` as either an absolute path or a path
+    relative to the config file's directory (e.g. ``urdf/<robot>.urdf``).
+    Relative entries are anchored at ``__config_dir__`` (stashed by
+    :func:`load_robot_section`); if that anchor is missing the raw
+    string is returned unchanged.
+    """
+    raw = section.get("urdf_path") or ""
+    if not raw:
+        return ""
+    p = Path(raw)
+    if p.is_absolute():
+        return str(p)
+    config_dir = section.get("__config_dir__")
+    if not config_dir:
+        return str(p)
+    return str((Path(config_dir) / p).resolve())
 
 
 def get_robot_name(section: Dict[str, Any]) -> str:

@@ -149,7 +149,7 @@ output_bag/
 
 ```bash
 # Start the container
-docker compose -f physical_ai_tools/docker/docker-compose.yml up -d
+docker compose -f cyclo_intelligence/docker/docker-compose.yml up -d
 
 # Enter the container
 docker exec -it orchestrator bash
@@ -292,7 +292,7 @@ Lint checking:
 ```bash
 # C++ lint
 cd /home/dongyun/main_ws
-ament_cpplint physical_ai_tools/rosbag_recorder
+ament_cpplint cyclo_intelligence/cyclo_data/recorder/rosbag_recorder
 
 # Should output: "No problems found"
 ```

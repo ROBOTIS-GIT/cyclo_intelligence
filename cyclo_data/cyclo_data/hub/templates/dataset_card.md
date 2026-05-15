@@ -5,7 +5,7 @@
 {{card_data}}
 ---
 
-This dataset was created using [Physical AI Tools](https://github.com/ROBOTIS-GIT/physical_ai_tools) and [LeRobot](https://github.com/huggingface/lerobot).
+This dataset was created using [Cyclo Intelligence](https://github.com/ROBOTIS-GIT/cyclo_intelligence) and [LeRobot](https://github.com/huggingface/lerobot).
 
 ## Dataset Description
 

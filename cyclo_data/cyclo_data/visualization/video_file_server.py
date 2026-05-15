@@ -24,6 +24,12 @@ import re
 import signal
 import subprocess
 import threading
+
+
+# HTTP Range header parser. Pre-compiled because every byte-range request
+# on a video file hits this path and re.match() would otherwise recompile
+# the pattern per request.
+_RANGE_RE = re.compile(r'bytes=(\d*)-(\d*)')
 from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -137,7 +143,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
         try:
             if range_header:
                 # Parse Range header
-                range_match = re.match(r'bytes=(\d*)-(\d*)', range_header)
+                range_match = _RANGE_RE.match(range_header)
                 if range_match:
                     start = range_match.group(1)
                     end = range_match.group(2)
@@ -229,7 +235,11 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._send_json_error(400, "Missing bag_path parameter")
             return
 
-        if not self.replay_data_handler:
+        # Snapshot the handler ref once — set_replay_data_handler(None)
+        # from another thread between check and call would otherwise
+        # turn the access at line below into AttributeError.
+        handler = self.replay_data_handler
+        if handler is None:
             self._send_json_error(500, "Replay data handler not configured")
             return
 
@@ -240,7 +250,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
 
         try:
             # Get replay data
-            result = self.replay_data_handler.get_replay_data(bag_path)
+            result = handler.get_replay_data(bag_path)
 
             # Convert to JSON
             json_data = json.dumps(result, ensure_ascii=False, cls=_NanSafeEncoder)
@@ -284,7 +294,8 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._send_json_error(400, "Missing folder_path parameter")
             return
 
-        if not self.replay_data_handler:
+        handler = self.replay_data_handler
+        if handler is None:
             self._send_json_error(500, "Replay data handler not configured")
             return
 
@@ -295,7 +306,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
 
         try:
             # Get rosbag list
-            result = self.replay_data_handler.get_rosbag_list(folder_path)
+            result = handler.get_rosbag_list(folder_path)
 
             # Convert to JSON
             json_data = json.dumps(result, ensure_ascii=False, cls=_NanSafeEncoder)
@@ -415,9 +426,8 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(result)
                     return
 
-                # Launch BT node — physical_ai_bt was absorbed into the
-                # orchestrator package in Step 5-A, and its launch file
-                # moved to orchestrator/bt/bringup/bt_node.launch.py
+                # Launch BT node from the orchestrator package. Its launch
+                # file lives at orchestrator/bt/bringup/bt_node.launch.py
                 # (installed to share/orchestrator/bt/bringup/).
                 cmd = [
                     'ros2', 'launch', 'orchestrator',
@@ -430,10 +440,14 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
                     stderr=subprocess.DEVNULL,
                     preexec_fn=os.setsid,
                 )
+                # Capture pid before releasing the lock — a concurrent
+                # /bt/shutdown could otherwise null _bt_process between
+                # the with-block exit and the .pid read below.
+                launched_pid = VideoFileHandler._bt_process.pid
 
             result = json.dumps({
                 'success': True,
-                'message': f'BT node launched (PID: {self._bt_process.pid})'
+                'message': f'BT node launched (PID: {launched_pid})'
             }).encode('utf-8')
             self.send_response(200)
             self.send_header(
@@ -471,17 +485,30 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(result)
                     return
 
-                # Kill the process group (includes ros2 launch children)
-                os.killpg(
-                    os.getpgid(self._bt_process.pid), signal.SIGTERM
-                )
+                # Kill the process group (includes ros2 launch children).
+                # ``getpgid`` can raise ``ProcessLookupError`` if the BT
+                # process already exited between the poll() check above
+                # and this signal — treat that as success rather than
+                # leaking the wait below.
+                bt_pid = self._bt_process.pid
                 try:
-                    self._bt_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(
-                        os.getpgid(self._bt_process.pid), signal.SIGKILL
-                    )
-                    self._bt_process.wait(timeout=3)
+                    pgid = os.getpgid(bt_pid)
+                except ProcessLookupError:
+                    pgid = None
+
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        self._bt_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(pgid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        self._bt_process.wait(timeout=3)
 
                 VideoFileHandler._bt_process = None
 
@@ -545,7 +572,8 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._send_json_error(400, "Missing bag_path parameter")
             return
 
-        if not self.replay_data_handler:
+        handler = self.replay_data_handler
+        if handler is None:
             self._send_json_error(500, "Replay data handler not configured")
             return
 
@@ -568,7 +596,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             exclude_regions = data.get('exclude_regions', None)
 
             # Update task markers, trim points, and exclude regions
-            result = self.replay_data_handler.update_task_markers(
+            result = handler.update_task_markers(
                 bag_path, task_markers, trim_points, exclude_regions
             )
 
@@ -590,7 +618,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._send_json_error(500, f"Error updating task markers: {str(e)}")
 
     # Panel layout file path
-    _PANEL_LAYOUT_PATH = '/workspace/.physical_ai/panel_layout.json'
+    _PANEL_LAYOUT_PATH = '/workspace/.cyclo_intelligence/panel_layout.json'
 
     def _handle_get_panel_layout(self):
         """Handle GET /panel-layout — read saved panel layout."""

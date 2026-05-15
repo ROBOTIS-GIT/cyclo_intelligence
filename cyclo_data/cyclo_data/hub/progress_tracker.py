@@ -17,6 +17,7 @@
 # Author: Kiwoong Park
 
 import io
+import queue
 import re
 import sys
 import time
@@ -220,7 +221,13 @@ class HuggingFaceLogCapture(io.StringIO):
                             'percentage': composite_percent
                         }
 
-                        self.progress_queue.put(progress_data)
+                        # Non-blocking so a slow consumer can't deadlock
+                        # the upload — progress updates are advisory and
+                        # the consumer always reads the latest one anyway.
+                        try:
+                            self.progress_queue.put_nowait(progress_data)
+                        except queue.Full:
+                            pass
                         print('📊 Upload Progress: '
                               f'{composite_percent:.1f}% - {stage}: '
                               f'{current_files}/{total_files} files')

@@ -58,13 +58,18 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# Step 3 consolidated rosbag_to_lerobot_converter.py into to_lerobot_v21.py
-# (the v2.1 path now hosts the converter class). v30 imports from there.
-from .to_lerobot_v21 import (
+# Shared rosbag-extraction / stats / feature-building lives in
+# base_converter.py. v3.0 inherits the base directly (sibling of v2.1)
+# rather than chaining through v21 — formats are independent now.
+from .base_converter import (
     ConversionConfig,
     EpisodeData,
-    RosbagToLerobotConverter,
+    RosbagToLerobotConverterBase,
+    STATS_STD_FLOOR,
     StalenessMetrics,
+    _conversion_worker_init,
+    _convert_rosbag_worker,
+    _resolve_conversion_worker_count,
 )
 
 
@@ -147,11 +152,13 @@ class EpisodeMetadata:
         return result
 
 
-class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
+class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
     """
     Converts ROSbag recordings with MP4 videos to LeRobot v3.0 dataset format.
 
-    Extends v2.1 converter with:
+    Sibling of the v2.1 converter — both inherit shared rosbag
+    extraction / stats logic from RosbagToLerobotConverterBase. Adds
+    v3.0-specific writers:
     - File-based aggregation (multiple episodes per file)
     - Chunked Parquet episodes metadata
     - Video concatenation
@@ -200,11 +207,86 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
 
         episodes_data: List[EpisodeData] = []
 
-        # Phase 1: Extract data from each rosbag (reuse v2.1 logic)
-        for idx, bag_path in enumerate(bag_paths):
-            episode_data = self.convert_single_rosbag(Path(bag_path), idx)
-            if episode_data is not None:
-                episodes_data.append(episode_data)
+        # Phase 1: Extract data from each rosbag. Matches v2.1's
+        # parallelism (ProcessPoolExecutor up to half the host CPUs) so
+        # v3.0-only runs aren't 8× slower than v2.1-only runs. When v2.1
+        # ran first against the same dataset, _sync_videos_to_grid hits
+        # the synced-MP4 cache sidecar and skips remux entirely.
+        if len(bag_paths) <= 1:
+            # Single episode: skip pool overhead.
+            for idx, bag_path in enumerate(bag_paths):
+                episode_data = self.convert_single_rosbag(Path(bag_path), idx)
+                if episode_data is not None:
+                    episodes_data.append(episode_data)
+        else:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            # Must mirror v2.1's config_dict — every selection knob the
+            # converter reads (camera_rotations / image_resize / selected_*)
+            # has to ride the pickle to the worker process, otherwise
+            # the worker defaults the field and silently drops the UI
+            # value.
+            config_dict = {
+                'repo_id': self.config.repo_id,
+                'output_dir': self.config.output_dir,
+                'fps': self.config.fps,
+                'robot_type': self.config.robot_type,
+                'use_videos': self.config.use_videos,
+                'chunks_size': self.config.chunks_size,
+                'robot_config_path': self.config.robot_config_path,
+                'state_topics': self.config.state_topics,
+                'action_topics': self.config.action_topics,
+                'apply_trim': self.config.apply_trim,
+                'apply_exclude_regions': self.config.apply_exclude_regions,
+                'quality_warning_multiplier': self.config.quality_warning_multiplier,
+                'quality_error_multiplier': self.config.quality_error_multiplier,
+                'selected_cameras': list(self.config.selected_cameras),
+                'camera_rotations': dict(self.config.camera_rotations),
+                'image_resize': (
+                    tuple(self.config.image_resize)
+                    if self.config.image_resize else None
+                ),
+                'selected_state_topics': list(self.config.selected_state_topics),
+                'selected_action_topics': list(self.config.selected_action_topics),
+                'selected_joints': list(self.config.selected_joints),
+                'source_rosbags': list(self.config.source_rosbags),
+            }
+            max_workers = _resolve_conversion_worker_count(len(bag_paths))
+            self._log_info(
+                f"Starting parallel rosbag parsing with {max_workers} workers"
+            )
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_conversion_worker_init,
+            ) as executor:
+                futures = {}
+                for idx, bag_path in enumerate(bag_paths):
+                    future = executor.submit(
+                        _convert_rosbag_worker,
+                        str(bag_path), idx, config_dict,
+                    )
+                    futures[future] = idx
+
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        episode_index, episode_data = future.result()
+                        if episode_data is not None:
+                            episodes_data.append(episode_data)
+                            self._log_info(
+                                f"Episode {episode_index} parsed successfully"
+                            )
+                        else:
+                            self._log_warning(
+                                f"Episode {idx} returned no data"
+                            )
+                    except Exception as e:
+                        self._log_error(
+                            f"Error parsing episode {idx}: {e}"
+                        )
+
+            # Sort by episode_index — as_completed delivers out of order.
+            episodes_data.sort(key=lambda ep: ep.episode_index)
 
         if not episodes_data:
             self._log_error("No episodes were successfully converted")
@@ -238,20 +320,6 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
 
         self._log_info(f"Successfully converted {len(episodes_data)} episodes to v3.0")
         return True
-
-    def _collect_tasks(self, episodes_data: List[EpisodeData]):
-        # Match v2.1 — first-appearance order so tasks.jsonl /
-        # tasks.parquet agrees with episodes.jsonl when the episode
-        # ordering isn't alphabetical (e.g. after a merge).
-        seen: set = set()
-        for ep in episodes_data:
-            for task in ep.tasks:
-                if task in seen:
-                    continue
-                seen.add(task)
-                idx = len(self._tasks)
-                self._tasks[idx] = task
-                self._task_to_index[task] = idx
 
     def _write_aggregated_data(self, episodes_data: List[EpisodeData]):
         """Write episode data to aggregated Parquet files."""
@@ -438,6 +506,13 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
         for camera_name, videos in camera_videos.items():
             self._write_aggregated_videos_for_camera(output_dir, camera_name, videos)
 
+        # ``<cam>_synced.mp4`` files are kept on disk as Phase 1 cache —
+        # the next conversion run hits the ``<cam>_synced.cache.json``
+        # gate in ``_sync_videos_to_grid`` and skips remux entirely.
+        # Disk cost is modest (~2-3 MB per camera per episode);
+        # operators who want to reclaim the space can wipe
+        # ``<episode>/videos/*_synced.*`` after the dataset is final.
+
     def _write_aggregated_videos_for_camera(
         self,
         output_dir: Path,
@@ -503,28 +578,31 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
         file_idx: int,
         videos: List[Tuple[int, Path, float]],
     ):
-        """Concatenate multiple video files using ffmpeg."""
+        """Concatenate episode videos into a CFR H.264 aggregate.
+
+        The v3.0 layout stores multiple episodes in one MP4 per camera. A
+        stream-copy concat (``-c copy``) can preserve per-file H.264 PTS /
+        B-frame quirks and produce an aggregate whose frame count looks
+        correct but decodes or seeks to wrong frames near episode boundaries.
+        Re-encoding with an explicit CFR filter regenerates timestamps so
+        LeRobot's timestamp-based frame lookup stays aligned.
+        """
         output_path = output_dir / DEFAULT_VIDEO_PATH.format(
             video_key=camera_key, chunk_index=chunk_idx, file_index=file_idx
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if len(videos) == 1:
-            # Single video, just copy
-            import shutil
-
-            shutil.copy2(videos[0][1], output_path)
-            self._log_info(f"Copied video: {output_path.name}")
-            return
+        expected_frames = self._expected_aggregated_frame_count(videos)
 
         # Create concat list file for ffmpeg
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             for _, video_path, _ in videos:
-                f.write(f"file '{video_path}'\n")
+                f.write(f"file '{video_path.resolve()}'\n")
             concat_list_path = f.name
 
         try:
-            # Use ffmpeg to concatenate
+            fps = float(self.config.fps)
+            fps_str = f"{fps:g}"
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -534,8 +612,17 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
                 "0",
                 "-i",
                 concat_list_path,
-                "-c",
-                "copy",
+                "-vf",
+                f"fps={fps_str},setpts=N/({fps_str}*TB)",
+                "-r",
+                fps_str,
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
                 str(output_path),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -543,9 +630,91 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
                 self._log_error(f"ffmpeg error: {result.stderr}")
                 raise RuntimeError(f"Failed to concatenate videos: {result.stderr}")
 
-            self._log_info(f"Concatenated {len(videos)} videos: {output_path.name}")
+            self._validate_aggregated_video(output_path, expected_frames)
+            self._log_info(
+                f"Concatenated {len(videos)} videos with CFR re-encode: "
+                f"{output_path.name} ({expected_frames} frames @ {fps_str} fps)"
+            )
         finally:
             Path(concat_list_path).unlink(missing_ok=True)
+
+    def _expected_aggregated_frame_count(
+        self, videos: List[Tuple[int, Path, float]]
+    ) -> int:
+        """Return the row-count-backed frame total for an aggregate video."""
+        length_by_episode = {
+            ep.episode_index: ep.length for ep in self._episode_metadata_list
+        }
+        missing = [
+            ep_idx for ep_idx, _, _ in videos
+            if ep_idx not in length_by_episode
+        ]
+        if missing:
+            raise RuntimeError(
+                "Cannot validate aggregated video frame count; missing "
+                f"episode metadata for episodes {missing}"
+            )
+        return int(sum(length_by_episode[ep_idx] for ep_idx, _, _ in videos))
+
+    def _validate_aggregated_video(
+        self, video_path: Path, expected_frames: int
+    ) -> None:
+        """Validate frame count and nominal FPS for a v3.0 aggregate MP4."""
+        frame_count = self._get_video_frame_count(video_path)
+        if frame_count is None:
+            message = f"Could not determine frame count for {video_path}"
+            self._log_error(message)
+            raise RuntimeError(message)
+        if frame_count != expected_frames:
+            message = (
+                f"Aggregated video frame count mismatch for {video_path}: "
+                f"expected {expected_frames}, got {frame_count}"
+            )
+            self._log_error(message)
+            raise RuntimeError(message)
+
+        fps = self._probe_video_fps(video_path)
+        if fps is None:
+            self._log_warning(f"Could not determine FPS for {video_path}")
+            return
+        expected_fps = float(self.config.fps)
+        if abs(fps - expected_fps) > 0.01:
+            message = (
+                f"Aggregated video FPS mismatch for {video_path}: "
+                f"expected {expected_fps:g}, got {fps:g}"
+            )
+            self._log_error(message)
+            raise RuntimeError(message)
+
+    def _probe_video_fps(self, video_path: Path) -> Optional[float]:
+        """Probe avg_frame_rate with ffprobe."""
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return None
+            rate = result.stdout.strip()
+            if "/" in rate:
+                num, _, den = rate.partition("/")
+                den_f = float(den)
+                if den_f == 0:
+                    return None
+                return float(num) / den_f
+            return float(rate)
+        except Exception as e:
+            self._log_warning(f"Failed to probe FPS for {video_path}: {e}")
+            return None
 
     def _update_video_metadata(
         self,
@@ -644,46 +813,73 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverter):
         self._log_info(f"Wrote tasks: {file_path}")
 
     def _write_global_stats(self):
-        """Write global statistics to stats.json."""
+        """Write global statistics to stats.json.
+
+        Combines per-episode stats with the length-weighted pooled
+        variance formula:
+
+            global_mean = sum(w_i * mean_i)
+            global_var = sum(w_i * (var_i + (mean_i - global_mean)^2))
+
+        This preserves between-episode variance for joints whose mean
+        shifts between takes; averaging episode stds alone under-reports
+        the true dataset std and can destabilize downstream normalization.
+        """
         self._log_info("Computing global statistics...")
 
         output_dir = Path(self.config.output_dir)
 
-        # Aggregate stats from all episodes
-        global_stats: Dict[str, Dict[str, Any]] = {}
+        per_feature: Dict[str, Dict[str, List[Any]]] = {}
 
         for ep_metadata in self._episode_metadata_list:
+            ep_buckets: Dict[str, Dict[str, Any]] = {}
             for stat_key, stat_value in ep_metadata.stats.items():
                 feature_key, stat_type = stat_key.rsplit("/", 1)
+                ep_buckets.setdefault(feature_key, {})[stat_type] = stat_value
 
-                if feature_key not in global_stats:
-                    global_stats[feature_key] = {
-                        "mean": [],
-                        "std": [],
-                        "min": [],
-                        "max": [],
-                        "count": 0,
-                    }
-
-                if stat_type in ["mean", "std", "min", "max"]:
-                    global_stats[feature_key][stat_type].append(np.array(stat_value))
-                elif stat_type == "count":
-                    global_stats[feature_key]["count"] += stat_value[0]
+            for feature_key, ep_stats in ep_buckets.items():
+                if not all(k in ep_stats for k in ("mean", "std", "count")):
+                    continue
+                slot = per_feature.setdefault(
+                    feature_key,
+                    {"mean": [], "std": [], "min": [], "max": [], "count": []},
+                )
+                slot["mean"].append(np.asarray(ep_stats["mean"], dtype=np.float64))
+                slot["std"].append(np.asarray(ep_stats["std"], dtype=np.float64))
+                slot["min"].append(np.asarray(ep_stats["min"], dtype=np.float64))
+                slot["max"].append(np.asarray(ep_stats["max"], dtype=np.float64))
+                count = ep_stats["count"]
+                slot["count"].append(
+                    int(count[0] if isinstance(count, (list, tuple)) else count)
+                )
 
         # Compute aggregated stats
-        aggregated_stats = {}
-        for feature_key, stats in global_stats.items():
+        aggregated_stats: Dict[str, Dict[str, List[float]]] = {}
+        for feature_key, stats in per_feature.items():
             if not stats["mean"]:
                 continue
 
-            mean_arrays = np.array(stats["mean"])
-            std_arrays = np.array(stats["std"])
-            min_arrays = np.array(stats["min"])
-            max_arrays = np.array(stats["max"])
+            mean_arrays = np.stack(stats["mean"])
+            std_arrays = np.stack(stats["std"])
+            min_arrays = np.stack(stats["min"])
+            max_arrays = np.stack(stats["max"])
+            counts = np.asarray(stats["count"], dtype=np.float64)
+
+            total = counts.sum()
+            if total <= 0:
+                continue
+
+            weights = (counts / total).reshape(-1, 1)
+            global_mean = (weights * mean_arrays).sum(axis=0)
+            pooled_var = (
+                weights
+                * (std_arrays**2 + (mean_arrays - global_mean) ** 2)
+            ).sum(axis=0)
+            pooled_std = np.maximum(np.sqrt(pooled_var), STATS_STD_FLOOR)
 
             aggregated_stats[feature_key] = {
-                "mean": np.mean(mean_arrays, axis=0).tolist(),
-                "std": np.sqrt(np.mean(std_arrays**2, axis=0)).tolist(),
+                "mean": global_mean.tolist(),
+                "std": pooled_std.tolist(),
                 "min": np.min(min_arrays, axis=0).tolist(),
                 "max": np.max(max_arrays, axis=0).tolist(),
             }

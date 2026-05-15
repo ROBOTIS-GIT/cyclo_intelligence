@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import URDFLoader from 'urdf-loader';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 
-const DEFAULT_URDF_PATH = '/urdf/urdf/ffw_sg2_follower.urdf';
 const EE_LINKS = ['end_effector_l_link', 'end_effector_r_link'];
 const ROS_TO_THREE = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
 
@@ -30,14 +29,20 @@ function createFkSolver(robot) {
   return solver;
 }
 
-export default function useUrdfRobot(urdfPath = DEFAULT_URDF_PATH) {
+export default function useUrdfRobot(urdfPath) {
   const [robot, setRobot] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!!urdfPath);
   const [error, setError] = useState(null);
   const robotRef = useRef(null);
   const fkSolverRef = useRef(null);
 
   const loadRobot = useCallback(() => {
+    if (!urdfPath) {
+      setRobot(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     setLoading(true);
     setError(null);
 

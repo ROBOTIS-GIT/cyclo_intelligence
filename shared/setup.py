@@ -20,9 +20,8 @@ package_name = 'shared'
 #   │   │   ├── *_config.yaml     ← per-robot config
 #   │   │   ├── urdf/             ← URDF XML per robot type
 #   │   │   └── ffw_description/  ← mesh tree referenced by URDFs
-#   │   ├── io/
-#   │   │   └── file_io.py
-#   │   └── logger/
+#   │   └── io/
+#   │       └── file_io.py
 #   ├── package.xml
 #   ├── resource/                 ← ament index marker (repo-level)
 #   └── setup.py
@@ -73,7 +72,7 @@ robot_assets = [
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.1.1',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory, so 'shared' resolves to ./shared/ and subpackages

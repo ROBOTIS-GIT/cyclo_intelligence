@@ -14,6 +14,8 @@ independently of the control plane (orchestrator). Services live under
 the /data/ prefix. DataOperationStatus flows on /data/status.
 """
 
+from pathlib import Path
+
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -51,6 +53,18 @@ class CycloDataNode(Node):
         self._conversion = ConversionService(self, self._status_publisher)
         self._hub = HubService(self, self._status_publisher)
         self._edit = EditService(self, self._status_publisher)
+
+        # Resume any background transcodes that were interrupted by the
+        # previous service exit. Done after services are advertised so a
+        # transcode failure can't block service availability.
+        try:
+            workspace_root = Path('/workspace/rosbag2')
+            if workspace_root.exists():
+                self._recording.resume_pending_transcodes(workspace_root)
+        except Exception as exc:
+            self.get_logger().error(
+                f'Transcode resume scan failed at startup: {exc!r}'
+            )
 
         self.get_logger().info('cyclo_data node ready.')
 

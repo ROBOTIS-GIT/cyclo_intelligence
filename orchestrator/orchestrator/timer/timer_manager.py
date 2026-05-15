@@ -16,6 +16,8 @@
 #
 # Author: Dongyun Kim
 
+import threading
+
 from rclpy.node import Node
 
 
@@ -26,12 +28,19 @@ class TimerManager:
         self._timer = {}
         self._timer_frequency = {}
         self._timer_callback = {}
+        # orchestrator runs under MultiThreadedExecutor so start/stop/
+        # stop_all/set_timer can be invoked concurrently from different
+        # service callbacks. The lock serialises mutations of the three
+        # state dicts (TOCTOU on start, dict-mutation-during-iteration
+        # on stop_all).
+        self._lock = threading.Lock()
 
     def start(self, timer_name):
-        if self._timer[timer_name] is None:
-            self._timer[timer_name] = self._node.create_timer(
-                1.0/self._timer_frequency[timer_name],
-                self._timer_callback[timer_name])
+        with self._lock:
+            if self._timer.get(timer_name) is None:
+                self._timer[timer_name] = self._node.create_timer(
+                    1.0/self._timer_frequency[timer_name],
+                    self._timer_callback[timer_name])
 
     def stop(self, timer_name):
         # Tolerate unknown timer names. The orchestrator's FINISH/SKIP/
@@ -40,16 +49,22 @@ class TimerManager:
         # timer (the policy container owns its own 100 Hz loop). Without
         # this guard, stop('inference') used to KeyError and abort the
         # FINISH handler before publishing READY.
-        timer = self._timer.get(timer_name)
-        if timer is not None:
-            timer.destroy()
-            self._timer[timer_name] = None
+        with self._lock:
+            timer = self._timer.get(timer_name)
+            if timer is not None:
+                timer.destroy()
+                self._timer[timer_name] = None
 
     def stop_all(self):
-        for timer_name in self._timer:
+        # Snapshot the keys under the lock so concurrent set_timer /
+        # stop calls can't mutate the dict mid-iteration.
+        with self._lock:
+            names = list(self._timer.keys())
+        for timer_name in names:
             self.stop(timer_name)
 
     def set_timer(self, timer_name, timer_frequency, callback_function):
-        self._timer[timer_name] = None
-        self._timer_frequency[timer_name] = timer_frequency
-        self._timer_callback[timer_name] = callback_function
+        with self._lock:
+            self._timer[timer_name] = None
+            self._timer_frequency[timer_name] = timer_frequency
+            self._timer_callback[timer_name] = callback_function

@@ -21,15 +21,12 @@ package_name = 'cyclo_data'
 
 packages = [
     package_name,
-    f'{package_name}.annotator',
-    f'{package_name}.augmentor',
     f'{package_name}.converter',
     f'{package_name}.converter.scripts',
     f'{package_name}.converter.video_encoder',
     f'{package_name}.editor',
     f'{package_name}.editor.scripts',
     f'{package_name}.hub',
-    f'{package_name}.quality',
     f'{package_name}.reader',
     f'{package_name}.recorder',
     f'{package_name}.services',
@@ -39,7 +36,7 @@ packages = [
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.1.1',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory. Avoids colcon-core's _symlinks_in_build veto on
