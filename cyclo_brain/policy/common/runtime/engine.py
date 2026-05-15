@@ -11,11 +11,10 @@
 """InferenceEngine abstract base class.
 
 Each opensource policy backend (LeRobot, GR00T, OpenVLA, ...) implements
-this contract in a single ``<policy>_engine.py`` module. The common
-Process A (``inference_server.py``) is policy-agnostic: it dynamically
-imports the engine module, calls ``create_engine()``, and routes
-InferenceCommand srv calls + Zenoh triggers through the four methods
-below.
+this contract in a backend engine package such as ``lerobot_engine`` or
+``groot_engine``. The common Engine process dynamically imports the engine
+module, calls ``create_engine()``, and routes internal EngineCommand service
+calls through the methods below.
 
 The engine owns the parts that genuinely vary per policy:
 
@@ -24,9 +23,9 @@ The engine owns the parts that genuinely vary per policy:
 - One synchronous inference call returning a ``(T, D)`` action chunk.
 - Resource cleanup.
 
-Everything else — Zenoh service handler, configure/lifecycle broadcasts,
-trigger subscriber, chunk publisher, the 100 Hz Process B — lives in
-``common/runtime/`` and is shared.
+Everything else - external service handling, request timeouts, action-list
+buffering, and robot command publishing - lives in ``common/runtime/`` and is
+shared.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ from typing import Any, Dict
 
 
 class InferenceEngine(ABC):
-    """Per-policy inference backend invoked by the common Process A.
+    """Per-policy inference backend invoked by the common Engine process.
 
     Result dict shapes (kept as plain dicts so engines never need to
     import zenoh_ros2_sdk message classes):
@@ -53,11 +52,10 @@ class InferenceEngine(ABC):
     ``get_action_chunk`` (failure) →
         ``{"success": False, "message": str}``
 
-    ``action_chunk`` is intentionally kept as a flat ``np.ndarray`` —
-    the common server's ``_publish_chunk`` calls ``.view()`` on the
-    array for fast CDR encoding (zenoh_ros2_sdk requirement) and a
-    plain Python list crashes with ``AttributeError: 'list' object
-    has no attribute 'view'``.
+    ``action_chunk`` is kept as a flat ``np.ndarray`` for compatibility with
+    backend implementations that already return numpy chunks. The Engine
+    process converts it to a plain ``float64[] action_list`` for the internal
+    service response.
     """
 
     @abstractmethod
@@ -82,7 +80,7 @@ class InferenceEngine(ABC):
         """Release the RobotClient + drop policy refs.
 
         Called on UNLOAD. Should be safe to call before ``load_policy``
-        and idempotent on repeat calls so the server can use it as a
+        and idempotent on repeat calls so the Engine process can use it as a
         catch-all teardown.
         """
 

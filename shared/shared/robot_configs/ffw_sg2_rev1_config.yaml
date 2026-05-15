@@ -11,17 +11,17 @@ orchestrator:
       # ────────────────────────────────────────────────────────────────
       observation:
         images:
-          cam_head_left:
+          rgb.cam_left_head:
             topic: /zed/zed_node/left/image_rect_color/compressed
             msg_type: sensor_msgs/msg/CompressedImage
-          cam_head_right:
+          rgb.cam_right_head:
             topic: /zed/zed_node/right/image_rect_color/compressed
             msg_type: sensor_msgs/msg/CompressedImage
-          cam_wrist_left:
+          rgb.cam_left_wrist:
             topic: /camera_left/camera_left/color/image_rect_raw/compressed
             msg_type: sensor_msgs/msg/CompressedImage
             rotation_deg: 270
-          cam_wrist_right:
+          rgb.cam_right_wrist:
             topic: /camera_right/camera_right/color/image_rect_raw/compressed
             msg_type: sensor_msgs/msg/CompressedImage
             rotation_deg: 270

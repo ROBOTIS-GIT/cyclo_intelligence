@@ -1,8 +1,8 @@
 # LeRobot Docker Container for Jetson (ARM64).
 #
-# Two-process policy runtime: s6-overlay supervises inference-server
-# (Process A) and control-publisher (Process B) over Zenoh. Runtime
-# Python source + the per-policy lerobot_engine.py are bind-mounted
+# Two-process policy runtime: s6-overlay supervises main-runtime
+# and engine-process over Zenoh. Runtime
+# Python source + the per-policy lerobot_engine package are bind-mounted
 # (see docker-compose.yml); only deps + s6 unit files are baked here.
 #
 # Build context: cyclo_brain/policy/        (NOTE: parent of lerobot/)
@@ -110,14 +110,14 @@ COPY lerobot/lerobot/ ./
 
 # Zenoh + runtime deps. SDKs are bind-mounted (see docker-compose.yml).
 RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config \
+    && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk /orchestrator_config \
                 /policy_runtime /app
 
 # s6 unit files come from cyclo_brain/policy/common/. Generic across all
 # policy backends — never edited per-policy.
 COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/inference-server/run \
-             /etc/s6-overlay/s6-rc.d/control-publisher/run
+RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
+             /etc/s6-overlay/s6-rc.d/engine-process/run
 
 # HuggingFace cache
 ENV HF_HOME=/root/.cache/huggingface
@@ -132,7 +132,7 @@ ENV ZENOH_SDK_PATH=/zenoh_sdk
 ENV ZENOH_TRANSPORT_SHM_ENABLED=true
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-ENV POST_PROCESSING_SDK_PATH=/post_processing_sdk
+ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
 # Common runtime dispatch
@@ -142,8 +142,8 @@ ENV POLICY_ENGINE_MODULE=lerobot_engine
 WORKDIR /lerobot
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD s6-svstat /run/service/inference-server 2>&1 | grep -q "up" \
-     && s6-svstat /run/service/control-publisher 2>&1 | grep -q "up" \
+    CMD s6-svstat /run/service/main-runtime 2>&1 | grep -q "up" \
+     && s6-svstat /run/service/engine-process 2>&1 | grep -q "up" \
      || exit 1
 
 ENTRYPOINT ["/init"]

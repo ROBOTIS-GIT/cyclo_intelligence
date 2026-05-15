@@ -1,10 +1,9 @@
-# Raw action chunk published by Process A (inference_server.py) over Zenoh to
-# Process B (control_publisher.py) inside the same policy container. ROS2 srv
-# replaced this path in Step 4 (§5.5) because it let obs be read directly by
-# Process A instead of round-tripping through orchestrator as a request/reply.
+# Legacy/optional raw action chunk message.
+# The current policy runtime uses interfaces/srv/EngineCommand for Main <->
+# Engine action_list responses. Keep this message only for tools that still
+# consume chunk-shaped previews or old recordings.
 
-# Monotonic trigger id (forwarded from the run_inference trigger) so Process B
-# can spot dropped chunks and log out-of-order arrivals.
+# Monotonic id for consumers that need to spot drops or out-of-order arrivals.
 uint64 seq_id
 
 # chunk_size × action_dim = len(data). data is row-major.

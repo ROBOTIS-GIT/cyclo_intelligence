@@ -53,10 +53,8 @@ string job_id
 """
 
 # --- InferenceCommand (interfaces/srv/InferenceCommand.srv) ---
-# REVIEW §10.5 — unified lifecycle service hosted by Process A
-# (runtime/inference_server.py). Command enum values must match the
-# .srv constants (LOAD=0 / START=1 / PAUSE=2 / RESUME=3 / STOP=4 /
-# UNLOAD=5); the .srv file is canonical.
+# Unified policy-session service hosted by the Main process. Command enum
+# values must match interfaces/srv/InferenceCommand.srv.
 INFERENCE_COMMAND_REQUEST_DEF = """\
 uint8 command
 string model_path
@@ -69,6 +67,28 @@ INFERENCE_COMMAND_RESPONSE_DEF = """\
 bool success
 string message
 string[] action_keys
+"""
+
+# --- EngineCommand (interfaces/srv/EngineCommand.srv) ---
+# Internal Main -> Engine process service. seq_id is echoed so the Main
+# process can discard late/stale responses after a timeout.
+ENGINE_COMMAND_REQUEST_DEF = """\
+uint8 command
+uint64 seq_id
+string model_path
+string embodiment_tag
+string robot_type
+string task_instruction
+"""
+
+ENGINE_COMMAND_RESPONSE_DEF = """\
+uint64 seq_id
+bool success
+string message
+string[] action_keys
+int32 chunk_size
+int32 action_dim
+float64[] action_list
 """
 
 # --- StopTraining (interfaces/srv/StopTraining.srv) ---
@@ -124,9 +144,8 @@ float64 timestamp
 """
 
 # --- ActionChunk (interfaces/msg/ActionChunk.msg) ---
-# REVIEW §10.2 — Zenoh pub payload from Process A to Process B inside
-# the policy container. seq_id is forwarded from the trigger so B can
-# dedupe / spot drops. data is row-major (chunk_size × action_dim).
+# Legacy/optional chunk-shaped payload. The current Main <-> Engine path uses
+# interfaces/srv/EngineCommand.action_list.
 ACTION_CHUNK_DEF = """\
 uint64 seq_id
 int32 chunk_size

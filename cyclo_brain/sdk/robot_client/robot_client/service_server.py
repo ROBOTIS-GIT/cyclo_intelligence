@@ -20,8 +20,8 @@
 RobotServiceServer - Decorator-based service framework for training executors.
 
 Inference lifecycle moved to InferenceCommand.srv hosted directly by
-cyclo_brain/policy/<backend>/runtime/inference_server.py (Step 4, §5.5).
-This framework now only covers training + status.
+cyclo_brain/policy/common/runtime/main_runtime. This framework now only covers
+training + status.
 
 Usage:
     server = RobotServiceServer(name="groot", domain_id=30)
@@ -126,8 +126,7 @@ class RobotServiceServer:
         /{name}/stop    - Stop training
         /{name}/status  - Get state and progress (built-in)
 
-    Inference lifecycle moved off this framework in Step 4 — Process A
-    (cyclo_brain/policy/<backend>/runtime/inference_server.py) hosts
+    Inference lifecycle moved off this framework. The Main process hosts
     /{name}/inference_command (InferenceCommand.srv) directly on
     ROS2ServiceServer.
     """
@@ -432,7 +431,7 @@ class RobotServiceServer:
             common_kwargs["domain_id"] = self._domain_id
 
         # Training-side services only. Inference moved to InferenceCommand.srv
-        # hosted by Process A directly (Step 4 §5.5).
+        # hosted by Main runtime directly.
         service_defs = [
             (f"{prefix}/train", "interfaces/srv/TrainModel",
              TRAIN_MODEL_REQUEST_DEF, TRAIN_MODEL_RESPONSE_DEF,

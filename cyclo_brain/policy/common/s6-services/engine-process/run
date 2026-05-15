@@ -1,0 +1,5 @@
+#!/command/with-contenv bash
+# Engine process — policy loading, RobotClient sensor reads, inference.
+
+export PYTHONPATH="/app:/policy_runtime:${ZENOH_SDK_PATH:-/zenoh_sdk}:${ROBOT_CLIENT_SDK_PATH:-/robot_client_sdk}${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 -m engine_process

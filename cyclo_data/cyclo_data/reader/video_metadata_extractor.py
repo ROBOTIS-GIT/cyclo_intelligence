@@ -39,10 +39,10 @@ class VideoMetadataExtractor:
         Extract a meaningful camera name from a topic path.
 
         Examples (current ZED-stereo + RealSense convention):
-            /zed/zed_node/left/image_rect_color/compressed         -> cam_head_left
-            /zed/zed_node/right/image_rect_color/compressed        -> cam_head_right
-            /camera_left/camera_left/color/image_rect_raw/...      -> cam_wrist_left
-            /camera_right/camera_right/color/image_rect_raw/...    -> cam_wrist_right
+            /zed/zed_node/left/image_rect_color/compressed         -> rgb.cam_left_head
+            /zed/zed_node/right/image_rect_color/compressed        -> rgb.cam_right_head
+            /camera_left/camera_left/color/image_rect_raw/...      -> rgb.cam_left_wrist
+            /camera_right/camera_right/color/image_rect_raw/...    -> rgb.cam_right_wrist
 
         Legacy datasets that recorded `/robot/camera/<cam_name>/...` keep
         their original camera name via the embedded-name fallback below.
@@ -52,14 +52,14 @@ class VideoMetadataExtractor:
         # ZED stereo head — split into left/right.
         if "zed" in topic_lower:
             if "/right/" in topic_lower or "_right" in topic_lower:
-                return "cam_head_right"
-            return "cam_head_left"
+                return "rgb.cam_right_head"
+            return "rgb.cam_left_head"
 
         # RealSense wrists.
         if "camera_left" in topic_lower:
-            return "cam_wrist_left"
+            return "rgb.cam_left_wrist"
         if "camera_right" in topic_lower:
-            return "cam_wrist_right"
+            return "rgb.cam_right_wrist"
 
         # Legacy `/robot/camera/<cam_name>/...` pattern — preserve the
         # embedded camera name verbatim so old datasets keep working.
@@ -71,12 +71,12 @@ class VideoMetadataExtractor:
         # Generic head/wrist hint fallback.
         if "head" in topic_lower:
             if "right" in topic_lower:
-                return "cam_head_right"
-            return "cam_head_left"
+                return "rgb.cam_right_head"
+            return "rgb.cam_left_head"
         if "wrist" in topic_lower:
             if "right" in topic_lower:
-                return "cam_wrist_right"
-            return "cam_wrist_left"
+                return "rgb.cam_right_wrist"
+            return "rgb.cam_left_wrist"
 
         parts = [
             p

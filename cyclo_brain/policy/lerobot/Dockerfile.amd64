@@ -1,14 +1,13 @@
 # LeRobot Docker Container with Zenoh Communication Support (AMD64)
 #
-# Two-process policy runtime: s6-overlay supervises inference-server
-# (Process A — PyTorch + obs + chunk pub) and control-publisher
-# (Process B — 100 Hz command publisher) as independent OS processes
-# that communicate over Zenoh.
+# Two-process policy runtime: s6-overlay supervises main-runtime
+# (external service + robot-facing control loop) and engine-process
+# (policy deps + RobotClient sensor reads + inference).
 #
 # The runtime + s6 services are policy-agnostic and live under
 # cyclo_brain/policy/common/. This image only ships the LeRobot deps
 # and bakes the common s6 unit files; the actual Python source for
-# Process A/B and lerobot_engine.py are bind-mounted at runtime so the
+# Runtime packages and lerobot_engine are bind-mounted at runtime so the
 # container can be iterated without rebuilds.
 #
 # Build context: cyclo_brain/policy/        (NOTE: parent of lerobot/)
@@ -95,19 +94,19 @@ RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
 COPY lerobot/lerobot/ ./
 
 # Zenoh + runtime Python deps. zenoh_ros2_sdk / robot_client /
-# post_processing come in via bind-mount (see docker-compose.yml).
+# action_chunk_processing come in via bind-mount (see docker-compose.yml).
 # IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled
 # zenoh-c version (1.6.x). Mismatched versions cause service call
 # failures despite discovery working.
 RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /post_processing_sdk /orchestrator_config \
+    && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk /orchestrator_config \
                 /policy_runtime /app
 
 # s6 unit files come from cyclo_brain/policy/common/. Generic across all
 # policy backends — never edited per-policy.
 COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/inference-server/run \
-             /etc/s6-overlay/s6-rc.d/control-publisher/run
+RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
+             /etc/s6-overlay/s6-rc.d/engine-process/run
 
 # HuggingFace cache (bind-mounted from compose so weights survive rebuild).
 ENV HF_HOME=/root/.cache/huggingface
@@ -121,25 +120,23 @@ ENV ZENOH_SHM_ENABLED=true
 ENV ZENOH_SDK_PATH=/zenoh_sdk
 ENV ZENOH_TRANSPORT_SHM_ENABLED=true
 
-# Bind-mount roots (consumed by /policy_runtime/inference_server.py and
-# /policy_runtime/control_publisher.py). Defaults match the compose
+# Bind-mount roots consumed by /policy_runtime/main_runtime and
+# /policy_runtime/engine_process. Defaults match the compose
 # volume mounts; override if layout changes.
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-ENV POST_PROCESSING_SDK_PATH=/post_processing_sdk
+ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
-# Common runtime dispatch — POLICY_BACKEND drives the Zenoh topic
-# prefix (cyclo/policy/<backend>/...) and the default engine module
-# name (<backend>_engine). docker-compose mounts lerobot_engine.py at
-# /app/lerobot_engine.py.
+# Common runtime dispatch. POLICY_BACKEND drives service names, and
+# POLICY_ENGINE_MODULE points at the backend engine package.
 ENV POLICY_BACKEND=lerobot
 ENV POLICY_ENGINE_MODULE=lerobot_engine
 
 WORKDIR /lerobot
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD s6-svstat /run/service/inference-server 2>&1 | grep -q "up" \
-     && s6-svstat /run/service/control-publisher 2>&1 | grep -q "up" \
+    CMD s6-svstat /run/service/main-runtime 2>&1 | grep -q "up" \
+     && s6-svstat /run/service/engine-process 2>&1 | grep -q "up" \
      || exit 1
 
 # s6-overlay init — launches both supervised services in parallel

@@ -1,6 +1,0 @@
-#!/command/with-contenv bash
-# Process B — 100 Hz control publisher.
-# Idle until cyclo/policy/groot/configure broadcast lands from Process A
-# (D16 — robot_type binds at InferenceCommand.LOAD, not compose env).
-
-exec python3 /app/runtime/control_publisher.py

@@ -1345,7 +1345,7 @@ class RosbagToLerobotConverter:
     def _get_camera_name_for_video(self, filename: str) -> str:
         """Get camera name from video filename.
 
-        MP4 converter outputs files like 'cam_head_left.mp4',
+        MP4 converter outputs files like 'rgb.cam_left_head.mp4',
         so the stem is already the camera name.
         """
         name = filename.replace("_compressed", "")
@@ -1361,7 +1361,7 @@ class RosbagToLerobotConverter:
                 if sanitized_topic in name or name in sanitized_topic:
                     return camera_name
 
-        # Filename is already the camera name (e.g., cam_head_left)
+        # Filename is already the camera name (e.g., rgb.cam_left_head)
         if name.startswith("cam_"):
             return name
 

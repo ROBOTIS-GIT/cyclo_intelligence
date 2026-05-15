@@ -38,7 +38,7 @@ _SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "")
 if _SDK_PATH and _SDK_PATH not in sys.path:
     sys.path.insert(0, _SDK_PATH)
 
-from zenoh_ros2_sdk import ROS2Subscriber  # noqa: E402
+from zenoh_ros2_sdk import ROS2Publisher, ROS2Subscriber, get_message_class  # noqa: E402
 
 
 # -- robot config schema helper -----------------------------------------------
@@ -117,8 +117,8 @@ def _build_runtime_config(section: dict) -> dict:
     if physical_follower_name is not None:
         for modality, cfg in action_groups.items():
             if cfg["msg_type"] == "geometry_msgs/msg/Twist":
-                # action.mobile is a command-only target (Process B
-                # publishes there); RobotClient stays read-only.
+                # action.mobile is command-only; observation RobotClient
+                # instances stay read-only.
                 continue
             child_name = f"follower_{modality}"
             if child_name in joint_groups:
@@ -137,8 +137,8 @@ def _build_runtime_config(section: dict) -> dict:
     }
 
 
-# Phase 4 compatibility re-export: lerobot's inference_server imports the
-# old name. Same VLA-semantic section in, same runtime-config dict out.
+# Compatibility re-export for older engine code. Same VLA-semantic section in,
+# same runtime-config dict out.
 def derive_robot_config(section: dict) -> dict:
     return _build_runtime_config(section)
 
@@ -161,6 +161,7 @@ class RobotClient:
         router_ip: str = "127.0.0.1",
         router_port: int = 7447,
         domain_id: Optional[int] = None,
+        enable_command_publishers: bool = False,
     ):
         section = robot_schema.load_robot_section(robot_type)
         # Phase 4: yaml is VLA-semantic (observation.images / state +
@@ -174,6 +175,9 @@ class RobotClient:
         self._sync_threshold_ms = sync_threshold_ms
         self._router_ip = router_ip
         self._router_port = router_port
+        self._domain_id = domain_id
+        self._enable_command_publishers = bool(enable_command_publishers)
+        self._action_groups = robot_schema.get_action_groups(section)
 
         # Thread-safe data stores
         self._lock = threading.Lock()
@@ -187,16 +191,17 @@ class RobotClient:
         self._sensor_timestamps: dict[str, float] = {}
         self._task_instruction: str = ""
 
-        # Read-only consumer: only subscribers, no publishers. Process B's
-        # control_publisher handles all outgoing commands directly; the
-        # legacy publisher API on RobotClient (set_joint_positions /
-        # set_velocity / execute_action_chunk) was never wired into the
-        # current architecture and was removed in Phase 3.1.
         self._subscribers: list = []
+        self._command_publishers: dict[str, ROS2Publisher] = {}
+        self._command_msg_types: dict[str, str] = {}
+        self._command_joint_names: dict[str, list[str]] = {}
+        self._action_keys = sorted(self._action_groups.keys())
 
         self._closed = False
 
         self._init_subscriptions()
+        if self._enable_command_publishers:
+            self._init_command_publishers()
         logger.info(f"RobotClient initialized: {robot_type} "
                      f"({len(self._config.get('cameras', {}))} cameras, "
                      f"{len(self._config.get('joint_groups', {}))} joint groups)")
@@ -262,6 +267,32 @@ class RobotClient:
             sub = ROS2Subscriber(**sub_kwargs)
             self._subscribers.append(sub)
             logger.debug(f"Subscribed sensor: {sensor_name} -> {sensor_cfg['topic']}")
+
+    def _init_command_publishers(self):
+        """Create publishers for configured action topics."""
+        common = {
+            "router_ip": self._router_ip,
+            "router_port": self._router_port,
+        }
+        if self._domain_id is not None:
+            common["domain_id"] = self._domain_id
+
+        for action_key in self._action_keys:
+            cfg = self._action_groups[action_key]
+            publisher_key = f"leader_{action_key}"
+            self._command_msg_types[publisher_key] = cfg["msg_type"]
+            self._command_joint_names[publisher_key] = list(cfg.get("joint_names", []))
+            self._command_publishers[publisher_key] = ROS2Publisher(
+                topic=cfg["topic"],
+                msg_type=cfg["msg_type"],
+                **common,
+            )
+            logger.debug(
+                "Command publisher: %s -> %s (%s)",
+                publisher_key,
+                cfg["topic"],
+                cfg["msg_type"],
+            )
 
     # ------------------------------------------------------------------ #
     # Callback handlers
@@ -492,6 +523,87 @@ class RobotClient:
             return sensor_name in self._sensors
 
     # ------------------------------------------------------------------ #
+    # Command API
+    # ------------------------------------------------------------------ #
+
+    @property
+    def action_keys(self) -> list[str]:
+        return list(self._action_keys)
+
+    def publish_action(self, action: np.ndarray, action_keys: Optional[list[str]] = None) -> None:
+        """Publish one flat action vector to the robot command topics.
+
+        Main process control loops use this method. Engine process instances keep
+        ``enable_command_publishers=False`` and remain read-only.
+        """
+        if not self._command_publishers:
+            raise RuntimeError("RobotClient command publishers are not enabled")
+
+        keys = list(action_keys) if action_keys else self._action_keys
+        values = np.asarray(action, dtype=np.float64).reshape(-1)
+        offset = 0
+        for action_key in keys:
+            cfg = self._action_groups.get(action_key)
+            if cfg is None:
+                continue
+            publisher_key = f"leader_{action_key}"
+            msg_type = cfg["msg_type"]
+            width = 3 if msg_type == "geometry_msgs/msg/Twist" else len(cfg["joint_names"])
+            segment = values[offset:offset + width]
+            offset += width
+
+            publisher = self._command_publishers.get(publisher_key)
+            if publisher is None:
+                continue
+            if msg_type == "geometry_msgs/msg/Twist":
+                self._publish_twist(publisher, segment)
+            else:
+                self._publish_joint_trajectory(
+                    publisher,
+                    self._command_joint_names.get(publisher_key, []),
+                    segment,
+                )
+
+    def _publish_twist(self, publisher: ROS2Publisher, values: np.ndarray) -> None:
+        Vector3 = get_message_class("geometry_msgs/msg/Vector3")
+        linear = Vector3(
+            x=float(values[0]) if len(values) > 0 else 0.0,
+            y=float(values[1]) if len(values) > 1 else 0.0,
+            z=0.0,
+        )
+        angular = Vector3(
+            x=0.0,
+            y=0.0,
+            z=float(values[2]) if len(values) > 2 else 0.0,
+        )
+        publisher.publish(linear=linear, angular=angular)
+
+    def _publish_joint_trajectory(
+        self,
+        publisher: ROS2Publisher,
+        joint_names: list[str],
+        values: np.ndarray,
+    ) -> None:
+        Header = get_message_class("std_msgs/msg/Header")
+        Time = get_message_class("builtin_interfaces/msg/Time")
+        Duration = get_message_class("builtin_interfaces/msg/Duration")
+        JointTrajectoryPoint = get_message_class(
+            "trajectory_msgs/msg/JointTrajectoryPoint"
+        )
+        point = JointTrajectoryPoint(
+            positions=np.asarray(values, dtype=np.float64),
+            velocities=np.zeros(0, dtype=np.float64),
+            accelerations=np.zeros(0, dtype=np.float64),
+            effort=np.zeros(0, dtype=np.float64),
+            time_from_start=Duration(sec=0, nanosec=0),
+        )
+        publisher.publish(
+            header=Header(stamp=Time(sec=0, nanosec=0), frame_id=""),
+            joint_names=list(joint_names),
+            points=[point],
+        )
+
+    # ------------------------------------------------------------------ #
     # Task instruction
     # ------------------------------------------------------------------ #
 
@@ -631,7 +743,7 @@ class RobotClient:
     # ------------------------------------------------------------------ #
 
     def close(self):
-        """Close all subscriptions."""
+        """Close all subscriptions and command publishers."""
         if hasattr(self, '_closed') and self._closed:
             return
         self._closed = True
@@ -641,6 +753,12 @@ class RobotClient:
             except Exception as e:
                 logger.debug(f"Error closing subscriber: {e}")
         self._subscribers.clear()
+        for pub in self._command_publishers.values():
+            try:
+                pub.close()
+            except Exception as e:
+                logger.debug(f"Error closing command publisher: {e}")
+        self._command_publishers.clear()
         logger.info("RobotClient closed")
 
     def __del__(self):

@@ -1,6 +1,0 @@
-#!/command/with-contenv bash
-# Process A — GR00T policy lifecycle + obs subscription + chunk emission.
-# s6-overlay restarts this on exit; fail-fast with `exec` so exit
-# codes propagate and the backoff kicks in.
-
-exec python3 /app/runtime/inference_server.py

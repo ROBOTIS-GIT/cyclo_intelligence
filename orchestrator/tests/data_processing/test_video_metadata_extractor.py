@@ -37,20 +37,20 @@ class TestVideoMetadataExtractor:
     # ZED stereo head — split into left/right
     def test_extract_camera_name_zed_left(self, extractor):
         topic = "/zed/zed_node/left/image_rect_color/compressed"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_head_left"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_left_head"
 
     def test_extract_camera_name_zed_right(self, extractor):
         topic = "/zed/zed_node/right/image_rect_color/compressed"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_head_right"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_right_head"
 
     # RealSense wrists
     def test_extract_camera_name_camera_left(self, extractor):
         topic = "/camera_left/camera_left/color/image_rect_raw/compressed"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_wrist_left"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_left_wrist"
 
     def test_extract_camera_name_camera_right(self, extractor):
         topic = "/camera_right/camera_right/color/image_rect_raw/compressed"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_wrist_right"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_right_wrist"
 
     # Legacy `/robot/camera/<cam_name>/...` — preserve embedded name verbatim
     def test_extract_camera_name_legacy_robot_camera(self, extractor):
@@ -60,15 +60,15 @@ class TestVideoMetadataExtractor:
     # Generic head/wrist hint fallback
     def test_extract_camera_name_head_hint(self, extractor):
         topic = "/head_camera/image"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_head_left"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_left_head"
 
     def test_extract_camera_name_wrist_left_hint(self, extractor):
         topic = "/wrist_left_camera/image"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_wrist_left"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_left_wrist"
 
     def test_extract_camera_name_wrist_right_hint(self, extractor):
         topic = "/wrist_right_camera/image"
-        assert extractor.extract_camera_name_from_topic(topic) == "cam_wrist_right"
+        assert extractor.extract_camera_name_from_topic(topic) == "rgb.cam_right_wrist"
 
     def test_extract_camera_name_fallback(self, extractor):
         topic = "/custom_camera/image"
@@ -99,13 +99,13 @@ class TestVideoMetadataExtractor:
     def test_get_video_files_success(self, extractor, temp_bag_dir):
         videos_dir = temp_bag_dir / "videos"
         videos_dir.mkdir()
-        (videos_dir / "cam_head_left.mp4").touch()
-        (videos_dir / "cam_wrist_left.mp4").touch()
+        (videos_dir / "rgb.cam_left_head.mp4").touch()
+        (videos_dir / "rgb.cam_left_wrist.mp4").touch()
 
         files = extractor.get_video_files(temp_bag_dir)
         assert len(files) == 2
-        assert "videos/cam_head_left.mp4" in files
-        assert "videos/cam_wrist_left.mp4" in files
+        assert "videos/rgb.cam_left_head.mp4" in files
+        assert "videos/rgb.cam_left_wrist.mp4" in files
 
     def test_build_video_info_empty(self, extractor, temp_bag_dir):
         result = extractor.build_video_info(temp_bag_dir, {}, {})
@@ -129,15 +129,15 @@ class TestVideoMetadataExtractor:
             ]
         }
         camera_name_map = {
-            "/zed/zed_node/left/image_rect_color/compressed": "cam_head_left"
+            "/zed/zed_node/left/image_rect_color/compressed": "rgb.cam_left_head"
         }
 
         result = extractor.build_video_info(
             temp_bag_dir, image_metadata, camera_name_map
         )
         assert len(result["video_files"]) == 1
-        assert result["video_names"][0] == "cam_head_left"
-        assert result["frame_counts"]["cam_head_left"] == 4
+        assert result["video_names"][0] == "rgb.cam_left_head"
+        assert result["frame_counts"]["rgb.cam_left_head"] == 4
 
 
 if __name__ == "__main__":

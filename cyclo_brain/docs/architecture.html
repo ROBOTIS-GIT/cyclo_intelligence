@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cyclo Brain System Architecture</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --paper: #ffffff;
+      --ink: #152033;
+      --muted: #5d6878;
+      --line: #c8d2df;
+      --host: #2e5fa7;
+      --main: #087f8c;
+      --engine: #2f6f4e;
+      --robot: #9a6a1d;
+      --backend: #6554a8;
+      --action: #b34242;
+      --shadow: 0 18px 45px rgba(21, 32, 51, 0.1);
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      --sans: Inter, "IBM Plex Sans", "Segoe UI", Roboto, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+    }
+
+    .page {
+      width: min(1600px, calc(100vw - 28px));
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 18px 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 12px;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.25rem, 1.8vw, 2.1rem);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      max-width: 760px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--paper);
+      font-size: 0.72rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--host);
+    }
+
+    .main-dot { background: var(--main); }
+    .engine-dot { background: var(--engine); }
+    .robot-dot { background: var(--robot); }
+    .backend-dot { background: var(--backend); }
+    .action-dot { background: var(--action); }
+
+    .canvas {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: 800px;
+    }
+
+    text {
+      font-family: var(--sans);
+      fill: var(--ink);
+    }
+
+    .mono {
+      font-family: var(--mono);
+    }
+
+    .box {
+      fill: #ffffff;
+      stroke: var(--line);
+      stroke-width: 1.5;
+      rx: 10;
+      filter: drop-shadow(0 8px 16px rgba(21, 32, 51, 0.08));
+    }
+
+    .container {
+      fill: #fbfdff;
+      stroke: #aebcce;
+      stroke-width: 2;
+      rx: 14;
+    }
+
+    .host-stroke { stroke: var(--host); }
+    .main-stroke { stroke: var(--main); }
+    .engine-stroke { stroke: var(--engine); }
+    .robot-stroke { stroke: var(--robot); }
+    .backend-stroke { stroke: var(--backend); }
+
+    .title {
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    .label {
+      font-size: 13.5px;
+      font-weight: 850;
+    }
+
+    .small {
+      fill: var(--muted);
+      font-size: 10.8px;
+      font-weight: 650;
+    }
+
+    .tiny {
+      fill: var(--muted);
+      font-size: 9.8px;
+      font-weight: 700;
+    }
+
+    .pill {
+      fill: #eef4f8;
+      stroke: #d2dce8;
+      rx: 16;
+    }
+
+    .pill-text {
+      font-size: 10.5px;
+      font-weight: 850;
+      fill: #344155;
+    }
+
+    .flow {
+      fill: none;
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow);
+    }
+
+    .flow-thin {
+      stroke-width: 3;
+    }
+
+    .flow-dashed {
+      stroke-dasharray: 10 10;
+      animation: dash 1.1s linear infinite;
+    }
+
+    .flow-command { stroke: var(--host); }
+    .flow-engine { stroke: var(--engine); }
+    .flow-observation { stroke: var(--robot); }
+    .flow-action { stroke: var(--action); }
+    .flow-buffer { stroke: var(--main); }
+    .flow-backend { stroke: var(--backend); }
+
+    .loop-ring {
+      fill: none;
+      stroke: var(--main);
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 7 6;
+      marker-end: url(#loop-arrow);
+    }
+
+    .flow-label-bg {
+      fill: #ffffff;
+      stroke: #d9e1ec;
+      rx: 7;
+    }
+
+    .flow-label {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 850;
+      fill: #263247;
+    }
+
+    .number {
+      fill: #ffffff;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      font-weight: 950;
+    }
+
+    .number-bg {
+      stroke: #ffffff;
+      stroke-width: 3;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .footer code {
+      color: var(--ink);
+      font-family: var(--mono);
+      font-weight: 800;
+    }
+
+    a {
+      color: var(--host);
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.18em;
+    }
+
+    @keyframes dash {
+      to {
+        stroke-dashoffset: -20;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .page {
+        width: min(100vw - 18px, 1600px);
+      }
+
+      header,
+      .footer {
+        display: block;
+      }
+
+      .legend {
+        justify-content: flex-start;
+        margin-top: 12px;
+      }
+
+      svg {
+        min-width: 1320px;
+      }
+
+      .canvas {
+        overflow: auto;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .flow-dashed {
+        animation: none;
+      }
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+      }
+
+      .page {
+        width: 100%;
+        min-height: auto;
+      }
+
+      .canvas {
+        box-shadow: none;
+      }
+
+      svg {
+        min-height: 700px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>Cyclo Brain System Architecture</h1>
+        <p class="subtitle">UI/orchestrator or standalone CLI feeds the same command shape. Two Python processes. Robot I/O is split by command vs observation.</p>
+      </div>
+      <div class="legend" aria-label="Flow legend">
+        <span><i class="dot"></i>external command</span>
+        <span><i class="dot engine-dot"></i>engine request / action_list</span>
+        <span><i class="dot robot-dot"></i>sensor / state read</span>
+        <span><i class="dot action-dot"></i>robot command publish</span>
+        <span><i class="dot backend-dot"></i>open-source backend</span>
+      </div>
+    </header>
+
+    <section class="canvas" aria-label="Cyclo Brain architecture diagram">
+      <svg viewBox="0 0 1600 860" role="img" aria-label="Cyclo Brain architecture and data flow" aria-describedby="diagram-desc">
+        <desc id="diagram-desc">
+          UI/orchestrator commands or standalone CLI arguments enter Main Runtime.
+          Main Runtime requests actions from Engine Process.
+          Engine Process reads robot observations and returns action_list. Main Runtime buffers,
+          optionally post-processes, and publishes robot commands.
+        </desc>
+
+        <defs>
+          <marker id="arrow" markerWidth="10.5" markerHeight="10.5" refX="9.2" refY="5.25" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M1.4,1.2 L9.2,5.25 L1.4,9.3 Z" fill="currentColor"></path>
+          </marker>
+          <marker id="loop-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M1,1 L7,4 L1,7 Z" fill="var(--main)"></path>
+          </marker>
+        </defs>
+
+        <!-- outer zones -->
+        <rect x="28" y="56" width="236" height="380" class="container host-stroke"></rect>
+        <rect x="310" y="42" width="948" height="708" class="container"></rect>
+        <rect x="342" y="110" width="378" height="518" class="container main-stroke"></rect>
+        <rect x="768" y="110" width="378" height="518" class="container engine-stroke"></rect>
+        <rect x="1328" y="102" width="244" height="526" class="container robot-stroke"></rect>
+        <rect x="342" y="660" width="884" height="70" class="container backend-stroke"></rect>
+
+        <text x="48" y="92" class="title">Host</text>
+        <text x="330" y="78" class="title">Policy Container: &lt;backend&gt;_server</text>
+        <text x="362" y="146" class="title">Main Runtime</text>
+        <text x="788" y="146" class="title">Engine Process</text>
+        <text x="1348" y="138" class="title">Robot</text>
+        <text x="362" y="704" class="title">Open-source backend island</text>
+
+        <!-- host nodes -->
+        <rect x="54" y="124" width="184" height="112" class="box host-stroke"></rect>
+        <text x="74" y="154" class="label">Command Source</text>
+        <text x="74" y="180" class="small">UI / Orchestrator</text>
+        <text x="74" y="202" class="small">Standalone CLI args</text>
+        <rect x="74" y="212" width="132" height="20" class="pill"></rect>
+        <text x="86" y="226" class="pill-text mono">same command shape</text>
+
+        <rect x="54" y="284" width="184" height="114" class="box host-stroke"></rect>
+        <text x="74" y="316" class="label mono">InferenceCommand</text>
+        <text x="74" y="342" class="small">LOAD / START / PAUSE</text>
+        <text x="74" y="364" class="small">RESUME / STOP / UNLOAD</text>
+        <rect x="74" y="374" width="122" height="22" class="pill"></rect>
+        <text x="86" y="390" class="pill-text mono">external service</text>
+
+        <!-- main process nodes -->
+        <rect x="372" y="178" width="146" height="76" class="box main-stroke"></rect>
+        <text x="390" y="210" class="label">ServiceHandler</text>
+        <text x="390" y="234" class="small">command entry</text>
+
+        <rect x="544" y="178" width="146" height="76" class="box main-stroke"></rect>
+        <text x="564" y="210" class="label">SessionState</text>
+        <text x="564" y="234" class="small">runtime gate</text>
+
+        <rect x="372" y="304" width="318" height="82" class="box main-stroke"></rect>
+        <text x="394" y="337" class="label">InferenceRequester</text>
+        <text x="394" y="357" class="small">one GET_ACTION at a time</text>
+        <text x="394" y="374" class="small">timeout + seq_id stale guard</text>
+
+        <rect x="372" y="438" width="318" height="86" class="box main-stroke"></rect>
+        <text x="394" y="472" class="label">ActionChunkProcessor</text>
+        <text x="394" y="492" class="small">buffer + optional match / RTC</text>
+        <text x="394" y="509" class="small">interpolate / blend / smooth</text>
+
+        <rect x="372" y="558" width="146" height="46" class="box main-stroke"></rect>
+        <text x="394" y="587" class="label">ControlLoop</text>
+        <path d="M518 581 C548 581 548 638 445 638 C350 638 350 581 372 581" class="loop-ring"></path>
+        <rect x="386" y="612" width="120" height="24" class="flow-label-bg"></rect>
+        <text x="398" y="629" class="flow-label">self-running tick</text>
+
+        <rect x="544" y="558" width="146" height="46" class="box main-stroke"></rect>
+        <text x="564" y="587" class="label">RobotClient</text>
+
+        <!-- engine process nodes -->
+        <rect x="798" y="178" width="318" height="82" class="box engine-stroke"></rect>
+        <text x="820" y="211" class="label">EngineWorker</text>
+        <text x="820" y="231" class="small">hosts internal EngineCommand service</text>
+        <text x="820" y="248" class="small">using Zenoh ROS2 SDK</text>
+
+        <rect x="798" y="304" width="318" height="204" class="box engine-stroke"></rect>
+        <text x="820" y="338" class="label">Backend InferenceEngine</text>
+        <text x="820" y="358" class="small">model-specific implementation</text>
+        <text x="820" y="375" class="small">behind stable contract</text>
+
+        <rect x="830" y="386" width="122" height="42" class="box engine-stroke"></rect>
+        <text x="852" y="412" class="small">Policy Load</text>
+
+        <rect x="964" y="386" width="122" height="42" class="box engine-stroke"></rect>
+        <text x="986" y="412" class="small">Preprocess</text>
+
+        <rect x="830" y="446" width="122" height="42" class="box engine-stroke"></rect>
+        <text x="856" y="472" class="small">Predict</text>
+
+        <rect x="964" y="446" width="122" height="42" class="box engine-stroke"></rect>
+        <text x="984" y="466" class="small">Optional</text>
+        <text x="984" y="480" class="small">Optimize</text>
+
+        <rect x="798" y="558" width="318" height="46" class="box engine-stroke"></rect>
+        <text x="820" y="587" class="label">RobotClient</text>
+        <text x="938" y="587" class="small">observation only</text>
+
+        <!-- robot nodes -->
+        <rect x="1352" y="180" width="194" height="92" class="box robot-stroke"></rect>
+        <text x="1374" y="214" class="label">Sensors / State</text>
+        <text x="1374" y="238" class="small">camera, joints, base state</text>
+
+        <rect x="1352" y="452" width="194" height="92" class="box robot-stroke"></rect>
+        <text x="1374" y="486" class="label">Command Topics</text>
+        <text x="1374" y="510" class="small">cmd_vel, trajectory, etc.</text>
+
+        <!-- backend island -->
+        <rect x="720" y="675" width="116" height="38" class="box backend-stroke"></rect>
+        <text x="744" y="699" class="small">LeRobot</text>
+
+        <rect x="860" y="675" width="116" height="38" class="box backend-stroke"></rect>
+        <text x="896" y="699" class="small">GR00T</text>
+
+        <rect x="1000" y="675" width="142" height="38" class="box backend-stroke"></rect>
+        <text x="1026" y="699" class="small">Future model</text>
+
+        <!-- flow labels -->
+        <rect x="232" y="256" width="124" height="28" class="flow-label-bg"></rect>
+        <text x="246" y="275" class="flow-label">service call</text>
+
+        <rect x="682" y="264" width="126" height="28" class="flow-label-bg"></rect>
+        <text x="696" y="283" class="flow-label">EngineCommand</text>
+
+        <rect x="680" y="398" width="118" height="28" class="flow-label-bg"></rect>
+        <text x="696" y="417" class="flow-label">action_list</text>
+
+        <rect x="1168" y="190" width="116" height="28" class="flow-label-bg"></rect>
+        <text x="1182" y="209" class="flow-label">sensor/state in</text>
+
+        <rect x="1168" y="612" width="122" height="28" class="flow-label-bg"></rect>
+        <text x="1182" y="631" class="flow-label">command out</text>
+
+        <rect x="482" y="526" width="124" height="28" class="flow-label-bg"></rect>
+        <text x="496" y="545" class="flow-label">processed actions</text>
+
+        <rect x="512" y="608" width="118" height="28" class="flow-label-bg"></rect>
+        <text x="526" y="627" class="flow-label">one action/tick</text>
+
+        <!-- data flows -->
+        <path d="M146 236 L146 284" class="flow flow-command flow-thin"></path>
+        <path d="M238 341 C306 341 318 216 372 216" class="flow flow-command flow-dashed"></path>
+        <path d="M518 216 L544 216" class="flow flow-buffer flow-thin"></path>
+
+        <path d="M617 254 C617 278 582 290 554 304" class="flow flow-buffer flow-thin"></path>
+        <path d="M690 345 C736 345 750 220 798 220" class="flow flow-engine flow-dashed"></path>
+        <path d="M798 244 C748 244 732 481 690 481" class="flow flow-engine flow-dashed"></path>
+
+        <path d="M1352 226 C1264 226 1264 581 1116 581" class="flow flow-observation flow-dashed"></path>
+
+        <path d="M531 524 L531 558" class="flow flow-buffer flow-thin"></path>
+        <path d="M518 581 L544 581" class="flow flow-buffer flow-thin"></path>
+        <path d="M690 581 C720 620 760 642 840 642 L1260 642 C1328 642 1338 540 1352 498" class="flow flow-action flow-dashed"></path>
+
+        <path d="M778 675 C778 610 798 536 856 508" class="flow flow-backend flow-thin"></path>
+        <path d="M918 675 C918 612 886 535 928 508" class="flow flow-backend flow-thin"></path>
+        <path d="M1071 675 C1071 612 1008 535 1048 508" class="flow flow-backend flow-thin"></path>
+
+        <!-- numbered badges -->
+        <circle cx="306" cy="326" r="15" fill="var(--host)" class="number-bg"></circle>
+        <text x="302" y="331" class="number">1</text>
+
+        <circle cx="744" cy="345" r="15" fill="var(--engine)" class="number-bg"></circle>
+        <text x="740" y="350" class="number">2</text>
+
+        <circle cx="1264" cy="252" r="15" fill="var(--robot)" class="number-bg"></circle>
+        <text x="1260" y="257" class="number">3</text>
+
+        <circle cx="744" cy="481" r="15" fill="var(--engine)" class="number-bg"></circle>
+        <text x="740" y="486" class="number">4</text>
+
+        <circle cx="1090" cy="642" r="15" fill="var(--action)" class="number-bg"></circle>
+        <text x="1086" y="647" class="number">5</text>
+
+        <!-- small flow summary -->
+        <rect x="42" y="472" width="268" height="236" class="box"></rect>
+        <text x="64" y="508" class="label">Data flow</text>
+        <text x="64" y="540" class="small">1. UI/CLI command enters Main</text>
+        <text x="64" y="568" class="small">2. Main requests Engine action</text>
+        <text x="64" y="596" class="small">3. Engine reads Robot observation</text>
+        <text x="64" y="624" class="small">4. Engine returns action_list</text>
+        <text x="64" y="652" class="small">5. Main buffers/processes/publishes</text>
+        <text x="64" y="690" class="tiny">Post-processing ON: 16 actions -> 100Hz buffer</text>
+      </svg>
+    </section>
+
+    <footer class="footer">
+      <span>Source of truth: <a href="../STRUCTURE.md">STRUCTURE.md</a></span>
+      <span>When runtime shape changes, update <code>cyclo_brain/docs/architecture.html</code> with it.</span>
+    </footer>
+  </main>
+</body>
+</html>

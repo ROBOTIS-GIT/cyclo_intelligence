@@ -18,20 +18,16 @@
 
 """GR00T N1.6 inference engine.
 
-Encapsulates Gr00tPolicy loading, RobotClient setup, observation
-preprocessing, and action chunk postprocessing. Imported by
-runtime/inference_server.py (Process A) which slots it into the
-cyclo_intelligence two-process pattern (LOAD srv → configure broadcast
-→ Zenoh trigger/chunk).
+Encapsulates Gr00tPolicy loading, RobotClient setup, observation preprocessing,
+and action chunk postprocessing. Imported by ``groot_engine`` and hosted by the
+common Engine process.
 
 Original Step 1 location: cyclo_brain/policy/groot/inference.py.
-Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
 """
 import logging
 import os
 import sys
-import time
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -66,7 +62,7 @@ else:
 if _groot_path and _groot_path not in sys.path:
     sys.path.insert(0, _groot_path)
 
-# TensorRT DiT acceleration - reuse existing GR00T deployment code
+# TensorRT DiT optimization - reuse existing GR00T deployment code
 from scripts.deployment.standalone_inference_script import (  # noqa: E402
     replace_dit_with_tensorrt,
 )
@@ -169,6 +165,49 @@ def build_trt_engine(policy: Gr00tPolicy, observation: dict, engine_path: str):
     logger.info("Cleaned up ONNX export files from: %s", onnx_dir)
 
 
+class TensorRTOptimizer:
+    """Build and attach the optional GR00T DiT TensorRT engine.
+
+    The policy can run without this optimizer. Keeping this behind a
+    class boundary makes the core inference engine responsible for
+    lifecycle, while TensorRT-specific export/build/replace details live here.
+    """
+
+    logger = logging.getLogger("groot_inference")
+
+    def __init__(self, engine_filename: str = "dit_model_bf16.trt") -> None:
+        self._engine_filename = engine_filename
+
+    def engine_path(self, model_path: str) -> str:
+        return os.path.join(model_path, self._engine_filename)
+
+    def apply(
+        self,
+        policy: Gr00tPolicy,
+        model_path: str,
+        observation_factory: Callable[[], dict],
+    ) -> Optional[str]:
+        """Ensure the TensorRT engine exists, then patch the policy.
+
+        Returns the TRT path on success. Returns None when TensorRT is
+        unavailable so inference can continue with PyTorch eager.
+        """
+        trt_path = self.engine_path(model_path)
+        try:
+            if not os.path.exists(trt_path):
+                self.logger.info("No TRT engine found, building automatically...")
+                build_trt_engine(policy, observation_factory(), trt_path)
+
+            replace_dit_with_tensorrt(policy, trt_path)
+            self.logger.info("DiT optimized with TensorRT: %s", trt_path)
+            return trt_path
+        except Exception as e:
+            self.logger.warning(
+                "TensorRT optimization unavailable, using PyTorch Eager: %s", e
+            )
+            return None
+
+
 class GR00TInference:
     """Encapsulates GR00T policy loading, observation building, and inference."""
 
@@ -184,6 +223,7 @@ class GR00TInference:
     def __init__(self):
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
+        self.optimizer = TensorRTOptimizer()
         self._loaded_model_path: Optional[str] = None  # track cached policy path
         self.policy_info: dict = {
             "video": [],       # e.g. ["cam_head_left", "cam_wrist_left", ...]
@@ -236,22 +276,13 @@ class GR00TInference:
             self.init_robot_info(robot_type)
             self.robot.wait_for_ready(timeout=10.0)
 
-            # TensorRT acceleration for DiT (Action Head).
-            # Engine is model-specific (weights baked in) and GPU-specific,
-            # so it lives next to the checkpoint. Auto-build on first use.
-            trt_path = os.path.join(model_path, "dit_model_bf16.trt")
-            try:
-                if not os.path.exists(trt_path):
-                    self.logger.info("No TRT engine found, building automatically...")
-                    dummy_obs = self._build_dummy_observation(request.task_instruction)
-                    build_trt_engine(self.policy, dummy_obs, trt_path)
-
-                replace_dit_with_tensorrt(self.policy, trt_path)
-                self.logger.info("DiT accelerated with TensorRT: %s", trt_path)
-            except Exception as e:
-                self.logger.warning(
-                    "TensorRT acceleration unavailable, using PyTorch Eager: %s", e
-                )
+            self.optimizer.apply(
+                policy=self.policy,
+                model_path=model_path,
+                observation_factory=lambda: self._build_dummy_observation(
+                    request.task_instruction
+                ),
+            )
 
             return {
                 "success": True,
@@ -403,10 +434,8 @@ class GR00TInference:
         self.logger.info("Action chunk: T=%d, D=%d", T, D)
         return {
             "success": True,
-            # Keep as numpy — zenoh_ros2_sdk's publisher uses .view() for fast
-            # CDR encoding and crashes on plain lists ('list' object has no
-            # attribute 'view'). inference_server._publish_chunk passes this
-            # straight through.
+            # Keep the backend contract as a flat numpy chunk. The common
+            # Engine process converts it to EngineCommand.action_list.
             "action_chunk": np.asarray(chunk.flatten(), dtype=np.float64),
             "chunk_size": T,
             "action_dim": D,
@@ -429,3 +458,6 @@ class GR00TInference:
     def fail(message: str) -> dict:
         return {"success": False, "message": message}
 
+
+def create_engine() -> GR00TInference:
+    return GR00TInference()

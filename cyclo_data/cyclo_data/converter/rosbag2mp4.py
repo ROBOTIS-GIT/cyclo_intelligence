@@ -29,10 +29,10 @@ Output structure:
     ├── episode_info.json   (copied)
     ├── metadata.yaml       (copied)
     ├── robot.urdf          (copied)
-    ├── cam_head_left.mp4   (new - replaces image topic)
-    ├── cam_head_right.mp4
-    ├── cam_wrist_left.mp4
-    ├── cam_wrist_right.mp4
+    ├── rgb.cam_left_head.mp4   (new - replaces image topic)
+    ├── rgb.cam_right_head.mp4
+    ├── rgb.cam_left_wrist.mp4
+    ├── rgb.cam_right_wrist.mp4
     └── episode.mcap        (modified - no images, synced camera_info only)
 """
 
@@ -118,19 +118,19 @@ class RosbagToMp4Converter:
     # not under the compressed image transport — _read_and_match_cameras
     # pairs them by header timestamp, so prefix mismatch is fine.
     DEFAULT_CAMERA_PAIRS = {
-        'cam_head_left': (
+        'rgb.cam_left_head': (
             '/zed/zed_node/left/image_rect_color/compressed',
             '/zed/zed_node/left/camera_info'
         ),
-        'cam_head_right': (
+        'rgb.cam_right_head': (
             '/zed/zed_node/right/image_rect_color/compressed',
             '/zed/zed_node/right/camera_info'
         ),
-        'cam_wrist_left': (
+        'rgb.cam_left_wrist': (
             '/camera_left/camera_left/color/image_rect_raw/compressed',
             '/camera_left/camera_left/color/camera_info'
         ),
-        'cam_wrist_right': (
+        'rgb.cam_right_wrist': (
             '/camera_right/camera_right/color/image_rect_raw/compressed',
             '/camera_right/camera_right/color/camera_info'
         ),
