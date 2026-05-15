@@ -1588,7 +1588,7 @@ class RosbagToLerobotConverterBase:
     def _sync_videos_to_grid(
         self, bag_path: Path, episode: EpisodeData,
     ) -> EpisodeData:
-        """Re-pack each camera's MJPEG MP4 to one frame per grid step.
+        """Re-pack each camera's source MP4 to one frame per grid step.
 
         Reads ``videos/<cam>_timestamps.parquet`` written by the
         recorder, maps the EpisodeData log-time grid (sub-second
@@ -1672,25 +1672,37 @@ class RosbagToLerobotConverterBase:
                 try:
                     cached_key = json.loads(cache_sidecar.read_text())
                     if cached_key == desired_key:
-                        self._log_info(
-                            f"{cam_name}: reusing cached synced MP4 "
-                            f"({indices.size} frames, fps={target_fps}, "
-                            f"rot={rotation_extra}°)"
-                        )
-                        # Even on cache hit, top up the video_stats.json
-                        # sidecar so Phase 2 stays a cache hit. If a
-                        # previous run wrote synced.mp4 + cache.json but
-                        # not video_stats.json (e.g. ran before this
-                        # precompute was added), this fills the gap.
-                        self._ensure_video_stats_cached(out_path, cam_name)
-                        synced[cam_name] = out_path
-                        continue
+                        cached_frames = self._get_video_frame_count(out_path)
+                        if cached_frames != int(indices.size):
+                            self._log_warning(
+                                f"{cam_name}: cached synced MP4 frame count "
+                                f"mismatch (cache={indices.size}, "
+                                f"mp4={cached_frames}); regenerating"
+                            )
+                        else:
+                            self._log_info(
+                                f"{cam_name}: reusing cached synced MP4 "
+                                f"({indices.size} frames, fps={target_fps}, "
+                                f"rot={rotation_extra}°)"
+                            )
+                            # Even on cache hit, top up the video_stats.json
+                            # sidecar so Phase 2 stays a cache hit. If a
+                            # previous run wrote synced.mp4 + cache.json but
+                            # not video_stats.json (e.g. ran before this
+                            # precompute was added), this fills the gap.
+                            self._ensure_video_stats_cached(out_path, cam_name)
+                            synced[cam_name] = out_path
+                            continue
                 except (OSError, ValueError) as exc:
                     self._log_warning(
                         f"{cam_name}: cache sidecar unreadable "
                         f"({exc!r}); regenerating"
                     )
-
+                except Exception as exc:
+                    self._log_warning(
+                        f"{cam_name}: cached synced MP4 validation failed "
+                        f"({exc!r}); regenerating"
+                    )
             try:
                 remux_selected_frames(
                     src_path, indices, out_path,
@@ -1698,11 +1710,21 @@ class RosbagToLerobotConverterBase:
                     rotation_deg=rotation_extra,
                     image_resize=image_resize,
                 )
+                produced_frames = self._get_video_frame_count(out_path)
+                cache_is_valid = produced_frames == int(indices.size)
                 # Best-effort sidecar write — failure here just means
                 # the next run won't get a cache hit. Don't fail the
                 # whole conversion over a metadata write.
                 try:
-                    cache_sidecar.write_text(json.dumps(desired_key))
+                    if cache_is_valid:
+                        cache_sidecar.write_text(json.dumps(desired_key))
+                    else:
+                        cache_sidecar.unlink(missing_ok=True)
+                        self._log_info(
+                            f"{cam_name}: not caching synced MP4 because "
+                            f"frame count is {produced_frames}, expected "
+                            f"{indices.size}"
+                        )
                 except OSError as exc:
                     self._log_warning(
                         f"{cam_name}: failed to write cache sidecar "
@@ -1781,6 +1803,16 @@ class RosbagToLerobotConverterBase:
                         if counts.get(cam_name, min_frames) <= min_frames:
                             continue
                         self._trim_video_to_n_frames(video_path, min_frames)
+                    # If an episode was shortened after sync, any
+                    # ``*_synced.cache.json`` keyed to the pre-trim grid
+                    # is no longer trustworthy. Drop it so the next
+                    # conversion validates/regenerates instead of
+                    # silently reusing a stale MP4.
+                    for video_path in synced.values():
+                        if video_path.stem.endswith("_synced"):
+                            video_path.with_name(
+                                video_path.stem + ".cache.json"
+                            ).unlink(missing_ok=True)
 
         return episode
 

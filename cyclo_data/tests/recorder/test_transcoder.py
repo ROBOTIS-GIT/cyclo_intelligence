@@ -444,3 +444,10 @@ class TestConcurrency:
         # The shutdown waited, so the job completed.
         assert fut.done()
         assert fut.result().success
+
+    def test_d4_shutdown_is_idempotent(self):
+        worker = TranscodeWorker(logger=None, parallelism=1)
+        worker.shutdown(wait=False)
+        worker.shutdown(wait=False)
+        with pytest.raises(RuntimeError, match="shut down"):
+            worker.submit(Path("/tmp/nonexistent_episode"))

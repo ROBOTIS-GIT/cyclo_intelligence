@@ -180,6 +180,13 @@ class RecordingService:
                 self._node.get_logger().warning(
                     f'CameraInfoSnapshot.close failed: {exc}')
             self._camera_info = None
+        if self._transcoder is not None:
+            try:
+                self._transcoder.shutdown(wait=False)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'TranscodeWorker.shutdown failed: {exc}')
+            self._transcoder = None
         self._rosbag.shutdown()
 
     # ------------------------------------------------------------------

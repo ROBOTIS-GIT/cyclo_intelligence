@@ -16,8 +16,9 @@ executor never blocks on pipe write/backpressure.
 
 A Parquet sidecar (``videos/<cam>_timestamps.parquet``) tracks the
 ``header.stamp`` (publisher clock) and ``recv`` (subscriber clock) of
-every frame written. LeRobot resampling uses ``header_stamp_ns`` to map
-the synced grid to MP4 frame indices.
+every frame written. LeRobot resampling maps the synced grid to MP4
+frame indices using ``recv_ns`` by default, matching MCAP ``log_time``
+semantics; ``header_stamp_ns`` stays available for diagnostics.
 
 Subscriptions are created once at ``__init__`` (= when the robot_type
 is first selected) and persist until ``close()``. Episode boundaries
@@ -30,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Full, Queue
+import os
 import shutil
 import subprocess
 import threading
@@ -56,7 +58,18 @@ _SUB_QOS = QoSProfile(
 # Bounded per-camera queue. Large enough to absorb several seconds of
 # bursty publishing on Jetson while ffmpeg warms up — when full we drop
 # the newest frame and bump a counter, never blocking the ROS callback.
-_QUEUE_MAX = 512
+_DEFAULT_QUEUE_MAX = 256
+_QUEUE_MAX_ENV = "CYCLO_VIDEO_RECORDER_QUEUE_MAX"
+
+
+def _resolve_queue_max() -> int:
+    raw = os.environ.get(_QUEUE_MAX_ENV)
+    if raw is None:
+        return _DEFAULT_QUEUE_MAX
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _DEFAULT_QUEUE_MAX
 
 # JPEG SOI marker. Some sims emit corrupted payloads; we skip those so
 # ffmpeg's mjpeg demuxer doesn't desync.
@@ -98,13 +111,14 @@ class _CameraStream:
 
     # Persistent — created in __init__/reconfigure, lives until close().
     subscription: Optional[object] = None
-    queue: Queue = field(default_factory=lambda: Queue(maxsize=_QUEUE_MAX))
+    queue: Queue = field(default_factory=lambda: Queue(maxsize=_DEFAULT_QUEUE_MAX))
 
     # Per-episode — populated by start_episode, cleared by stop_episode.
     mp4_path: Optional[Path] = None
     sidecar_path: Optional[Path] = None
     process: Optional[subprocess.Popen] = None
     writer: Optional[pq.ParquetWriter] = None
+    writer_lock: threading.Lock = field(default_factory=threading.Lock)
     worker: Optional[threading.Thread] = None
 
     frames_received: int = 0
@@ -138,6 +152,7 @@ class VideoRecorder:
         self._cb_group = callback_group or ReentrantCallbackGroup()
         self._ffmpeg_bin = shutil.which(ffmpeg_bin) or ffmpeg_bin
         self._framerate_hint = framerate_hint
+        self._queue_max = _resolve_queue_max()
 
         self._streams: Dict[str, _CameraStream] = {}
         # Simple bool — read in the ROS callback on every frame, flipped
@@ -146,6 +161,10 @@ class VideoRecorder:
         self._recording_active = False
 
         self._build_streams(self._cameras_spec)
+        self._node.get_logger().info(
+            f"VideoRecorder: configured {len(self._streams)} camera(s), "
+            f"queue_max={self._queue_max}"
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -216,27 +235,13 @@ class VideoRecorder:
         try:
             # Push sentinels so each worker drains its queue and exits.
             for stream in streams:
-                try:
-                    stream.queue.put(None, timeout=2.0)
-                except Full:
-                    try:
-                        stream.queue.get_nowait()
-                    except Empty:
-                        pass
-                    try:
-                        stream.queue.put_nowait(None)
-                    except Full:
-                        pass
+                self._enqueue_stop_sentinel(stream)
 
-            # Join workers in parallel — they're already running in OS
-            # threads so this fans out automatically.
+            # First drain window: in the healthy path workers consume the
+            # sentinel, flush their final parquet batch, and return before
+            # we close ffmpeg stdin.
             for stream in streams:
-                if stream.worker is not None:
-                    stream.worker.join(timeout=10.0)
-                    if stream.worker.is_alive():
-                        self._node.get_logger().error(
-                            f"VideoRecorder: {stream.name} worker did not exit within 10s"
-                        )
+                self._join_worker(stream, timeout=10.0, phase="drain")
         finally:
             # The ffmpeg + parquet cleanup must always run so subprocesses
             # never leak and parquet writers always flush, even if an
@@ -250,19 +255,9 @@ class VideoRecorder:
             # this avoids). The sentinel itself is dropped because no
             # further SOI follows it.
             for stream in streams:
-                if stream.process is not None and stream.process.stdin is not None:
-                    try:
-                        if not stream.process.stdin.closed:
-                            stream.process.stdin.write(_JPEG_SENTINEL)
-                    except (BrokenPipeError, OSError):
-                        pass
+                self._write_ffmpeg_sentinel(stream)
             for stream in streams:
-                if stream.process is not None and stream.process.stdin is not None:
-                    try:
-                        if not stream.process.stdin.closed:
-                            stream.process.stdin.close()
-                    except (BrokenPipeError, OSError):
-                        pass
+                self._close_ffmpeg_stdin(stream)
             for stream in streams:
                 if stream.process is not None:
                     try:
@@ -271,16 +266,11 @@ class VideoRecorder:
                         self._node.get_logger().error(
                             f"VideoRecorder: {stream.name} ffmpeg close failed: {exc!r}"
                         )
+            for stream in streams:
+                self._join_worker(stream, timeout=2.0, phase="final")
 
             for stream in streams:
-                if stream.writer is not None:
-                    try:
-                        stream.writer.close()
-                    except Exception as exc:  # pragma: no cover - defensive
-                        self._node.get_logger().error(
-                            f"VideoRecorder: {stream.name} parquet close failed: {exc!r}"
-                        )
-                    stream.writer = None
+                self._close_writer(stream)
                 stats[stream.name] = {
                     "frames_received": stream.frames_received,
                     "frames_written": stream.frames_written,
@@ -330,7 +320,11 @@ class VideoRecorder:
     def _build_streams(self, cameras: Dict[str, str]) -> None:
         """Create one _CameraStream + subscription per camera."""
         for cam_name, topic in cameras.items():
-            stream = _CameraStream(name=cam_name, topic=topic)
+            stream = _CameraStream(
+                name=cam_name,
+                topic=topic,
+                queue=Queue(maxsize=self._queue_max),
+            )
             stream.subscription = self._node.create_subscription(
                 CompressedImage,
                 topic,
@@ -342,6 +336,71 @@ class VideoRecorder:
             self._node.get_logger().info(
                 f"VideoRecorder: {cam_name} <- {topic} subscribed (idle)"
             )
+
+    def _enqueue_stop_sentinel(self, stream: _CameraStream) -> None:
+        """Ensure a worker sees its stop sentinel even if the queue is full."""
+        try:
+            stream.queue.put(None, timeout=2.0)
+            return
+        except Full:
+            pass
+        try:
+            stream.queue.get_nowait()
+        except Empty:
+            pass
+        try:
+            stream.queue.put_nowait(None)
+        except Full:
+            self._node.get_logger().error(
+                f"VideoRecorder: {stream.name} queue stayed full; "
+                "worker may need ffmpeg close to exit"
+            )
+
+    def _join_worker(
+        self, stream: _CameraStream, *, timeout: float, phase: str,
+    ) -> None:
+        worker = stream.worker
+        if worker is None:
+            return
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            self._node.get_logger().error(
+                f"VideoRecorder: {stream.name} worker did not exit during "
+                f"{phase} join ({timeout:.1f}s)"
+            )
+
+    def _write_ffmpeg_sentinel(self, stream: _CameraStream) -> None:
+        if stream.process is None or stream.process.stdin is None:
+            return
+        try:
+            if not stream.process.stdin.closed:
+                stream.process.stdin.write(_JPEG_SENTINEL)
+        except (BrokenPipeError, OSError):
+            pass
+
+    def _close_ffmpeg_stdin(self, stream: _CameraStream) -> None:
+        if stream.process is None or stream.process.stdin is None:
+            return
+        try:
+            if not stream.process.stdin.closed:
+                stream.process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def _close_writer(self, stream: _CameraStream) -> None:
+        if stream.writer is None:
+            return
+        with stream.writer_lock:
+            writer = stream.writer
+            if writer is None:
+                return
+            try:
+                writer.close()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._node.get_logger().error(
+                    f"VideoRecorder: {stream.name} parquet close failed: {exc!r}"
+                )
+            stream.writer = None
 
     def _teardown_subscriptions(self) -> None:
         for stream in self._streams.values():
@@ -471,8 +530,11 @@ class VideoRecorder:
                 },
                 schema=_TIMESTAMP_SCHEMA,
             )
-            if stream.writer is not None:
-                stream.writer.write_table(table)
+            writer = stream.writer
+            if writer is not None:
+                with stream.writer_lock:
+                    if stream.writer is writer:
+                        writer.write_table(table)
             idxs.clear()
             hdrs.clear()
             recvs.clear()
