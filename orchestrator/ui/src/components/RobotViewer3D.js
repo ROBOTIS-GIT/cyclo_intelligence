@@ -3,8 +3,10 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { MdCenterFocusStrong } from 'react-icons/md';
+import { useSelector } from 'react-redux';
 import useUrdfRobot from '../hooks/useUrdfRobot';
 import useJointStateSubscription from '../hooks/useJointStateSubscription';
+import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 const CAMERA_PRESETS = {
   perspective: { label: 'Perspective' },
@@ -323,7 +325,35 @@ export default function RobotViewer3D({
   showGrid = true,
   className = '',
 }) {
-  const { robot, loading, error, setJointValues, computeTrajectoryPaths, reload } = useUrdfRobot();
+  const robotType = useSelector((state) => state.tasks.robotType);
+  const { getRobotInfo } = useRosServiceCaller();
+  const [urdfPath, setUrdfPath] = useState(null);
+
+  useEffect(() => {
+    if (!robotType) {
+      setUrdfPath(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await getRobotInfo();
+        if (cancelled || !info?.success || !info.urdf_path) return;
+        // Orchestrator returns an absolute filesystem path under
+        // shared/robot_configs/urdf/. nginx serves the same directory at
+        // /urdf/urdf/ so map basename onto that prefix.
+        const basename = info.urdf_path.split('/').pop();
+        if (basename) setUrdfPath(`/urdf/urdf/${basename}`);
+      } catch (e) {
+        console.error('Failed to fetch robot info for URDF:', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [robotType, getRobotInfo]);
+
+  const { robot, loading, error, setJointValues, computeTrajectoryPaths, reload } = useUrdfRobot(urdfPath);
   const cameraRef = useRef();
   const [activePreset, setActivePreset] = useState('perspective');
   const [trajectoryPaths, setTrajectoryPaths] = useState(null);

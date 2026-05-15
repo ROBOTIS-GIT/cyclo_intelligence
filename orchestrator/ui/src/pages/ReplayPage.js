@@ -88,6 +88,11 @@ function ReplayPage({ isActive }) {
     // MCAP direct streaming
     hasRawImages,
     mcapFile,
+    // Recording format v2 transcode state — non-"done" means the
+    // source MP4 isn't ready (still MJPEG or missing) and Chromium
+    // can't decode it in <video>.
+    transcodingStatus,
+    transcodingCamerasFailed,
   } = useSelector((state) => state.replay);
 
   const rosHost = useSelector((state) => state.ros.rosHost);
@@ -265,12 +270,23 @@ function ReplayPage({ isActive }) {
     }
   }, [videoFiles, bagPath, getVideoUrl, dispatch]);
 
-  // Start downloading videos when replay data is loaded
+  // Start downloading videos when replay data is loaded.
+  // Skip if transcoding isn't done yet — those MP4 files would still be
+  // raw MJPEG and Chromium can't decode them. The overlay shown in the
+  // main content area covers the user-facing side.
+  const transcodingReady =
+    !transcodingStatus || transcodingStatus === 'done' || transcodingStatus === 'not_required';
   useEffect(() => {
-    if (isLoaded && videoFiles.length > 0 && videoBlobUrls.length === 0 && !isDownloading) {
+    if (
+      isLoaded
+      && videoFiles.length > 0
+      && videoBlobUrls.length === 0
+      && !isDownloading
+      && transcodingReady
+    ) {
       downloadVideos();
     }
-  }, [isLoaded, videoFiles.length, videoBlobUrls.length, isDownloading, downloadVideos]);
+  }, [isLoaded, videoFiles.length, videoBlobUrls.length, isDownloading, downloadVideos, transcodingReady]);
 
   // Cleanup all cached blob URLs on unmount only
   useEffect(() => {
@@ -1332,8 +1348,57 @@ function ReplayPage({ isActive }) {
         </div>
       </div>
 
-      {/* Main content — Grid Layout */}
-      {isLoaded && (videoFiles.length > 0 || isDirectMcapMode) ? (
+      {/* Recording-format-v2 transcode gate: refuse to play until the
+          background MJPEG → H.264 pass finishes. Without this guard the
+          <video> tag would receive raw MJPEG which Chromium can't
+          decode (black screen + no error). */}
+      {isLoaded && transcodingStatus && transcodingStatus !== 'done' && transcodingStatus !== 'not_required' ? (
+        <div className="flex-1 flex items-center justify-center px-4">
+          <div className="max-w-xl w-full bg-gray-900/90 border border-gray-700 rounded-lg p-6 text-center">
+            {transcodingStatus === 'pending' || transcodingStatus === 'running' ? (
+              <>
+                <div className="mx-auto mb-4 w-10 h-10 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                <h3 className="text-white text-lg font-medium mb-2">Transcoding videos…</h3>
+                <p className="text-gray-400 text-sm">
+                  This episode's camera files are still being re-encoded to H.264.
+                  Replay will become available once the background task finishes — usually
+                  within a minute per recorded minute on the Jetson. Re-open this bag in a
+                  bit, or pick another one in the meantime.
+                </p>
+              </>
+            ) : transcodingStatus === 'failed' ? (
+              <>
+                <h3 className="text-red-400 text-lg font-medium mb-2">Transcode failed</h3>
+                <p className="text-gray-400 text-sm mb-3">
+                  The background H.264 transcode didn't finish for this episode, so the
+                  source MP4s aren't browser-playable.
+                </p>
+                {transcodingCamerasFailed && Object.keys(transcodingCamerasFailed).length > 0 && (
+                  <ul className="text-left text-xs text-gray-300 bg-black/40 rounded p-2 mb-3">
+                    {Object.entries(transcodingCamerasFailed).map(([cam, err]) => (
+                      <li key={cam}><span className="text-red-300">{cam}:</span> {String(err).slice(0, 200)}</li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-gray-500 text-xs">
+                  Check the cyclo_data logs, fix the cause, and re-trigger the transcode
+                  (or delete the episode_info.json's transcoding_status to retry from raw).
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="text-yellow-400 text-lg font-medium mb-2">
+                  Unexpected transcode state: {transcodingStatus}
+                </h3>
+                <p className="text-gray-400 text-sm">
+                  This episode's transcoding_status is not a value we know how to handle.
+                  Inspect <code>episode_info.json</code> for details.
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      ) : isLoaded && (videoFiles.length > 0 || isDirectMcapMode) ? (
         <>
           <div className="flex-1 px-4 min-h-0 overflow-hidden">
             <ReplayLayoutContainer

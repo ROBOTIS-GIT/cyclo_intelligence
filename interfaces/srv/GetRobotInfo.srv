@@ -1,0 +1,6 @@
+---
+string robot_type
+string robot_name
+string urdf_path
+bool success
+string message

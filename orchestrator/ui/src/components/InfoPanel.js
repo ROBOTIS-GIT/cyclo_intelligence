@@ -17,9 +17,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
+import toast from 'react-hot-toast';
 import { MdInfoOutline } from 'react-icons/md';
 import { RecordPhase } from '../constants/taskPhases';
 import { setTaskInfo } from '../features/tasks/taskSlice';
+import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import Tooltip from './Tooltip';
 
 const InfoPanel = () => {
@@ -37,6 +39,14 @@ const InfoPanel = () => {
   const disabled = isTaskRunning;
   const [isEditable, setIsEditable] = useState(!disabled);
 
+  // Tracks whether prepare_session has succeeded for the current task
+  // identity. Reset whenever taskNum / taskName change so the button
+  // re-arms — user needs to confirm again after editing.
+  const [isPrepared, setIsPrepared] = useState(false);
+  const [isPreparing, setIsPreparing] = useState(false);
+
+  const { sendRecordCommand } = useRosServiceCaller();
+
   const handleChange = useCallback(
     (field, value) => {
       if (!isEditable) return; // Block changes when not editable
@@ -49,6 +59,46 @@ const InfoPanel = () => {
   useEffect(() => {
     setIsEditable(!disabled);
   }, [disabled]);
+
+  // Re-arm the prepare button whenever the task identity changes so the
+  // user has to re-confirm. Solo-recording flow relies on this — editing
+  // task_num/name mid-session should not silently keep an old prep.
+  useEffect(() => {
+    setIsPrepared(false);
+  }, [info.taskNum, info.taskName]);
+
+  const canPrepare =
+    !disabled &&
+    !isPreparing &&
+    Boolean(String(info.taskNum || '').trim()) &&
+    Boolean(String(info.taskName || '').trim());
+
+  const handlePrepareSession = useCallback(async () => {
+    if (!canPrepare) {
+      if (!String(info.taskNum || '').trim() || !String(info.taskName || '').trim()) {
+        toast.error('Fill in Task Num and Task Name first.');
+      }
+      return;
+    }
+    setIsPreparing(true);
+    try {
+      const result = await sendRecordCommand('prepare_session');
+      if (result && result.success) {
+        setIsPrepared(true);
+        toast.success(result.message || 'Session prepared — use the leader to start.');
+      } else {
+        setIsPrepared(false);
+        toast.error(
+          `Prepare failed: ${(result && result.message) || 'Unknown error'}`
+        );
+      }
+    } catch (error) {
+      setIsPrepared(false);
+      toast.error(`Prepare failed: ${error.message || error}`);
+    } finally {
+      setIsPreparing(false);
+    }
+  }, [canPrepare, info.taskNum, info.taskName, sendRecordCommand]);
 
   // track task status update
   useEffect(() => {
@@ -216,13 +266,61 @@ const InfoPanel = () => {
         />
       </div>
 
-      {/* Dataset save path indicator */}
-      <div className="flex flex-col items-center text-xs text-gray-500 mt-3 leading-relaxed bg-gray-100 p-2 rounded-md">
-        <div>Dataset will be saved as:</div>
-        <div className="text-blue-500 font-bold break-all">
+      {/* Prepare-session button. Doubles as the "saved as" indicator:
+          clicking arms the orchestrator with this task_info so the
+          leader joystick can drive episode 0 without anyone touching
+          the UI's RECORD button. Re-arms on task_num/name edit. */}
+      <button
+        type="button"
+        onClick={handlePrepareSession}
+        disabled={!canPrepare}
+        title={
+          !canPrepare && !isPreparing
+            ? 'Fill in Task Num and Task Name to enable.'
+            : isPrepared
+              ? 'Session prepared — use the leader joystick to start recording.'
+              : 'Click to arm this task on the orchestrator so the leader joystick can start episode 0.'
+        }
+        className={clsx(
+          'flex',
+          'flex-col',
+          'items-center',
+          'w-full',
+          'text-xs',
+          'mt-3',
+          'leading-relaxed',
+          'p-2',
+          'rounded-md',
+          'border',
+          'transition-colors',
+          'focus:outline-none',
+          'focus:ring-2',
+          'focus:ring-blue-400',
+          {
+            'bg-gray-100 border-gray-200 text-gray-500 hover:bg-blue-50 hover:border-blue-300 cursor-pointer':
+              canPrepare && !isPrepared,
+            'bg-green-50 border-green-300 text-green-700 hover:bg-green-100 cursor-pointer':
+              canPrepare && isPrepared,
+            'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed': !canPrepare,
+          }
+        )}
+      >
+        <div>
+          {isPreparing
+            ? 'Preparing…'
+            : isPrepared
+              ? 'Session ready — use leader to record'
+              : 'Click to prepare session as:'}
+        </div>
+        <div
+          className={clsx('font-bold', 'break-all', {
+            'text-blue-500': !isPrepared,
+            'text-green-700': isPrepared,
+          })}
+        >
           Task_{info.taskNum}_{info.taskName}_MCAP
         </div>
-      </div>
+      </button>
 
     </div>
   );

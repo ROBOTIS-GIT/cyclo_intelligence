@@ -296,6 +296,7 @@ Examples:
             output_dir=args.output,
             fps=args.fps,
             robot_type=args.robot_type,
+            robot_config_path=args.robot_config,
             chunks_size=args.chunks_size,
             apply_trim=not args.no_trim,
             apply_exclude_regions=not args.no_exclude,

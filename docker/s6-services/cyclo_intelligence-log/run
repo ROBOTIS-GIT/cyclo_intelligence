@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# cyclo_intelligence log consumer — wraps s6-log via logutil-service.
+
+exec logutil-service /var/log/cyclo_intelligence

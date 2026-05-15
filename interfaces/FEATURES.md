@@ -1,7 +1,7 @@
-# Physical AI Interfaces - FEATURES
+# Cyclo Intelligence Interfaces - FEATURES
 
 ## Overview
-ROS2 message and service definition package. Communication interface between physical_ai_server and UI.
+ROS2 message and service definition package. Communication interface between orchestrator and UI.
 
 ---
 
@@ -306,6 +306,6 @@ HuggingFace server control.
 ---
 
 ## Notes
-- All messages/services built from `physical_ai_interfaces` package
+- All messages/services built from `interfaces` package
 - Python: `from interfaces.msg import RecordingStatus, InferenceStatus`
-- C++: `#include "physical_ai_interfaces/msg/task_status.hpp"`
+- C++: `#include "interfaces/msg/task_status.hpp"`

@@ -16,7 +16,7 @@
 #
 # Author: Seongwoo Kim
 
-"""Physical AI Behavior Tree actions package."""
+"""Cyclo Intelligence Behavior Tree actions package."""
 
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.actions.inference_until_gripper import InferenceUntilGripperClose

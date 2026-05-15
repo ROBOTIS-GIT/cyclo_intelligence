@@ -72,6 +72,12 @@ class ConversionService:
         self._status_timer = None
         self._idle_count = 0
         self._last_status = None
+        # Protects the worker handle + idle bookkeeping + last-status
+        # snapshot. _start_callback / _status_callback / _status_timer_callback
+        # all run on io_callback_group (Reentrant) — without this lock the
+        # timer's idle-reap can null _worker between a check and a
+        # subsequent dereference inside _start_callback.
+        self._state_lock = threading.Lock()
 
         # Tracks the most recently accepted job so GetConversionStatus can
         # answer without trawling the worker history queue. Guarded by a
@@ -103,34 +109,46 @@ class ConversionService:
     # ------------------------------------------------------------------
 
     def _init_worker(self):
+        # Build outside the lock — Mp4ConversionWorker forks a child
+        # process which can take a few hundred ms.
         try:
-            self._worker = Mp4ConversionWorker()
-            if self._worker.start():
-                self._node.get_logger().info('MP4 Conversion Worker started')
-                self._idle_count = 0
-                self._status_timer = self._node.create_timer(
-                    self.STATUS_PERIOD_SEC,
-                    self._status_timer_callback,
-                    callback_group=self._node.io_callback_group,
-                )
-            else:
+            worker = Mp4ConversionWorker()
+            if not worker.start():
                 self._node.get_logger().error('Failed to start MP4 Conversion Worker')
+                return
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(
                 f'Error initializing MP4 Conversion Worker: {exc}')
+            return
+
+        timer = self._node.create_timer(
+            self.STATUS_PERIOD_SEC,
+            self._status_timer_callback,
+            callback_group=self._node.io_callback_group,
+        )
+        with self._state_lock:
+            self._worker = worker
+            self._status_timer = timer
+            self._idle_count = 0
+        self._node.get_logger().info('MP4 Conversion Worker started')
 
     def shutdown(self):
         """Explicit cleanup hook invoked by cyclo_data_node on shutdown."""
         self._cleanup_worker()
 
     def _cleanup_worker(self):
+        # Detach handles atomically so a concurrent _status_callback /
+        # timer callback doesn't race against worker.stop().
+        with self._state_lock:
+            timer = self._status_timer
+            worker = self._worker
+            self._status_timer = None
+            self._worker = None
         try:
-            if self._status_timer is not None:
-                self._status_timer.cancel()
-                self._status_timer = None
-            if self._worker is not None:
-                self._worker.stop()
-                self._worker = None
+            if timer is not None:
+                timer.cancel()
+            if worker is not None:
+                worker.stop()
             self._node.get_logger().info('MP4 Conversion Worker cleaned up successfully')
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(
@@ -147,16 +165,20 @@ class ConversionService:
             response.message = 'dataset_path is required.'
             return response
 
-        if self._worker is None or not self._worker.is_alive():
+        with self._state_lock:
+            worker = self._worker
+        if worker is None or not worker.is_alive():
             self._node.get_logger().info('MP4 Conversion Worker not running, restarting...')
             self._init_worker()
-        if self._worker is None:
+            with self._state_lock:
+                worker = self._worker
+        if worker is None:
             response.success = False
             response.job_id = ''
             response.message = 'MP4 Conversion Worker could not be started.'
             return response
 
-        if self._worker.is_busy():
+        if worker.is_busy():
             response.success = False
             response.job_id = ''
             response.message = 'MP4 conversion is already in progress'
@@ -230,7 +252,7 @@ class ConversionService:
             'selected_joints': list(getattr(request, 'selected_joints', []) or []),
         }
 
-        if not self._worker.send_request(request_data):
+        if not worker.send_request(request_data):
             response.success = False
             response.job_id = ''
             response.message = 'Failed to send request to MP4 Conversion Worker'
@@ -278,7 +300,9 @@ class ConversionService:
             )
             return response
 
-        if self._worker is None:
+        with self._state_lock:
+            worker = self._worker
+        if worker is None:
             response.success = True
             response.status = GetConversionStatus.Response.UNKNOWN
             response.progress_percentage = 0.0
@@ -288,7 +312,7 @@ class ConversionService:
             response.message = 'Worker has shut down (likely idle-reaped).'
             return response
 
-        worker_status = self._worker.check_task_status()
+        worker_status = worker.check_task_status()
         status_str = worker_status.get('status', 'Unknown')
         progress = worker_status.get('progress', {})
 
@@ -307,20 +331,32 @@ class ConversionService:
     # ------------------------------------------------------------------
 
     def _status_timer_callback(self):
-        if self._worker is None:
+        with self._state_lock:
+            worker = self._worker
+        if worker is None:
             return
         try:
-            status = self._worker.check_task_status()
+            status = worker.check_task_status()
             current = status.get('status', 'Unknown')
 
-            last = (
-                self._last_status.get('status', 'Unknown')
-                if self._last_status else 'Unknown'
-            )
-            if self._last_status is not None and last != current:
+            with self._state_lock:
+                last_status = self._last_status
+                last = (
+                    last_status.get('status', 'Unknown')
+                    if last_status else 'Unknown'
+                )
+                changed = last_status is not None and last != current
+                self._last_status = status
+                if current == 'Idle':
+                    self._idle_count += 1
+                    idle_count = self._idle_count
+                else:
+                    self._idle_count = 0
+                    idle_count = 0
+
+            if changed:
                 self._node.get_logger().info(
                     f'MP4 Conversion Status changed: {last} -> {current}')
-            self._last_status = status
 
             progress = status.get('progress', {})
             percentage = float(progress.get('percentage', 0.0))
@@ -353,15 +389,11 @@ class ConversionService:
                     message=status.get('message', ''),
                 )
 
-            if current == 'Idle':
-                self._idle_count += 1
-                if self._idle_count >= self.IDLE_TICKS_BEFORE_SHUTDOWN:
-                    self._node.get_logger().info(
-                        f'MP4 Conversion Worker idle for {self.IDLE_TICKS_BEFORE_SHUTDOWN} '
-                        'cycles, shutting down worker and timer.')
-                    self._cleanup_worker()
-            else:
-                self._idle_count = 0
+            if current == 'Idle' and idle_count >= self.IDLE_TICKS_BEFORE_SHUTDOWN:
+                self._node.get_logger().info(
+                    f'MP4 Conversion Worker idle for {self.IDLE_TICKS_BEFORE_SHUTDOWN} '
+                    'cycles, shutting down worker and timer.')
+                self._cleanup_worker()
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(
                 f'Error in MP4 status timer callback: {exc}')

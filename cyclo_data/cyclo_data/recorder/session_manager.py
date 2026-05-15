@@ -24,6 +24,7 @@ import shutil
 import socket
 import threading
 import time
+from typing import Optional
 
 from huggingface_hub import HfApi
 from interfaces.msg import RecordingStatus
@@ -39,6 +40,27 @@ from cyclo_data.hub.progress_tracker import (
 from orchestrator.internal.device_manager.cpu_checker import CPUChecker
 from orchestrator.internal.device_manager.ram_checker import RAMChecker
 from orchestrator.internal.device_manager.storage_checker import StorageChecker
+
+
+def _atomic_write_text(path, content: str, encoding: str = 'utf-8') -> None:
+    """Write ``content`` to ``path`` atomically (temp file + os.replace).
+
+    Prevents partial/truncated writes from being observed by concurrent
+    readers (e.g. the converter reading episode_info.json while recorder
+    saves it, or an HF upload streaming README.md while a checkbox toggle
+    rewrites it). A crash between the temp write and the rename leaves
+    the original file unchanged.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(content, encoding=encoding)
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(path, obj, indent: int = 2) -> None:
+    """JSON-serialize and write atomically. See ``_atomic_write_text``."""
+    _atomic_write_text(path, json.dumps(obj, indent=indent))
 
 
 # README building helpers — shared between recording (DataManager._ensure_task_readme),
@@ -177,6 +199,18 @@ class DataManager:
         self.current_instruction = ''
         self._init_task_limits()
         self._current_scenario_number = 0
+        # Last README content written for this task. Cached so the
+        # per-episode save path doesn't re-read README.md from disk
+        # on every save_robotis_metadata() call.
+        self._cached_readme_content: Optional[str] = None
+        # Protects the recording-state group (_status, _record_episode_count,
+        # _start_time_s, _proceed_time, _current_scenario_number).
+        # orchestrator runs under MultiThreadedExecutor so the timer
+        # callback that publishes RecordingStatus and the service
+        # callbacks that mutate state (START_RECORD / STOP_RECORD etc.)
+        # can fire concurrently; the lock guarantees the snapshot read
+        # in ``get_current_record_status`` is consistent.
+        self._state_lock = threading.Lock()
 
     def _find_next_episode_number(self) -> int:
         """
@@ -215,7 +249,8 @@ class DataManager:
         return next_episode
 
     def get_status(self):
-        return self._status
+        with self._state_lock:
+            return self._status
 
     # ========== Simplified Recording Methods (rosbag2-only mode) ==========
 
@@ -225,11 +260,13 @@ class DataManager:
 
         Changes status to 'recording' for rosbag to begin writing.
         """
-        self._status = 'recording'
-        self._start_time_s = time.perf_counter()
+        with self._state_lock:
+            self._status = 'recording'
+            self._start_time_s = time.perf_counter()
+            episode = self._record_episode_count
         self.current_instruction = self._task_info.task_instruction[0] \
             if self._task_info.task_instruction else ''
-        print(f'[DataManager] Recording started - Episode {self._record_episode_count}')
+        print(f'[DataManager] Recording started - Episode {episode}')
 
     def stop_recording(self):
         """
@@ -237,15 +274,34 @@ class DataManager:
 
         Changes status to 'idle' and increments episode count.
         """
-        self._status = 'idle'
-        self._record_episode_count += 1
-        self._start_time_s = 0
+        with self._state_lock:
+            self._status = 'idle'
+            self._record_episode_count += 1
+            self._start_time_s = 0
+            total = self._record_episode_count
         print(f'[DataManager] Recording stopped - Episode saved. '
-              f'Total episodes: {self._record_episode_count}')
+              f'Total episodes: {total}')
+
+    def discard_recording(self):
+        """
+        Stop without saving — flip to idle but leave the episode counter
+        untouched so the discarded slot is reused by the next START.
+
+        Caller is responsible for removing the episode directory on disk
+        (rosbag's stop_and_delete + a defensive rmtree in
+        RecordingService._do_discard).
+        """
+        with self._state_lock:
+            self._status = 'idle'
+            self._start_time_s = 0
+            unchanged = self._record_episode_count
+        print(f'[DataManager] Recording discarded - episode count unchanged '
+              f'({unchanged})')
 
     def is_recording(self):
         """Check if currently recording."""
-        return self._status == 'recording'
+        with self._state_lock:
+            return self._status == 'recording'
 
     # ========== End Simplified Recording Methods ==========
 
@@ -253,11 +309,14 @@ class DataManager:
         """Get rosbag save path for current episode."""
         # For simplified mode, return path when recording.
         # `allow_idle` is used during START pre-check before status flips to recording.
-        if self._status == 'idle' and not allow_idle:
+        with self._state_lock:
+            status = self._status
+            episode = self._record_episode_count
+        if status == 'idle' and not allow_idle:
             return None  # Not recording
-        if self._status == 'warmup':
+        if status == 'warmup':
             return None  # Legacy: Not ready yet
-        return self._save_rosbag_path + f'/{self._record_episode_count}'
+        return self._save_rosbag_path + f'/{episode}'
 
     def update_task_info(self, task_info):
         """Refresh per-session config from a new task_info.
@@ -302,22 +361,31 @@ class DataManager:
             name=self._save_repo_name,
             include_license=self._include_robotis_license,
         )
+        if self._cached_readme_content == desired and readme_path.exists():
+            return
         if readme_path.exists():
             try:
                 if readme_path.read_text(encoding='utf-8') == desired:
+                    self._cached_readme_content = desired
                     return
             except Exception:
                 pass  # fall through and rewrite
 
         try:
-            task_dir.mkdir(parents=True, exist_ok=True)
-            readme_path.write_text(desired, encoding='utf-8')
+            _atomic_write_text(readme_path, desired)
+            self._cached_readme_content = desired
             variant = 'with ROBOTIS license' if self._include_robotis_license else 'minimal'
             print(f'[ROBOTIS] README.md written at: {readme_path} ({variant})')
         except Exception as e:
             print(f'[ROBOTIS] Failed to write README.md at {task_dir}: {e}')
 
-    def save_robotis_metadata(self, urdf_path: str = None, needs_review: bool = False):
+    def save_robotis_metadata(
+        self,
+        urdf_path: str = None,
+        video_stats: dict | None = None,
+        camera_info_files: dict | None = None,
+        camera_rotations: dict | None = None,
+    ):
         """
         Save URDF and metadata for ROBOTIS format.
 
@@ -326,7 +394,8 @@ class DataManager:
 
         Args:
             urdf_path: Path to URDF file to copy.
-            needs_review: If True, marks episode as needing review (e.g., cancelled recording).
+            video_stats: ``{cam_name: {frames_received, frames_written, ...}}`` from VideoRecorder.
+            camera_info_files: ``{cam_name: yaml_path}`` from CameraInfoSnapshot.
         """
         rosbag_path = self.get_save_rosbag_path()
         if rosbag_path is None:
@@ -364,66 +433,59 @@ class DataManager:
         # rate for MP4 encoding + LeRobot info.json. That value rides
         # on the StartConversion srv (request.fps), so it doesn't
         # belong in the per-episode recording metadata.
+        # Recording format v2 (images-as-MP4 + camera_info-as-yaml + MCAP
+        # without images). format_version: 'robotis_v2'. Older recordings
+        # used 'robotis_v1' (images embedded in MCAP) — the converter
+        # branches on this field. video_files / camera_info_files are
+        # paths relative to the episode dir so the manifest survives a
+        # move of the parent workspace tree.
+        videos_dir = os.path.join(rosbag_path, 'videos')
+        video_files = {}
+        if os.path.isdir(videos_dir):
+            for entry in sorted(os.listdir(videos_dir)):
+                full = os.path.join(videos_dir, entry)
+                if entry.endswith('.mp4') and os.path.isfile(full):
+                    cam = entry[:-4]
+                    video_files[cam] = os.path.relpath(full, rosbag_path)
+        camera_info_rel = {}
+        if camera_info_files:
+            for cam, path in camera_info_files.items():
+                try:
+                    camera_info_rel[cam] = os.path.relpath(path, rosbag_path)
+                except ValueError:
+                    camera_info_rel[cam] = path
+
+        # ``transcoding_status`` default depends on whether this episode
+        # actually has any cameras to transcode. The TranscodeWorker
+        # patches this field again once it runs.
+        initial_status = 'pending' if video_files else 'not_required'
+
         meta_data = {
             'task_instruction': self.current_instruction,
             'robot_type': self._robot_type,
             'episode_index': self._record_episode_count,
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-            'format_version': 'robotis_v1',
+            'format_version': 'robotis_v2',
+            'recorder_format_version': 2,
             'device_serial': socket.gethostname(),
-            'needs_review': needs_review,
+            'video_files': video_files,
+            'camera_info_files': camera_info_rel,
+            'video_stats': video_stats or {},
+            # ``camera_rotations`` is ``{cam_name: degrees}`` (0/90/180/270)
+            # straight from the robot config yaml. The background
+            # transcoder reads this when re-encoding to H.264 and applies
+            # ``-vf transpose=N`` so the stored MP4 has the correct
+            # orientation (e.g. wrist cameras mounted upside down at 270°).
+            'camera_rotations': dict(camera_rotations or {}),
+            'transcoding_status': initial_status,
         }
 
         meta_data_path = os.path.join(rosbag_path, 'episode_info.json')
         try:
-            with open(meta_data_path, 'w') as f:
-                json.dump(meta_data, f, indent=2)
+            _atomic_write_json(meta_data_path, meta_data)
             print(f'[ROBOTIS] Metadata saved to: {meta_data_path}')
         except Exception as e:
             print(f'[ROBOTIS] Failed to save metadata: {e}')
-
-    def toggle_previous_episode_needs_review(self):
-        """Toggle the previous episode's needs_review flag.
-
-        Reads the current needs_review state and flips it.
-        Used when user presses cancel in idle state.
-
-        Returns:
-            Optional[bool]: The new needs_review value, or None if failed.
-        """
-        prev_episode = self._record_episode_count - 1
-        if prev_episode < 0:
-            print('[DataManager] No previous episode to toggle')
-            return None
-
-        episode_path = self._save_rosbag_path + f'/{prev_episode}'
-        meta_data_path = os.path.join(episode_path, 'episode_info.json')
-
-        if not os.path.exists(meta_data_path):
-            # Backward compatibility: check old name
-            legacy_path = os.path.join(episode_path, 'meta_data.json')
-            if os.path.exists(legacy_path):
-                meta_data_path = legacy_path
-            else:
-                print(f'[DataManager] No episode_info.json at: {meta_data_path}')
-                return None
-
-        try:
-            with open(meta_data_path, 'r') as f:
-                meta_data = json.load(f)
-
-            current = meta_data.get('needs_review', False)
-            meta_data['needs_review'] = not current
-
-            with open(meta_data_path, 'w') as f:
-                json.dump(meta_data, f, indent=2)
-
-            print(f'[DataManager] Episode {prev_episode} '
-                  f'needs_review: {current} -> {not current}')
-            return not current
-        except Exception as e:
-            print(f'[DataManager] Failed to toggle episode {prev_episode}: {e}')
-            return None
 
     def should_record_rosbag2(self):
         """In simplified mode, always record rosbag2."""
@@ -436,25 +498,35 @@ class DataManager:
         current_status.robot_type = self._robot_type
         current_status.task_info = self._task_info
 
-        if self._status == 'idle':
+        with self._state_lock:
+            status = self._status
+            start_time_s = self._start_time_s
+
+        if status == 'idle':
             current_status.record_phase = RecordingStatus.READY
-        elif self._status == 'recording':
+        elif status == 'recording':
             current_status.record_phase = RecordingStatus.RECORDING
-            if self._start_time_s > 0:
-                elapsed = time.perf_counter() - self._start_time_s
-                self._proceed_time = int(elapsed)
-        elif self._status == 'save' or self._status == 'finish':
+            if start_time_s > 0:
+                elapsed = time.perf_counter() - start_time_s
+                with self._state_lock:
+                    self._proceed_time = int(elapsed)
+        elif status == 'save' or status == 'finish':
             is_saving, encoding_progress = self._get_encoding_progress()
             current_status.record_phase = RecordingStatus.SAVING
-            self._proceed_time = int(0)
+            with self._state_lock:
+                self._proceed_time = int(0)
             if is_saving:
                 current_status.encoding_progress = encoding_progress
             else:
                 current_status.encoding_progress = 0.0
 
+        with self._state_lock:
+            proceed_time = int(getattr(self, '_proceed_time', 0))
+            episode_count = int(self._record_episode_count)
+            scenario_number = self._current_scenario_number
         current_status.current_task_instruction = self.current_instruction
-        current_status.proceed_time = int(getattr(self, '_proceed_time', 0))
-        current_status.current_episode_number = int(self._record_episode_count)
+        current_status.proceed_time = proceed_time
+        current_status.current_episode_number = episode_count
 
         total_storage, used_storage = StorageChecker.get_storage_gb('/')
         current_status.used_storage_size = float(used_storage)
@@ -466,7 +538,7 @@ class DataManager:
         current_status.used_ram_size = float(ram_used)
         current_status.total_ram_size = float(ram_total)
         if not self._single_task:
-            current_status.current_scenario_number = self._current_scenario_number
+            current_status.current_scenario_number = scenario_number
 
         return current_status
 
@@ -592,9 +664,18 @@ class DataManager:
         )
 
         # Child becomes a process-group leader + dies if our worker dies.
+        # If libc cannot be loaded (musl, stripped image), surface a
+        # warning so an operator can see why the child outlives its
+        # parent on crash — silent failure here previously left orphan
+        # hf download processes running after the worker died.
         try:
             _libc = ctypes.CDLL('libc.so.6', use_errno=True)
-        except OSError:
+        except OSError as exc:
+            print(
+                f'[DataManager] WARNING: failed to load libc for '
+                f'PR_SET_PDEATHSIG ({exc}); hf download child may '
+                f'outlive this worker on crash.'
+            )
             _libc = None
 
         def _preexec():
@@ -634,7 +715,12 @@ class DataManager:
                         break
 
                 try:
-                    r, _, _ = select.select([master_fd], [], [], 0.5)
+                    # 1s blocks the loop just long enough that an idle
+                    # multi-minute download polls proc.poll() ~ once per
+                    # second instead of twice. tqdm-style progress lines
+                    # arrive far more frequently than that anyway, so
+                    # latency-to-log doesn't change in practice.
+                    r, _, _ = select.select([master_fd], [], [], 1.0)
                 except (OSError, ValueError):
                     break
                 if r:
@@ -733,7 +819,7 @@ class DataManager:
 
         Just task instructions + provenance (created via cyclo_intelligence
         by ROBOTIS). No HF DatasetCard template, no embedded info.json
-        block — those were inherited from physical_ai_tools and added
+        block — those were inherited from cyclo_intelligence and added
         clutter without giving HF Hub anything it needs beyond the
         license / tags frontmatter.
         """

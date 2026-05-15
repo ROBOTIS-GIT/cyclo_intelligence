@@ -1,30 +1,55 @@
 orchestrator:
   ros__parameters:
     omx_f:
-      observation_list:
-        - camera1
-        # - camera2 #check your camera topic from 'ros2 topic list' command
-        - state
+      robot_name: "OMX F"
 
-      camera_topic_list:
-        - camera1:/camera1/image_raw/compressed
-        # - camera2:/camera2/image_raw/compressed #check your camera topic from 'ros2 topic list' command
+      # ────────────────────────────────────────────────────────────────
+      # Observation — every signal the policy reads from the robot.
+      # Recording subscribes to all topics referenced here. Inference
+      # Process A subscribes to these same topics for live obs.
+      # ────────────────────────────────────────────────────────────────
+      observation:
+        images:
+          camera1:
+            topic: /camera1/image_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          # camera2:
+          #   topic: /camera2/image_raw/compressed
+          #   msg_type: sensor_msgs/msg/CompressedImage
 
-      joint_topic_list:
-        - follower:/joint_states
-        - leader:/leader/joint_trajectory
+        state:
+          arm:
+            topic: /joint_states
+            msg_type: sensor_msgs/msg/JointState
+            joint_names:
+              - joint1
+              - joint2
+              - joint3
+              - joint4
+              - joint5
+              - gripper_joint_1
 
-      joint_list:
-        - leader
+      # ────────────────────────────────────────────────────────────────
+      # Action — every modality the policy commands. Each entry's topic
+      # is BOTH the inference command target (Process B publishes here)
+      # AND the rosbag record target.
+      # ────────────────────────────────────────────────────────────────
+      action:
+        arm:
+          topic: /leader/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - joint1
+            - joint2
+            - joint3
+            - joint4
+            - joint5
+            - gripper_joint_1
 
-      rosbag_extra_topic_list:
-        - /tf
-
-      joint_order:
-        leader:
-          - joint1
-          - joint2
-          - joint3
-          - joint4
-          - joint5
-          - gripper_joint_1
+      # ────────────────────────────────────────────────────────────────
+      # Recording — auxiliary topics that need to be in the bag but are
+      # NOT VLA training data.
+      # ────────────────────────────────────────────────────────────────
+      recording:
+        extra_topics:
+          - /tf

@@ -2,7 +2,7 @@
 
 ## Overview
 
-LeRobot has been integrated into Physical AI Tools following the opensource_integration_workflow.
+LeRobot has been integrated into Cyclo Intelligence following the opensource_integration_workflow.
 
 ## Integration Details
 
@@ -36,10 +36,10 @@ The `executor.py` provides the following capabilities:
 ### Architecture
 
 ```
-Physical AI Manager (React UI)
+Cyclo Intelligence Web UI (React UI)
         |
         v (WebSocket 9090)
-Physical AI Server (ROS2 + rmw_zenoh_cpp)
+Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
         |
         v (Zenoh Protocol 7447)
 LeRobot Executor (Docker Container)
@@ -70,7 +70,7 @@ LeRobot Training/Inference APIs
 ## File Structure
 
 ```
-physical_ai_tools/
+cyclo_intelligence/
 ├── cyclo_brain/policy/
 │   ├── lerobot/                     # LeRobot integration folder
 │   │   ├── lerobot/                 # LeRobot repository (git submodule)
@@ -91,7 +91,7 @@ physical_ai_tools/
 ### Build
 
 ```bash
-cd physical_ai_tools
+cd cyclo_intelligence
 docker compose -f docker/docker-compose.yml build lerobot
 ```
 
@@ -148,7 +148,7 @@ future = client.call_async(request)
 ### Unit Tests
 
 ```bash
-cd physical_ai_tools/cyclo_brain/policy/lerobot
+cd cyclo_intelligence/cyclo_brain/policy/lerobot
 python -m pytest tests/test_executor.py -v
 ```
 

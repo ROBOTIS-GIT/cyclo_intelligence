@@ -413,7 +413,7 @@ class InferenceServer:
         # joint_groups). Tack 'mobile' onto the modality list so
         # _run_inference splices its [linear_x, linear_y, angular_z] into
         # observation.state — matches the layout used during training in
-        # the legacy physical_ai_server pipeline.
+        # the legacy orchestrator pipeline.
         if "odom" in robot_config.get("sensors", {}):
             modalities = sorted(set(modalities) | {"mobile"})
         if not modalities:
@@ -631,7 +631,7 @@ class InferenceServer:
         """nav_msgs/Odometry → mobile state slot.
 
         ACT (and other LeRobot policies) trained on the legacy
-        physical_ai_server pipeline expect the 3-vector
+        orchestrator pipeline expect the 3-vector
         [linear_x, linear_y, angular_z] to participate in observation.state
         alongside the joint-state modalities. Read it off the standard
         Odometry fields and write it into the same _latest_obs structure

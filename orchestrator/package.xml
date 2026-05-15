@@ -2,9 +2,9 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>orchestrator</name>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
   <description>
-    ROS 2 package for Open Platform AI Kit integration
+    ROS 2 package for Cyclo Intelligence integration
   </description>
   <maintainer email="pyo@robotis.com">Pyo</maintainer>
   <license>Apache 2.0</license>
@@ -21,7 +21,7 @@
   <depend>rosbag2_py</depend>
   <depend>rosbag_recorder</depend>
   <depend>shared</depend>
-  <!-- bt/ subtree (absorbed from physical_ai_bt in Step 5-A) needs
+  <!-- bt/ subtree (absorbed from orchestrator/bt in Step 5-A) needs
        numpy (math) and lxml (tree XML parsing) at runtime. -->
   <exec_depend>python3-lxml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

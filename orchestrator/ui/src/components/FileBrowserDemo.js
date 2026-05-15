@@ -19,6 +19,9 @@ import { MdFolderOpen, MdInsertDriveFile } from 'react-icons/md';
 import FileBrowser from './FileBrowser';
 import FileBrowserModal from './FileBrowserModal';
 
+const DEMO_WORKSPACE_PATH = '/workspace';
+const DEMO_DATASET_PATH = '/workspace/rosbag2';
+
 export default function FileBrowserDemo() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [currentPath, setCurrentPath] = useState('');
@@ -261,12 +264,20 @@ export default function FileBrowserDemo() {
             <div>
               <h3 className="text-md font-medium text-gray-900 mb-2">Workspace Root</h3>
               <p className="text-sm text-gray-600 mb-3">Set to workspace root directory</p>
-              <FileBrowser homePath="/home/ola/ai_ws" className="h-64" title="Workspace Browser" />
+              <FileBrowser
+                homePath={DEMO_WORKSPACE_PATH}
+                className="h-64"
+                title="Workspace Browser"
+              />
             </div>
             <div>
-              <h3 className="text-md font-medium text-gray-900 mb-2">Project Source</h3>
-              <p className="text-sm text-gray-600 mb-3">Set to specific project source directory</p>
-              <FileBrowser homePath="/home/ola/ai_ws/src" className="h-64" title="Source Browser" />
+              <h3 className="text-md font-medium text-gray-900 mb-2">Dataset Storage</h3>
+              <p className="text-sm text-gray-600 mb-3">Set to the default dataset directory</p>
+              <FileBrowser
+                homePath={DEMO_DATASET_PATH}
+                className="h-64"
+                title="Dataset Browser"
+              />
             </div>
           </div>
         </div>
@@ -374,7 +385,7 @@ export default function FileBrowserDemo() {
         isOpen={showModal === 'workspace_home'}
         onClose={() => setShowModal(false)}
         onFileSelect={handleModalFileSelect}
-        homePath="/home/ola/ai_ws"
+        homePath={DEMO_WORKSPACE_PATH}
         title="Browse with Workspace as Home"
         selectButtonText="Select"
         allowDirectorySelect={true}
@@ -384,8 +395,8 @@ export default function FileBrowserDemo() {
         isOpen={showModal === 'project_home'}
         onClose={() => setShowModal(false)}
         onFileSelect={handleModalFileSelect}
-        homePath="/home/ola/ai_ws/src/physical_ai_tools"
-        title="Browse with Project as Home"
+        homePath={DEMO_DATASET_PATH}
+        title="Browse with Dataset Storage as Home"
         selectButtonText="Select"
         allowDirectorySelect={true}
       />

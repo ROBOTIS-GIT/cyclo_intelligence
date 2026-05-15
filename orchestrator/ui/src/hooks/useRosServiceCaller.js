@@ -163,6 +163,9 @@ export function useRosServiceCaller() {
           case 'update_instruction':
             command_enum = TaskCommand.UPDATE_INSTRUCTION;
             break;
+          case 'prepare_session':
+            command_enum = TaskCommand.PREPARE_SESSION;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }
@@ -271,6 +274,20 @@ export function useRosServiceCaller() {
       return result;
     } catch (error) {
       console.error('Failed to get image topic list:', error);
+      throw new Error(`${error.message || error}`);
+    }
+  }, [callService]);
+
+  const getRobotInfo = useCallback(async () => {
+    try {
+      const result = await callService(
+        '/get_robot_info',
+        'interfaces/srv/GetRobotInfo',
+        {}
+      );
+      return result;
+    } catch (error) {
+      console.error('Failed to get robot info:', error);
       throw new Error(`${error.message || error}`);
     }
   }, [callService]);
@@ -782,7 +799,17 @@ export function useRosServiceCaller() {
           trim_points: result.trim_points || null,
           exclude_regions: result.exclude_regions || [],
           frame_counts: result.frame_counts || {},
-          // MCAP direct streaming
+          // Recording format v2 transcode state: the ReplayPage gates
+          // playback on this — pending/running/failed means the MP4
+          // files are still raw MJPEG (or missing) which Chromium can't
+          // decode in <video>. ``done`` (or missing → defaults to done
+          // on legacy episodes) means it's safe to play.
+          transcoding_status: result.transcoding_status || 'done',
+          transcoding_cameras_failed: result.transcoding_cameras_failed || {},
+          // MCAP-direct-streaming (v1 legacy) — backend no longer ships
+          // these fields, so they default to false/empty. The UI keeps
+          // its dead-code branch readers around for binary compatibility
+          // with old episode dumps but they'll never be true in v2.
           has_raw_images: result.has_raw_images || false,
           raw_image_topics: result.raw_image_topics || [],
           mcap_file: result.mcap_file || '',
@@ -823,6 +850,7 @@ export function useRosServiceCaller() {
     callService,
     sendRecordCommand,
     getImageTopicList,
+    getRobotInfo,
     getRobotTypeList,
     setRobotType,
     registerHFUser,
