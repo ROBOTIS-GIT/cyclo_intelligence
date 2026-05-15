@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pyarrow.parquet as pq
 
 # Mock ROS2 modules that are not available outside Docker
 for mod_name in [
@@ -36,6 +37,8 @@ for mod_name in [
     "nav_msgs", "nav_msgs.msg",
     "geometry_msgs", "geometry_msgs.msg",
     "rosbag_recorder", "rosbag_recorder.msg",
+    "mcap", "mcap.reader",
+    "mcap_ros2", "mcap_ros2.decoder",
 ]:
     if mod_name not in sys.modules:
         sys.modules[mod_name] = types.ModuleType(mod_name)
@@ -49,11 +52,17 @@ sys.modules["rosbag2_py"].SequentialReader = MagicMock
 sys.modules["rosbag2_py"].StorageOptions = MagicMock
 sys.modules["rosbag2_py"].ConverterOptions = MagicMock
 sys.modules["rclpy.serialization"].deserialize_message = MagicMock
+sys.modules["mcap.reader"].make_reader = MagicMock
+sys.modules["mcap_ros2.decoder"].DecoderFactory = MagicMock
 
 from cyclo_data.converter.to_lerobot_v21 import (
     ConversionConfig,
     EpisodeData,
     RosbagToLerobotConverter,
+)
+from cyclo_data.converter.to_lerobot_v30 import (
+    RosbagToLerobotV30Converter,
+    V30ConversionConfig,
 )
 
 
@@ -344,6 +353,64 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
             merged[0][1], [1.0, 2.0, 3.0, 4.0]
         )
 
+    def test_merge_action_messages_with_joint_order(self):
+        self.converter._joint_order_by_group = {
+            "leader_arm_left": ["j2", "j1"],
+            "leader_arm_right": ["j4", "j3"],
+        }
+        self.converter._action_topic_key_map = {
+            "/robot/arm_left_leader/joint_states": "leader_arm_left",
+            "/robot/arm_right_leader/joint_states": "leader_arm_right",
+        }
+
+        action_msgs = {
+            "/robot/arm_left_leader/joint_states": [
+                (0.0, np.array([1.0, 2.0], dtype=np.float32)),
+                (0.01, np.array([1.1, 2.1], dtype=np.float32)),
+            ],
+            "/robot/arm_right_leader/joint_states": [
+                (0.0, np.array([3.0, 4.0], dtype=np.float32)),
+                (0.01, np.array([3.1, 4.1], dtype=np.float32)),
+            ],
+        }
+        action_names = {
+            "/robot/arm_left_leader/joint_states": ["j1", "j2"],
+            "/robot/arm_right_leader/joint_states": ["j3", "j4"],
+        }
+
+        merged = self.converter._merge_action_messages(action_msgs, action_names)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(self.converter._action_joint_names, ["j2", "j1", "j4", "j3"])
+        np.testing.assert_array_almost_equal(
+            merged[0][1], [2.0, 1.0, 4.0, 3.0]
+        )
+
+    def test_merge_state_missing_joint_skips_samples_with_single_warning(self):
+        self.converter._joint_order_by_group = {
+            "follower_arm_left": ["j1", "missing_joint"],
+        }
+        self.converter._state_topic_key_map = {
+            "/robot/arm_left_follower/joint_states": "follower_arm_left",
+        }
+
+        state_msgs = {
+            "/robot/arm_left_follower/joint_states": [
+                (0.0, np.array([1.0, 2.0], dtype=np.float32)),
+                (0.01, np.array([1.1, 2.1], dtype=np.float32)),
+            ],
+        }
+        state_names = {
+            "/robot/arm_left_follower/joint_states": ["j1", "j2"],
+        }
+
+        with patch.object(self.converter, "_log_warning") as warn:
+            merged = self.converter._merge_state_messages(state_msgs, state_names)
+
+        self.assertEqual(merged, [])
+        warn.assert_called_once()
+        self.assertIn("missing_joint", warn.call_args[0][0])
+
     def test_get_topic_group_key(self):
         self.assertEqual(
             self.converter._get_topic_group_key(
@@ -435,6 +502,92 @@ class TestInfoJsonGeneration(unittest.TestCase):
         self.assertEqual(info["total_episodes"], 5)
         self.assertEqual(info["total_frames"], 500)
         self.assertIn("features", info)
+
+
+class TestRosbagToLerobotV30Converter(unittest.TestCase):
+    """Tests for v3.0 conversion writer helpers."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config = V30ConversionConfig(
+            repo_id="test/dataset_v30",
+            output_dir=Path(self.temp_dir),
+            fps=10,
+        )
+        self.converter = RosbagToLerobotV30Converter(self.config)
+
+    def test_write_aggregated_data_uses_equivalent_columns_and_metadata(self):
+        self.converter._task_to_index = {"task_a": 4, "task_b": 7}
+
+        episodes = [
+            EpisodeData(
+                episode_index=0,
+                timestamps=[0.0, 0.1],
+                observation_state=[
+                    np.array([1.0, 2.0], dtype=np.float32),
+                    np.array([1.1, 2.1], dtype=np.float32),
+                ],
+                action=[
+                    np.array([0.1, 0.2], dtype=np.float32),
+                    np.array([0.11, 0.21], dtype=np.float32),
+                ],
+                tasks=["task_a"],
+                length=2,
+            ),
+            EpisodeData(
+                episode_index=1,
+                timestamps=[0.0, 0.1, 0.2],
+                observation_state=[
+                    np.array([3.0, 4.0], dtype=np.float32),
+                    np.array([3.1, 4.1], dtype=np.float32),
+                    np.array([3.2, 4.2], dtype=np.float32),
+                ],
+                action=[
+                    np.array([0.3, 0.4], dtype=np.float32),
+                    np.array([0.31, 0.41], dtype=np.float32),
+                    np.array([0.32, 0.42], dtype=np.float32),
+                ],
+                tasks=["task_b"],
+                length=3,
+            ),
+        ]
+
+        self.converter._write_aggregated_data(episodes)
+
+        parquet_path = (
+            Path(self.temp_dir) / "data" / "chunk-000" / "file-000.parquet"
+        )
+        self.assertTrue(parquet_path.exists())
+
+        table = pq.read_table(parquet_path)
+        self.assertEqual(table.num_rows, 5)
+        self.assertEqual(
+            table.column_names,
+            [
+                "timestamp",
+                "frame_index",
+                "episode_index",
+                "index",
+                "task_index",
+                "observation.state",
+                "action",
+            ],
+        )
+        self.assertEqual(table["frame_index"].to_pylist(), [0, 1, 0, 1, 2])
+        self.assertEqual(table["episode_index"].to_pylist(), [0, 0, 1, 1, 1])
+        self.assertEqual(table["index"].to_pylist(), [0, 1, 2, 3, 4])
+        self.assertEqual(table["task_index"].to_pylist(), [4, 4, 7, 7, 7])
+        self.assertEqual(table["observation.state"].to_pylist()[0], [1.0, 2.0])
+        np.testing.assert_allclose(table["action"].to_pylist()[4], [0.32, 0.42])
+
+        self.assertEqual(len(self.converter._episode_metadata_list), 2)
+        first, second = self.converter._episode_metadata_list
+        self.assertEqual(first.dataset_from_index, 0)
+        self.assertEqual(first.dataset_to_index, 2)
+        self.assertEqual(second.dataset_from_index, 2)
+        self.assertEqual(second.dataset_to_index, 5)
+        self.assertEqual(self.converter._total_frames, 5)
+        self.assertEqual(self.converter._total_episodes, 2)
 
 
 if __name__ == "__main__":

@@ -223,6 +223,20 @@ class EpisodeData:
     grid_log_times_sec: List[float] = field(default_factory=list)
 
 
+@dataclass
+class _MergeTopicSpec:
+    """Precomputed per-topic metadata for state/action causal merge."""
+
+    topic: str
+    group_key: str
+    messages: List[Tuple[float, np.ndarray]]
+    message_joint_names: List[str]
+    output_joint_names: List[str]
+    index_array: Optional[np.ndarray] = None
+    valid: bool = True
+    length_warning_logged: bool = False
+
+
 class RosbagToLerobotConverterBase:
     """
     Base class for ROSbag-to-LeRobot conversion.
@@ -998,6 +1012,75 @@ class RosbagToLerobotConverterBase:
                 return True
         return False
 
+    def _build_merge_topic_specs(
+        self,
+        sorted_topics: List[str],
+        messages_by_topic: Dict[str, List[Tuple[float, np.ndarray]]],
+        joint_names_by_topic: Dict[str, List[str]],
+        topic_to_group: Dict[str, str],
+        target_names_by_topic: Dict[str, List[str]],
+    ) -> Tuple[List[_MergeTopicSpec], List[str]]:
+        """Precompute joint filtering metadata for a merge operation."""
+        specs: List[_MergeTopicSpec] = []
+        combined_names: List[str] = []
+
+        for topic in sorted_topics:
+            group_key = topic_to_group[topic]
+            msg_names = joint_names_by_topic.get(topic, [])
+            target_names = target_names_by_topic.get(topic, [])
+            output_names = target_names if target_names else msg_names
+            combined_names.extend(output_names)
+
+            index_array = None
+            valid = True
+            if target_names and msg_names:
+                name_to_idx = {name: idx for idx, name in enumerate(msg_names)}
+                missing = [name for name in target_names if name not in name_to_idx]
+                if missing:
+                    self._log_warning(
+                        f"{topic}: joint_order names not found in message: {missing}"
+                    )
+                    valid = False
+                else:
+                    index_array = np.array(
+                        [name_to_idx[name] for name in target_names],
+                        dtype=np.intp,
+                    )
+
+            specs.append(
+                _MergeTopicSpec(
+                    topic=topic,
+                    group_key=group_key,
+                    messages=messages_by_topic[topic],
+                    message_joint_names=msg_names,
+                    output_joint_names=output_names,
+                    index_array=index_array,
+                    valid=valid,
+                )
+            )
+
+        return specs, combined_names
+
+    def _value_for_merge_spec(
+        self,
+        spec: _MergeTopicSpec,
+        value: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        """Apply a precomputed joint filter to one message value."""
+        if spec.index_array is None:
+            return value
+
+        if len(value) != len(spec.message_joint_names):
+            if not spec.length_warning_logged:
+                self._log_warning(
+                    f"{spec.topic}: position/name length mismatch: "
+                    f"{len(value)} vs {len(spec.message_joint_names)}"
+                )
+                spec.length_warning_logged = True
+            return None
+
+        return value[spec.index_array]
+
     def _merge_action_messages(
         self,
         action_messages_by_topic: Dict[str, List[Tuple[float, np.ndarray]]],
@@ -1019,15 +1102,17 @@ class RosbagToLerobotConverterBase:
             key=lambda t: topic_to_group.get(t, t)
         )
 
-        # Build combined joint names, applying per-group joint_order if available
-        combined_names = []
-        for topic in sorted_topics:
-            group_key = topic_to_group[topic]
-            if group_key in self._joint_order_by_group:
-                combined_names.extend(self._joint_order_by_group[group_key])
-            else:
-                names = action_joint_names_by_topic.get(topic, [])
-                combined_names.extend(names)
+        target_names_by_topic = {
+            topic: self._joint_order_by_group.get(topic_to_group[topic], [])
+            for topic in sorted_topics
+        }
+        merge_specs, combined_names = self._build_merge_topic_specs(
+            sorted_topics,
+            action_messages_by_topic,
+            action_joint_names_by_topic,
+            topic_to_group,
+            target_names_by_topic,
+        )
         self._action_joint_names = combined_names
 
         # Use timestamps from the first topic as reference
@@ -1041,40 +1126,31 @@ class RosbagToLerobotConverterBase:
         merged_messages: List[Tuple[float, np.ndarray]] = []
 
         for timestamp in reference_timestamps:
-            combined_action = []
+            parts: List[np.ndarray] = []
             all_topics_have_data = True
 
-            for topic in sorted_topics:
-                msgs = action_messages_by_topic[topic]
-                prev_value, _ = self._find_previous_value_in_list(
-                    msgs, timestamp, tolerance=0.05
-                )
-                if prev_value is not None:
-                    # Apply per-group joint_order filtering if available
-                    group_key = topic_to_group[topic]
-                    if group_key in self._joint_order_by_group:
-                        group_names = action_joint_names_by_topic.get(topic, [])
-                        target_names = self._joint_order_by_group[group_key]
-                        if group_names:
-                            filtered = self._filter_positions_by_joint_order(
-                                prev_value, group_names, target_names
-                            )
-                            if filtered is not None:
-                                combined_action.extend(filtered.tolist())
-                            else:
-                                all_topics_have_data = False
-                                break
-                        else:
-                            combined_action.extend(prev_value.tolist())
-                    else:
-                        combined_action.extend(prev_value.tolist())
-                else:
+            for spec in merge_specs:
+                if not spec.valid:
                     all_topics_have_data = False
                     break
+                prev_value, _ = self._find_previous_value_in_list(
+                    spec.messages, timestamp, tolerance=0.05
+                )
+                if prev_value is None:
+                    all_topics_have_data = False
+                    break
+                filtered = self._value_for_merge_spec(spec, prev_value)
+                if filtered is None:
+                    all_topics_have_data = False
+                    break
+                parts.append(filtered)
 
-            if all_topics_have_data and combined_action:
+            if all_topics_have_data and parts:
                 merged_messages.append(
-                    (timestamp, np.array(combined_action, dtype=np.float32))
+                    (
+                        timestamp,
+                        np.concatenate(parts).astype(np.float32, copy=False),
+                    )
                 )
 
         return merged_messages
@@ -1136,18 +1212,17 @@ class RosbagToLerobotConverterBase:
             key=_state_sort_key,
         )
 
-        # Build combined joint names, applying joint_order if a state-side
-        # filter resolves (directly or via follower_<X>→leader_<X>
-        # symmetry — see _resolve_filter_target_names).
-        combined_names = []
-        for topic in sorted_topics:
-            group_key = topic_to_group[topic]
-            target = self._resolve_filter_target_names(group_key)
-            if target:
-                combined_names.extend(target)
-            else:
-                names = state_joint_names_by_topic.get(topic, [])
-                combined_names.extend(names)
+        target_names_by_topic = {
+            topic: self._resolve_filter_target_names(topic_to_group[topic])
+            for topic in sorted_topics
+        }
+        merge_specs, combined_names = self._build_merge_topic_specs(
+            sorted_topics,
+            state_messages_by_topic,
+            state_joint_names_by_topic,
+            topic_to_group,
+            target_names_by_topic,
+        )
         self._state_joint_names = combined_names
 
         # Use timestamps from the first topic as reference
@@ -1162,41 +1237,31 @@ class RosbagToLerobotConverterBase:
         merged_messages: List[Tuple[float, np.ndarray]] = []
 
         for timestamp in reference_timestamps:
-            combined_state = []
+            parts: List[np.ndarray] = []
             all_topics_have_data = True
 
-            for topic in sorted_topics:
-                msgs = state_messages_by_topic[topic]
-                prev_value, _ = self._find_previous_value_in_list(
-                    msgs, timestamp, tolerance=0.05
-                )
-                if prev_value is not None:
-                    # Apply joint_order filtering when a target resolves;
-                    # otherwise pass the message's positions through.
-                    group_key = topic_to_group[topic]
-                    target_names = self._resolve_filter_target_names(group_key)
-                    if target_names:
-                        group_names = state_joint_names_by_topic.get(topic, [])
-                        if group_names:
-                            filtered = self._filter_positions_by_joint_order(
-                                prev_value, group_names, target_names
-                            )
-                            if filtered is not None:
-                                combined_state.extend(filtered.tolist())
-                            else:
-                                all_topics_have_data = False
-                                break
-                        else:
-                            combined_state.extend(prev_value.tolist())
-                    else:
-                        combined_state.extend(prev_value.tolist())
-                else:
+            for spec in merge_specs:
+                if not spec.valid:
                     all_topics_have_data = False
                     break
+                prev_value, _ = self._find_previous_value_in_list(
+                    spec.messages, timestamp, tolerance=0.05
+                )
+                if prev_value is None:
+                    all_topics_have_data = False
+                    break
+                filtered = self._value_for_merge_spec(spec, prev_value)
+                if filtered is None:
+                    all_topics_have_data = False
+                    break
+                parts.append(filtered)
 
-            if all_topics_have_data and combined_state:
+            if all_topics_have_data and parts:
                 merged_messages.append(
-                    (timestamp, np.array(combined_state, dtype=np.float32))
+                    (
+                        timestamp,
+                        np.concatenate(parts).astype(np.float32, copy=False),
+                    )
                 )
 
         self._log_info(

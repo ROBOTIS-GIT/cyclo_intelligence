@@ -151,6 +151,49 @@ class EpisodeMetadata:
         return result
 
 
+@dataclass
+class _DataFileBuffers:
+    """Column-oriented pending buffers for one v3.0 data parquet file."""
+
+    timestamps: List[float] = field(default_factory=list)
+    frame_indices: List[int] = field(default_factory=list)
+    episode_indices: List[int] = field(default_factory=list)
+    global_indices: List[int] = field(default_factory=list)
+    task_indices: List[int] = field(default_factory=list)
+    observation_state: List[np.ndarray] = field(default_factory=list)
+    action: List[np.ndarray] = field(default_factory=list)
+    state_dim: int = 0
+    action_dim: int = 0
+
+    def __len__(self) -> int:
+        return len(self.timestamps)
+
+    def append(
+        self,
+        timestamp: float,
+        frame_index: int,
+        episode_index: int,
+        global_index: int,
+        task_index: int,
+        observation_state: Optional[np.ndarray],
+        action: Optional[np.ndarray],
+    ) -> None:
+        self.timestamps.append(float(timestamp))
+        self.frame_indices.append(int(frame_index))
+        self.episode_indices.append(int(episode_index))
+        self.global_indices.append(int(global_index))
+        self.task_indices.append(int(task_index))
+
+        if observation_state is not None:
+            if self.state_dim == 0:
+                self.state_dim = len(observation_state)
+            self.observation_state.append(observation_state)
+        if action is not None:
+            if self.action_dim == 0:
+                self.action_dim = len(action)
+            self.action.append(action)
+
+
 class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
     """
     Converts ROSbag recordings with MP4 videos to LeRobot v3.0 dataset format.
@@ -179,7 +222,6 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         self._video_tracking: Dict[str, Dict[str, Any]] = {}
 
         # Temporary storage for aggregation
-        self._pending_parquet_data: List[pd.DataFrame] = []
         self._pending_video_files: Dict[
             str, List[Tuple[Path, float]]
         ] = {}  # camera -> [(path, duration)]
@@ -325,7 +367,7 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         self._log_info("Writing aggregated data files...")
 
         output_dir = Path(self.config.output_dir)
-        pending_frames: List[Dict[str, Any]] = []
+        pending = _DataFileBuffers()
         pending_size_mb = 0.0
         global_frame_index = 0
 
@@ -334,32 +376,28 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             num_frames = episode.length
 
             # Track where this episode starts in the current file
-            dataset_from_index = len(pending_frames)
+            dataset_from_index = len(pending)
+            task_idx = self._task_to_index.get(
+                episode.tasks[0] if episode.tasks else "default_task", 0
+            )
 
             # Add frames for this episode
             for frame_idx in range(num_frames):
-                frame_data = {
-                    "timestamp": episode.timestamps[frame_idx],
-                    "frame_index": frame_idx,
-                    "episode_index": ep_idx,
-                    "index": global_frame_index,
-                    "task_index": self._task_to_index.get(
-                        episode.tasks[0] if episode.tasks else "default_task", 0
+                pending.append(
+                    timestamp=episode.timestamps[frame_idx],
+                    frame_index=frame_idx,
+                    episode_index=ep_idx,
+                    global_index=global_frame_index,
+                    task_index=task_idx,
+                    observation_state=(
+                        episode.observation_state[frame_idx]
+                        if episode.observation_state else None
                     ),
-                }
-
-                if episode.observation_state:
-                    frame_data["observation.state"] = episode.observation_state[
-                        frame_idx
-                    ].tolist()
-
-                if episode.action:
-                    frame_data["action"] = episode.action[frame_idx].tolist()
-
-                pending_frames.append(frame_data)
+                    action=episode.action[frame_idx] if episode.action else None,
+                )
                 global_frame_index += 1
 
-            dataset_to_index = len(pending_frames)
+            dataset_to_index = len(pending)
 
             # Create episode metadata
             ep_stats = self._compute_episode_stats(episode)
@@ -376,24 +414,24 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             self._episode_metadata_list.append(ep_metadata)
 
             # Estimate size (rough approximation)
-            pending_size_mb = len(pending_frames) * 0.001  # ~1KB per frame estimate
+            pending_size_mb = len(pending) * 0.001  # ~1KB per frame estimate
 
             # Check if we need to flush
             if pending_size_mb >= self.config.data_file_size_in_mb:
-                self._flush_data_file(output_dir, pending_frames)
-                pending_frames = []
+                self._flush_data_file(output_dir, pending)
+                pending = _DataFileBuffers()
                 pending_size_mb = 0.0
                 self._advance_chunk_file_index("data")
 
-        if pending_frames:
-            self._flush_data_file(output_dir, pending_frames)
+        if len(pending) > 0:
+            self._flush_data_file(output_dir, pending)
 
         self._total_episodes = len(episodes_data)
         self._total_frames = global_frame_index
 
-    def _flush_data_file(self, output_dir: Path, frames: List[Dict[str, Any]]):
+    def _flush_data_file(self, output_dir: Path, buffers: _DataFileBuffers):
         """Write accumulated frames to a Parquet file with HuggingFace-compatible schema."""
-        if not frames:
+        if len(buffers) == 0:
             return
 
         chunk_idx = self._current_data_chunk_idx
@@ -404,13 +442,6 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         )
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        state_dim = (
-            len(frames[0].get("observation.state", []))
-            if frames[0].get("observation.state")
-            else 0
-        )
-        action_dim = len(frames[0].get("action", [])) if frames[0].get("action") else 0
-
         schema_fields = [
             pa.field("timestamp", pa.float32()),
             pa.field("frame_index", pa.int64()),
@@ -419,34 +450,45 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             pa.field("task_index", pa.int64()),
         ]
 
-        if state_dim > 0:
+        if buffers.state_dim > 0:
             schema_fields.append(
-                pa.field("observation.state", pa.list_(pa.float32(), state_dim))
+                pa.field(
+                    "observation.state",
+                    pa.list_(pa.float32(), buffers.state_dim),
+                )
             )
-        if action_dim > 0:
-            schema_fields.append(pa.field("action", pa.list_(pa.float32(), action_dim)))
+        if buffers.action_dim > 0:
+            schema_fields.append(
+                pa.field("action", pa.list_(pa.float32(), buffers.action_dim))
+            )
 
         schema = pa.schema(schema_fields)
 
-        num_frames = len(frames)
+        num_frames = len(buffers)
         arrays = [
-            pa.array([float(f["timestamp"]) for f in frames], type=pa.float32()),
-            pa.array([f["frame_index"] for f in frames], type=pa.int64()),
-            pa.array([f["episode_index"] for f in frames], type=pa.int64()),
-            pa.array([f["index"] for f in frames], type=pa.int64()),
-            pa.array([f["task_index"] for f in frames], type=pa.int64()),
+            pa.array(buffers.timestamps, type=pa.float32()),
+            pa.array(buffers.frame_indices, type=pa.int64()),
+            pa.array(buffers.episode_indices, type=pa.int64()),
+            pa.array(buffers.global_indices, type=pa.int64()),
+            pa.array(buffers.task_indices, type=pa.int64()),
         ]
 
-        if state_dim > 0:
-            state_values = [[float(v) for v in f["observation.state"]] for f in frames]
+        if buffers.state_dim > 0:
+            state_values = np.asarray(buffers.observation_state, dtype=np.float32)
             arrays.append(
-                pa.array(state_values, type=pa.list_(pa.float32(), state_dim))
+                pa.FixedSizeListArray.from_arrays(
+                    pa.array(state_values.ravel(), type=pa.float32()),
+                    buffers.state_dim,
+                )
             )
 
-        if action_dim > 0:
-            action_values = [[float(v) for v in f["action"]] for f in frames]
+        if buffers.action_dim > 0:
+            action_values = np.asarray(buffers.action, dtype=np.float32)
             arrays.append(
-                pa.array(action_values, type=pa.list_(pa.float32(), action_dim))
+                pa.FixedSizeListArray.from_arrays(
+                    pa.array(action_values.ravel(), type=pa.float32()),
+                    buffers.action_dim,
+                )
             )
 
         hf_features = {
@@ -457,16 +499,16 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             "task_index": {"dtype": "int64", "_type": "Value"},
         }
 
-        if state_dim > 0:
+        if buffers.state_dim > 0:
             hf_features["observation.state"] = {
                 "feature": {"dtype": "float32", "_type": "Value"},
-                "length": state_dim,
+                "length": buffers.state_dim,
                 "_type": "Sequence",
             }
-        if action_dim > 0:
+        if buffers.action_dim > 0:
             hf_features["action"] = {
                 "feature": {"dtype": "float32", "_type": "Value"},
-                "length": action_dim,
+                "length": buffers.action_dim,
                 "_type": "Sequence",
             }
 
