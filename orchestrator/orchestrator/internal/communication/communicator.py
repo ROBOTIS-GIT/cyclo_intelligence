@@ -149,10 +149,9 @@ class Communicator:
         # /task/action_event publisher moved to cyclo_data.recorder.rosbag_control
         # in Step 3 Part C2d-1/-5. cyclo_data owns the recording lifecycle.
 
-        # /inference/trajectory_preview publisher moved to groot Process B
-        # (control_publisher.py). Post-D16 split, action chunks flow
-        # Process A → Process B over Zenoh; orchestrator no longer sees
-        # them, so it can't republish.
+        # /inference/trajectory_preview is owned by the policy runtime.
+        # Action chunks flow from main_runtime to engine_process over Zenoh;
+        # orchestrator no longer sees them, so it can't republish.
 
         # Heartbeat publisher
         self.heartbeat_publisher = self.node.create_publisher(

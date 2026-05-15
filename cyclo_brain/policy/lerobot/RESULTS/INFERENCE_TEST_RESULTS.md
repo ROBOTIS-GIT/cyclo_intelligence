@@ -1,6 +1,6 @@
 # LeRobot Inference (LOAD) 테스트 결과
 
-호출 경로: 호스트 → Zenoh router (`rmw_zenohd` in `cyclo_intelligence`) → `/lerobot/inference_command` (lerobot_server의 inference-server) → `LeRobotEngine.load_policy()`.
+호출 경로: 호스트 → Zenoh router (`rmw_zenohd` in `cyclo_intelligence`) → `/lerobot/inference_command` (`main-runtime`) → `/lerobot/engine_command` (`engine-process`) → `LeRobotEngine.load_policy()`.
 
 테스트 클라이언트: `/tmp/test_lerobot_load.py` (zenoh_ros2_sdk.ROS2ServiceClient로 InferenceCommand.LOAD 호출, 옵션으로 UNLOAD 선행 가능).
 
@@ -46,13 +46,13 @@
 
 ## 핵심 발견
 
-### 1. lerobot_engine.py의 HF Hub policy_type 감지 버그 fix 완료
+### 1. `lerobot_engine`의 HF Hub policy_type 감지 버그 fix 완료
 
 원본 코드는 `Path(model_path) / "config.json"` 로컬 경로만 검사하고 HF Hub id는 항상 `"act"`로 폴백 → 모든 비-ACT 정책이 ACTPolicy로 instantiate되며 `'XConfig' object has no attribute 'use_vae'` 에러.
 
 **수정**: HF Hub id 형태(`"<user>/<repo>"` 패턴) 인식 → `huggingface_hub.hf_hub_download(filename="config.json")`로 metadata만 받아 policy_type 결정 → 올바른 PolicyClass dispatch.
 
-수정 위치: `cyclo_brain/policy/lerobot/lerobot_engine.py:236~256`.
+수정 위치: `cyclo_brain/policy/lerobot/lerobot_engine/loading.py`.
 
 ### 2. 우리 학습 ckpt vs 사전훈련 ckpt의 io 매핑
 

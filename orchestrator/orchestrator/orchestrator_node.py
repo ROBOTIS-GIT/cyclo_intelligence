@@ -337,9 +337,9 @@ class OrchestratorNode(Node):
         self.get_logger().info('ROS services initialized successfully')
 
     def _setup_timer_callbacks(self):
-        # Step 4 §5.5: inference no longer needs an orchestrator-side 100 Hz
-        # timer — the policy container (runtime/control_publisher.py) owns
-        # the control loop. orchestrator publishes InferenceStatus on
+        # Inference no longer needs an orchestrator-side 100 Hz timer.
+        # The policy main_runtime owns the control loop. orchestrator publishes
+        # InferenceStatus on
         # command transitions (LOAD / START / PAUSE / RESUME / STOP)
         # instead of from a polling timer.
         self.timer_callback_dict = {

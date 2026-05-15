@@ -33,7 +33,7 @@
 2. **`PIP_INDEX_URL=pypi.org/simple`** Dockerfile에 추가 — 죽은 jetson-ai-lab.dev 도메인 우회.
 3. **lerobot 서브모듈 + zenoh_ros2_sdk 서브모듈** 초기화 (LOAD 인프라 작동 전제).
 4. **카메라 명명 통일** — 데이터 수집 + robot_configs를 `rgb.cam_<side>_<part>`로 일치 (7개 파일 변경).
-5. **lerobot_engine.py policy_type 감지 버그 fix** — HF Hub id를 ACT로 폴백하던 버그 수정 → 모든 정책 종류 dispatch 가능.
+5. **`lerobot_engine` policy_type 감지 버그 fix** — HF Hub id를 ACT로 폴백하던 버그 수정 → 모든 정책 종류 dispatch 가능.
 6. **Dockerfile extras 확장** — `dataset, training, async, peft, diffusion, multi_task_dit, wallx, pi, smolvla, xvla, hilserl` (production은 학습 extras 제외).
 7. **데이터셋 v2.1 → v3.0 변환** + 고아 task_index sanitize.
 

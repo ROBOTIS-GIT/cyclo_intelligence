@@ -1,0 +1,11 @@
+# Local-dev override — auto-merged by `docker compose` on top of
+# docker-compose.yml. Keeps the canonical compose file pinned to the
+# production tag (`robotis/lerobot-zenoh:1.0.0-${ARCH}`) while letting
+# the lerobot service run off whatever was just built locally
+# (`robotis/lerobot-zenoh:${ARCH}` — no version prefix).
+#
+# Delete this file once the 1.0.0 image is pushed to Docker Hub.
+
+services:
+  lerobot:
+    image: robotis/lerobot-zenoh:${ARCH:-arm64}
