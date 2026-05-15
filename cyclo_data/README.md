@@ -18,8 +18,7 @@ cyclo_data/
 │   ├── hub_service.py         HfOperation.srv
 │   └── edit_service.py        EditDataset.srv
 ├── recorder/                  Recording subsystem.
-│   ├── rosbag_recorder/       C++ recorder node (existing from
-│   │                          physical_ai_tools)
+│   ├── rosbag_recorder/       C++ recorder node.
 │   ├── rosbag_control.py      Python wrapper that starts / stops
 │   │                          the C++ node via ROS2 srv.
 │   ├── session_manager.py     DataManager — session state +
@@ -59,7 +58,7 @@ cyclo_data/
 ## 7-way decomposition
 
 The split above follows PLAN §4.2's "what does this file's subject
-do?" rule. The prior `physical_ai_server/data_processing/` directory
+do?" rule. The prior `orchestrator/data_processing/` directory
 had 14 files in one folder, each answering a different question
 (recording? conversion? quality? hub upload?). Breaking them out
 per-subsystem makes the orchestrator ↔ cyclo_data srv boundary

@@ -7,7 +7,7 @@
 
 # Model Card for {{ model_name | default("Model", true) }}
 
-This model was trained using [Physical AI Tools](https://github.com/ROBOTIS-GIT/physical_ai_tools) and [LeRobot](https://github.com/huggingface/lerobot).
+This model was trained using [Cyclo Intelligence](https://github.com/ROBOTIS-GIT/cyclo_intelligence) and [LeRobot](https://github.com/huggingface/lerobot).
 
 ## Model Description
 

@@ -16,4 +16,4 @@
 #
 # Author: Seongwoo Kim
 
-"""Physical AI Behavior Tree package."""
+"""Cyclo Intelligence Behavior Tree package."""

@@ -50,7 +50,7 @@ packages = [
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.1.1',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory. Avoids colcon-core's _symlinks_in_build veto on
@@ -65,9 +65,8 @@ setup(
         # urdf/, ffw_description/, and the schema.py helper). Launch
         # resolves them via get_package_share_directory('shared') +
         # 'robot_configs'.
-        # BT assets absorbed from physical_ai_bt (Step 5-A). The trees /
-        # bringup data dirs moved into nested orchestrator/orchestrator/bt/
-        # (D17 user decision: data dirs that pair with code go nested).
+        # BT assets live next to the orchestrator.bt Python package. The
+        # trees / bringup data dirs are installed to the package share tree.
         # Share install path stays the same so `get_package_share_directory(
         # 'orchestrator') / 'bt' / 'trees'` keeps working.
         (
@@ -99,7 +98,7 @@ setup(
         'Programming Language :: Python',
         'Topic :: Software Development',
     ],
-    description='ROS 2 package for Open Platform AI Kit integration',
+    description='ROS 2 package for Cyclo Intelligence integration',
     license='Apache 2.0',
     tests_require=['pytest'],
     entry_points={

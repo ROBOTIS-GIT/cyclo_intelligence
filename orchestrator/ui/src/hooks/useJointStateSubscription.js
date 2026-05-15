@@ -5,7 +5,7 @@ import ROSLIB from 'roslib';
 // Single unified joint_states topic — carries all upper-body joints
 // (arm_l × 8, arm_r × 8, head × 2, lift × 1 = 19 joints) at 100 Hz.
 // Phase 4 yaml's observation.state.upper_body.topic. The legacy
-// physical_ai_tools four-topic split (per-arm-controller) caused each
+// cyclo_intelligence four-topic split (per-arm-controller) caused each
 // joint group to update at only ~7.5 Hz on the URDF (one global throttle
 // shared across four 100 Hz streams), which is why the 3D viewer used
 // to lag the real robot.

@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>cyclo_data</name>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
   <description>
     Cyclo Intelligence — data recording, conversion, editing, HuggingFace hub, and visualization as an independent ROS 2 node (see PLAN.md §6).
   </description>

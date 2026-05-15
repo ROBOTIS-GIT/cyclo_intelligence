@@ -1,7 +1,7 @@
-# Physical AI Manager (React UI) - FEATURES
+# Cyclo Intelligence Web UI (React UI) - FEATURES
 
 ## Overview
-React-based Physical AI Tools web UI. Real-time topic subscription and service calls via ROS2 rosbridge.
+React-based Cyclo Intelligence web UI. Real-time topic subscription and service calls via ROS2 rosbridge.
 
 ---
 
@@ -302,7 +302,7 @@ Training control command constants.
 
 ### Run
 ```bash
-cd physical_ai_manager
+cd cyclo-ui
 npm install
 npm start
 ```

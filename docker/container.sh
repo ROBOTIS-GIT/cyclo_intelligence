@@ -1,9 +1,7 @@
 #!/bin/bash
 #
-# cyclo_intelligence container helper — mirrors the physical_ai_tools
-# docker/container.sh pattern (auto-detects ARCH from uname -m). Step 6
-# expands this from lerobot-only to also managing the main
-# cyclo_intelligence service.
+# cyclo_intelligence container helper. It auto-detects ARCH from uname -m
+# and manages the main runtime plus optional policy containers.
 #
 # Usage:
 #   docker/container.sh start              # → cyclo_intelligence

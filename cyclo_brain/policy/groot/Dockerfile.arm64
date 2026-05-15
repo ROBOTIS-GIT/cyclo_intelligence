@@ -5,7 +5,7 @@
 # Note: Training/finetuning should be done on AMD64 (x86_64) machines
 # ARM64/Jetson is optimized for inference deployment only
 # Optimized for NVIDIA Jetson Orin series with JetPack 6.x
-# Build context: physical_ai_tools/cyclo_brain/policy/groot/
+# Build context: cyclo_intelligence/cyclo_brain/policy/groot/
 # Usage: docker build -f Dockerfile.arm64 -t robotis/groot-zenoh:arm64 .
 
 # JetPack 6.x (L4T R36.4) base image for Jetson Orin series

@@ -1111,7 +1111,7 @@ class RosbagToLerobotConverterBase:
         # position of leader_<X>, follower_upper_body sorts to the first
         # non-mobile leader. Result: state and action emit dimensions in
         # the same per-modality order (mobile last for ffw_sg2, matching
-        # the predecessor physical_ai_tools layout).
+        # the predecessor cyclo_intelligence layout).
         canonical_keys = [
             k for k in self._joint_order_by_group if k.startswith("leader_")
         ]

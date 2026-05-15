@@ -103,7 +103,7 @@ class OrchestratorNode(Node):
             'orchestrator',
             automatically_declare_parameters_from_overrides=True,
         )
-        self.get_logger().info('Start Physical AI Server')
+        self.get_logger().info('Start Cyclo Intelligence Orchestrator')
 
         # Callback groups for MultiThreadedExecutor.
         # Separating service servers from service clients prevents deadlock
@@ -1087,7 +1087,7 @@ class OrchestratorNode(Node):
                     # success=True immediately. UI tracks progress via the
                     # /task/inference_status topic (LOADING → INFERENCING,
                     # or READY+error on failure). Mirrors the
-                    # InferenceManager.start() pattern from physical_ai_tools.
+                    # Container start pattern used across policy backends.
                     with self._state_lock:
                         existing_client = self.container_service_client
                     if existing_client is not None:

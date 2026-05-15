@@ -1,7 +1,7 @@
 {
   "name": "cyclo-ui",
-  "version": "0.1.0",
-  "description": "Web UI for Physical AI Platform",
+  "version": "0.1.1",
+  "description": "Web UI for Cyclo Intelligence",
   "author": "Kiwoong Park <pkw@robotis.com>",
   "contributors": [
     "Kiwoong Park <pkw@robotis.com>"

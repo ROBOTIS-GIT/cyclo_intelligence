@@ -8,24 +8,20 @@ boundaries.
 ```
 orchestrator/
 ├── orchestrator_node.py       ROS2 Node entry — class OrchestratorNode.
-│                              Step 5-B renamed it from
-│                              physical_ai_server.py + class
-│                              PhysicalAIServer, per the cyclo_data
-│                              <pkg>_node.py convention.
+│                              Follows the cyclo_data <pkg>_node.py
+│                              convention.
 ├── launch/                    ros2 launch files.
 │   ├── orchestrator.launch.py          OrchestratorNode only.
 │   ├── orchestrator_bringup.launch.py  OrchestratorNode + rosbridge
 │   │                                   + rosbag_recorder +
 │   │                                   web_video_server.
-│   └── bt_node.launch.py      BT node (Step 5-A — absorbed from
-│                              physical_ai_bt/bt_bringup/).
+│   └── bt_node.launch.py      BT node bringup.
 ├── config/                    Robot-specific YAML
 │                              (ffw_sg2_rev1_config.yaml, etc.).
 │                              Top-level key is 'orchestrator'
 │                              (Step 2 Import Fixer).
 │
-├── bt/                        Behaviour Tree subsystem (absorbed
-│     │                        from physical_ai_bt in Step 5-A).
+├── bt/                        Behaviour Tree subsystem.
 │     ├── bt_core.py           NodeStatus, BTNode base classes.
 │     ├── bt_node.py           BehaviorTreeNode ROS2 Node
 │     │                        (orchestrator_bt_node). Loads tree
@@ -67,8 +63,7 @@ orchestrator/
 │
 ├── timer/                     Shared TimerManager wrapper.
 │
-├── ui/                        React UI app (Step 1 port from
-│                              physical_ai_manager). Built by the
+├── ui/                        React UI app. Built by the
 │                              Dockerfile.{arm64,amd64} stage-1
 │                              node:22 stage and copied into
 │                              /usr/share/nginx/html.

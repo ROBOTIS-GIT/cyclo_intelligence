@@ -62,9 +62,8 @@ class BehaviorTreeNode(Node):
 
         self.main_tree_path = os.path.join(pkg_share, 'bt', 'trees', tree_xml)
         if not os.path.exists(self.main_tree_path):
-            # Step 5-A absorbed physical_ai_bt into orchestrator/bt/, so the
-            # in-tree fallback now lives under orchestrator/bt/trees/ (one
-            # level deeper than the original physical_ai_bt/trees/ layout).
+            # In-tree fallback for editable checkouts; installed packages
+            # resolve through share/orchestrator/bt/trees above.
             self.main_tree_path = os.path.join(
                 os.path.dirname(os.path.dirname(__file__)),
                 'bt',

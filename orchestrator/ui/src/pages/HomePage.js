@@ -69,7 +69,7 @@ export default function HomePage() {
     );
   };
 
-  const githubRobotisGitPhysicalAiTools = () => {
+  const githubRobotisGitCycloIntelligence = () => {
     return classLinkItem(
       <FaGithub className="text-xl" />,
       'https://github.com/ROBOTIS-GIT/cyclo_intelligence',
@@ -85,7 +85,7 @@ export default function HomePage() {
     );
   };
 
-  const aboutPhysicalAiManager = () => {
+  const aboutCycloIntelligence = () => {
     return (
       <div className="flex flex-col items-center justify-center m-5 gap-5 min-w-72">
         <p className="text-3xl font-bold">Cyclo Intelligence</p>
@@ -106,7 +106,7 @@ export default function HomePage() {
               <span className="h-2" />
               {aiRobotisDotCom()}
               {youtubeRobotisOpenSourceTeam()}
-              {githubRobotisGitPhysicalAiTools()}
+              {githubRobotisGitCycloIntelligence()}
               {huggingfaceROBOTIS()}
             </div>
           </div>
@@ -121,7 +121,7 @@ export default function HomePage() {
         <HeartbeatStatus />
       </div>
       <div className="flex flex-raw items-center justify-center gap-16">
-        {aboutPhysicalAiManager()}
+        {aboutCycloIntelligence()}
         <RobotTypeSelector />
       </div>
     </div>

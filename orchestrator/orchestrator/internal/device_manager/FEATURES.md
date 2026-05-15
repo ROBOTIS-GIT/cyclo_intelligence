@@ -25,7 +25,7 @@ Moving average-based CPU usage monitoring.
 
 #### Usage
 ```python
-from physical_ai_server.device_manager.cpu_checker import CPUChecker
+from orchestrator.device_manager.cpu_checker import CPUChecker
 
 checker = CPUChecker(window_size=30)
 
@@ -51,7 +51,7 @@ System RAM usage monitoring.
 
 #### Usage
 ```python
-from physical_ai_server.device_manager.ram_checker import RAMChecker
+from orchestrator.device_manager.ram_checker import RAMChecker
 
 # Total and used RAM
 total, used = RAMChecker.get_ram_gb()
@@ -80,7 +80,7 @@ Disk storage usage monitoring.
 
 #### Usage
 ```python
-from physical_ai_server.device_manager.storage_checker import StorageChecker
+from orchestrator.device_manager.storage_checker import StorageChecker
 
 # Root partition storage
 total, used = StorageChecker.get_storage_gb('/')
@@ -108,9 +108,9 @@ print(f"Available: {free:.1f} GB")
 ```python
 # Example usage in data_manager.py
 
-from physical_ai_server.device_manager.cpu_checker import CPUChecker
-from physical_ai_server.device_manager.ram_checker import RAMChecker
-from physical_ai_server.device_manager.storage_checker import StorageChecker
+from orchestrator.device_manager.cpu_checker import CPUChecker
+from orchestrator.device_manager.ram_checker import RAMChecker
+from orchestrator.device_manager.storage_checker import StorageChecker
 
 class DataManager:
     RAM_LIMIT_GB = 2  # Minimum required RAM

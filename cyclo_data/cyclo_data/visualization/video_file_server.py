@@ -426,9 +426,8 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(result)
                     return
 
-                # Launch BT node — physical_ai_bt was absorbed into the
-                # orchestrator package in Step 5-A, and its launch file
-                # moved to orchestrator/bt/bringup/bt_node.launch.py
+                # Launch BT node from the orchestrator package. Its launch
+                # file lives at orchestrator/bt/bringup/bt_node.launch.py
                 # (installed to share/orchestrator/bt/bringup/).
                 cmd = [
                     'ros2', 'launch', 'orchestrator',
@@ -619,7 +618,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
             self._send_json_error(500, f"Error updating task markers: {str(e)}")
 
     # Panel layout file path
-    _PANEL_LAYOUT_PATH = '/workspace/.physical_ai/panel_layout.json'
+    _PANEL_LAYOUT_PATH = '/workspace/.cyclo_intelligence/panel_layout.json'
 
     def _handle_get_panel_layout(self):
         """Handle GET /panel-layout — read saved panel layout."""

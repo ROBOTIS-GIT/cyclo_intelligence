@@ -819,7 +819,7 @@ class DataManager:
 
         Just task instructions + provenance (created via cyclo_intelligence
         by ROBOTIS). No HF DatasetCard template, no embedded info.json
-        block — those were inherited from physical_ai_tools and added
+        block — those were inherited from cyclo_intelligence and added
         clutter without giving HF Hub anything it needs beyond the
         license / tags frontmatter.
         """

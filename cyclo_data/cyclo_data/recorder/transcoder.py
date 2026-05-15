@@ -406,7 +406,7 @@ class TranscodeWorker:
         """Map a ``rotation_deg`` value (0/90/180/270) to ffmpeg ``-vf``.
 
         Convention matches the legacy rosbag2mp4 pipeline and the
-        physical_ai_tools reference so existing yaml configs port over
+        cyclo_intelligence reference so existing yaml configs port over
         unchanged:
 
         * 0   → no filter (pass through)

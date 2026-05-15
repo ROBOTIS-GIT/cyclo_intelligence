@@ -9,7 +9,7 @@
 
 ```bash
 cd /home/dongyun/main_ws
-docker compose -f physical_ai_tools/docker/docker-compose.yml up -d orchestrator
+docker compose -f cyclo_intelligence/docker/docker-compose.yml up -d orchestrator
 ```
 
 ### Build Process
@@ -60,7 +60,7 @@ ls -l install/rosbag_recorder/lib/rosbag_recorder/
 # - service_bag_recorder
 
 # Check lint
-ament_cpplint physical_ai_tools/rosbag_recorder
+ament_cpplint cyclo_intelligence/cyclo_data/recorder/rosbag_recorder
 ```
 
 ## Testing
@@ -130,7 +130,7 @@ ros2 run image_tools cam2image --ros-args -r image:=/camera/image_raw
 docker exec -it orchestrator bash
 cd /workspace
 source install/setup.bash
-bash physical_ai_tools/rosbag_recorder/scripts/test_recorder.sh
+bash cyclo_intelligence/cyclo_data/recorder/rosbag_recorder/scripts/test_recorder.sh
 ```
 
 ## Verifying Output
@@ -262,7 +262,7 @@ docker exec -it orchestrator bash
 rm -rf /tmp/test_recording /tmp/multi_camera_test
 
 # Stop container
-docker compose -f physical_ai_tools/docker/docker-compose.yml down
+docker compose -f cyclo_intelligence/docker/docker-compose.yml down
 ```
 
 ## Next Steps
@@ -270,7 +270,7 @@ docker compose -f physical_ai_tools/docker/docker-compose.yml down
 After successful testing in Docker:
 
 1. Test with real robot hardware
-2. Integrate with Physical AI Manager UI
+2. Integrate with Cyclo Intelligence Web UI
 3. Test dataset conversion to LeRobot format
 4. Performance optimization for production use
 

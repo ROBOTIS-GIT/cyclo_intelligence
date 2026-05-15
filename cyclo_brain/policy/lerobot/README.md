@@ -1,8 +1,8 @@
-# LeRobot Integration for Physical AI Tools
+# LeRobot Integration for Cyclo Intelligence
 
 ## Overview
 
-LeRobot integration for Physical AI Tools. This folder contains the executor and Docker configuration for running LeRobot training and inference via Zenoh communication.
+LeRobot integration for Cyclo Intelligence. This folder contains the executor and Docker configuration for running LeRobot training and inference via Zenoh communication.
 
 ## Folder Structure
 
@@ -23,21 +23,21 @@ cyclo_brain/policy/lerobot/
 
 - Docker with NVIDIA GPU support
 - NVIDIA GPU (CUDA 12.1+)
-- Physical AI Tools repository
+- Cyclo Intelligence repository
 
 ## Quick Start
 
 ### 1. Clone LeRobot (if not already done)
 
 ```bash
-cd physical_ai_tools/cyclo_brain/policy/lerobot
+cd cyclo_intelligence/cyclo_brain/policy/lerobot
 git clone https://github.com/huggingface/lerobot.git lerobot
 ```
 
 ### 2. Build Docker Image
 
 ```bash
-cd physical_ai_tools
+cd cyclo_intelligence
 docker compose -f docker/docker-compose.yml build lerobot
 ```
 
@@ -62,10 +62,10 @@ docker compose -f docker/docker-compose.yml up lerobot
 ## Architecture
 
 ```
-Physical AI Manager (React UI)
+Cyclo Intelligence Web UI (React UI)
         │
         ▼ WebSocket (9090)
-Physical AI Server (ROS2 + rmw_zenoh_cpp)
+Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
         │
         ▼ Zenoh Protocol (7447)
 LeRobot Executor (Docker Container)
@@ -128,7 +128,7 @@ LeRobot Training/Inference APIs
 ### Unit Tests
 
 ```bash
-cd physical_ai_tools/cyclo_brain/policy/lerobot
+cd cyclo_intelligence/cyclo_brain/policy/lerobot
 python -m pytest test_executor.py -v
 ```
 
@@ -180,4 +180,4 @@ export PYTHONPATH="/app/lerobot:$PYTHONPATH"
 - [LeRobot GitHub](https://github.com/huggingface/lerobot)
 - [LeRobot Documentation](https://huggingface.co/lerobot)
 - [Zenoh ROS2 SDK](https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk)
-- [Physical AI Tools Workflow](../../ai_system_agents/opensource_integration_workflow/)
+- [Cyclo Intelligence Workflow](../../ai_system_agents/opensource_integration_workflow/)
