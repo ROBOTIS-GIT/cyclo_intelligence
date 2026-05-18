@@ -1592,7 +1592,7 @@ class RosbagToLerobotConverterBase:
 
         Reads ``videos/<cam>_timestamps.parquet`` written by the
         recorder, maps the EpisodeData log-time grid (sub-second
-        UNIX seconds) onto frame indices via causal lookup, then
+        UNIX seconds) onto nearest header-timestamp frame indices, then
         runs ``video_sync.remux_selected_frames`` to produce a
         ``videos/<cam>_synced.mp4``. The synced MP4 replaces the raw
         recording in ``episode.video_files`` so downstream copy is
@@ -1641,7 +1641,40 @@ class RosbagToLerobotConverterBase:
                 self._log_warning(f"{cam_name}: empty sidecar; skipping sync")
                 synced[cam_name] = src_path
                 continue
-            indices = ft.map_to_grid(grid_ns)
+            time_source = "header"
+            selection_strategy = "nearest"
+            indices = ft.map_to_grid(
+                grid_ns,
+                time_source=time_source,
+                strategy=selection_strategy,
+            )
+            terminal_gray_dropped = False
+            if (
+                ft.num_frames > 1
+                and np.any(indices == ft.num_frames - 1)
+                and self._has_terminal_uniform_gray_frame(src_path)
+            ):
+                affected = int(np.count_nonzero(indices == ft.num_frames - 1))
+                indices = np.minimum(indices, ft.num_frames - 2)
+                terminal_gray_dropped = True
+                self._log_warning(
+                    f"{cam_name}: detected terminal uniform-gray trailer "
+                    f"in source MP4; remapping {affected} selected frame(s) "
+                    f"from index {ft.num_frames - 1} to {ft.num_frames - 2}"
+                )
+            selected_stamps = ft.header_stamp_ns[indices]
+            offsets_ms = (selected_stamps - grid_ns).astype(np.float64) / 1e6
+            offset_threshold_ms = (1000.0 / float(self.config.fps)) * 0.5
+            offset_mask = np.abs(offsets_ms) > offset_threshold_ms
+            if np.any(offset_mask):
+                max_abs_offset = float(np.max(np.abs(offsets_ms)))
+                self._log_warning(
+                    f"{cam_name}: header-nearest sync selected "
+                    f"{int(np.count_nonzero(offset_mask))}/{indices.size} "
+                    f"frame(s) beyond ±0.5 frame "
+                    f"({offset_threshold_ms:.1f}ms); "
+                    f"max_abs_offset={max_abs_offset:.1f}ms"
+                )
             out_path = videos_dir / f"{cam_name}_synced.mp4"
             rotation_extra = int(ui_rotations.get(cam_name, 0) or 0)
             target_fps = int(self.config.fps)
@@ -1663,6 +1696,10 @@ class RosbagToLerobotConverterBase:
                 "rotation_deg": rotation_extra,
                 "image_resize": resize_key,
                 "frame_count": int(indices.size),
+                "time_source": time_source,
+                "selection_strategy": selection_strategy,
+                "terminal_frame_policy": "drop_uniform_gray",
+                "terminal_gray_dropped": terminal_gray_dropped,
             }
             if (
                 out_path.exists()
@@ -1815,6 +1852,39 @@ class RosbagToLerobotConverterBase:
                             ).unlink(missing_ok=True)
 
         return episode
+
+    def _has_terminal_uniform_gray_frame(self, video_path: Path) -> bool:
+        """Detect the recorder's historical gray JPEG trailer in an MP4.
+
+        Older recordings can contain a synthetic final frame used to flush
+        ffmpeg's MJPEG demuxer. It decodes as a completely uniform gray
+        frame and has no matching real camera exposure. Treat only that
+        terminal, near-zero-variance frame as a trailer; normal low-color
+        camera images still have spatial texture and are left untouched.
+        """
+        try:
+            import cv2
+        except Exception:
+            return False
+        cap = cv2.VideoCapture(str(video_path))
+        try:
+            if not cap.isOpened():
+                return False
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if frame_count <= 1:
+                return False
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return False
+            frame_i16 = frame.astype(np.int16)
+            mean_channel_range = float(
+                np.mean(np.max(frame_i16, axis=2) - np.min(frame_i16, axis=2))
+            )
+            spatial_std = float(np.std(frame))
+            return mean_channel_range < 2.0 and spatial_std < 2.0
+        finally:
+            cap.release()
 
     def _trim_video_to_n_frames(self, video_path: Path, n: int) -> None:
         """Truncate ``video_path`` to its first ``n`` frames in place.

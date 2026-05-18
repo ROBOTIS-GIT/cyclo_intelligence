@@ -75,17 +75,18 @@ def _resolve_queue_max() -> int:
 # ffmpeg's mjpeg demuxer doesn't desync.
 _JPEG_SOI = b"\xff\xd8"
 
-# Minimal valid 1x1 grayscale JPEG, written into ffmpeg's stdin right
-# before close() so the demuxer can finalise the last real frame.
+# Fallback JPEG trailer written into ffmpeg's stdin right before close()
+# so the demuxer can finalise the last real frame.
 #
 # Why: ffmpeg's image2pipe+mjpeg demuxer only commits frame N to the
 # muxer when it sees frame N+1's SOI marker — it uses the next SOI as
 # the byte-boundary for the previous frame. On EOF the last buffered
 # frame is dropped, which makes mp4 frame_count = sidecar rows - 1.
-# Feeding one extra full JPEG before close lets that real last frame
-# get demuxed; this sentinel itself has no next-SOI so the demuxer
-# drops it. Verified empirically (synthetic N=5/10/50/100 all recover
-# to exactly N frames with this trailer).
+# Feeding one extra full JPEG before close lets that real last frame get
+# demuxed. In practice ffmpeg can also keep the trailer as the terminal
+# frame, so _write_ffmpeg_sentinel() prefers the last real JPEG payload;
+# if it survives into the MP4, it is a duplicate real image rather than a
+# synthetic gray frame. This fallback only covers streams with no frame.
 _JPEG_SENTINEL = bytes.fromhex(
     "ffd8"                                                          # SOI
     "ffe000104a46494600010100000100010000"                          # APP0 (JFIF)
@@ -126,6 +127,7 @@ class _CameraStream:
     frames_dropped_queue: int = 0
     frames_dropped_invalid: int = 0
     ffmpeg_error: Optional[str] = None
+    last_jpeg_payload: Optional[bytes] = None
 
 
 class VideoRecorder:
@@ -199,6 +201,7 @@ class VideoRecorder:
             stream.frames_dropped_queue = 0
             stream.frames_dropped_invalid = 0
             stream.ffmpeg_error = None
+            stream.last_jpeg_payload = None
 
             self._spawn_ffmpeg(stream)
             stream.writer = pq.ParquetWriter(
@@ -286,6 +289,7 @@ class VideoRecorder:
                 stream.process = None
                 stream.mp4_path = None
                 stream.sidecar_path = None
+                stream.last_jpeg_payload = None
 
         return stats
 
@@ -374,7 +378,9 @@ class VideoRecorder:
             return
         try:
             if not stream.process.stdin.closed:
-                stream.process.stdin.write(_JPEG_SENTINEL)
+                stream.process.stdin.write(
+                    stream.last_jpeg_payload or _JPEG_SENTINEL
+                )
         except (BrokenPipeError, OSError):
             pass
 
@@ -554,6 +560,7 @@ class VideoRecorder:
                 stream.frames_dropped_queue += 1
                 continue
             try:
+                stream.last_jpeg_payload = data
                 proc.stdin.write(data)
             except (BrokenPipeError, OSError) as exc:
                 stream.ffmpeg_error = repr(exc)
