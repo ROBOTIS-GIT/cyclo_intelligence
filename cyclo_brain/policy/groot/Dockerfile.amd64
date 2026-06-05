@@ -83,7 +83,7 @@ RUN pip install --no-cache-dir \
     "pandas==2.2.3" \
     "peft==0.17.1" \
     "termcolor==3.2.0" \
-    "transformers==4.53.0" \
+    "transformers==4.57.3" \
     "tyro==0.9.17" \
     "click==8.1.8" \
     "datasets==3.6.0" \
