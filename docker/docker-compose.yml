@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:${VERSION:-0.2.2}-${ARCH:-arm64}
+    image: robotis/cyclo-intelligence:${VERSION:-1.0.0}-${ARCH:-arm64}
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}

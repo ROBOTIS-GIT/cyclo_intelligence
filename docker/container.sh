@@ -498,7 +498,7 @@ Environment:
   FLASH_ATTN_CUDA_ARCHS
                    CUDA archs for GR00T Blackwell flash-attn builds
                    (default 120)
-  VERSION          image tag version (default: 0.2.2 for cyclo)
+  VERSION          image tag version (default: 1.0.0 for cyclo)
   ROS_DOMAIN_ID    default 30
   CYCLO_STORAGE_MODE
                    auto | ssd | local (default auto). Containers always

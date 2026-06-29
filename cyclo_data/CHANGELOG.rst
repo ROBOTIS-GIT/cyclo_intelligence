@@ -2,6 +2,11 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
 0.2.2 (2026-06-26)
 ------------------
 * Optimized recording startup by caching existing episode metadata scans while initializing and refreshing recording sessions.
