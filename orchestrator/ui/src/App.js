@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree, MdNavigation } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
 import toast from 'react-hot-toast';
@@ -30,10 +30,13 @@ import EditDatasetPage from './pages/EditDatasetPage';
 import BTManagerPage from './pages/BTManagerPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
+import { stopNavigation } from './utils/navigationApi';
 import { useDispatch, useSelector } from 'react-redux';
 import { moveToPage, persistCurrentPage } from './features/ui/uiSlice';
 import { persistRobotType } from './features/tasks/taskSlice';
 import PageType from './constants/pageType';
+
+const NavigationPage = React.lazy(() => import('./pages/NavigationPage'));
 
 function App() {
   const dispatch = useDispatch();
@@ -58,6 +61,7 @@ function App() {
   const taskStatusReceived = recordTopicReceived || inferenceTopicReceived;
 
   const isFirstLoad = useRef(true);
+  const previousPageRef = useRef(page);
 
   // Subscribe to task status from ROS topic (always active)
   const rosSubscriptionControls = useRosTopicSubscription();
@@ -100,6 +104,19 @@ function App() {
 
   useEffect(() => {
     persistCurrentPage(page);
+  }, [page]);
+
+  // Navigation belongs to the Nav page. Stop the external stack when the user
+  // leaves it; keeping this transition at App level avoids StrictMode's
+  // development-only effect cleanup from stopping a freshly mounted page.
+  useEffect(() => {
+    const previousPage = previousPageRef.current;
+    previousPageRef.current = page;
+    if (previousPage === PageType.NAVIGATION && page !== PageType.NAVIGATION) {
+      void stopNavigation().catch((error) => {
+        console.error('Failed to stop Navigation after leaving the Nav page:', error);
+      });
+    }
   }, [page]);
 
   useEffect(() => {
@@ -247,6 +264,11 @@ function App() {
   const handleBTManagerPageNavigation = () => {
     isFirstLoad.current = false;
     dispatch(moveToPage(PageType.BT_MANAGER));
+  };
+
+  const handleNavigationPageNavigation = () => {
+    isFirstLoad.current = false;
+    dispatch(moveToPage(PageType.NAVIGATION));
   };
 
   const classPageButton = clsx(
@@ -409,6 +431,30 @@ function App() {
             <span className="mt-1 text-sm whitespace-nowrap">Data Tools</span>
           </button>
 
+          {/* Replay page button */}
+          <button
+            className={clsx(classPageButton, {
+              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.REPLAY,
+              'bg-gray-300 dark:bg-slate-700': page === PageType.REPLAY,
+            })}
+            onClick={handleReplayPageNavigation}
+          >
+            <MdPlayCircle size={28} className="mb-2" />
+            <span className="mt-1 text-sm whitespace-nowrap">Replay</span>
+          </button>
+
+          {/* Navigation page button - keep this as the last sidebar item. */}
+          <button
+            className={clsx(classPageButton, {
+              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.NAVIGATION,
+              'bg-gray-300 dark:bg-slate-700': page === PageType.NAVIGATION,
+            })}
+            onClick={handleNavigationPageNavigation}
+          >
+            <MdNavigation size={30} className="mb-2" />
+            <span className="mt-1 text-sm whitespace-nowrap">Nav</span>
+          </button>
+
         </div>
       </aside>
       <main className="flex-1 flex flex-col h-screen bg-white dark:bg-slate-950">
@@ -424,6 +470,10 @@ function App() {
           <EditDatasetPage isActive={page === PageType.EDIT_DATASET} />
         ) : page === PageType.BT_MANAGER ? (
           <BTManagerPage isActive={page === PageType.BT_MANAGER} />
+        ) : page === PageType.NAVIGATION ? (
+          <React.Suspense fallback={<div className="flex-1 flex items-center justify-center">Loading Navigation...</div>}>
+            <NavigationPage />
+          </React.Suspense>
         ) : (
           <HomePage />
         )}

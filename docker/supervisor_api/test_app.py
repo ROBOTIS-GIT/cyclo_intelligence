@@ -1,4 +1,6 @@
 import importlib.util
+import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -56,6 +58,163 @@ _resolve_groot_trt_paths = app._resolve_groot_trt_paths
 _trt_status = app._trt_status
 _BACKENDS = app._BACKENDS
 _USER_SERVICES = app._USER_SERVICES
+navigation = sys.modules["supervisor_api.navigation"]
+navigation_grid_cache = sys.modules["supervisor_api.navigation_grid_cache"]
+
+
+def test_navigation_parses_binary_pgm():
+    data = b"P5\n# map\n2 2\n255\n" + bytes([0, 127, 254, 255])
+
+    assert navigation._parse_pgm(data) == (
+        2,
+        2,
+        255,
+        [0, 127, 254, 255],
+    )
+
+
+def test_navigation_rejects_map_path_escape():
+    import pytest
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        navigation._resolve_pgm_path("../../outside.pgm")
+
+
+def test_navigation_validates_map_name():
+    import pytest
+    from fastapi import HTTPException
+
+    assert navigation._validate_map_name("factory-1") == "factory-1"
+    with pytest.raises(HTTPException):
+        navigation._validate_map_name("factory; reboot")
+
+
+def test_navigation_routes_are_registered():
+    paths = {route.path for route in app.app.routes}
+
+    assert "/navigation/status" in paths
+    assert "/navigation/start" in paths
+    assert "/navigation/maps/pgm/save" in paths
+    assert "/navigation/topics/ws" in paths
+
+
+def test_navigation_grid_data_crc32_uses_only_map_data():
+    first = {"info": {"width": 2}, "data": [-1, 0, 100, 0]}
+    same_data = {"info": {"width": 4}, "data": [-1, 0, 100, 0]}
+    changed = {"info": {"width": 2}, "data": [-1, 0, 99, 0]}
+
+    marker = navigation_grid_cache.occupancy_grid_data_crc32(first)
+    assert navigation_grid_cache.occupancy_grid_data_crc32(same_data) == marker
+    assert navigation_grid_cache.occupancy_grid_data_crc32(changed) != marker
+
+
+def test_navigation_grid_cache_serializes_only_changed_data():
+    cache = navigation_grid_cache.OccupancyGridCache("/map")
+
+    cache.cache_ros_message({"info": {"width": 2}, "data": [0, 1]})
+    marker, payload = cache.serialized_if_changed(None)
+    assert json.loads(payload) == {
+        "available": True,
+        "data": {"info": {"width": 2}, "data": [0, 1]},
+    }
+    assert cache.serialized_if_changed(marker) == (marker, None)
+
+    cache.cache_ros_message({"info": {"width": 99}, "data": [0, 1]})
+    metadata_marker, metadata_payload = cache.serialized_if_changed(marker)
+    assert metadata_marker != marker
+    assert json.loads(metadata_payload)["data"]["info"]["width"] == 99
+
+    cache.cache_ros_message({"info": {"width": 2}, "data": [0, 2]})
+    changed_marker, changed_payload = cache.serialized_if_changed(metadata_marker)
+    assert changed_marker != metadata_marker
+    assert json.loads(changed_payload)["data"]["data"] == [0, 2]
+
+
+def test_navigation_grid_websocket_sends_cached_original_topic(monkeypatch):
+    cache = navigation_grid_cache.OccupancyGridCache("/map")
+    cache.cache_ros_message({"info": {"width": 2}, "data": [0, 100]})
+    monkeypatch.setitem(navigation_grid_cache.GRID_CACHES, "/map", cache)
+
+    started = []
+    monkeypatch.setattr(
+        navigation,
+        "ensure_ros_grid_subscriber_started",
+        lambda: started.append(True),
+    )
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.accepted = False
+            self.messages = []
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_text(self, payload):
+            self.messages.append(json.loads(payload))
+
+        async def receive(self):
+            return {"type": "websocket.disconnect"}
+
+    websocket = FakeWebSocket()
+    asyncio.run(asyncio.wait_for(
+        navigation.navigation_grid_websocket(websocket, "/map"),
+        timeout=1.0,
+    ))
+
+    assert websocket.accepted is True
+    assert started == [True]
+    assert websocket.messages == [{
+        "available": True,
+        "data": {"info": {"width": 2}, "data": [0, 100]},
+    }]
+
+
+def test_navigation_ros_exec_environment_matches_server(monkeypatch):
+    monkeypatch.setenv("ROS_DOMAIN_ID", "30")
+    monkeypatch.setenv("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+
+    assert navigation._ros_exec_environment() == {
+        "ROS_DOMAIN_ID": "30",
+        "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    }
+
+
+def test_navigation_goal_passes_ros_environment(monkeypatch):
+    captured = {}
+
+    def fake_exec(command, *, environment=None, timeout=None):
+        captured["command"] = command
+        captured["environment"] = environment
+        return 0, "Goal accepted"
+
+    monkeypatch.setattr(navigation, "_exec", fake_exec)
+    monkeypatch.setenv("ROS_DOMAIN_ID", "30")
+    monkeypatch.setenv("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+
+    result = navigation.send_goal(
+        navigation.NavigateGoalRequest(
+            pose={
+                "header": {"frame_id": "map"},
+                "pose": {
+                    "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+                    "orientation": {
+                        "x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0,
+                    },
+                },
+            }
+        )
+    )
+
+    assert result.ok
+    assert captured["command"][:4] == [
+        "bash", "--noprofile", "--norc", "-c"
+    ]
+    assert captured["environment"] == {
+        "ROS_DOMAIN_ID": "30",
+        "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    }
 
 
 def _container_with_mounts(*destinations):

@@ -60,6 +60,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from supervisor_api.navigation import router as navigation_router
+
 
 logger = logging.getLogger("supervisor_api")
 
@@ -975,6 +977,8 @@ app = FastAPI(
     description=__doc__,
     version="1.0.0",
 )
+
+app.include_router(navigation_router)
 
 
 @app.get("/health", response_model=HealthResponse)

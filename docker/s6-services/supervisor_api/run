@@ -8,6 +8,11 @@ set -e
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/opt/supervisor_api:${PYTHONPATH}
 
+# The Navigation grid WebSocket uses an in-process rclpy subscriber. s6 does
+# not read /root/.bashrc, so make the ROS Python packages visible.
+ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+source "/opt/ros/${ROS_DISTRO}/setup.bash"
+
 HOST="${CYCLO_SUPERVISOR_API_HOST:-127.0.0.1}"
 PORT="${CYCLO_SUPERVISOR_API_PORT:-8100}"
 

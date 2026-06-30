@@ -20,6 +20,7 @@
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^13.5.0",
     "@xyflow/react": "^12.10.1",
+    "ansi-to-html": "^0.7.2",
     "comlink": "^4.4.2",
     "clsx": "^2.1.1",
     "dagre": "^0.8.5",
