@@ -411,6 +411,9 @@ class EpisodeData:
     # ``timestamps``. Populated by ``_resample_to_fps`` so the video
     # sync step can map per-camera MP4 frames onto the same grid.
     grid_log_times_sec: List[float] = field(default_factory=list)
+    # Per-camera frame-reuse reports produced while syncing raw MP4 frames
+    # to the LeRobot grid. Stored on the episode so ProcessPool workers can
+    # return this metadata to the parent writer.
     frame_reuse_reports: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -1548,21 +1551,32 @@ class RosbagToLerobotConverterBase:
         segment_stem: str,
     ) -> Dict[str, Path]:
         """Find raw camera MP4 files for one archived subtask segment."""
-        video_dir = Path(bag_path) / "videos" / segment_stem
-        if not video_dir.exists():
-            videos_root = Path(bag_path) / "videos"
-            if videos_root.exists():
-                raise FileNotFoundError(
-                    f"{bag_path.name}: expected video segment directory "
-                    f"{video_dir.relative_to(bag_path)} for {segment_stem}"
-                )
+        videos_root = Path(bag_path) / "videos"
+        if not videos_root.exists():
             return {}
+        segment_dir = videos_root / segment_stem
+        root_mp4s = [
+            path
+            for path in sorted(videos_root.glob("*.mp4"))
+            if not path.stem.endswith("_synced")
+        ]
+        if not segment_dir.exists() and not root_mp4s:
+            raise FileNotFoundError(
+                f"{bag_path.name}: expected video segment directory "
+                f"{segment_dir.relative_to(bag_path)} for {segment_stem}"
+            )
+        search_dirs = [segment_dir, videos_root]
         video_files: Dict[str, Path] = {}
-        for mp4_file in sorted(video_dir.glob("*.mp4")):
-            if mp4_file.stem.endswith("_synced"):
+        for video_dir in search_dirs:
+            if not video_dir.exists():
                 continue
-            camera_name = self._get_camera_name_for_video(mp4_file.stem)
-            video_files.setdefault(camera_name, mp4_file)
+            for mp4_file in sorted(video_dir.glob("*.mp4")):
+                if mp4_file.stem.endswith("_synced"):
+                    continue
+                camera_name = self._get_camera_name_for_video(mp4_file.stem)
+                video_files.setdefault(camera_name, mp4_file)
+            if video_files:
+                break
         return video_files
 
     def _convert_archived_segment_episode(
@@ -1653,6 +1667,10 @@ class RosbagToLerobotConverterBase:
                     int(single.length) / float(self.config.fps or DEFAULT_FPS),
                 ],
             }]
+            single.frame_reuse_reports = self._merge_segment_frame_reuse_reports(
+                episode_index,
+                [single],
+            )
             self._log_info(
                 f"{bag_path.name}: converted 1 archived subtask segment "
                 "without row/video stitching"
@@ -1740,6 +1758,74 @@ class RosbagToLerobotConverterBase:
             f"subtask segment(s) into {stitched.length} continuous frames"
         )
         return stitched
+
+    def _merge_segment_frame_reuse_reports(
+        self,
+        episode_index: int,
+        segment_episodes: List[EpisodeData],
+    ) -> List[Dict[str, Any]]:
+        """Merge per-segment frame-reuse runs into stitched episode indices."""
+        reports_by_camera: Dict[str, Dict[str, Any]] = {}
+        frame_offset = 0
+        for segment_episode in segment_episodes:
+            segment_length = int(segment_episode.length)
+            for report in segment_episode.frame_reuse_reports:
+                if not isinstance(report, dict):
+                    continue
+                camera = str(report.get("camera", ""))
+                if not camera:
+                    continue
+                merged = reports_by_camera.setdefault(
+                    camera,
+                    {
+                        "episode_index": int(episode_index),
+                        "camera": camera,
+                        "target_fps": int(report.get("target_fps", self.config.fps)),
+                        "time_source": str(report.get("time_source", "header")),
+                        "total_target_frames": 0,
+                        "total_source_frames": 0,
+                        "reused_target_frames": 0,
+                        "reuse_ratio": 0.0,
+                        "clamped_before_first_count": 0,
+                        "runs": [],
+                    },
+                )
+                merged["total_target_frames"] += int(
+                    report.get("total_target_frames", segment_length) or 0
+                )
+                merged["total_source_frames"] += int(
+                    report.get("total_source_frames", 0) or 0
+                )
+                merged["reused_target_frames"] += int(
+                    report.get("reused_target_frames", 0) or 0
+                )
+                merged["clamped_before_first_count"] += int(
+                    report.get("clamped_before_first_count", 0) or 0
+                )
+                for run in report.get("runs") or []:
+                    if not isinstance(run, dict):
+                        continue
+                    shifted = dict(run)
+                    shifted["target_start_frame"] = int(
+                        run.get("target_start_frame", 0)
+                    ) + frame_offset
+                    shifted["target_end_frame"] = int(
+                        run.get("target_end_frame", 0)
+                    ) + frame_offset
+                    merged["runs"].append(shifted)
+            frame_offset += segment_length
+
+        merged_reports: List[Dict[str, Any]] = []
+        for report in reports_by_camera.values():
+            total = int(report.get("total_target_frames", 0) or 0)
+            reused = int(report.get("reused_target_frames", 0) or 0)
+            report["reuse_ratio"] = (float(reused) / float(total)) if total else 0.0
+            report["runs"] = sorted(
+                report.get("runs") or [],
+                key=lambda run: int(run.get("target_start_frame", 0)),
+            )
+            merged_reports.append(report)
+        return sorted(merged_reports, key=lambda report: str(report.get("camera", "")))
 
     def _assign_subtask_indices(self, episode_data: EpisodeData) -> None:
         """Map each output row timestamp to its source subtask segment."""
@@ -2159,6 +2245,21 @@ class RosbagToLerobotConverterBase:
                 for camera_name in sorted(common_cameras)
             }
 
+        stitch_jobs: List[Tuple[str, List[Path]]] = []
+        for camera_name in sorted(common_cameras):
+            srcs = [Path(ep.video_files[camera_name]) for ep in ordered]
+            duplicates = self._duplicate_video_source_paths(srcs)
+            if duplicates:
+                self._log_warning(
+                    f"Skipping stitched video for full_episode={full_idx} "
+                    f"camera={camera_name}: duplicate segment source(s) "
+                    f"would repeat video: {duplicates}"
+                )
+                continue
+            stitch_jobs.append((camera_name, srcs))
+        if not stitch_jobs:
+            return {}
+
         from cyclo_data.converter.video_sync import (
             _ffmpeg,
             _ffmpeg_threads_arg,
@@ -2168,19 +2269,27 @@ class RosbagToLerobotConverterBase:
         out_dir = Path(self.config.output_dir) / "_stitched_subtasks" / f"full_{full_idx:06d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         stitched: Dict[str, Path] = {}
-        for camera_name in sorted(common_cameras):
-            srcs = [Path(ep.video_files[camera_name]) for ep in ordered]
+        for camera_name, srcs in stitch_jobs:
             out_path = out_dir / f"{camera_name}.mp4"
             list_path: Optional[Path] = None
             if out_path.exists():
                 try:
                     out_mtime = out_path.stat().st_mtime
+                    expected_frames = self._stitched_video_expected_frames(srcs)
+                    cached_frames = self._get_video_frame_count(out_path)
                     if (
-                        all(src.exists() and src.stat().st_mtime <= out_mtime for src in srcs)
+                        expected_frames is not None
+                        and cached_frames == expected_frames
+                        and all(src.exists() and src.stat().st_mtime <= out_mtime for src in srcs)
                         and self._video_decodes_successfully(out_path)
                     ):
                         stitched[camera_name] = out_path
                         continue
+                    self._log_warning(
+                        f"{camera_name}: cached stitched video is stale "
+                        f"or wrong length (expected={expected_frames}, "
+                        f"cached={cached_frames}); rebuilding"
+                    )
                 except OSError:
                     pass
 
@@ -2247,6 +2356,32 @@ class RosbagToLerobotConverterBase:
                     except Exception:
                         pass
         return stitched
+
+    @staticmethod
+    def _duplicate_video_source_paths(srcs: List[Path]) -> List[str]:
+        """Return duplicate source identities that would repeat a segment."""
+        seen: set[str] = set()
+        duplicates: List[str] = []
+        for src in srcs:
+            src = Path(src)
+            try:
+                identity = str(src.resolve())
+            except OSError:
+                identity = _fast_absolute_path(src)
+            if identity in seen and identity not in duplicates:
+                duplicates.append(identity)
+            seen.add(identity)
+        return duplicates
+
+    def _stitched_video_expected_frames(self, srcs: List[Path]) -> Optional[int]:
+        """Return the expected stitched frame count from source videos."""
+        total = 0
+        for src in srcs:
+            frame_count = self._get_video_frame_count(Path(src))
+            if frame_count is None or frame_count <= 0:
+                return None
+            total += int(frame_count)
+        return total
 
     def _store_stitched_video_stats_from_sources(
         self,
@@ -3921,7 +4056,9 @@ class RosbagToLerobotConverterBase:
         """Return where synced MP4/cache sidecars should be written."""
         staging_root = os.environ.get(_VIDEO_SYNC_STAGING_DIR_ENV, "").strip()
         if not staging_root:
-            return videos_dir
+            out_dir = Path(videos_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            return out_dir
         videos_dir = Path(videos_dir)
         try:
             identity = str(videos_dir.resolve())
@@ -3931,6 +4068,23 @@ class RosbagToLerobotConverterBase:
         out_dir = Path(staging_root) / "synced" / digest
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
+
+    @staticmethod
+    def _video_sync_cache_base_dir(bag_path: Path, videos_dir: Path) -> Path:
+        """Return the source-side cache namespace for synced segment videos.
+
+        Archived robotis_v2 episodes call ``_sync_videos_to_grid`` once per
+        segment MCAP. When those segments share a flat ``videos/`` directory,
+        writing every segment to ``videos/<cam>_synced.mp4`` makes later
+        segments overwrite earlier ones. Stitching then concatenates the same
+        last synced file repeatedly. Keep the normal per-segment directory fast
+        path, but add a segment-stem namespace for flat roots.
+        """
+        bag_path = Path(bag_path)
+        videos_dir = Path(videos_dir)
+        if bag_path.is_file() and videos_dir.name != bag_path.stem:
+            return videos_dir / ".cyclo_synced" / bag_path.stem
+        return videos_dir
 
     @staticmethod
     def _resolve_video_sync_camera_workers(camera_count: int) -> int:
@@ -4039,7 +4193,8 @@ class RosbagToLerobotConverterBase:
                 grid_ns=grid_ns,
                 frame_timestamps=ft,
             )
-            sync_output_dir = self._video_sync_output_dir(videos_dir)
+            sync_base_dir = self._video_sync_cache_base_dir(bag_path, videos_dir)
+            sync_output_dir = self._video_sync_output_dir(sync_base_dir)
             out_path = sync_output_dir / f"{cam_name}_synced.mp4"
             rotation_extra = int(ui_rotations.get(cam_name, 0) or 0)
             target_fps = int(self.config.fps)
