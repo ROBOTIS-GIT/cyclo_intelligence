@@ -16,29 +16,26 @@
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { MdFolder, MdClose, MdRefresh, MdDashboard } from 'react-icons/md';
+import { MdFolder, MdRefresh, MdDashboard, MdList } from 'react-icons/md';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import FileBrowserModal from '../components/FileBrowserModal';
-import {
-  lttbDownsample,
-  formatTime,
-} from '../utils/chartUtils';
+import { prepareChartData } from '../utils/chartUtils';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   setSelectedBagPath,
   setLoading,
   setReplayData,
-  setTaskMarkers,
-  setSegments,
   setError,
   setCurrentTime,
   setIsPlaying,
   setIsVideoLoaded,
   setVideoLoadProgress,
+  resetReplayState,
 } from '../features/replay/replaySlice';
 import {
+  PANEL_IDS,
   resetToDefaultLayout,
   showPanel,
 } from '../features/layout/layoutSlice';
@@ -54,48 +51,18 @@ import JointDataPanel from '../components/replay/JointDataPanel';
 import SidebarPanel from '../components/replay/SidebarPanel';
 import TimelineControls from '../components/replay/TimelineControls';
 
-const frameFromTime = (time, fps) => Math.round(time * (fps || 30));
+const rosbagNameCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+});
 
-const annotationsFromSegments = (segments, fps) => {
-  if (!Array.isArray(segments) || segments.length === 0) {
-    return { trimStart: null, trimEnd: null, taskMarkers: [] };
-  }
+const sortRosbags = (rosbags) => (
+  [...(rosbags || [])].sort((a, b) => rosbagNameCollator.compare(a.name || '', b.name || ''))
+);
 
-  const sortedSegments = [...segments]
-    .filter((segment) => Array.isArray(segment.frame_duration) && segment.frame_duration.length === 2)
-    .sort((a, b) => a.frame_duration[0] - b.frame_duration[0]);
-
-  if (sortedSegments.length === 0) {
-    return { trimStart: null, trimEnd: null, taskMarkers: [] };
-  }
-
-  const first = sortedSegments[0];
-  const last = sortedSegments[sortedSegments.length - 1];
-  const trimStartTime = Number(first.frame_duration[0]) || 0;
-  const trimEndTime = Number(last.frame_duration[1]) || trimStartTime;
-
-  return {
-    trimStart: {
-      time: trimStartTime,
-      frame: frameFromTime(trimStartTime, fps),
-      instruction: first.sub_task_instruction || 'Start',
-    },
-    trimEnd: {
-      time: trimEndTime,
-      frame: frameFromTime(trimEndTime, fps),
-    },
-    taskMarkers: sortedSegments.slice(1).map((segment) => {
-      const time = Number(segment.frame_duration[0]) || 0;
-      const fallbackIndex = Number.isInteger(segment.sub_task_index)
-        ? segment.sub_task_index + 1
-        : sortedSegments.indexOf(segment) + 1;
-      return {
-        time,
-        frame: frameFromTime(time, fps),
-        instruction: segment.sub_task_instruction || `Segment ${fallbackIndex}`,
-      };
-    }),
-  };
+const basename = (path) => {
+  if (!path) return '';
+  return String(path).split('/').filter(Boolean).pop() || path;
 };
 
 function ReplayPage({ isActive }) {
@@ -111,6 +78,7 @@ function ReplayPage({ isActive }) {
     videoFiles,
     videoNames,
     videoFps,
+    videoSegments,
     bagPath,
     jointTimestamps,
     jointNames,
@@ -122,13 +90,10 @@ function ReplayPage({ isActive }) {
     currentTime,
     isPlaying,
     isVideoLoaded,
-    // eslint-disable-next-line no-unused-vars
-    videoLoadProgress,
     // Extended metadata
     robotType,
     recordingDate,
     fileSizeBytes,
-    taskMarkers,
     segments: replaySegments,
     frameCounts,
     // MCAP direct streaming
@@ -156,17 +121,14 @@ function ReplayPage({ isActive }) {
   const [expandedVideoIndex, setExpandedVideoIndex] = useState(null);
   const [rosbagList, setRosbagList] = useState([]);
   const [currentBagIndex, setCurrentBagIndex] = useState(-1);
-  const [parentFolderPath, setParentFolderPath] = useState('');
+  const [selectedTaskPath, setSelectedTaskPath] = useState('');
+  const [episodeDrawerOpen, setEpisodeDrawerOpen] = useState(true);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   // WebGL rendering mode
   const [useWebGL, setUseWebGL] = useState(true);
   const [videoBrightness, setVideoBrightness] = useState(0);
   const [videoContrast, setVideoContrast] = useState(1);
-
-  // A-B Loop state
-  const [loopStart, setLoopStart] = useState(null);
-  const [loopEnd, setLoopEnd] = useState(null);
 
   // MCAP direct streaming mode detection
   const isDirectMcapMode = isLoaded && hasRawImages && videoFiles.length === 0;
@@ -184,42 +146,10 @@ function ReplayPage({ isActive }) {
     currentTime,
     isPlaying,
     playbackSpeed,
-    loopStart,
-    loopEnd,
+    loopStart: null,
+    loopEnd: null,
     isActive: isDirectMcapMode,
   });
-
-  // Task Marker state
-  const [showMarkerDialog, setShowMarkerDialog] = useState(false);
-  const [pendingMarkerTime, setPendingMarkerTime] = useState(null);
-  const [markerInput, setMarkerInput] = useState('');
-  const [isSavingMarkers, setIsSavingMarkers] = useState(false);
-  const [instructionPalette, setInstructionPalette] = useState(() => {
-    try {
-      const saved = localStorage.getItem('taskInstructionPalette');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        return parsed.instructions || [];
-      }
-    } catch {
-      // Ignore parse errors
-    }
-    return [
-      'Pick up the object',
-      'Move to target position',
-      'Place the object',
-      'Open gripper',
-      'Close gripper',
-    ];
-  });
-  const [newPaletteInput, setNewPaletteInput] = useState('');
-  const [showHelpModal, setShowHelpModal] = useState(false);
-  const [trimStart, setTrimStart] = useState(null);
-  const [trimEnd, setTrimEnd] = useState(null);
-  const [showTrimStartDialog, setShowTrimStartDialog] = useState(false);
-  const [trimStartInstruction, setTrimStartInstruction] = useState('');
-  const [excludeRegions, setExcludeRegions] = useState([]);
-  const [pendingExcludeStart, setPendingExcludeStart] = useState(null);
 
   // Hidden panels dropdown
   const [showPanelMenu, setShowPanelMenu] = useState(false);
@@ -229,10 +159,20 @@ function ReplayPage({ isActive }) {
   // Refs
   const videoRefs = useRef([]);
   const videoCacheRef = useRef(new Map());
-  const markersCacheRef = useRef(new Map());
-  const isLoadingBagRef = useRef(false); // Guard against auto-save during bag load
-  const autoSaveTimerRef = useRef(null);
-  const wasPlayingBeforeTrimRef = useRef(false); // Resume playback after S/E dialog
+  const playbackStateRef = useRef({
+    currentTime: 0,
+    isPlaying: false,
+  });
+  const lastVideoTimeDispatchRef = useRef({
+    time: -1,
+    wallTime: 0,
+  });
+  useEffect(() => {
+    playbackStateRef.current = {
+      currentTime,
+      isPlaying,
+    };
+  }, [currentTime, isPlaying]);
 
   // Calculate video URL for a given index
   const getVideoUrl = useCallback(
@@ -243,6 +183,226 @@ function ReplayPage({ isActive }) {
       return `/files${bagPath}/${videoFile}`;
     },
     [bagPath, videoFiles]
+  );
+
+  const segmentVideoMode = useMemo(
+    () => Array.isArray(videoSegments) && videoSegments.some(
+      (segment) => Array.isArray(segment.video_files) && segment.video_files.length > 0
+    ),
+    [videoSegments]
+  );
+
+  const findVideoSegmentForTime = useCallback(
+    (time) => {
+      if (!segmentVideoMode) return null;
+      const sorted = [...videoSegments]
+        .filter((segment) => Array.isArray(segment.frame_duration) && segment.frame_duration.length === 2)
+        .sort((a, b) => Number(a.frame_duration[0]) - Number(b.frame_duration[0]));
+      if (sorted.length === 0) return null;
+      const clampedTime = Math.max(0, Number(time) || 0);
+      return sorted.find((segment, index) => {
+        const start = Number(segment.frame_duration[0]) || 0;
+        const end = Number(segment.frame_duration[1]) || start;
+        const isLast = index === sorted.length - 1;
+        return clampedTime >= start && (clampedTime < end || isLast);
+      }) || sorted[sorted.length - 1];
+    },
+    [segmentVideoMode, videoSegments]
+  );
+
+  const activeVideoSegment = useMemo(
+    () => findVideoSegmentForTime(currentTime),
+    [findVideoSegmentForTime, currentTime]
+  );
+
+  const globalToVideoTime = useCallback(
+    (time, segment = findVideoSegmentForTime(time)) => {
+      if (!segmentVideoMode || !segment) return Math.max(0, Math.min(duration, time));
+      const start = Number(segment.frame_duration?.[0]) || 0;
+      const end = Number(segment.frame_duration?.[1]) || start;
+      const localDuration = Math.max(0, end - start);
+      return Math.max(0, Math.min(localDuration, (Number(time) || 0) - start));
+    },
+    [duration, findVideoSegmentForTime, segmentVideoMode]
+  );
+
+  const videoTimeToGlobal = useCallback(
+    (localTime, segment = activeVideoSegment) => {
+      if (!segmentVideoMode || !segment) {
+        return Math.max(0, Math.min(duration, localTime));
+      }
+      const start = Number(segment.frame_duration?.[0]) || 0;
+      return Math.max(0, Math.min(duration, start + (Number(localTime) || 0)));
+    },
+    [activeVideoSegment, duration, segmentVideoMode]
+  );
+
+  const currentVideoFiles = useMemo(
+    () => (segmentVideoMode && activeVideoSegment
+      ? (activeVideoSegment.video_files || [])
+      : videoFiles),
+    [activeVideoSegment, segmentVideoMode, videoFiles]
+  );
+
+  const currentVideoNames = useMemo(
+    () => (segmentVideoMode && activeVideoSegment
+      ? (activeVideoSegment.video_names || [])
+      : videoNames),
+    [activeVideoSegment, segmentVideoMode, videoNames]
+  );
+
+  const currentVideoFps = useMemo(
+    () => (segmentVideoMode && activeVideoSegment
+      ? (activeVideoSegment.video_fps || [])
+      : videoFps),
+    [activeVideoSegment, segmentVideoMode, videoFps]
+  );
+
+  const getSegmentVideoUrl = useCallback(
+    (file) => (bagPath && file ? `/files${bagPath}/${file}` : ''),
+    [bagPath]
+  );
+
+  const getVideoSegmentKey = useCallback((segment) => {
+    if (!segment) return '';
+    return [
+      segment.index ?? '',
+      segment.name ?? '',
+      segment.frame_duration?.[0] ?? '',
+      segment.frame_duration?.[1] ?? '',
+    ].join(':');
+  }, []);
+
+  const activeVideoSegmentKey = useMemo(() => {
+    if (!segmentVideoMode || !activeVideoSegment) return '';
+    return getVideoSegmentKey(activeVideoSegment);
+  }, [activeVideoSegment, getVideoSegmentKey, segmentVideoMode]);
+
+  const currentVideoUrls = useMemo(
+    () => {
+      if (!bagPath) return [];
+
+      return currentVideoFiles.map((file) => (
+        getSegmentVideoUrl(file)
+      ));
+    },
+    [
+      bagPath,
+      currentVideoFiles,
+      getSegmentVideoUrl,
+    ]
+  );
+
+  const segmentVideoSets = useMemo(() => {
+    if (!segmentVideoMode || !Array.isArray(videoSegments)) return [];
+
+    return [...videoSegments]
+      .filter((segment) => Array.isArray(segment.video_files) && segment.video_files.length > 0)
+      .sort((a, b) => Number(a.frame_duration?.[0] || 0) - Number(b.frame_duration?.[0] || 0))
+      .map((segment) => {
+        const key = getVideoSegmentKey(segment);
+        const files = segment.video_files || [];
+
+        return {
+          key,
+          index: segment.index,
+          name: segment.name,
+          frameDuration: segment.frame_duration,
+          videoFiles: files,
+          videoNames: segment.video_names || [],
+          urls: files.map((file) => getSegmentVideoUrl(file)),
+        };
+      });
+  }, [
+    getSegmentVideoUrl,
+    getVideoSegmentKey,
+    segmentVideoMode,
+    videoSegments,
+  ]);
+
+  const isVideoElementForSegment = useCallback(
+    (video, segmentKey = activeVideoSegmentKey) => (
+      !segmentVideoMode
+      || !segmentKey
+      || video?.dataset?.segmentKey === segmentKey
+    ),
+    [activeVideoSegmentKey, segmentVideoMode]
+  );
+
+  const getActiveSegmentLocalEnd = useCallback(
+    (metadataLocalEnd, segmentKey = activeVideoSegmentKey, preferredIndex = null) => {
+      if (!Number.isFinite(metadataLocalEnd)) return metadataLocalEnd;
+
+      if (preferredIndex !== null) {
+        const preferredVideo = videoRefs.current[preferredIndex];
+        if (isVideoElementForSegment(preferredVideo, segmentKey)) {
+          const preferredDuration = Number(preferredVideo?.duration);
+          if (Number.isFinite(preferredDuration) && preferredDuration > 0) {
+            return Math.min(metadataLocalEnd, preferredDuration);
+          }
+        }
+      }
+
+      let localEnd = metadataLocalEnd;
+      videoRefs.current.forEach((video) => {
+        if (!isVideoElementForSegment(video, segmentKey)) return;
+        const mediaDuration = Number(video?.duration);
+        if (Number.isFinite(mediaDuration) && mediaDuration > 0) {
+          localEnd = Math.min(localEnd, mediaDuration);
+        }
+      });
+
+      return localEnd;
+    },
+    [activeVideoSegmentKey, isVideoElementForSegment]
+  );
+
+  const setVideoElementRef = useCallback(
+    (index, element) => {
+      videoRefs.current[index] = element;
+      if (!element || isDirectMcapMode) return;
+
+      const syncElementToPlayback = () => {
+        if (videoRefs.current[index] !== element) return;
+
+        const { currentTime: targetTime, isPlaying: shouldPlay } = playbackStateRef.current;
+        const segment = findVideoSegmentForTime(targetTime);
+        const targetSegmentKey = segmentVideoMode ? getVideoSegmentKey(segment) : '';
+        if (!isVideoElementForSegment(element, targetSegmentKey)) return;
+
+        const localTime = globalToVideoTime(targetTime, segment);
+        if (Number.isFinite(localTime)) {
+          try {
+            if (Math.abs(element.currentTime - localTime) > 0.05) {
+              element.currentTime = localTime;
+            }
+          } catch {
+            // Metadata can still be loading while the focused camera view mounts.
+          }
+        }
+
+        element.playbackRate = playbackSpeed;
+        if (shouldPlay) {
+          element.play().catch(() => {});
+        } else {
+          element.pause();
+        }
+      };
+
+      syncElementToPlayback();
+      if (element.readyState < 1) {
+        element.addEventListener('loadedmetadata', syncElementToPlayback, { once: true });
+      }
+    },
+    [
+      findVideoSegmentForTime,
+      getVideoSegmentKey,
+      globalToVideoTime,
+      isDirectMcapMode,
+      isVideoElementForSegment,
+      playbackSpeed,
+      segmentVideoMode,
+    ]
   );
 
   // Download all videos as blobs for smooth playback (with caching)
@@ -329,10 +489,25 @@ function ReplayPage({ isActive }) {
       && videoBlobUrls.length === 0
       && !isDownloading
       && transcodingReady
+      && !segmentVideoMode
     ) {
       downloadVideos();
     }
-  }, [isLoaded, videoFiles.length, videoBlobUrls.length, isDownloading, downloadVideos, transcodingReady]);
+  }, [isLoaded, videoFiles.length, videoBlobUrls.length, isDownloading, downloadVideos, transcodingReady, segmentVideoMode]);
+
+  useEffect(() => {
+    if (isLoaded && segmentVideoMode && currentVideoUrls.length > 0 && transcodingReady) {
+      dispatch(setIsVideoLoaded(true));
+      dispatch(setVideoLoadProgress(100));
+    }
+  }, [isLoaded, segmentVideoMode, currentVideoUrls.length, transcodingReady, dispatch]);
+
+  useEffect(() => {
+    if (!segmentVideoMode) return;
+    setExpandedVideoIndex((index) => (
+      index === null ? null : Math.max(0, Math.min((currentVideoFiles.length || 1) - 1, index))
+    ));
+  }, [currentVideoFiles.length, segmentVideoMode]);
 
   // Cleanup all cached blob URLs on unmount only
   useEffect(() => {
@@ -354,8 +529,12 @@ function ReplayPage({ isActive }) {
   }, [jointNames, actionNames]);
 
   const hasActionData = actionTimestamps.length > 0 && actionNames.length > 0;
+  const chartCurrentTime = useMemo(
+    () => Math.round((Number(currentTime) || 0) * 10) / 10,
+    [currentTime]
+  );
 
-  // Auto-expand all joints when data loads
+  // Auto-expand all joints when data loads.
   useEffect(() => {
     if (allJointNames.length > 0) {
       setExpandedJoints(new Set(allJointNames));
@@ -364,78 +543,38 @@ function ReplayPage({ isActive }) {
 
   // Prepare state chart data
   const stateChartData = useMemo(() => {
-    if (!jointTimestamps.length || !jointNames.length || !jointPositions.length) {
-      return [];
-    }
-
-    const numJoints = jointNames.length;
-    const targetPoints = 1000;
-
-    const fullData = jointTimestamps.map((time, i) => {
-      const point = { time };
-      const startIdx = i * numJoints;
-      jointNames.forEach((name, j) => {
-        point[`state_${name}`] = jointPositions[startIdx + j] || 0;
-      });
-      return point;
-    });
-
-    if (fullData.length <= targetPoints) {
-      return fullData;
-    }
-
-    const firstJointKey = `state_${jointNames[0]}`;
-    const sampledData = lttbDownsample(fullData, targetPoints, 'time', firstJointKey);
-    return sampledData;
+    return prepareChartData(
+      jointTimestamps,
+      jointNames,
+      jointPositions,
+      'state_',
+      1000
+    );
   }, [jointTimestamps, jointNames, jointPositions]);
 
   // Prepare action chart data
   const actionChartData = useMemo(() => {
-    if (!actionTimestamps.length || !actionNames.length || !actionValues.length) {
-      return [];
-    }
-
-    const numActions = actionNames.length;
-    const targetPoints = 1000;
-
-    const fullData = actionTimestamps.map((time, i) => {
-      const point = { time };
-      const startIdx = i * numActions;
-      actionNames.forEach((name, j) => {
-        point[`action_${name}`] = actionValues[startIdx + j] || 0;
-      });
-      return point;
-    });
-
-    if (fullData.length <= targetPoints) {
-      return fullData;
-    }
-
-    const firstActionKey = `action_${actionNames[0]}`;
-    const sampledData = lttbDownsample(fullData, targetPoints, 'time', firstActionKey);
-    return sampledData;
+    return prepareChartData(
+      actionTimestamps,
+      actionNames,
+      actionValues,
+      'action_',
+      1000
+    );
   }, [actionTimestamps, actionNames, actionValues]);
 
-  // Toggle joint expansion by row
+  // Toggle one joint chart at a time.
   const toggleJoint = useCallback((jointName) => {
-    const jointIndex = allJointNames.indexOf(jointName);
-    if (jointIndex === -1) return;
-
-    const rowStart = Math.floor(jointIndex / 3) * 3;
-    const rowJoints = allJointNames.slice(rowStart, rowStart + 3);
-
     setExpandedJoints((prev) => {
       const newSet = new Set(prev);
-      const isRowExpanded = rowJoints.some((name) => prev.has(name));
-
-      if (isRowExpanded) {
-        rowJoints.forEach((name) => newSet.delete(name));
+      if (newSet.has(jointName)) {
+        newSet.delete(jointName);
       } else {
-        rowJoints.forEach((name) => newSet.add(name));
+        newSet.add(jointName);
       }
       return newSet;
     });
-  }, [allJointNames]);
+  }, []);
 
   const expandAllJoints = useCallback(() => {
     setExpandedJoints(new Set(allJointNames));
@@ -445,164 +584,86 @@ function ReplayPage({ isActive }) {
     setExpandedJoints(new Set());
   }, []);
 
-  const restoreReplayEditingState = useCallback((result) => {
-    const hasSavedMarkers = Array.isArray(result.task_markers) && result.task_markers.length > 0;
-    const hasTrimPoints = Boolean(result.trim_points);
+  const loadEpisode = useCallback(
+    async (bag, index, options = {}) => {
+      if (!bag?.path) return;
 
-    if (hasTrimPoints) {
-      const tp = result.trim_points;
-      if (tp.start) {
-        setTrimStart({
-          time: tp.start.time,
-          frame: tp.start.frame,
-          instruction: tp.start.instruction || 'Start',
-        });
-      }
-      if (tp.end) {
-        setTrimEnd({ time: tp.end.time, frame: tp.end.frame });
-      }
-    } else if (!hasSavedMarkers && Array.isArray(result.segments) && result.segments.length > 0) {
-      const restored = annotationsFromSegments(result.segments, result.video_fps?.[0] || 30);
-      if (restored.trimStart) {
-        setTrimStart(restored.trimStart);
-      }
-      if (restored.trimEnd) {
-        setTrimEnd(restored.trimEnd);
-      }
-      if (restored.taskMarkers.length > 0) {
-        dispatch(setTaskMarkers(restored.taskMarkers));
-      }
-    }
+      setCurrentBagIndex(index);
+      setVideoBlobUrls([]);
+      setDownloadProgress(0);
+      setExpandedVideoIndex(null);
+      dispatch(setSelectedBagPath(bag.path));
+      dispatch(setLoading(true));
+      dispatch(setIsVideoLoaded(false));
 
-    if (result.exclude_regions && result.exclude_regions.length > 0) {
-      setExcludeRegions(result.exclude_regions);
-    }
-  }, [dispatch]);
-
-  const buildSegmentsForSave = useCallback(() => {
-    const anchors = [];
-    if (trimStart) {
-      anchors.push({
-        time: trimStart.time,
-        instruction: trimStart.instruction || 'Start',
-      });
-    }
-    [...taskMarkers]
-      .sort((a, b) => a.time - b.time)
-      .forEach((marker) => {
-        anchors.push({
-          time: marker.time,
-          instruction: marker.instruction || '',
-        });
-      });
-
-    if (anchors.length === 0) {
-      return replaySegments.length > 0 ? [] : null;
-    }
-
-    const finalEnd = trimEnd?.time ?? duration;
-    return anchors
-      .map((anchor, index) => {
-        const next = anchors[index + 1];
-        const end = next ? next.time : finalEnd;
-        return {
-          sub_task_instruction: anchor.instruction,
-          frame_duration: [anchor.time, end],
-        };
-      })
-      .filter((segment) => segment.frame_duration[1] >= segment.frame_duration[0]);
-  }, [duration, replaySegments.length, taskMarkers, trimEnd, trimStart]);
-
-  const buildSaveData = useCallback(() => {
-    const saveData = { task_markers: taskMarkers };
-
-    if (trimStart || trimEnd) {
-      saveData.trim_points = {
-        start: trimStart ? {
-          time: trimStart.time,
-          frame: trimStart.frame,
-          instruction: trimStart.instruction,
-        } : null,
-        end: trimEnd ? { time: trimEnd.time, frame: trimEnd.frame } : null,
-      };
-    }
-
-    if (excludeRegions.length > 0) {
-      saveData.exclude_regions = excludeRegions.map((region) => ({
-        start: { time: region.start.time, frame: region.start.frame },
-        end: { time: region.end.time, frame: region.end.frame },
-      }));
-    }
-
-    const segments = buildSegmentsForSave();
-    if (segments !== null) {
-      saveData.segments = segments;
-    }
-
-    return saveData;
-  }, [buildSegmentsForSave, excludeRegions, taskMarkers, trimEnd, trimStart]);
-
-  // Handle bag selection
-  const handleSelectBag = async (path) => {
-    setShowFileBrowser(false);
-    isLoadingBagRef.current = true;
-
-    if (bagPath && taskMarkers.length > 0) {
-      markersCacheRef.current.set(bagPath, [...taskMarkers]);
-    }
-
-    dispatch(setSelectedBagPath(path));
-    dispatch(setLoading(true));
-
-    // Clear previous bag's editing state
-    setTrimStart(null);
-    setTrimEnd(null);
-    setLoopStart(null);
-    setLoopEnd(null);
-    setExcludeRegions([]);
-    setPendingExcludeStart(null);
-
-    const parentPath = path.substring(0, path.lastIndexOf('/'));
-    if (parentPath && parentPath !== parentFolderPath) {
-      setParentFolderPath(parentPath);
       try {
-        const listResult = await getRosbagList(parentPath);
-        if (listResult.success && listResult.rosbags) {
-          setRosbagList(listResult.rosbags);
-          const idx = listResult.rosbags.findIndex((bag) => bag.path === path);
-          setCurrentBagIndex(idx);
+        const result = await getReplayData(bag.path);
+        if (result.success) {
+          dispatch(setReplayData(result));
+          if (options.showToast !== false) {
+            toast.success(`Loaded episode ${bag.name}`);
+          }
+        } else {
+          dispatch(setError(result.message));
+          toast.error(`Failed to load episode: ${result.message}`);
         }
       } catch (err) {
-        console.error('Failed to load rosbag list:', err);
+        dispatch(setError(err.message));
+        toast.error(`Error loading episode: ${err.message}`);
       }
-    } else {
-      const idx = rosbagList.findIndex((bag) => bag.path === path);
-      setCurrentBagIndex(idx);
-    }
+    },
+    [dispatch, getReplayData]
+  );
 
-    try {
-      const result = await getReplayData(path);
-      if (result.success) {
-        const cachedMarkers = markersCacheRef.current.get(path);
-        if (cachedMarkers && cachedMarkers.length > 0) {
-          result.task_markers = cachedMarkers;
-          toast('Restored cached markers');
+  const handleSelectTaskFolder = useCallback(
+    async (path) => {
+      if (!path) return;
+
+      setShowFileBrowser(false);
+      setSelectedTaskPath(path);
+      setEpisodeDrawerOpen(true);
+      setRosbagList([]);
+      setCurrentBagIndex(-1);
+      setVideoBlobUrls([]);
+      setDownloadProgress(0);
+      dispatch(resetReplayState());
+      dispatch(setLoading(true));
+
+      try {
+        const listResult = await getRosbagList(path);
+        if (!listResult.success) {
+          dispatch(setError(listResult.message || 'Failed to load task folder'));
+          toast.error(listResult.message || 'Failed to load task folder');
+          return;
         }
-        dispatch(setReplayData(result));
-        restoreReplayEditingState(result);
-        toast.success('Replay data loaded successfully');
-      } else {
-        dispatch(setError(result.message));
-        toast.error(`Failed to load replay data: ${result.message}`);
+
+        const rosbags = sortRosbags(listResult.rosbags || []);
+        if (rosbags.length === 0) {
+          const message = 'No episodes found. Select the task folder that directly contains numbered episode folders with metadata.yaml.';
+          dispatch(setError(message));
+          toast.error(message);
+          return;
+        }
+
+        setRosbagList(rosbags);
+        await loadEpisode(rosbags[0], 0, { showToast: false });
+        toast.success(`Loaded task: ${basename(path)} (${rosbags.length} episodes)`);
+      } catch (err) {
+        dispatch(setError(err.message));
+        toast.error(`Error loading task folder: ${err.message}`);
       }
-    } catch (err) {
-      dispatch(setError(err.message));
-      toast.error(`Error loading replay data: ${err.message}`);
-    } finally {
-      // Allow auto-save after load settles
-      setTimeout(() => { isLoadingBagRef.current = false; }, 500);
-    }
-  };
+    },
+    [dispatch, getRosbagList, loadEpisode]
+  );
+
+  const handleSelectBag = useCallback(
+    async (path) => {
+      const index = rosbagList.findIndex((bag) => bag.path === path);
+      if (index < 0) return;
+      await loadEpisode(rosbagList[index], index);
+    },
+    [loadEpisode, rosbagList]
+  );
 
   // Navigate to previous/next rosbag
   const navigateRosbag = useCallback(
@@ -613,68 +674,124 @@ function ReplayPage({ isActive }) {
       const newIndex = direction === 'prev' ? currentBagIndex - 1 : currentBagIndex + 1;
       if (newIndex < 0 || newIndex >= rosbagList.length) return;
 
-      if (bagPath && taskMarkers.length > 0) {
-        markersCacheRef.current.set(bagPath, [...taskMarkers]);
-      }
-
-      isLoadingBagRef.current = true;
       const newBag = rosbagList[newIndex];
-      setCurrentBagIndex(newIndex);
-      dispatch(setSelectedBagPath(newBag.path));
-      dispatch(setLoading(true));
-
-      setVideoBlobUrls([]);
-      setDownloadProgress(0);
-      dispatch(setIsVideoLoaded(false));
-
-      setTrimStart(null);
-      setTrimEnd(null);
-      setLoopStart(null);
-      setLoopEnd(null);
-      setExcludeRegions([]);
-      setPendingExcludeStart(null);
-
-      try {
-        const result = await getReplayData(newBag.path);
-        if (result.success) {
-          const cachedMarkers = markersCacheRef.current.get(newBag.path);
-          if (cachedMarkers && cachedMarkers.length > 0) {
-            result.task_markers = cachedMarkers;
-            toast('Restored cached markers');
-          }
-          dispatch(setReplayData(result));
-          restoreReplayEditingState(result);
-          toast.success(`Loaded: ${newBag.name}`);
-        } else {
-          dispatch(setError(result.message));
-          toast.error(`Failed to load: ${result.message}`);
-        }
-      } catch (err) {
-        dispatch(setError(err.message));
-        toast.error(`Error: ${err.message}`);
-      } finally {
-        setTimeout(() => { isLoadingBagRef.current = false; }, 500);
-      }
+      await loadEpisode(newBag, newIndex);
     },
-    [rosbagList, currentBagIndex, isDownloading, dispatch, getReplayData, bagPath, taskMarkers, restoreReplayEditingState]
+    [rosbagList, currentBagIndex, isDownloading, loadEpisode]
   );
 
   // Handle video events
   useEffect(() => {
-    if (!isVideoLoaded || videoBlobUrls.length === 0) return;
+    const activeVideoUrlCount = segmentVideoMode ? currentVideoUrls.length : videoBlobUrls.length;
+    if (!isVideoLoaded || activeVideoUrlCount === 0) return;
 
-    const videos = videoRefs.current;
+    const videos = videoRefs.current.slice();
 
-    const handleTimeUpdate = () => {
-      const video = expandedVideoIndex !== null ? videos[expandedVideoIndex] : videos.find(v => v);
-      if (video) {
-        dispatch(setCurrentTime(video.currentTime));
-      }
+    const isCurrentActiveVideo = (eventTarget) => {
+      const index = videos.indexOf(eventTarget);
+      return index >= 0 && videoRefs.current[index] === eventTarget;
     };
 
-    const handleEnded = () => {
-      dispatch(setIsPlaying(false));
-      dispatch(setCurrentTime(duration));
+    const getDriverVideoIndex = () => {
+      if (expandedVideoIndex !== null) return expandedVideoIndex;
+      return videoRefs.current.findIndex((video) => isVideoElementForSegment(video));
+    };
+
+    const getDriverVideo = () => {
+      const driverIndex = getDriverVideoIndex();
+      return driverIndex >= 0 ? videoRefs.current[driverIndex] : null;
+    };
+
+    const handleTimeUpdate = (event) => {
+      if (!isCurrentActiveVideo(event.currentTarget)) return;
+      if (!isVideoElementForSegment(event.currentTarget)) return;
+
+      const video = getDriverVideo();
+      if (!video || event.currentTarget !== video) return;
+
+      let nextTime = videoTimeToGlobal(video.currentTime);
+      const { currentTime: lastKnownTime, isPlaying: currentlyPlaying } = playbackStateRef.current;
+      if (currentlyPlaying && nextTime < lastKnownTime - 1 / 60) return;
+      if (!currentlyPlaying && Math.abs(nextTime - lastKnownTime) > 0.5) return;
+
+      let isSegmentBoundaryTransition = false;
+      if (segmentVideoMode && activeVideoSegment && currentlyPlaying) {
+        const segmentEnd = Number(activeVideoSegment.frame_duration?.[1]);
+        const metadataLocalEnd = globalToVideoTime(segmentEnd, activeVideoSegment);
+        const driverIndex = getDriverVideoIndex();
+        const localEnd = getActiveSegmentLocalEnd(
+          metadataLocalEnd,
+          activeVideoSegmentKey,
+          driverIndex >= 0 ? driverIndex : null
+        );
+        const fps = (
+          currentVideoFps[driverIndex]
+          || currentVideoFps[0]
+          || videoFps[driverIndex]
+          || videoFps[0]
+          || 30
+        );
+        const transitionEpsilon = Math.max(1 / fps, 1 / 60);
+
+        if (
+          Number.isFinite(segmentEnd)
+          && segmentEnd < duration - 0.001
+          && Number.isFinite(localEnd)
+          && localEnd - video.currentTime <= transitionEpsilon
+        ) {
+          nextTime = segmentEnd;
+          isSegmentBoundaryTransition = true;
+        }
+      }
+
+      const now = performance.now();
+      const last = lastVideoTimeDispatchRef.current;
+      if (
+        !isSegmentBoundaryTransition
+        &&
+        currentlyPlaying
+        && Math.abs(nextTime - last.time) < 1 / 30
+        && now - last.wallTime < 80
+      ) {
+        return;
+      }
+
+      lastVideoTimeDispatchRef.current = {
+        time: nextTime,
+        wallTime: now,
+      };
+      playbackStateRef.current = {
+        ...playbackStateRef.current,
+        currentTime: nextTime,
+      };
+      dispatch(setCurrentTime(nextTime));
+    };
+
+    const handleEnded = (event) => {
+      if (!isCurrentActiveVideo(event.currentTarget)) return;
+      if (!isVideoElementForSegment(event.currentTarget)) return;
+
+      const video = getDriverVideo();
+      if (video && event.currentTarget !== video) return;
+
+      const segmentEnd = segmentVideoMode && activeVideoSegment
+        ? Number(activeVideoSegment.frame_duration?.[1]) || duration
+        : duration;
+      const nextTime = Math.min(duration, segmentEnd);
+      const shouldStop = !segmentVideoMode || segmentEnd >= duration - 0.01;
+      lastVideoTimeDispatchRef.current = {
+        time: nextTime,
+        wallTime: performance.now(),
+      };
+      playbackStateRef.current = {
+        ...playbackStateRef.current,
+        currentTime: nextTime,
+        isPlaying: shouldStop ? false : playbackStateRef.current.isPlaying,
+      };
+      dispatch(setCurrentTime(nextTime));
+      if (shouldStop) {
+        dispatch(setIsPlaying(false));
+      }
     };
 
     videos.forEach((video) => {
@@ -692,20 +809,97 @@ function ReplayPage({ isActive }) {
         }
       });
     };
-  }, [isVideoLoaded, videoBlobUrls.length, duration, dispatch, expandedVideoIndex]);
+  }, [
+    isVideoLoaded,
+    videoBlobUrls.length,
+    currentVideoUrls.length,
+    duration,
+    dispatch,
+    expandedVideoIndex,
+    getActiveSegmentLocalEnd,
+    globalToVideoTime,
+    isVideoElementForSegment,
+    segmentVideoMode,
+    activeVideoSegment,
+    activeVideoSegmentKey,
+    currentVideoFps,
+    videoTimeToGlobal,
+    videoFps,
+  ]);
 
-  // A-B Loop: Jump to A when reaching B (video mode only — MCAP handles looping internally)
   useEffect(() => {
-    if (isDirectMcapMode) return; // MCAP player's rAF loop handles A-B looping
-    if (!isPlaying || loopStart === null || loopEnd === null) return;
+    if (!isVideoLoaded || isDirectMcapMode || !segmentVideoMode) return;
+    const localTime = globalToVideoTime(currentTime, activeVideoSegment);
 
-    if (currentTime >= loopEnd) {
-      videoRefs.current.forEach((v) => {
-        if (v) v.currentTime = loopStart;
+    videoRefs.current.forEach((video) => {
+      if (!video) return;
+      if (!isVideoElementForSegment(video)) return;
+
+      if (!isPlaying && Number.isFinite(localTime) && Math.abs(video.currentTime - localTime) > 0.05) {
+        try {
+          video.currentTime = localTime;
+        } catch {
+          // Metadata may still be settling just after the active segment switches.
+        }
+      }
+
+      video.playbackRate = playbackSpeed;
+      if (isPlaying) {
+        if (video.paused) {
+          video.play().catch(() => {});
+        }
+      } else if (!video.paused) {
+        video.pause();
+      }
+    });
+  }, [
+    activeVideoSegment,
+    currentVideoUrls.length,
+    currentTime,
+    globalToVideoTime,
+    isDirectMcapMode,
+    isPlaying,
+    isVideoLoaded,
+    isVideoElementForSegment,
+    playbackSpeed,
+    segmentVideoMode,
+    expandedVideoIndex,
+  ]);
+
+  const syncVideosToGlobalTime = useCallback(
+    (time, playback = 'keep') => {
+      const segment = findVideoSegmentForTime(time);
+      const segmentKey = segmentVideoMode ? getVideoSegmentKey(segment) : '';
+      const localTime = globalToVideoTime(time, segment);
+      playbackStateRef.current = {
+        currentTime: time,
+        isPlaying: playback === 'play'
+          ? true
+          : playback === 'pause'
+            ? false
+            : playbackStateRef.current.isPlaying,
+      };
+      videoRefs.current.forEach((video) => {
+        if (!video) return;
+        if (!isVideoElementForSegment(video, segmentKey)) return;
+        video.currentTime = localTime;
+        video.playbackRate = playbackSpeed;
+        if (playback === 'play') {
+          video.play().catch(() => {});
+        } else if (playback === 'pause') {
+          video.pause();
+        }
       });
-      dispatch(setCurrentTime(loopStart));
-    }
-  }, [currentTime, isPlaying, loopStart, loopEnd, isDirectMcapMode, dispatch]);
+    },
+    [
+      findVideoSegmentForTime,
+      getVideoSegmentKey,
+      globalToVideoTime,
+      isVideoElementForSegment,
+      playbackSpeed,
+      segmentVideoMode,
+    ]
+  );
 
   // Unified seek-and-play: seeks to time and starts playback (handles both MCAP and video modes)
   const seekAndPlay = useCallback((time) => {
@@ -716,13 +910,11 @@ function ReplayPage({ isActive }) {
         mcapPlayer.playAll();
       }
     } else {
-      videoRefs.current.forEach((v) => {
-        if (v) { v.currentTime = clamped; v.play().catch(() => {}); }
-      });
+      syncVideosToGlobalTime(clamped, 'play');
       dispatch(setCurrentTime(clamped));
       dispatch(setIsPlaying(true));
     }
-  }, [duration, isDirectMcapMode, isPlaying, mcapPlayer, dispatch]);
+  }, [duration, isDirectMcapMode, isPlaying, mcapPlayer, syncVideosToGlobalTime, dispatch]);
 
   // Unified seek-to-time: seeks without changing play state (handles both MCAP and video modes)
   const seekToTime = useCallback((time) => {
@@ -730,27 +922,10 @@ function ReplayPage({ isActive }) {
     if (isDirectMcapMode) {
       mcapPlayer.syncToTime(clamped);
     } else {
-      videoRefs.current.forEach((v) => {
-        if (v) v.currentTime = clamped;
-      });
+      syncVideosToGlobalTime(clamped);
       dispatch(setCurrentTime(clamped));
     }
-  }, [duration, isDirectMcapMode, mcapPlayer, dispatch]);
-
-  // Unified seek-and-pause: pauses playback then seeks (handles both MCAP and video modes)
-  const seekAndPause = useCallback((time) => {
-    const clamped = Math.max(0, Math.min(duration, time));
-    if (isDirectMcapMode) {
-      if (isPlaying) mcapPlayer.pauseAll();
-      mcapPlayer.syncToTime(clamped);
-    } else {
-      videoRefs.current.forEach((v) => {
-        if (v) { v.pause(); v.currentTime = clamped; }
-      });
-      dispatch(setCurrentTime(clamped));
-      dispatch(setIsPlaying(false));
-    }
-  }, [duration, isPlaying, isDirectMcapMode, mcapPlayer, dispatch]);
+  }, [duration, isDirectMcapMode, mcapPlayer, syncVideosToGlobalTime, dispatch]);
 
   // Handle play/pause
   const togglePlayPause = useCallback(() => {
@@ -763,28 +938,18 @@ function ReplayPage({ isActive }) {
       videoRefs.current.forEach((video) => {
         if (video) video.pause();
       });
+      playbackStateRef.current = {
+        ...playbackStateRef.current,
+        isPlaying: false,
+      };
       dispatch(setIsPlaying(false));
     } else {
-      const firstVideo = videoRefs.current[0];
-
-      if (firstVideo && firstVideo.ended) {
-        videoRefs.current.forEach((video) => {
-          if (video) video.currentTime = 0;
-        });
-        dispatch(setCurrentTime(0));
-      } else {
-        const targetTime = firstVideo?.currentTime || 0;
-        videoRefs.current.forEach((video) => {
-          if (video) video.currentTime = targetTime;
-        });
-      }
-
-      videoRefs.current.forEach((video) => {
-        if (video) video.play().catch(() => {});
-      });
+      const targetTime = currentTime >= duration ? 0 : currentTime;
+      syncVideosToGlobalTime(targetTime, 'play');
+      dispatch(setCurrentTime(targetTime));
       dispatch(setIsPlaying(true));
     }
-  }, [isPlaying, isDirectMcapMode, mcapPlayer, dispatch]);
+  }, [currentTime, duration, isPlaying, isDirectMcapMode, mcapPlayer, syncVideosToGlobalTime, dispatch]);
 
   // Restart playback
   const restartPlayback = useCallback(() => {
@@ -793,15 +958,10 @@ function ReplayPage({ isActive }) {
       return;
     }
 
-    videoRefs.current.forEach((video) => {
-      if (video) {
-        video.currentTime = 0;
-        video.play().catch(() => {});
-      }
-    });
+    syncVideosToGlobalTime(0, 'play');
     dispatch(setCurrentTime(0));
     dispatch(setIsPlaying(true));
-  }, [isDirectMcapMode, mcapPlayer, dispatch]);
+  }, [isDirectMcapMode, mcapPlayer, syncVideosToGlobalTime, dispatch]);
 
   // Step frame forward or backward
   const stepFrame = useCallback(
@@ -815,20 +975,29 @@ function ReplayPage({ isActive }) {
 
       if (isPlaying) {
         videoRefs.current.forEach((v) => v?.pause());
+        playbackStateRef.current = {
+          ...playbackStateRef.current,
+          isPlaying: false,
+        };
         dispatch(setIsPlaying(false));
       }
 
-      const fps = videoFps[0] || 30;
+      const fpsIndex = expandedVideoIndex ?? 0;
+      const fps = (
+        currentVideoFps[fpsIndex]
+        || currentVideoFps[0]
+        || videoFps[fpsIndex]
+        || videoFps[0]
+        || 30
+      );
       const frameTime = 1 / fps;
       const delta = direction === 'forward' ? frameTime : -frameTime;
       const newTime = Math.max(0, Math.min(duration, currentTime + delta));
 
-      videoRefs.current.forEach((v) => {
-        if (v) v.currentTime = newTime;
-      });
+      syncVideosToGlobalTime(newTime);
       dispatch(setCurrentTime(newTime));
     },
-    [isVideoLoaded, isPlaying, isDirectMcapMode, mcapPlayer, videoFps, duration, currentTime, dispatch]
+    [isVideoLoaded, isPlaying, isDirectMcapMode, mcapPlayer, currentVideoFps, videoFps, expandedVideoIndex, duration, currentTime, syncVideosToGlobalTime, dispatch]
   );
 
   // Seek relative
@@ -842,385 +1011,11 @@ function ReplayPage({ isActive }) {
       if (!isVideoLoaded) return;
 
       const newTime = Math.max(0, Math.min(duration, currentTime + seconds));
-      videoRefs.current.forEach((v) => {
-        if (v) v.currentTime = newTime;
-      });
+      syncVideosToGlobalTime(newTime);
       dispatch(setCurrentTime(newTime));
     },
-    [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, currentTime, dispatch]
+    [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, currentTime, syncVideosToGlobalTime, dispatch]
   );
-
-  // Toggle A-B loop points
-  const toggleLoopPoint = useCallback(() => {
-    if (!isVideoLoaded) return;
-
-    if (loopStart === null) {
-      setLoopStart(currentTime);
-      toast(`Loop A set at ${formatTime(currentTime)}`);
-    } else if (loopEnd === null) {
-      if (currentTime > loopStart) {
-        setLoopEnd(currentTime);
-        toast(`Loop B set at ${formatTime(currentTime)}`);
-      } else {
-        setLoopStart(currentTime);
-        toast(`Loop A updated to ${formatTime(currentTime)}`);
-      }
-    } else {
-      setLoopStart(currentTime);
-      setLoopEnd(null);
-      toast(`Loop A set at ${formatTime(currentTime)}`);
-    }
-  }, [isVideoLoaded, loopStart, loopEnd, currentTime]);
-
-  const clearLoop = useCallback(() => {
-    setLoopStart(null);
-    setLoopEnd(null);
-    toast('Loop cleared');
-  }, []);
-
-  // ===== Task Marker Callbacks =====
-
-  const openMarkerDialog = useCallback(() => {
-    if (!isVideoLoaded) return;
-
-    if (!trimStart) {
-      toast.error('Please set Start point first (press S)');
-      return;
-    }
-
-    if (isPlaying) {
-      videoRefs.current.forEach((v) => v?.pause());
-      dispatch(setIsPlaying(false));
-    }
-
-    setPendingMarkerTime(currentTime);
-    setMarkerInput('');
-    setShowMarkerDialog(true);
-  }, [isVideoLoaded, isPlaying, currentTime, dispatch, trimStart]);
-
-  const addMarker = useCallback((instruction) => {
-    if (pendingMarkerTime === null || !instruction.trim()) return;
-
-    const fps = videoFps[0] || 30;
-    const frame = Math.round(pendingMarkerTime * fps);
-
-    const newMarker = {
-      frame: frame,
-      time: pendingMarkerTime,
-      instruction: instruction.trim(),
-    };
-
-    const updatedMarkers = [...taskMarkers, newMarker].sort((a, b) => a.frame - b.frame);
-    dispatch(setTaskMarkers(updatedMarkers));
-
-    setShowMarkerDialog(false);
-    setPendingMarkerTime(null);
-    setMarkerInput('');
-    toast.success(`Marker added at frame ${frame}: "${instruction.trim()}"`);
-  }, [pendingMarkerTime, videoFps, taskMarkers, dispatch]);
-
-  const deleteNearestMarker = useCallback(() => {
-    if (!taskMarkers.length) {
-      toast('No markers to delete');
-      return;
-    }
-
-    let nearestIndex = 0;
-    let minDiff = Math.abs(taskMarkers[0].time - currentTime);
-
-    taskMarkers.forEach((marker, index) => {
-      const diff = Math.abs(marker.time - currentTime);
-      if (diff < minDiff) {
-        minDiff = diff;
-        nearestIndex = index;
-      }
-    });
-
-    if (minDiff > 2) {
-      toast('No marker within 2 seconds');
-      return;
-    }
-
-    const deletedMarker = taskMarkers[nearestIndex];
-    const updatedMarkers = taskMarkers.filter((_, i) => i !== nearestIndex);
-    dispatch(setTaskMarkers(updatedMarkers));
-    toast(`Deleted: "${deletedMarker.instruction}"`);
-  }, [taskMarkers, currentTime, dispatch]);
-
-  const jumpToMarker = useCallback((index) => {
-    if (index < 0 || index >= taskMarkers.length) {
-      toast(`No marker at position ${index + 1}`);
-      return;
-    }
-
-    const marker = taskMarkers[index];
-    videoRefs.current.forEach((v) => {
-      if (v) v.currentTime = marker.time;
-    });
-    dispatch(setCurrentTime(marker.time));
-    toast(`Jumped to: "${marker.instruction}"`);
-  }, [taskMarkers, dispatch]);
-
-  const openTrimStartDialog = useCallback(() => {
-    if (!isVideoLoaded) return;
-    // Remember play state and pause
-    wasPlayingBeforeTrimRef.current = isPlaying;
-    if (isPlaying) {
-      if (isDirectMcapMode) {
-        mcapPlayer.pauseAll();
-      } else {
-        videoRefs.current.forEach((v) => v?.pause());
-      }
-      dispatch(setIsPlaying(false));
-    }
-    setTrimStartInstruction(trimStart?.instruction || '');
-    setShowTrimStartDialog(true);
-  }, [isVideoLoaded, isPlaying, isDirectMcapMode, mcapPlayer, dispatch, trimStart]);
-
-  const applyTrimStart = useCallback((instruction) => {
-    const fps = videoFps[0] || 30;
-    const frame = Math.round(currentTime * fps);
-    setTrimStart({
-      time: currentTime,
-      frame,
-      instruction: instruction.trim() || 'Start',
-    });
-    setShowTrimStartDialog(false);
-    toast(`Start point set at ${formatTime(currentTime)} (frame ${frame})`);
-    // Resume playback if it was playing before dialog opened
-    if (wasPlayingBeforeTrimRef.current) {
-      wasPlayingBeforeTrimRef.current = false;
-      seekAndPlay(currentTime);
-    }
-  }, [currentTime, videoFps, seekAndPlay]);
-
-  const applyTrimEnd = useCallback(() => {
-    if (!isVideoLoaded) return;
-    // Remember play state and pause briefly
-    const wasPlaying = isPlaying;
-    if (isPlaying) {
-      if (isDirectMcapMode) {
-        mcapPlayer.pauseAll();
-      } else {
-        videoRefs.current.forEach((v) => v?.pause());
-      }
-      dispatch(setIsPlaying(false));
-    }
-    const fps = videoFps[0] || 30;
-    const frame = Math.round(currentTime * fps);
-    setTrimEnd({ time: currentTime, frame });
-    toast(`End point set at ${formatTime(currentTime)}`);
-    // Resume playback if it was playing
-    if (wasPlaying) {
-      seekAndPlay(currentTime);
-    }
-  }, [isVideoLoaded, isPlaying, isDirectMcapMode, mcapPlayer, dispatch, currentTime, videoFps, seekAndPlay]);
-
-  const clearTrimPoints = useCallback(() => {
-    setTrimStart(null);
-    setTrimEnd(null);
-    toast('Trim points cleared');
-  }, []);
-
-  const toggleExcludeRegion = useCallback(() => {
-    if (!isVideoLoaded) return;
-
-    const fps = videoFps[0] || 30;
-    const frame = Math.round(currentTime * fps);
-
-    if (pendingExcludeStart === null) {
-      setPendingExcludeStart({ time: currentTime, frame });
-      toast(`Exclude start at ${formatTime(currentTime)} - press X again to set end`);
-    } else {
-      if (currentTime <= pendingExcludeStart.time) {
-        toast.error('Exclude end must be after start');
-        return;
-      }
-      const newRegion = {
-        start: pendingExcludeStart,
-        end: { time: currentTime, frame },
-      };
-      setExcludeRegions((prev) => [...prev, newRegion].sort((a, b) => a.start.time - b.start.time));
-      setPendingExcludeStart(null);
-      toast.success(`Excluded: ${formatTime(newRegion.start.time)} - ${formatTime(newRegion.end.time)}`);
-    }
-  }, [isVideoLoaded, currentTime, videoFps, pendingExcludeStart]);
-
-  const cancelExcludeRegion = useCallback(() => {
-    if (pendingExcludeStart) {
-      setPendingExcludeStart(null);
-      toast('Exclude marking cancelled');
-    }
-  }, [pendingExcludeStart]);
-
-  const deleteExcludeRegion = useCallback((index) => {
-    setExcludeRegions((prev) => prev.filter((_, i) => i !== index));
-    toast('Exclude region deleted');
-  }, []);
-
-  // Save markers and trim points to server
-  const saveMarkers = useCallback(async () => {
-    if (!bagPath) {
-      toast.error('No bag selected');
-      return;
-    }
-
-    setIsSavingMarkers(true);
-    try {
-      const saveData = buildSaveData();
-
-      const response = await fetch(
-        `/data-api/task-markers${bagPath}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(saveData),
-        }
-      );
-
-      const result = await response.json();
-      if (result.success) {
-        if (saveData.segments) {
-          dispatch(setSegments(saveData.segments));
-        }
-        toast.success('Data saved to file');
-      } else {
-        toast.error(result.message || 'Failed to save');
-      }
-    } catch (error) {
-      toast.error(`Save failed: ${error.message}`);
-    } finally {
-      setIsSavingMarkers(false);
-    }
-  }, [bagPath, buildSaveData, dispatch]);
-
-  // Auto-save: debounced save whenever editing data changes
-  useEffect(() => {
-    // Skip during bag load (state is being set from server, not user edits)
-    if (isLoadingBagRef.current) return;
-    // Skip if no bag loaded
-    if (!bagPath) return;
-    // Skip if nothing to save
-    const hasData = taskMarkers.length > 0 || trimStart || trimEnd || excludeRegions.length > 0 || replaySegments.length > 0;
-    if (!hasData) return;
-
-    // Debounce: save 2 seconds after last change
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-    }
-    autoSaveTimerRef.current = setTimeout(async () => {
-      try {
-        const saveData = buildSaveData();
-        const response = await fetch(`/data-api/task-markers${bagPath}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(saveData),
-        });
-        const result = await response.json();
-        if (result.success) {
-          if (saveData.segments) {
-            dispatch(setSegments(saveData.segments));
-          }
-          console.log('[AutoSave] Saved markers/trim/exclude');
-        }
-      } catch (err) {
-        console.error('[AutoSave] Failed:', err);
-      }
-    }, 2000);
-
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-      }
-    };
-  }, [bagPath, buildSaveData, dispatch, excludeRegions.length, replaySegments.length, taskMarkers.length, trimEnd, trimStart]);
-
-  const savePaletteToStorage = useCallback((newPalette) => {
-    setInstructionPalette(newPalette);
-    localStorage.setItem('taskInstructionPalette', JSON.stringify({
-      name: 'Custom Palette',
-      instructions: newPalette,
-    }));
-  }, []);
-
-  const addToPalette = useCallback((instruction) => {
-    if (!instruction.trim()) return;
-    if (instructionPalette.includes(instruction.trim())) {
-      toast('Instruction already in palette');
-      return;
-    }
-    const newPalette = [...instructionPalette, instruction.trim()];
-    savePaletteToStorage(newPalette);
-    toast.success('Added to palette');
-  }, [instructionPalette, savePaletteToStorage]);
-
-  const removeFromPalette = useCallback((index) => {
-    const newPalette = instructionPalette.filter((_, i) => i !== index);
-    savePaletteToStorage(newPalette);
-  }, [instructionPalette, savePaletteToStorage]);
-
-  const importPaletteFromJson = useCallback((event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const data = JSON.parse(e.target.result);
-        if (data.instructions && Array.isArray(data.instructions)) {
-          savePaletteToStorage(data.instructions);
-          toast.success(`Imported ${data.instructions.length} instructions`);
-        } else {
-          toast.error('Invalid JSON format');
-        }
-      } catch {
-        toast.error('Failed to parse JSON file');
-      }
-    };
-    reader.readAsText(file);
-    event.target.value = '';
-  }, [savePaletteToStorage]);
-
-  const exportPaletteToJson = useCallback(() => {
-    if (!instructionPalette.length) {
-      toast('No instructions to export');
-      return;
-    }
-
-    const data = {
-      name: 'Instruction Palette',
-      instructions: instructionPalette,
-      exportedAt: new Date().toISOString(),
-    };
-
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `instruction_palette_${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    toast.success('Palette exported');
-  }, [instructionPalette]);
-
-  // Get current active task based on time
-  const { currentActiveTask, currentActiveTaskIndex } = useMemo(() => {
-    if (!taskMarkers.length) return { currentActiveTask: null, currentActiveTaskIndex: -1 };
-
-    let activeMarker = null;
-    let activeIndex = -1;
-    for (let i = 0; i < taskMarkers.length; i++) {
-      if (taskMarkers[i].time <= currentTime) {
-        activeMarker = taskMarkers[i];
-        activeIndex = i;
-      } else {
-        break;
-      }
-    }
-    return { currentActiveTask: activeMarker, currentActiveTaskIndex: activeIndex };
-  }, [taskMarkers, currentTime]);
 
   // Keyboard shortcuts
   useKeyboardShortcuts({
@@ -1232,21 +1027,6 @@ function ReplayPage({ isActive }) {
       onStepForward: () => stepFrame('forward'),
       onSeekRelative: seekRelative,
       onTogglePlayPause: togglePlayPause,
-      onToggleLoopPoint: toggleLoopPoint,
-      onClearLoop: clearLoop,
-      onOpenMarkerDialog: openMarkerDialog,
-      onDeleteNearestMarker: deleteNearestMarker,
-      onJumpToMarker: jumpToMarker,
-      onSetTrimStart: openTrimStartDialog,
-      onSetTrimEnd: applyTrimEnd,
-      onToggleExcludeRegion: toggleExcludeRegion,
-      onCancelExclude: cancelExcludeRegion,
-      onToggleHelp: () => setShowHelpModal((prev) => !prev),
-      onCloseHelp: () => setShowHelpModal(false),
-      onCloseTrimDialog: () => setShowTrimStartDialog(false),
-      hasPendingExclude: pendingExcludeStart,
-      showHelpModal,
-      showTrimDialog: showTrimStartDialog,
     },
   });
 
@@ -1263,7 +1043,7 @@ function ReplayPage({ isActive }) {
     videoRefs.current.forEach((video) => {
       if (video) video.playbackRate = playbackSpeed;
     });
-  }, [videoBlobUrls, playbackSpeed]);
+  }, [videoBlobUrls, currentVideoUrls, playbackSpeed]);
 
   // Handle seek for all videos
   const handleSeek = useCallback((e) => {
@@ -1279,11 +1059,9 @@ function ReplayPage({ isActive }) {
       return;
     }
 
-    videoRefs.current.forEach((video) => {
-      if (video) video.currentTime = newTime;
-    });
+    syncVideosToGlobalTime(newTime);
     dispatch(setCurrentTime(newTime));
-  }, [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, dispatch]);
+  }, [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, syncVideosToGlobalTime, dispatch]);
 
   // Handle chart click to seek
   const handleChartSeek = useCallback((time) => {
@@ -1296,14 +1074,12 @@ function ReplayPage({ isActive }) {
       return;
     }
 
-    videoRefs.current.forEach((video) => {
-      if (video) video.currentTime = clampedTime;
-    });
+    syncVideosToGlobalTime(clampedTime);
     dispatch(setCurrentTime(clampedTime));
-  }, [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, dispatch]);
+  }, [isVideoLoaded, isDirectMcapMode, mcapPlayer, duration, syncVideosToGlobalTime, dispatch]);
 
   // Extract short name from video file path
-  const getShortVideoName = (filePath) => {
+  const getShortVideoName = useCallback((filePath) => {
     const fileName = filePath.split('/').pop();
     return fileName
       .replace('.mp4', '')
@@ -1311,7 +1087,7 @@ function ReplayPage({ isActive }) {
       .split('_')
       .slice(-3)
       .join('_');
-  };
+  }, []);
 
   // Reset state when leaving page
   useEffect(() => {
@@ -1334,16 +1110,29 @@ function ReplayPage({ isActive }) {
   useEffect(() => {
     setVideoBlobUrls([]);
     setDownloadProgress(0);
+    setExpandedVideoIndex(null);
   }, [selectedBagPath]);
 
   // Hidden panels list
-  const hiddenPanels = Object.values(layoutPanels).filter((p) => !p.visible);
+  const hiddenPanels = Object.values(layoutPanels).filter(
+    (p) => !p.visible && p.id !== PANEL_IDS.SIDEBAR
+  );
+  const hasExpandedReplayPanel = Object.values(layoutPanels).some(
+    (p) => p.visible && p.expandable !== false && p.expanded
+  );
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="relative flex flex-col h-full bg-gray-50">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 flex-shrink-0">
-        <h1 className="text-xl font-bold text-gray-800">Replay Viewer</h1>
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-gray-800">Replay Viewer</h1>
+          {selectedTaskPath && (
+            <div className="text-xs text-gray-500 truncate max-w-xl" title={selectedTaskPath}>
+              {basename(selectedTaskPath)}
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           {/* Hidden panel restore dropdown */}
           {hiddenPanels.length > 0 && (
@@ -1391,6 +1180,21 @@ function ReplayPage({ isActive }) {
             >
               <MdRefresh size={16} />
               Reset Layout
+            </button>
+          )}
+          {rosbagList.length > 0 && (
+            <button
+              onClick={() => setEpisodeDrawerOpen((open) => !open)}
+              className={clsx(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors text-sm',
+                episodeDrawerOpen
+                  ? 'bg-blue-600 text-white hover:bg-blue-700'
+                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              )}
+              title="Show or hide episodes"
+            >
+              <MdList size={16} />
+              Episodes {currentBagIndex + 1 > 0 ? currentBagIndex + 1 : 0}/{rosbagList.length}
             </button>
           )}
           {isDirectMcapMode && (
@@ -1442,7 +1246,7 @@ function ReplayPage({ isActive }) {
             className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
           >
             <MdFolder size={18} />
-            Select ROSbag
+            Select Task
           </button>
         </div>
       </div>
@@ -1497,33 +1301,38 @@ function ReplayPage({ isActive }) {
             )}
           </div>
         </div>
-      ) : isLoaded && (videoFiles.length > 0 || isDirectMcapMode) ? (
+      ) : isLoaded && (currentVideoFiles.length > 0 || isDirectMcapMode) ? (
         <>
           <div className="flex-1 px-4 min-h-0 overflow-hidden">
             <ReplayLayoutContainer
+              sidebarMode="drawer"
               cameraPanelContent={
                 <CameraPanel
                   isDirectMcapMode={isDirectMcapMode}
                   isLoaded={isLoaded}
                   isLoading={isLoading}
                   error={error}
-                  videoFiles={videoFiles}
-                  videoNames={videoNames}
-                  videoBlobUrls={videoBlobUrls}
+                  videoFiles={currentVideoFiles}
+                  videoNames={currentVideoNames}
+                  videoBlobUrls={segmentVideoMode ? currentVideoUrls : videoBlobUrls}
+                  segmentVideoSets={segmentVideoSets}
+                  activeVideoSegmentKey={activeVideoSegmentKey}
                   videoRefs={videoRefs}
+                  setVideoRef={setVideoElementRef}
                   expandedVideoIndex={expandedVideoIndex}
                   setExpandedVideoIndex={setExpandedVideoIndex}
                   mcapPlayer={mcapPlayer}
                   useWebGL={useWebGL}
                   videoBrightness={videoBrightness}
                   videoContrast={videoContrast}
-                  isDownloading={isDownloading}
-                  downloadProgress={downloadProgress}
+                  isDownloading={segmentVideoMode ? false : isDownloading}
+                  downloadProgress={segmentVideoMode ? 100 : downloadProgress}
                   getShortVideoName={getShortVideoName}
                 />
               }
               viewer3DPanelContent={
                 <Viewer3DPanel
+                  robotType={robotType}
                   jointTimestamps={jointTimestamps}
                   jointNames={jointNames}
                   jointPositions={jointPositions}
@@ -1531,6 +1340,8 @@ function ReplayPage({ isActive }) {
                   actionNames={actionNames}
                   actionValues={actionValues}
                   currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  playbackSpeed={playbackSpeed}
                 />
               }
               jointDataPanelContent={
@@ -1538,7 +1349,7 @@ function ReplayPage({ isActive }) {
                   allJointNames={allJointNames}
                   stateChartData={stateChartData}
                   actionChartData={actionChartData}
-                  currentTime={currentTime}
+                  currentTime={chartCurrentTime}
                   duration={duration}
                   expandedJoints={expandedJoints}
                   toggleJoint={toggleJoint}
@@ -1547,45 +1358,6 @@ function ReplayPage({ isActive }) {
                   hasActionData={hasActionData}
                   actionNames={actionNames}
                   handleChartSeek={handleChartSeek}
-                />
-              }
-              sidebarPanelContent={
-                <SidebarPanel
-                  recordingDate={recordingDate}
-                  robotType={robotType}
-                  fileSizeBytes={fileSizeBytes}
-                  duration={duration}
-                  frameCounts={frameCounts}
-                  taskMarkers={taskMarkers}
-                  currentActiveTask={currentActiveTask}
-                  currentActiveTaskIndex={currentActiveTaskIndex}
-                  trimStart={trimStart}
-                  trimEnd={trimEnd}
-                  excludeRegions={excludeRegions}
-                  pendingExcludeStart={pendingExcludeStart}
-                  isSavingMarkers={isSavingMarkers}
-                  instructionPalette={instructionPalette}
-                  newPaletteInput={newPaletteInput}
-                  setNewPaletteInput={setNewPaletteInput}
-                  addToPalette={addToPalette}
-                  removeFromPalette={removeFromPalette}
-                  importPaletteFromJson={importPaletteFromJson}
-                  exportPaletteToJson={exportPaletteToJson}
-                  rosbagList={rosbagList}
-                  currentBagIndex={currentBagIndex}
-                  isDownloading={isDownloading}
-                  navigateRosbag={navigateRosbag}
-                  handleSelectBag={handleSelectBag}
-                  dispatch={dispatch}
-                  setTaskMarkers={setTaskMarkers}
-                  setTrimStart={setTrimStart}
-                  setLoopStart={setLoopStart}
-                  setLoopEnd={setLoopEnd}
-                  seekAndPlay={seekAndPlay}
-                  seekAndPause={seekAndPause}
-                  saveMarkers={saveMarkers}
-                  deleteExcludeRegion={deleteExcludeRegion}
-                  currentTime={currentTime}
                 />
               }
             />
@@ -1599,30 +1371,14 @@ function ReplayPage({ isActive }) {
             isVideoLoaded={isVideoLoaded}
             isDirectMcapMode={isDirectMcapMode}
             mcapPlayer={mcapPlayer}
-            trimStart={trimStart}
-            trimEnd={trimEnd}
-            loopStart={loopStart}
-            loopEnd={loopEnd}
-            excludeRegions={excludeRegions}
-            pendingExcludeStart={pendingExcludeStart}
-            taskMarkers={taskMarkers}
-            currentActiveTask={currentActiveTask}
-            currentActiveTaskIndex={currentActiveTaskIndex}
+            replaySegments={replaySegments}
             handleSeek={handleSeek}
             togglePlayPause={togglePlayPause}
             restartPlayback={restartPlayback}
-            openMarkerDialog={openMarkerDialog}
-            openTrimStartDialog={openTrimStartDialog}
-            applyTrimEnd={applyTrimEnd}
-            clearTrimPoints={clearTrimPoints}
-            clearLoop={clearLoop}
             changePlaybackSpeed={changePlaybackSpeed}
             playbackSpeed={playbackSpeed}
             PLAYBACK_SPEEDS={PLAYBACK_SPEEDS}
-            setShowHelpModal={setShowHelpModal}
-            videoFiles={videoFiles}
-            setLoopStart={setLoopStart}
-            setLoopEnd={setLoopEnd}
+            videoFiles={currentVideoFiles}
             seekAndPlay={seekAndPlay}
             seekToTime={seekToTime}
           />
@@ -1642,16 +1398,54 @@ function ReplayPage({ isActive }) {
           ) : (
             <div className="text-center">
               <MdFolder size={64} className="mx-auto mb-4 text-gray-400" />
-              <p>Select a ROSbag to start viewing</p>
+              <p>Select a task folder to start viewing episodes</p>
             </div>
           )}
         </div>
       )}
 
+      {episodeDrawerOpen && rosbagList.length > 0 && (
+        <div
+          className={clsx(
+            'absolute right-4 top-14 bottom-24 w-[340px] max-w-[calc(100vw-2rem)] rounded-lg border border-gray-200 bg-white shadow-xl overflow-hidden',
+            hasExpandedReplayPanel ? 'z-0' : 'z-30'
+          )}
+        >
+          <SidebarPanel
+            taskPath={selectedTaskPath}
+            recordingDate={recordingDate}
+            robotType={robotType}
+            fileSizeBytes={fileSizeBytes}
+            duration={duration}
+            frameCounts={frameCounts}
+            replaySegments={replaySegments}
+            currentTime={currentTime}
+            videoCount={currentVideoFiles.length}
+            jointCount={jointNames.length}
+            actionCount={actionNames.length}
+            rosbagList={rosbagList}
+            currentBagIndex={currentBagIndex}
+            isBusy={isDownloading || isLoading}
+            navigateRosbag={navigateRosbag}
+            handleSelectBag={handleSelectBag}
+            seekAndPlay={seekAndPlay}
+            seekToTime={seekToTime}
+            onClose={() => setEpisodeDrawerOpen(false)}
+          />
+        </div>
+      )}
+
       {/* Bag info */}
       {selectedBagPath && (
-        <div className="px-4 py-1 text-xs text-gray-500 flex-shrink-0">
-          <span className="font-medium">Selected:</span> {selectedBagPath}
+        <div className="px-4 py-1 text-xs text-gray-500 flex-shrink-0 flex items-center gap-3 min-w-0">
+          {selectedTaskPath && (
+            <span className="truncate">
+              <span className="font-medium">Task:</span> {selectedTaskPath}
+            </span>
+          )}
+          <span className="truncate">
+            <span className="font-medium">Episode:</span> {selectedBagPath}
+          </span>
         </div>
       )}
 
@@ -1660,267 +1454,14 @@ function ReplayPage({ isActive }) {
         <FileBrowserModal
           isOpen={showFileBrowser}
           onClose={() => setShowFileBrowser(false)}
-          onFileSelect={(item) => handleSelectBag(item.full_path)}
-          title="Select ROSbag Directory"
+          onFileSelect={(item) => handleSelectTaskFolder(item.full_path)}
+          title="Select Task Folder"
+          selectButtonText="Open Task"
           allowDirectorySelect={true}
           allowFileSelect={false}
-          targetFileName="metadata.yaml"
           initialPath="/workspace/rosbag2"
           defaultPath="/workspace/rosbag2"
         />
-      )}
-
-      {/* Task Marker add dialog */}
-      {showMarkerDialog && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          onClick={() => setShowMarkerDialog(false)}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-96 max-w-full mx-4"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                setShowMarkerDialog(false);
-              } else if (e.key === 'Enter' && markerInput.trim()) {
-                addMarker(markerInput);
-              } else if (e.key >= '1' && e.key <= '9') {
-                const idx = parseInt(e.key) - 1;
-                if (idx < instructionPalette.length) {
-                  addMarker(instructionPalette[idx]);
-                }
-              }
-            }}
-          >
-            <div className="p-4 border-b bg-gray-50 rounded-t-xl">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">Add Task Marker</h3>
-                <button onClick={() => setShowMarkerDialog(false)} className="text-gray-400 hover:text-gray-600">
-                  <MdClose size={20} />
-                </button>
-              </div>
-              <p className="text-sm text-gray-500 mt-1">
-                Time: {formatTime(pendingMarkerTime || 0)}
-              </p>
-            </div>
-
-            <div className="p-4">
-              {instructionPalette.length > 0 && (
-                <div className="mb-4">
-                  <p className="text-xs text-gray-500 mb-2">Quick select (press 1-9):</p>
-                  <div className="space-y-1 max-h-40 overflow-y-auto">
-                    {instructionPalette.slice(0, 9).map((instruction, idx) => (
-                      <button
-                        key={`quick-${idx}`}
-                        onClick={() => addMarker(instruction)}
-                        className="w-full flex items-center gap-2 p-2 text-left hover:bg-purple-50 rounded transition-colors"
-                      >
-                        <span className="w-5 h-5 flex items-center justify-center bg-purple-100 text-purple-700 text-xs font-bold rounded">
-                          {idx + 1}
-                        </span>
-                        <span className="text-sm text-gray-700 truncate">{instruction}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <p className="text-xs text-gray-500 mb-2">Or enter custom instruction:</p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={markerInput}
-                    onChange={(e) => setMarkerInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && markerInput.trim()) {
-                        e.preventDefault();
-                        addMarker(markerInput);
-                      }
-                    }}
-                    placeholder="Type instruction..."
-                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => addMarker(markerInput)}
-                    disabled={!markerInput.trim()}
-                    className={clsx(
-                      'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-                      markerInput.trim()
-                        ? 'bg-purple-600 text-white hover:bg-purple-700'
-                        : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                    )}
-                  >
-                    Add
-                  </button>
-                </div>
-                {markerInput.trim() && !instructionPalette.includes(markerInput.trim()) && (
-                  <button
-                    onClick={() => addToPalette(markerInput)}
-                    className="mt-2 text-xs text-blue-600 hover:text-blue-800"
-                  >
-                    + Add to palette
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="px-4 py-3 border-t bg-gray-50 rounded-b-xl text-xs text-gray-400">
-              Press Escape to cancel
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Keyboard shortcuts help modal */}
-      {showHelpModal && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          onClick={() => setShowHelpModal(false)}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-[500px] max-w-full mx-4 max-h-[80vh] overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-4 border-b bg-gray-50 rounded-t-xl">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">Keyboard Shortcuts</h3>
-                <button onClick={() => setShowHelpModal(false)} className="text-gray-400 hover:text-gray-600">
-                  <MdClose size={20} />
-                </button>
-              </div>
-            </div>
-            <div className="p-4 overflow-y-auto max-h-[60vh]">
-              <div className="space-y-4">
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Playback</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Play / Pause</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">Space</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">1 Frame Backward</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">&larr;</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">1 Frame Forward</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">&rarr;</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">5 Seconds Back</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">Shift + &larr;</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">5 Seconds Forward</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">Shift + &rarr;</kbd></div>
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">A-B Loop</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Set A/B Point</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">A</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Clear Loop</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">Backspace</kbd></div>
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Task Markers</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Add Marker</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">M</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Delete Nearest Marker</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">D</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Jump to Marker #N</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">1-9</kbd></div>
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Navigation</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Previous ROSbag</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">&uarr;</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Next ROSbag</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">&darr;</kbd></div>
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Trim Points</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Set Start Point</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">S</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Set End Point</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">E</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Mark Exclude Region</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">X</kbd><span className="text-xs text-gray-400">(2x)</span></div>
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Other</h4>
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between"><span className="text-gray-600">Show This Help</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">?</kbd></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Close Dialog</span><kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs">Esc</kbd></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="px-4 py-3 border-t bg-gray-50 rounded-b-xl text-xs text-gray-400 text-center">
-              Press Escape or click outside to close
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Trim Start dialog */}
-      {showTrimStartDialog && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          onClick={() => setShowTrimStartDialog(false)}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-96 max-w-full mx-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-4 border-b bg-green-50 rounded-t-xl">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">Set Start Point</h3>
-                <button onClick={() => setShowTrimStartDialog(false)} className="text-gray-400 hover:text-gray-600">
-                  <MdClose size={20} />
-                </button>
-              </div>
-              <p className="text-sm text-gray-500 mt-1">
-                Time: {formatTime(currentTime)} (Frame: {Math.round(currentTime * (videoFps[0] || 30))})
-              </p>
-            </div>
-            <div className="p-4">
-              {instructionPalette.length > 0 && (
-                <div className="mb-4">
-                  <p className="text-xs text-gray-500 mb-2">Quick select from palette:</p>
-                  <div className="space-y-1 max-h-40 overflow-y-auto">
-                    {instructionPalette.slice(0, 9).map((instruction, idx) => (
-                      <button
-                        key={`trim-quick-${idx}`}
-                        onClick={() => applyTrimStart(instruction)}
-                        className="w-full flex items-center gap-2 p-2 text-left hover:bg-green-50 rounded transition-colors"
-                      >
-                        <span className="w-5 h-5 flex items-center justify-center bg-green-100 text-green-700 text-xs font-bold rounded">
-                          {idx + 1}
-                        </span>
-                        <span className="text-sm text-gray-700 truncate">{instruction}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div>
-                <p className="text-xs text-gray-500 mb-2">Or enter instruction for this segment:</p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={trimStartInstruction}
-                    onChange={(e) => setTrimStartInstruction(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        applyTrimStart(trimStartInstruction);
-                      }
-                    }}
-                    placeholder="e.g., Pick up the cube"
-                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => applyTrimStart(trimStartInstruction)}
-                    className="px-4 py-2 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition-colors"
-                  >
-                    Set
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div className="px-4 py-3 border-t bg-gray-50 rounded-b-xl text-xs text-gray-400">
-              Press Escape to cancel, Enter to confirm
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

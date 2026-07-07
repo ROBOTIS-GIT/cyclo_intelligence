@@ -121,7 +121,6 @@ RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
     echo "export ROS_DOMAIN_ID=30" >> /root/.bashrc && \
     echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp" >> /root/.bashrc && \
     echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'" >> /root/.bashrc && \
-    echo "alias zenoh='ros2 run rmw_zenoh_cpp rmw_zenohd'" >> /root/.bashrc && \
     echo "alias cb='cd ${COLCON_WS} && colcon build --symlink-install --paths src/cyclo_intelligence/orchestrator src/cyclo_intelligence/cyclo_data src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder src/cyclo_intelligence/interfaces src/cyclo_intelligence/shared --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> /root/.bashrc && \
     echo "alias orchestrator='ros2 launch orchestrator orchestrator_bringup.launch.py'" >> /root/.bashrc && \
     echo "alias cyclo_data='ros2 run cyclo_data cyclo_data_node'" >> /root/.bashrc && \

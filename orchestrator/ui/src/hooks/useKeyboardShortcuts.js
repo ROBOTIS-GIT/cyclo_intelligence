@@ -81,78 +81,6 @@ export function useKeyboardShortcuts({
                     h.onTogglePlayPause?.();
                     break;
 
-                // A-B Loop
-                case 'KeyA':
-                    e.preventDefault();
-                    h.onToggleLoopPoint?.();
-                    break;
-                case 'Backspace':
-                    e.preventDefault();
-                    h.onClearLoop?.();
-                    break;
-
-                // Task Markers
-                case 'KeyM':
-                    e.preventDefault();
-                    h.onOpenMarkerDialog?.();
-                    break;
-                case 'KeyD':
-                    e.preventDefault();
-                    h.onDeleteNearestMarker?.();
-                    break;
-
-                // Jump to marker by number (Digit1 through Digit9)
-                case 'Digit1':
-                case 'Digit2':
-                case 'Digit3':
-                case 'Digit4':
-                case 'Digit5':
-                case 'Digit6':
-                case 'Digit7':
-                case 'Digit8':
-                case 'Digit9':
-                    e.preventDefault();
-                    h.onJumpToMarker?.(parseInt(e.code.replace('Digit', '')) - 1);
-                    break;
-
-                // Trim points
-                case 'KeyS':
-                    e.preventDefault();
-                    h.onSetTrimStart?.();
-                    break;
-                case 'KeyE':
-                    e.preventDefault();
-                    h.onSetTrimEnd?.();
-                    break;
-
-                // Exclude regions
-                case 'KeyX':
-                    e.preventDefault();
-                    h.onToggleExcludeRegion?.();
-                    break;
-
-                // Help (Shift + /)
-                case 'Slash':
-                    if (e.shiftKey) {
-                        e.preventDefault();
-                        h.onToggleHelp?.();
-                    }
-                    break;
-
-                // Escape for various actions
-                case 'Escape':
-                    e.preventDefault();
-                    if (h.hasPendingExclude) {
-                        h.onCancelExclude?.();
-                    } else if (h.showHelpModal) {
-                        h.onCloseHelp?.();
-                    } else if (h.showTrimDialog) {
-                        h.onCloseTrimDialog?.();
-                    } else if (h.showMarkerDialog) {
-                        h.onCloseMarkerDialog?.();
-                    }
-                    break;
-
                 default:
                     break;
             }
@@ -173,16 +101,6 @@ export const KEYBOARD_SHORTCUTS = [
     { key: '←/→', description: 'Step frame backward/forward' },
     { key: 'Shift + ←/→', description: 'Seek ±5 seconds' },
     { key: '↑/↓', description: 'Previous/Next rosbag' },
-    { key: 'A', description: 'Set A-B loop point' },
-    { key: 'Backspace', description: 'Clear A-B loop' },
-    { key: 'S', description: 'Set trim start point' },
-    { key: 'E', description: 'Set trim end point' },
-    { key: 'M', description: 'Add task marker' },
-    { key: 'D', description: 'Delete nearest marker' },
-    { key: '1-9', description: 'Jump to marker' },
-    { key: 'X', description: 'Set exclude region (press twice)' },
-    { key: 'Esc', description: 'Cancel/Close' },
-    { key: '?', description: 'Toggle help' },
 ];
 
 export default useKeyboardShortcuts;

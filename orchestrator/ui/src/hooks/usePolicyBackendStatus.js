@@ -17,7 +17,7 @@ const POLICY_BACKEND_SERVICE_GROUPS = [
 ];
 
 export const getPolicyBackendName = (serviceType) => (
-  serviceType === 'groot' || serviceType === 'rldx' ? serviceType : 'lerobot'
+  ['groot', 'rldx', 'rldx-server'].includes(serviceType) ? serviceType : 'lerobot'
 );
 
 export function getPolicyBackendServiceLabel(name) {
@@ -112,7 +112,21 @@ export function getPolicyBackendReadiness(status, options = {}) {
   }
 
   const services = getPolicyBackendServices(status);
-  if (services.length === 0 || services.some((service) => service.state !== 'up')) {
+  if (services.length === 0) {
+    if (status.name === 'rldx-server') {
+      return {
+        ready: true,
+        state: 'ready',
+        message: 'Backend ready',
+      };
+    }
+    return {
+      ready: false,
+      state: 'warming',
+      message: 'Backend processes are starting...',
+    };
+  }
+  if (services.some((service) => service.state !== 'up')) {
     return {
       ready: false,
       state: 'warming',

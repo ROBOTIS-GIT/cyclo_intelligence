@@ -7,9 +7,13 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 import React from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
-import { setTaskInfo } from '../features/tasks/taskSlice';
+import {
+  markLocalTaskInfoEdited,
+  selectInferenceTaskInfo,
+  setInferenceTaskInfo,
+} from '../features/tasks/taskSlice';
 import { withRuntimeDefaults } from '../utils/inferenceRuntime';
 
 // Inference models. Each option pairs a backend (orchestrator routing
@@ -78,7 +82,7 @@ const classLabel = clsx(
 
 const InferenceModelSelector = ({ readonly = false }) => {
   const dispatch = useDispatch();
-  const info = useSelector((state) => state.tasks.taskInfo);
+  const info = useSelector(selectInferenceTaskInfo, shallowEqual);
   const serviceType = info.serviceType || DEFAULT.serviceType;
   const policyType = info.policyType || DEFAULT.policyType;
   const value = `${serviceType}:${policyType}`;
@@ -90,10 +94,15 @@ const InferenceModelSelector = ({ readonly = false }) => {
       ...info,
       serviceType: sel.serviceType,
       policyType: sel.policyType,
+      accelerationMode: sel.serviceType === 'groot'
+        ? (info.accelerationMode || 'pytorch')
+        : 'pytorch',
+      accelerationEnginePath: sel.serviceType === 'groot'
+        ? (info.accelerationEnginePath || '')
+        : '',
     };
-    dispatch(
-      setTaskInfo(withRuntimeDefaults(nextInfo))
-    );
+    dispatch(setInferenceTaskInfo(withRuntimeDefaults(nextInfo)));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
   };
 
   return (

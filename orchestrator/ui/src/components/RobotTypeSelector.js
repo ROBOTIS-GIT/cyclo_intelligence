@@ -50,8 +50,9 @@ export default function RobotTypeSelector() {
 
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
-  const [selectedRobotType, setSelectedRobotType] = useState('');
+  const [selectedRobotType, setSelectedRobotType] = useState(robotType || '');
   const initialFetchStartedRef = useRef(false);
+  const previousRobotTypeRef = useRef(robotType);
 
   // Fetch robot type list
   const fetchRobotTypes = useCallback(async ({ showSuccess = true } = {}) => {
@@ -104,7 +105,11 @@ export default function RobotTypeSelector() {
       console.log('Set robot type result:', result);
 
       if (result && result.success) {
-        dispatch(selectRobotType(selectedRobotType));
+        dispatch(selectRobotType({
+          robotType: selectedRobotType,
+          source: 'user',
+          selectedAtMs: Date.now(),
+        }));
         showShortSuccessToast(
           `Robot type set to: ${selectedRobotType}`,
           'robot-type-set',
@@ -133,10 +138,11 @@ export default function RobotTypeSelector() {
   }, [fetchRobotTypes, robotTypeList.length]);
 
   useEffect(() => {
-    if (robotType && !selectedRobotType) {
-      setSelectedRobotType(robotType);
+    if (robotType !== previousRobotTypeRef.current) {
+      previousRobotTypeRef.current = robotType;
+      setSelectedRobotType(robotType || '');
     }
-  }, [robotType, selectedRobotType]);
+  }, [robotType]);
 
   const classCard = clsx(
     'bg-white',

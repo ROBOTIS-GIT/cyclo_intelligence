@@ -32,6 +32,7 @@ const initialState = {
   videoTopics: [],
   videoNames: [],  // Human-readable camera names
   videoFps: [],
+  videoSegments: [],
   videoServerPort: 8082,
   bagPath: null,
 
@@ -87,9 +88,13 @@ const replaySlice = createSlice({
   reducers: {
     setSelectedBagPath: (state, action) => {
       state.selectedBagPath = action.payload;
-      // Reset loaded state when bag path changes
+      // Reset playback state when bag path changes.
       state.isLoaded = false;
       state.error = null;
+      state.currentTime = 0;
+      state.isPlaying = false;
+      state.isVideoLoaded = false;
+      state.videoLoadProgress = 0;
     },
     setLoading: (state, action) => {
       state.isLoading = action.payload;
@@ -100,6 +105,7 @@ const replaySlice = createSlice({
       state.videoTopics = data.video_topics || [];
       state.videoNames = data.video_names || [];
       state.videoFps = data.video_fps || [];
+      state.videoSegments = data.video_segments || [];
       state.videoServerPort = data.video_server_port || 8082;
       state.bagPath = data.bag_path || null;
       state.frameIndices = data.frame_indices || [];
@@ -130,6 +136,10 @@ const replaySlice = createSlice({
       state.isLoaded = true;
       state.isLoading = false;
       state.error = null;
+      state.currentTime = 0;
+      state.isPlaying = false;
+      state.isVideoLoaded = false;
+      state.videoLoadProgress = 0;
     },
     setTaskMarkers: (state, action) => {
       state.taskMarkers = action.payload;

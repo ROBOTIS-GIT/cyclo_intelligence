@@ -2,6 +2,47 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo UI release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
+0.2.2 (2026-06-26)
+------------------
+* Updated Cyclo release metadata to 0.2.2.
+* Contributors: Taehyeong Kim
+
+0.2.1 (2026-06-26)
+------------------
+* Replaced the Training placeholder with a Training Guide for LeRobot and GR00T CLI training handoff.
+* Documented that training should use the pinned policy submodules that match Cyclo Inference.
+* Contributors: Taehyeong Kim
+
+0.2.0 (2026-06-25)
+------------------
+* Merged Replay into Data Tools as the Review Episodes workflow.
+* Reworked Replay playback with segment-aware camera panels, timeline controls, joint charts, and 3D viewer layout updates.
+* Added cache-control rules so rebuilt UI assets and SPA entrypoints refresh predictably.
+* Contributors: Taehyeong Kim
+
+0.1.16 (2026-06-23)
+-------------------
+* Moved the inference ``Action Request`` controls into the runtime timing section so request scheduling sits with the related rate controls.
+* Contributors: Taehyeong Kim
+
+0.1.15 (2026-06-22)
+-------------------
+* Added inference action request mode and acceleration controls, including GR00T TensorRT engine build and status UI.
+* Refined inference task and page sync so robot type, policy path, deployment mode, and recording state stay consistent across pages.
+* Contributors: Taehyeong Kim
+
+0.1.14 (2026-06-17)
+-------------------
+* Added camera recording monitor rows, warning toasts, and speech notifications from RecordingStatus diagnostics.
+* Synced saved subtask indices from the server and hardened segmented episode finish/discard reset handling.
+* Normalized record task info synchronization for policy and inference metadata.
+* Contributors: Taehyeong Kim
+
 0.1.13 (2026-06-11)
 -------------------
 * Added explicit ``3D Sim Deploy`` and ``Real Robot Deploy`` controls with a confirmation dialog before robot publishing.

@@ -21,7 +21,7 @@
  *  - Seek is non-blocking with token-based cancellation and error recovery
  */
 
-import { useRef, useState, useCallback, useEffect } from "react";
+import { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import { useDispatch } from "react-redux";
 import { setCurrentTime, setIsPlaying } from "../features/replay/replaySlice";
 import { getMcapWorker, disposeMcapWorker } from "../workers/mcapReaderProxy";
@@ -89,6 +89,7 @@ export function useMcapFramePlayer({
   const bitmapCacheRef = useRef(new Map());
   // Set of keys currently being decoded (prevent duplicate decodes)
   const decodingRef = useRef(new Set());
+  const renderGenerationRef = useRef(0);
 
   // Worker proxy
   const mcapWorkerRef = useRef(null);
@@ -151,6 +152,7 @@ export function useMcapFramePlayer({
   // ---------------------------------------------------------------------------
 
   const closeBitmapCache = useCallback(() => {
+    renderGenerationRef.current += 1;
     const cache = bitmapCacheRef.current;
     for (const bmp of cache.values()) {
       if (bmp && bmp.close) bmp.close();
@@ -249,19 +251,23 @@ export function useMcapFramePlayer({
   // ---------------------------------------------------------------------------
 
   const fetchInitialFrames = useCallback(
-    async (timeSec) => {
+    async (timeSec, seekToken = null) => {
       const { imageTopics, startTimeNs } = readerStateRef.current;
       const mcap = mcapWorkerRef.current;
-      if (!mcap || !imageTopics.length) return;
+      if (!mcap || !imageTopics.length) return true;
 
       const targetNs = startTimeNs + BigInt(Math.round(timeSec * 1e9));
+      const renderGeneration = renderGenerationRef.current;
 
       const t0 = performance.now();
 
       try {
         const result = await mcap.readFramesAtTime(targetNs.toString());
+        if (seekToken !== null && seekTokenRef.current !== seekToken) {
+          return false;
+        }
         const { frames, buffers } = result;
-        if (!frames.length) return;
+        if (!frames.length) return true;
 
         const queue = frameQueueRef.current;
 
@@ -281,6 +287,14 @@ export function useMcapFramePlayer({
           decodePromises.push(
             createImageBitmap(blob)
               .then((bitmap) => {
+                if (
+                  renderGenerationRef.current !== renderGeneration
+                  || (seekToken !== null && seekTokenRef.current !== seekToken)
+                ) {
+                  if (bitmap && bitmap.close) bitmap.close();
+                  return;
+                }
+
                 const key = `${topicIdx}:${logTimeBI}`;
                 cacheBitmap(key, bitmap);
                 lastDisplayedNsRef.current[topicIdx] = logTimeBI;
@@ -296,13 +310,18 @@ export function useMcapFramePlayer({
         }
 
         await Promise.all(decodePromises);
+        if (seekToken !== null && seekTokenRef.current !== seekToken) {
+          return false;
+        }
 
         console.log(
           `[MCAP] Initial frames in ${(performance.now() - t0).toFixed(0)}ms, ` +
             `${frames.length}/${imageTopics.length} topics`
         );
+        return true;
       } catch (e) {
         console.error("[MCAP] fetchInitialFrames error:", e);
+        return true;
       }
     },
     [renderToCanvas, cacheBitmap]
@@ -408,6 +427,7 @@ export function useMcapFramePlayer({
       decodingRef.current.add(nextKey);
 
       const { jpegBuffer, format } = next.data;
+      const renderGeneration = renderGenerationRef.current;
       const mimeType =
         format && format.includes("png") ? "image/png" : "image/jpeg";
       const blob = new Blob([jpegBuffer], { type: mimeType });
@@ -415,6 +435,10 @@ export function useMcapFramePlayer({
       createImageBitmap(blob)
         .then((bitmap) => {
           decodingRef.current.delete(nextKey);
+          if (renderGenerationRef.current !== renderGeneration) {
+            if (bitmap && bitmap.close) bitmap.close();
+            return;
+          }
           cacheBitmap(nextKey, bitmap);
         })
         .catch(() => {
@@ -471,6 +495,7 @@ export function useMcapFramePlayer({
         const { jpegBuffer, format } = nearest.data;
         const logTime = currentLogTime;
         const topicIdx = i;
+        const renderGeneration = renderGenerationRef.current;
         const mimeType =
           format && format.includes("png") ? "image/png" : "image/jpeg";
         const blob = new Blob([jpegBuffer], { type: mimeType });
@@ -478,6 +503,10 @@ export function useMcapFramePlayer({
         createImageBitmap(blob)
           .then((bitmap) => {
             decodingRef.current.delete(cacheKey);
+            if (renderGenerationRef.current !== renderGeneration) {
+              if (bitmap && bitmap.close) bitmap.close();
+              return;
+            }
             cacheBitmap(cacheKey, bitmap);
             lastDisplayedNsRef.current[topicIdx] = logTime;
             renderToCanvas(topicIdx, bitmap);
@@ -582,7 +611,7 @@ export function useMcapFramePlayer({
             () => null
           );
 
-          return fetchInitialFrames(clamped).then(() => {
+          return fetchInitialFrames(clamped, myToken).then(() => {
             if (seekTokenRef.current !== myToken) return; // superseded
 
             // Unfreeze — time is exactly at clamped, no drift
@@ -618,12 +647,25 @@ export function useMcapFramePlayer({
   );
 
   const restart = useCallback(() => {
+    if (!readerStateRef.current.isReady) return;
+    const myToken = ++seekTokenRef.current;
+    currentTimeRef.current = 0;
     dispatch(setCurrentTime(0));
     clearCache();
-    fetchInitialFrames(0);
     lastTickTimeRef.current = null;
-    dispatch(setIsPlaying(true));
-  }, [dispatch, clearCache, fetchInitialFrames]);
+    dispatchCounterRef.current = 0;
+
+    fetchInitialFrames(0, myToken).then((isCurrent) => {
+      if (!isCurrent || seekTokenRef.current !== myToken) return;
+      const mcap = mcapWorkerRef.current;
+      if (mcap) {
+        const { startTimeNs } = readerStateRef.current;
+        mcap.startProducer(startTimeNs.toString());
+        startDraining();
+      }
+      dispatch(setIsPlaying(true));
+    });
+  }, [dispatch, clearCache, fetchInitialFrames, startDraining]);
 
   const stepFrame = useCallback(
     (direction) => {
@@ -770,6 +812,7 @@ export function useMcapFramePlayer({
 
   useEffect(() => {
     const queue = frameQueueRef.current;
+    const bitmapCache = bitmapCacheRef.current;
     return () => {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       drainActiveRef.current = false;
@@ -782,11 +825,10 @@ export function useMcapFramePlayer({
 
       queue.clear();
       // Close all cached bitmaps
-      const cache = bitmapCacheRef.current;
-      for (const bmp of cache.values()) {
+      for (const bmp of bitmapCache.values()) {
         if (bmp && bmp.close) bmp.close();
       }
-      cache.clear();
+      bitmapCache.clear();
     };
   }, []);
 
@@ -794,7 +836,11 @@ export function useMcapFramePlayer({
   // Return interface
   // ---------------------------------------------------------------------------
 
-  return {
+  const setPlaybackSpeedCallback = useCallback((speed) => {
+    playbackSpeedRef.current = speed;
+  }, []);
+
+  return useMemo(() => ({
     imageTopics: readerState.imageTopics,
     isLoading: readerState.isLoading,
     isReady: readerState.isReady,
@@ -814,12 +860,27 @@ export function useMcapFramePlayer({
     syncToTime,
     handleProgressClick,
 
-    setPlaybackSpeed: (speed) => {
-      playbackSpeedRef.current = speed;
-    },
+    setPlaybackSpeed: setPlaybackSpeedCallback,
     handleTimeUpdate: () => {},
     handleEnded: () => {},
-  };
+  }), [
+    readerState.imageTopics,
+    readerState.isLoading,
+    readerState.isReady,
+    readerState.error,
+    setCanvasRef,
+    setWebGLPanelRef,
+    getCanvas,
+    togglePlayPause,
+    playAll,
+    pauseAll,
+    restart,
+    stepFrame,
+    seekRelative,
+    syncToTime,
+    handleProgressClick,
+    setPlaybackSpeedCallback,
+  ]);
 }
 
 export default useMcapFramePlayer;

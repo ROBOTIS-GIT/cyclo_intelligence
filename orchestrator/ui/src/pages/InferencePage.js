@@ -15,7 +15,7 @@
 // Author: Kiwoong Park
 
 import React, { useState, useEffect } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
 import {
@@ -30,6 +30,7 @@ import ImageGrid from '../components/ImageGrid';
 import RobotViewer3D from '../components/RobotViewer3D';
 import InferencePanel from '../components/InferencePanel';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
+import { selectInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
@@ -43,7 +44,7 @@ export default function InferencePage({ isActive = true }) {
 
   const robotType = useSelector((state) => state.tasks.robotType);
   const joystickMode = useSelector((state) => state.tasks.joystickMode);
-  const taskInfo = useSelector((state) => state.tasks.taskInfo);
+  const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
 
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [show3DViewer, setShow3DViewer] = useState(true);

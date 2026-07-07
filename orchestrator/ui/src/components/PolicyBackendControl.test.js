@@ -84,7 +84,7 @@ describe('PolicyBackendControl', () => {
     global.fetch
       .mockResolvedValueOnce(mockResponse({
         name: 'groot',
-        image: 'robotis/groot-zenoh:1.3.0-arm64',
+        image: 'robotis/groot-zenoh:1.3.1-arm64',
         image_pulled: true,
         image_status: 'stale',
         container_state: 'exited',
@@ -94,7 +94,7 @@ describe('PolicyBackendControl', () => {
       .mockResolvedValueOnce(mockResponse({ ok: true, message: 'recreated' }))
       .mockResolvedValueOnce(mockResponse({
         name: 'groot',
-        image: 'robotis/groot-zenoh:1.3.0-arm64',
+        image: 'robotis/groot-zenoh:1.3.1-arm64',
         image_pulled: true,
         image_status: 'current',
         container_state: 'exited',
@@ -153,7 +153,7 @@ describe('PolicyBackendControl', () => {
     mockRegisterHFUser.mockResolvedValue({ success: true });
     global.fetch.mockResolvedValueOnce(mockResponse({
       name: 'groot',
-      image: 'robotis/groot-zenoh:1.3.0-arm64',
+      image: 'robotis/groot-zenoh:1.3.1-arm64',
       image_pulled: true,
       image_status: 'current',
       container_state: 'running',
@@ -177,6 +177,85 @@ describe('PolicyBackendControl', () => {
         label: 'Hugging Face',
         token: 'hf_test_token',
       });
+    });
+  });
+
+  it('shows backend traffic logs on demand', async () => {
+    global.fetch
+      .mockResolvedValueOnce(mockResponse({
+        name: 'rldx',
+        image: 'robotis/rldx-zenoh:0.1.1-amd64',
+        image_pulled: true,
+        image_status: 'current',
+        container_state: 'running',
+        services: [],
+      }))
+      .mockResolvedValueOnce(mockResponse({
+        name: 'rldx',
+        container_state: 'running',
+        lines: [
+          '2026-06-30T00:00:01Z [RLDX-ZMQ] -> endpoint=get_action',
+          '2026-06-30T00:00:02Z [RLDX-ZMQ] <- endpoint=get_action ok 184.1ms',
+        ],
+      }));
+
+    render(<PolicyBackendControl serviceType="rldx" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'RLDX Docker traffic log',
+    }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/backends/rldx/logs?tail=120&traffic_only=true'
+      );
+    });
+    expect(await screen.findByText(/endpoint=get_action ok 184.1ms/))
+      .toBeInTheDocument();
+  });
+
+  it('sends action payload when starting an RLDX server backend', async () => {
+    global.fetch
+      .mockResolvedValueOnce(mockResponse({
+        name: 'rldx-server',
+        image: 'ghcr.io/prefix-dev/pixi:0.70.1',
+        image_pulled: true,
+        image_status: 'current',
+        container_state: 'exited',
+        services: [],
+      }))
+      .mockResolvedValueOnce(mockResponse({ ok: true, message: 'started' }))
+      .mockResolvedValueOnce(mockResponse({
+        name: 'rldx-server',
+        image: 'ghcr.io/prefix-dev/pixi:0.70.1',
+        image_pulled: true,
+        image_status: 'current',
+        container_state: 'running',
+        services: [],
+      }));
+
+    render(
+      <PolicyBackendControl
+        serviceType="rldx-server"
+        actionPayload={{ model_path: '/workspace/model/rldx/task0047' }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'RLDX Server Docker on',
+    }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/backends/rldx-server/start',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model_path: '/workspace/model/rldx/task0047',
+          }),
+        }
+      );
     });
   });
 });

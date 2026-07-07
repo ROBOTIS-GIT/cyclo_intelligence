@@ -10,8 +10,10 @@ sys.path.insert(0, str(POLICY_ROOT))
 from rldx_engine.mapping import (  # noqa: E402
     aspect_area_resize_crop_sizes,
     build_state_observation,
+    policy_action_chunk_from_rldx,
     robot_action_keys_from_policy,
     robot_action_chunk_from_rldx,
+    stack_history_window,
 )
 
 
@@ -28,31 +30,58 @@ def test_robot_action_chunk_combines_rldx_arm_and_gripper_modalities():
 
     chunk = robot_action_chunk_from_rldx(
         actions,
-        ["arm_left", "arm_right", "head", "lift", "mobile"],
+        ["arm_left", "arm_right", "mobile"],
     )
 
-    assert chunk.shape == (16, 22)
+    assert chunk.shape == (16, 19)
     np.testing.assert_array_equal(chunk[:, :7], 1)
     np.testing.assert_array_equal(chunk[:, 7:8], 2)
     np.testing.assert_array_equal(chunk[:, 8:15], 3)
     np.testing.assert_array_equal(chunk[:, 15:16], 4)
-    np.testing.assert_array_equal(chunk[:, 16:18], 5)
-    np.testing.assert_array_equal(chunk[:, 18:19], 6)
-    np.testing.assert_array_equal(chunk[:, 19:22], 7)
+    np.testing.assert_array_equal(chunk[:, 16:19], 7)
 
 
-def test_robot_action_keys_from_policy_uses_only_model_outputs():
+def test_policy_action_chunk_preserves_rldx_modality_order_for_rtc_prefix():
+    actions = {
+        "action.arm_left": np.ones((1, 16, 8), dtype=np.float32),
+        "action.arm_right": np.full((1, 16, 8), 2, dtype=np.float32),
+        "action.lift": np.full((1, 16, 1), 3, dtype=np.float32),
+    }
+
+    chunk = policy_action_chunk_from_rldx(
+        actions,
+        ["arm_left", "arm_right", "lift"],
+    )
+
+    assert chunk.shape == (16, 17)
+    np.testing.assert_array_equal(chunk[:, :8], 1)
+    np.testing.assert_array_equal(chunk[:, 8:16], 2)
+    np.testing.assert_array_equal(chunk[:, 16:17], 3)
+
+
+def test_robot_action_keys_from_policy_uses_only_model_outputs(monkeypatch):
+    monkeypatch.setenv("RLDX_SKIP_ROBOT_ACTION_KEYS", "head,lift")
     robot_keys = ["arm_left", "arm_right", "head", "lift", "mobile"]
 
     assert robot_action_keys_from_policy(
         ["arm_left", "arm_right", "lift"],
         robot_keys,
-    ) == ["arm_left", "arm_right", "lift"]
+    ) == ["arm_left", "arm_right"]
 
     assert robot_action_keys_from_policy(
         ["left_arm", "left_gripper", "right_arm", "right_gripper", "head", "lift", "base"],
         robot_keys,
-    ) == ["arm_left", "arm_right", "head", "lift", "mobile"]
+    ) == ["arm_left", "arm_right", "mobile"]
+
+
+def test_robot_action_keys_can_publish_lift_when_skip_env_empty(monkeypatch):
+    monkeypatch.setenv("RLDX_SKIP_ROBOT_ACTION_KEYS", "")
+
+    assert robot_action_keys_from_policy(
+        ["arm_left", "arm_right", "lift"],
+        ["arm_left", "arm_right", "lift"],
+    ) == ["arm_left", "arm_right", "lift"]
+
 
 
 def test_build_state_observation_splits_combined_robot_arm_groups():
@@ -108,3 +137,13 @@ def test_aspect_area_resize_crop_sizes_match_rldx_eval_geometry():
     assert aspect_area_resize_crop_sizes(720, 1280) == ((192, 341), (192, 320))
     assert aspect_area_resize_crop_sizes(480, 640) == ((192, 256), (192, 256))
     assert aspect_area_resize_crop_sizes(256, 256) == ((256, 256), (256, 256))
+
+
+def test_stack_history_window_uses_delta_indices_with_oldest_padding():
+    frames = [np.full((2, 2, 1), value, dtype=np.uint8) for value in range(7)]
+
+    warmup = stack_history_window(frames[-2:], [-6, -4, -2, 0])
+    np.testing.assert_array_equal(warmup[:, 0, 0, 0], [5, 5, 5, 6])
+
+    window = stack_history_window(frames, [-6, -4, -2, 0])
+    np.testing.assert_array_equal(window[:, 0, 0, 0], [0, 2, 4, 6])

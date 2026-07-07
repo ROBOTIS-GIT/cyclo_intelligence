@@ -65,6 +65,9 @@ bool publish_to_robot
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+string action_request_mode
+string acceleration_mode
+string acceleration_engine_path
 """
 
 INFERENCE_COMMAND_RESPONSE_DEF = """\
@@ -86,6 +89,8 @@ string task_instruction
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+string acceleration_mode
+string acceleration_engine_path
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\

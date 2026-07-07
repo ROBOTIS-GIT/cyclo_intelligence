@@ -8,18 +8,23 @@
 
 """Background MJPEG-to-H.264 transcoder for recording format v2.
 
-Recording writes per-camera MJPEG MP4s for near-zero live CPU/GPU cost.
-After STOP, this module re-encodes each camera's MP4 to H.264 in a
-worker pool so the final on-disk format is universally playable
-(VSCode webview / browser <video>) and ~20x smaller.
+Recording writes per-camera raw MJPEG spools for near-zero live CPU/GPU
+cost. After STOP, this module first remuxes each ``*.mjpeg.tmp`` spool
+to an MJPEG MP4, then re-encodes each camera's MP4 to H.264 in a worker
+pool so the final on-disk format is universally playable (VSCode
+webview / browser <video>) and ~20x smaller.
 
 Crash-safety story
 ------------------
 
 For every camera, the worker:
-  1. encodes ``<cam>.mp4`` → ``<cam>.h264.tmp`` (raw stays intact)
-  2. verifies the new file's frame count against the sidecar
-  3. atomically renames ``<cam>.h264.tmp`` → ``<cam>.mp4``
+  1. remuxes ``<cam>.mjpeg.tmp`` → ``<cam>.remuxing.mp4``
+  2. verifies the remuxed MP4 frame count against the sidecar
+  3. atomically renames ``<cam>.remuxing.mp4`` → ``<cam>.mp4``
+     and removes the raw spool
+  4. encodes ``<cam>.mp4`` → ``<cam>.h264.tmp`` (MJPEG MP4 stays intact)
+  5. verifies the new file's frame count against the sidecar
+  6. atomically renames ``<cam>.h264.tmp`` → ``<cam>.mp4``
      (POSIX ``rename`` overwrites the raw in one step)
 
 So at every moment exactly one of these holds:
@@ -143,6 +148,17 @@ class _CameraJob:
     camera_id: str
     camera_name: str
     videos_dir: Path
+
+
+@dataclass(frozen=True)
+class _RawRemuxJob:
+    camera_id: str
+    camera_name: str
+    videos_dir: Path
+    raw_path: Path
+    mp4_path: Path
+    sidecar_path: Path
+    stats_path: Path
 
 
 class _SkipCamera(Exception):
@@ -276,12 +292,13 @@ class TranscodeWorker:
         videos_dir = episode_dir / "videos"
         if not videos_dir.exists():
             return
-        for stale in videos_dir.rglob("*.h264.tmp"):
-            try:
-                stale.unlink()
-                self._log_info(f"transcode: cleaned orphan {stale}")
-            except OSError:
-                pass
+        for pattern in ("*.h264.tmp", "*.remuxing.mp4"):
+            for stale in videos_dir.rglob(pattern):
+                try:
+                    stale.unlink()
+                    self._log_info(f"transcode: cleaned orphan {stale}")
+                except OSError:
+                    pass
 
     def _log_info(self, msg: str) -> None:
         if self._logger is not None:
@@ -350,19 +367,55 @@ class TranscodeWorker:
         # (see TranscodeWorker._cleanup_orphan_tmps) so this worker
         # thread can skip the per-job glob.
 
+        _patch_status(
+            info_path,
+            STATUS_RUNNING,
+            encoder=encoder_name,
+            video_remux_status=STATUS_RUNNING,
+        )
+
+        remux_failed = self._remux_pending_raw_spools(videos_dir)
+        if remux_failed:
+            _patch_status(
+                info_path,
+                STATUS_FAILED,
+                encoder=encoder_name,
+                cameras_failed=remux_failed,
+                video_remux_status=STATUS_FAILED,
+            )
+            return TranscodeResult(
+                episode_dir=episode_dir,
+                success=False,
+                elapsed_sec=time.time() - t0,
+                encoder=encoder_name,
+                cameras_done=[],
+                cameras_failed=remux_failed,
+            )
+
+        _patch_status(
+            info_path,
+            STATUS_RUNNING,
+            encoder=encoder_name,
+            cameras_failed={},
+            video_remux_status=STATUS_DONE,
+        )
+
         camera_jobs = self._discover_camera_jobs(videos_dir)
 
         if not camera_jobs:
             self._log_info(
                 f"transcode: {episode_dir.name} has no cameras; marking not_required"
             )
-            _patch_status(info_path, STATUS_NOT_REQUIRED, encoder=encoder_name)
+            _patch_status(
+                info_path,
+                STATUS_NOT_REQUIRED,
+                encoder=encoder_name,
+                video_remux_status=STATUS_NOT_REQUIRED,
+            )
             return TranscodeResult(
                 episode_dir=episode_dir, success=True, elapsed_sec=time.time() - t0,
                 encoder=encoder_name, cameras_done=[], cameras_failed={},
             )
-
-        _patch_status(info_path, STATUS_RUNNING, encoder=encoder_name)
 
         done: list[str] = []
         skipped: dict[str, str] = {}
@@ -399,10 +452,165 @@ class TranscodeWorker:
             cameras_done=done,
             cameras_failed=failed,
             cameras_skipped=skipped,
+            video_remux_status=STATUS_DONE,
         )
         return TranscodeResult(
             episode_dir=episode_dir, success=success, elapsed_sec=elapsed,
             encoder=encoder_name, cameras_done=done, cameras_failed=failed,
+        )
+
+    @staticmethod
+    def _camera_id_for(videos_dir: Path, camera_dir: Path, camera_name: str) -> str:
+        if camera_dir == videos_dir:
+            return camera_name
+        return f"{camera_dir.relative_to(videos_dir).as_posix()}/{camera_name}"
+
+    @classmethod
+    def _discover_raw_spool_jobs(cls, videos_dir: Path) -> list[_RawRemuxJob]:
+        if not videos_dir.exists():
+            return []
+
+        jobs: list[_RawRemuxJob] = []
+        for raw_path in sorted(videos_dir.rglob("*.mjpeg.tmp")):
+            if not raw_path.is_file():
+                continue
+            camera_name = raw_path.name[:-len(".mjpeg.tmp")]
+            camera_dir = raw_path.parent
+            jobs.append(_RawRemuxJob(
+                camera_id=cls._camera_id_for(videos_dir, camera_dir, camera_name),
+                camera_name=camera_name,
+                videos_dir=camera_dir,
+                raw_path=raw_path,
+                mp4_path=camera_dir / f"{camera_name}.mp4",
+                sidecar_path=camera_dir / f"{camera_name}_timestamps.parquet",
+                stats_path=camera_dir / f"{camera_name}_recorder_stats.json",
+            ))
+        return jobs
+
+    def _remux_pending_raw_spools(self, videos_dir: Path) -> dict[str, str]:
+        failed: dict[str, str] = {}
+        for job in self._discover_raw_spool_jobs(videos_dir):
+            if job.mp4_path.exists() and job.mp4_path.stat().st_size > 0:
+                job.raw_path.unlink(missing_ok=True)
+                _patch_recorder_stats(
+                    job.stats_path,
+                    {
+                        "remux_status": STATUS_DONE,
+                        "remux_error": None,
+                    },
+                )
+                continue
+            try:
+                self._remux_raw_spool(job)
+            except _SkipCamera as exc:
+                self._log_warn(
+                    f"remux {job.camera_id}: skipped: {exc}"
+                )
+            except Exception as exc:
+                failed[job.camera_id] = repr(exc)
+                self._log_error(
+                    f"remux {job.camera_id}: {exc!r}"
+                )
+        return failed
+
+    def _remux_raw_spool(self, job: _RawRemuxJob) -> None:
+        if not job.sidecar_path.exists():
+            raise FileNotFoundError(f"sidecar missing: {job.sidecar_path}")
+
+        sidecar_rows = _sidecar_row_count(job.sidecar_path)
+        if sidecar_rows <= 0:
+            job.raw_path.unlink(missing_ok=True)
+            job.sidecar_path.unlink(missing_ok=True)
+            _patch_recorder_stats(
+                job.stats_path,
+                {
+                    "remux_status": STATUS_NOT_REQUIRED,
+                    "remux_error": None,
+                },
+            )
+            raise _SkipCamera("sidecar has 0 rows; removed raw spool")
+
+        tmp_mp4 = job.videos_dir / f"{job.camera_name}.remuxing.mp4"
+        tmp_mp4.unlink(missing_ok=True)
+        fps = _estimate_raw_framerate(job.sidecar_path, job.stats_path)
+        cmd = [
+            _FFMPEG,
+            "-hide_banner", "-loglevel", "error",
+            "-y",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-framerate", f"{fps:.6f}",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-i", str(job.raw_path),
+            "-c:v", "copy",
+            "-an",
+            "-fps_mode", "passthrough",
+            "-video_track_timescale", "90000",
+            str(tmp_mp4),
+        ]
+        start = time.monotonic()
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        elapsed_ns = int((time.monotonic() - start) * 1_000_000_000)
+        if result.returncode != 0:
+            tmp_mp4.unlink(missing_ok=True)
+            error = result.stderr.decode("utf-8", errors="replace")
+            _patch_recorder_stats(
+                job.stats_path,
+                {
+                    "remux_status": STATUS_FAILED,
+                    "remux_error": error,
+                    "remux_duration_ns": elapsed_ns,
+                },
+            )
+            raise RuntimeError(f"ffmpeg remux rc={result.returncode}: {error}")
+
+        try:
+            remuxed_frames = _mp4_frame_count(tmp_mp4)
+        except Exception as exc:
+            tmp_mp4.unlink(missing_ok=True)
+            error = str(exc)
+            _patch_recorder_stats(
+                job.stats_path,
+                {
+                    "remux_status": STATUS_FAILED,
+                    "remux_error": error,
+                    "remux_duration_ns": elapsed_ns,
+                },
+            )
+            raise RuntimeError(error) from exc
+        if remuxed_frames != sidecar_rows:
+            tmp_mp4.unlink(missing_ok=True)
+            error = (
+                f"frame count mismatch mp4={remuxed_frames} "
+                f"sidecar={sidecar_rows}"
+            )
+            _patch_recorder_stats(
+                job.stats_path,
+                {
+                    "remux_status": STATUS_FAILED,
+                    "remux_error": error,
+                    "frames_remuxed": remuxed_frames,
+                    "remux_duration_ns": elapsed_ns,
+                },
+            )
+            raise RuntimeError(error)
+
+        os.replace(tmp_mp4, job.mp4_path)
+        job.raw_path.unlink(missing_ok=True)
+        _patch_recorder_stats(
+            job.stats_path,
+            {
+                "remux_status": STATUS_DONE,
+                "remux_error": None,
+                "frames_remuxed": remuxed_frames,
+                "remux_duration_ns": elapsed_ns,
+            },
         )
 
     @staticmethod
@@ -497,6 +705,19 @@ class TranscodeWorker:
                 "removed camera files for this episode"
             )
 
+        codec = _mp4_codec_name(raw_mp4)
+        if codec == "h264":
+            encoded_frames = _mp4_frame_count(raw_mp4)
+            if abs(encoded_frames - sidecar_rows) <= _VERIFY_FRAME_TOLERANCE:
+                self._log_info(
+                    f"transcode {cam_name}: already h264; skipping encode"
+                )
+                return
+            raise RuntimeError(
+                f"h264 frame count mismatch: encoded={encoded_frames} "
+                f"sidecar={sidecar_rows} (tolerance={_VERIFY_FRAME_TOLERANCE})"
+            )
+
         cmd = [
             _FFMPEG, "-hide_banner", "-loglevel", "warning", "-y",
             "-i", str(raw_mp4),
@@ -546,7 +767,11 @@ class TranscodeWorker:
             raise RuntimeError("ffmpeg produced no output file")
 
         # Verify pass — frame count tolerated mismatch.
-        encoded_frames = _mp4_frame_count(tmp_mp4)
+        try:
+            encoded_frames = _mp4_frame_count(tmp_mp4)
+        except Exception:
+            tmp_mp4.unlink(missing_ok=True)
+            raise
         if abs(encoded_frames - sidecar_rows) > _VERIFY_FRAME_TOLERANCE:
             tmp_mp4.unlink(missing_ok=True)
             raise RuntimeError(
@@ -562,6 +787,59 @@ class TranscodeWorker:
 # ----------------------------------------------------------------------
 # Helpers (module-level so they're picklable + reusable across tests)
 # ----------------------------------------------------------------------
+
+
+def _patch_recorder_stats(stats_path: Path, updates: dict) -> None:
+    if not stats_path.exists():
+        return
+    try:
+        with open(stats_path, encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        payload.update(updates)
+        tmp = stats_path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, stats_path)
+    except Exception:
+        return
+
+
+def _estimate_raw_framerate(sidecar: Path, stats_path: Path) -> float:
+    default = 30.0
+    if stats_path.exists():
+        try:
+            with open(stats_path, encoding="utf-8") as f:
+                stats = json.load(f) or {}
+            frames = int(stats.get("frames_written") or 0)
+            first_ns = stats.get("first_recv_ns")
+            last_ns = stats.get("last_recv_ns")
+            if (
+                frames > 1
+                and first_ns is not None
+                and last_ns is not None
+                and int(last_ns) > int(first_ns)
+            ):
+                fps = (frames - 1) / ((int(last_ns) - int(first_ns)) / 1e9)
+                if 1.0 <= fps <= 120.0:
+                    return float(fps)
+        except Exception:
+            pass
+
+    try:
+        table = pq.read_table(str(sidecar), columns=["header_stamp_ns"])
+        values = table.column(0).to_pylist()
+        if len(values) > 1 and values[-1] is not None and values[0] is not None:
+            first_ns = int(values[0])
+            last_ns = int(values[-1])
+            if last_ns > first_ns:
+                fps = (len(values) - 1) / ((last_ns - first_ns) / 1e9)
+                if 1.0 <= fps <= 120.0:
+                    return float(fps)
+    except Exception:
+        pass
+    return default
 
 
 def _sidecar_row_count(sidecar: Path) -> int:
@@ -587,7 +865,12 @@ def _mp4_dimensions(mp4: Path) -> tuple[int, int]:
             f"ffprobe dimensions timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
             f"for {mp4.name}"
         ) from exc
-    text = (out.stdout or "").strip().splitlines()[0] if out.stdout else ""
+    lines = [
+        line.strip()
+        for line in (out.stdout or "").splitlines()
+        if line.strip()
+    ]
+    text = lines[0] if lines else ""
     try:
         width, height = text.split("x", 1)
         return int(width), int(height)
@@ -598,15 +881,105 @@ def _mp4_dimensions(mp4: Path) -> tuple[int, int]:
         ) from exc
 
 
+def _mp4_codec_name(mp4: Path) -> str:
+    try:
+        out = subprocess.run(
+            [
+                _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=nw=1:nk=1", str(mp4),
+            ],
+            capture_output=True, text=True,
+            timeout=_FFPROBE_FRAME_COUNT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe codec probe timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
+            f"for {mp4.name}"
+        ) from exc
+    lines = [
+        line.strip()
+        for line in (out.stdout or "").splitlines()
+        if line.strip()
+    ]
+    codec = lines[0] if lines else ""
+    if codec:
+        return codec.lower()
+    raise RuntimeError(
+        f"ffprobe could not determine codec for {mp4.name}: "
+        f"stderr={out.stderr!r}"
+    )
+
+
 def _mp4_frame_count(mp4: Path) -> int:
     """Return the frame count of an MP4 via ffprobe.
 
-    Uses ``-count_frames`` which is slow on huge files but exact, so
-    the verify pass refuses to ship a transcode that doesn't match
-    the sidecar. Raises ``RuntimeError`` on timeout or parse failure so
-    the caller can fail this single camera without blocking the worker
-    pool.
+    Prefer container metadata / packet counts because ``-count_frames``
+    can take minutes on multi-GB MJPEG files. MP4 video tracks have one
+    packet per frame in our recorder/transcoder pipeline, so packet count
+    gives the same safety check without decoding every JPEG. Falls back
+    to ``-count_frames`` for odd files that lack both fast counts.
     """
+    attempts = [
+        (
+            "nb_frames",
+            [
+                _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_frames",
+                "-of", "default=nw=1:nk=1", str(mp4),
+            ],
+        ),
+        (
+            "nb_read_packets",
+            [
+                _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-count_packets",
+                "-show_entries", "stream=nb_read_packets",
+                "-of", "default=nw=1:nk=1", str(mp4),
+            ],
+        ),
+        (
+            "nb_read_frames",
+            [
+                _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "default=nw=1:nk=1", str(mp4),
+            ],
+        ),
+    ]
+    errors: list[str] = []
+    for label, cmd in attempts:
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True, text=True,
+                timeout=_FFPROBE_FRAME_COUNT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            errors.append(
+                f"{label} timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s"
+            )
+            continue
+        text = (out.stdout or "").strip()
+        if text and text != "N/A":
+            try:
+                return int(text.splitlines()[0])
+            except ValueError:
+                errors.append(f"{label} stdout={out.stdout!r}")
+                continue
+        if out.stderr:
+            errors.append(f"{label} stderr={out.stderr!r}")
+        else:
+            errors.append(f"{label} unavailable")
+    detail = "; ".join(errors) if errors else "no ffprobe output"
+    raise RuntimeError(
+        f"ffprobe could not determine frame count for {mp4.name}: {detail}"
+    )
+
+
+def _mp4_frame_count_slow_decode(mp4: Path) -> int:
+    """Legacy exact decode count kept for manual diagnostics/tests."""
     try:
         out = subprocess.run(
             [
@@ -659,6 +1032,7 @@ def _patch_status(
     cameras_done: Optional[list[str]] = None,
     cameras_failed: Optional[dict[str, str]] = None,
     cameras_skipped: Optional[dict[str, str]] = None,
+    video_remux_status: Optional[str] = None,
 ) -> None:
     """Read-modify-write episode_info.json atomically.
 
@@ -674,6 +1048,8 @@ def _patch_status(
     except Exception:
         info = {}
     info["transcoding_status"] = status
+    if video_remux_status is not None:
+        info["video_remux_status"] = video_remux_status
     if cameras_failed is not None:
         info["transcoding_cameras_failed"] = dict(cameras_failed)
     else:

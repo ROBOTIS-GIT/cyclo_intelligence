@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
@@ -21,6 +21,7 @@ import {
   markLocalTaskInfoEdited,
   resetSegmentPlan,
   resetSegmentProgress,
+  selectRecordTaskInfo,
   setActiveSlotIndex,
   setPlannedCount,
   setPlannedSubTaskAt,
@@ -28,6 +29,7 @@ import {
   setSlotToServerIdx,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { buildRosbagStartWarningMessage } from '../utils/recordingMonitorWarnings';
 import InfoPanel from './InfoPanel';
 import Tooltip from './Tooltip';
 
@@ -44,17 +46,22 @@ export default function SegmentPanel() {
   const dispatch = useDispatch();
   const { sendRecordCommand } = useRosServiceCaller();
 
-  const taskInfo = useSelector((state) => state.tasks.taskInfo);
+  const taskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const recordStatus = useSelector((state) => state.tasks.recordStatus);
   const plannedCount = useSelector((state) => state.tasks.plannedCount);
   const plannedSubTasks = useSelector((state) => state.tasks.plannedSubTasks);
   const slotToServerIdx = useSelector((state) => state.tasks.slotToServerIdx);
   const activeSlotIndex = useSelector((state) => state.tasks.activeSlotIndex);
+  const recordingMonitor = useSelector((state) => state.tasks.recordingMonitor);
 
   const [optimisticRecording, setOptimisticRecording] = useState(false);
   const [episodeAcquisitionStarted, setEpisodeAcquisitionStarted] = useState(false);
   const [savingInProgress, setSavingInProgress] = useState(false);
+  const [serverResetInProgress, setServerResetInProgress] = useState(false);
+  const episodeFullIndexRef = useRef(null);
   const lastServerEpisodeRef = useRef(null);
+  const commandSequenceInProgressRef = useRef(false);
+  const pendingEpisodeResetRef = useRef(null);
 
   const serverRecording =
     recordStatus.recordPhase === RecordPhase.RECORDING || Boolean(recordStatus.running);
@@ -66,11 +73,21 @@ export default function SegmentPanel() {
   );
   const serverSubtaskIndex = Number(recordStatus.currentSubtaskIndex || 0);
   const serverSubtaskCount = Number(recordStatus.subtaskCount || 0);
+  const serverSavedSubtaskIndices = useMemo(() => (
+    Array.isArray(recordStatus.savedSubtaskIndices)
+      ? recordStatus.savedSubtaskIndices
+          .map((idx) => Number(idx))
+          .filter((idx) => Number.isInteger(idx) && idx >= 0)
+      : null
+  ), [recordStatus.savedSubtaskIndices]);
   const hasServerSavedSubtasks =
-    serverSubtaskCount > 0 && serverSubtaskIndex > 0 && !isRecording;
+    Array.isArray(serverSavedSubtaskIndices)
+      ? serverSavedSubtaskIndices.length > 0
+      : serverSubtaskCount > 0 && serverSubtaskIndex > 0 && !isRecording;
   const hasLocalSavedSubtasks = savedCount > 0;
   const isPlanMode = plannedCountNumber > 0;
   const isSingleMode = plannedCountNumber === 0;
+  const currentFullEpisodeIndex = Number(recordStatus.currentEpisodeNumber || 0);
   const firstPendingSlot = useMemo(
     () => slotToServerIdx.findIndex((v) => v === -1),
     [slotToServerIdx]
@@ -95,13 +112,57 @@ export default function SegmentPanel() {
   useEffect(() => {
     if (serverRecording || hasLocalSavedSubtasks || hasServerSavedSubtasks) {
       setEpisodeAcquisitionStarted(true);
+      if (episodeFullIndexRef.current === null) {
+        episodeFullIndexRef.current = currentFullEpisodeIndex;
+      }
     }
-  }, [hasLocalSavedSubtasks, hasServerSavedSubtasks, serverRecording]);
+  }, [currentFullEpisodeIndex, hasLocalSavedSubtasks, hasServerSavedSubtasks, serverRecording]);
 
   useEffect(() => {
     if (!recordStatus.topicReceived) return;
+    if (commandSequenceInProgressRef.current) return;
 
-    const currentEpisode = Number(recordStatus.currentEpisodeNumber || 0);
+    if (pendingEpisodeResetRef.current) {
+      const pendingReset = pendingEpisodeResetRef.current;
+      const operationFailed = (
+        pendingReset.type === 'finish' &&
+        recordStatus.recordingOperationStage === 'FINISH_EPISODE' &&
+        ['failed', 'cancelled'].includes(recordStatus.recordingOperationStatus)
+      );
+      const savedStatusKnown = Array.isArray(serverSavedSubtaskIndices);
+      const noServerSavedSubtasks = (
+        !savedStatusKnown || serverSavedSubtaskIndices.length === 0
+      );
+      const resetObserved = pendingReset.type === 'finish'
+        ? (
+          !serverRecording &&
+          serverSubtaskIndex === 0 &&
+          currentFullEpisodeIndex > pendingReset.fullEpisodeIndex
+        )
+        : (
+          !serverRecording &&
+          serverSubtaskIndex === 0 &&
+          noServerSavedSubtasks
+        );
+      if (operationFailed) {
+        pendingEpisodeResetRef.current = null;
+        setServerResetInProgress(false);
+        setEpisodeAcquisitionStarted(true);
+        toast.error(
+          recordStatus.recordingOperationMessage ||
+          'Finish episode failed; saved subtasks are still available.'
+        );
+      } else if (resetObserved) {
+        pendingEpisodeResetRef.current = null;
+        setServerResetInProgress(false);
+        lastServerEpisodeRef.current = currentFullEpisodeIndex;
+        dispatch(resetSegmentProgress());
+      } else {
+        return;
+      }
+    }
+
+    const currentEpisode = currentFullEpisodeIndex;
     if (lastServerEpisodeRef.current === null) {
       lastServerEpisodeRef.current = currentEpisode;
     } else if (
@@ -113,6 +174,7 @@ export default function SegmentPanel() {
       setOptimisticRecording(false);
       setSavingInProgress(false);
       setEpisodeAcquisitionStarted(false);
+      episodeFullIndexRef.current = null;
       dispatch(resetSegmentProgress());
       return;
     } else {
@@ -127,9 +189,14 @@ export default function SegmentPanel() {
       0,
       Math.min(serverSubtaskIndex, plannedCountNumber - 1)
     );
-    const syncedSlotMap = slotToServerIdx.map((value, index) => (
-      index < boundedServerSlot && value < 0 ? index : value
-    ));
+    const savedSet = Array.isArray(serverSavedSubtaskIndices)
+      ? new Set(serverSavedSubtaskIndices)
+      : null;
+    const syncedSlotMap = savedSet
+      ? slotToServerIdx.map((_, index) => (savedSet.has(index) ? index : -1))
+      : slotToServerIdx.map((value, index) => (
+        index < boundedServerSlot && value < 0 ? index : value
+      ));
     const slotMapChanged = syncedSlotMap.some(
       (value, index) => value !== slotToServerIdx[index]
     );
@@ -138,8 +205,16 @@ export default function SegmentPanel() {
       dispatch(setSlotToServerIdx(syncedSlotMap));
     }
 
-    if (activeSlotIndex !== boundedServerSlot && !planComplete) {
-      dispatch(setActiveSlotIndex(boundedServerSlot));
+    const firstServerPendingSlot = savedSet
+      ? syncedSlotMap.findIndex((value) => value < 0)
+      : -1;
+    const nextActiveSlot = (
+      savedSet && firstServerPendingSlot >= 0 && !serverRecording
+    )
+      ? firstServerPendingSlot
+      : boundedServerSlot;
+    if (activeSlotIndex !== nextActiveSlot && !planComplete) {
+      dispatch(setActiveSlotIndex(nextActiveSlot));
     }
 
     if (serverRecording) {
@@ -152,9 +227,14 @@ export default function SegmentPanel() {
     isPlanMode,
     planComplete,
     plannedCountNumber,
-    recordStatus.currentEpisodeNumber,
+    currentFullEpisodeIndex,
+    recordStatus.recordingOperationMessage,
+    recordStatus.recordingOperationStage,
+    recordStatus.recordingOperationStatus,
     recordStatus.topicReceived,
     serverRecording,
+    serverResetInProgress,
+    serverSavedSubtaskIndices,
     serverSubtaskCount,
     serverSubtaskIndex,
     slotToServerIdx,
@@ -234,6 +314,7 @@ export default function SegmentPanel() {
   const canStartRecord =
     !isRecording &&
     !savingInProgress &&
+    !serverResetInProgress &&
     !planComplete &&
     allSubTasksFilled &&
     taskInfoComplete;
@@ -245,6 +326,9 @@ export default function SegmentPanel() {
       dispatch(setActiveSlotIndex(slotIdx));
       setOptimisticRecording(true);
       setEpisodeAcquisitionStarted(true);
+      if (episodeFullIndexRef.current === null) {
+        episodeFullIndexRef.current = currentFullEpisodeIndex;
+      }
       const result = await runCommand('Record', 'start_segment', {
         segmentIndex: slotIdx,
       });
@@ -257,6 +341,7 @@ export default function SegmentPanel() {
       return result;
     },
     [
+      currentFullEpisodeIndex,
       dispatch,
       hasLocalSavedSubtasks,
       hasServerSavedSubtasks,
@@ -268,57 +353,82 @@ export default function SegmentPanel() {
 
   const handleRecordStart = useCallback(async () => {
     if (!canStartRecord) return;
-    await startRecordingSlot(activeSlotIndex);
-  }, [activeSlotIndex, canStartRecord, startRecordingSlot]);
+    if (commandSequenceInProgressRef.current) return;
+    commandSequenceInProgressRef.current = true;
+    try {
+      const warningMessage = buildRosbagStartWarningMessage(recordingMonitor);
+      if (warningMessage) {
+        toast.error(warningMessage, { duration: 9000 });
+      }
+      await startRecordingSlot(activeSlotIndex);
+    } finally {
+      commandSequenceInProgressRef.current = false;
+    }
+  }, [activeSlotIndex, canStartRecord, recordingMonitor, startRecordingSlot]);
 
   const handleSlotSave = useCallback(
     async (slotIdx) => {
       if (!isSingleMode && slotIdx !== activeSlotIndex) return;
       if (!isRecording || savingInProgress) return;
+      if (serverResetInProgress) return;
+      if (commandSequenceInProgressRef.current) return;
+      commandSequenceInProgressRef.current = true;
       setSavingInProgress(true);
       setOptimisticRecording(false);
       const isLastSlot = isSingleMode || slotIdx >= plannedCountNumber - 1;
-      const result = await runCommand('Save', 'stop_segment', {
-        segmentIndex: slotIdx,
-      });
-      if (!result || result.success === false) {
-        setSavingInProgress(false);
-        return;
-      }
-
-      const assignedServerIdx = slotToServerIdx.filter((v) => v >= 0).length;
-      const updatedSlotMap = isSingleMode
-        ? slotToServerIdx
-        : slotToServerIdx.map((v, i) => (i === slotIdx ? assignedServerIdx : v));
-      if (!isSingleMode) {
-        dispatch(setSlotToServerIdx(updatedSlotMap));
-      }
-
-      if (isLastSlot) {
-        const finishResult = await runCommand('Finish episode', 'finish_episode');
-        if (finishResult && finishResult.success) {
-          setEpisodeAcquisitionStarted(false);
-          dispatch(resetSegmentProgress());
+      try {
+        const result = await runCommand('Save', 'stop_segment', {
+          segmentIndex: slotIdx,
+        });
+        if (!result || result.success === false) {
+          return;
         }
-        setSavingInProgress(false);
-        return;
-      }
 
-      const nextPending = updatedSlotMap.findIndex((v) => v === -1);
-      if (nextPending >= 0) {
+        const updatedSlotMap = isSingleMode
+          ? slotToServerIdx
+          : slotToServerIdx.map((v, i) => (i === slotIdx ? slotIdx : v));
+        if (!isSingleMode) {
+          dispatch(setSlotToServerIdx(updatedSlotMap));
+        }
+
+        const nextPending = updatedSlotMap.findIndex((v) => v === -1);
+        if (isLastSlot || nextPending < 0) {
+          const targetFullEpisodeIndex = (
+            episodeFullIndexRef.current === null
+              ? currentFullEpisodeIndex
+              : episodeFullIndexRef.current
+          );
+          const finishResult = await runCommand('Finish episode', 'finish_episode');
+          if (finishResult && finishResult.success) {
+            pendingEpisodeResetRef.current = {
+              type: 'finish',
+              fullEpisodeIndex: targetFullEpisodeIndex,
+            };
+            setServerResetInProgress(true);
+            setEpisodeAcquisitionStarted(false);
+            episodeFullIndexRef.current = null;
+            dispatch(resetSegmentProgress());
+          }
+          return;
+        }
+
         dispatch(setActiveSlotIndex(nextPending));
         await startRecordingSlot(nextPending);
+      } finally {
+        setSavingInProgress(false);
+        commandSequenceInProgressRef.current = false;
       }
-      setSavingInProgress(false);
     },
     [
       activeSlotIndex,
+      currentFullEpisodeIndex,
       dispatch,
       isRecording,
       isSingleMode,
       plannedCountNumber,
       runCommand,
       savingInProgress,
+      serverResetInProgress,
       slotToServerIdx,
       startRecordingSlot,
     ]
@@ -327,48 +437,84 @@ export default function SegmentPanel() {
   const handleSlotTrash = useCallback(
     async (slotIdx) => {
       if (savingInProgress) return;
+      if (serverResetInProgress) return;
+      if (commandSequenceInProgressRef.current) return;
+      commandSequenceInProgressRef.current = true;
       const isActiveRecording = slotIdx === activeSlotIndex && isRecording;
       const serverIdx = slotToServerIdx[slotIdx];
-
-      if (isActiveRecording) {
-        setOptimisticRecording(false);
-        await runCommand('Discard', 'cancel_segment', { segmentIndex: slotIdx });
-        return;
+      try {
+        if (isActiveRecording) {
+          setOptimisticRecording(false);
+          await runCommand('Discard', 'cancel_segment', { segmentIndex: slotIdx });
+          return;
+        }
+        if (serverIdx < 0) return;
+        if (!window.confirm(`Discard subtask ${slotIdx + 1}?`)) return;
+        const result = await runCommand(`Discard #${slotIdx + 1}`, 'discard_segment', {
+          segmentIndex: slotIdx,
+        });
+        if (!result || result.success === false) return;
+        const updated = slotToServerIdx.map((v, i) => (i === slotIdx ? -1 : v));
+        dispatch(setSlotToServerIdx(updated));
+        dispatch(setActiveSlotIndex(slotIdx));
+      } finally {
+        commandSequenceInProgressRef.current = false;
       }
-      if (serverIdx < 0) return;
-      if (!window.confirm(`Discard subtask ${slotIdx + 1}?`)) return;
-      const result = await runCommand(`Discard #${slotIdx + 1}`, 'discard_segment', {
-        segmentIndex: slotIdx,
-      });
-      if (!result || result.success === false) return;
-      const updated = slotToServerIdx.map((v, i) => (i === slotIdx ? -1 : v));
-      dispatch(setSlotToServerIdx(updated));
-      dispatch(setActiveSlotIndex(slotIdx));
     },
-    [activeSlotIndex, dispatch, isRecording, runCommand, savingInProgress, slotToServerIdx]
+    [
+      activeSlotIndex,
+      dispatch,
+      isRecording,
+      runCommand,
+      savingInProgress,
+      serverResetInProgress,
+      slotToServerIdx,
+    ]
   );
 
   const handleDiscardEpisode = useCallback(async () => {
     if (
       savingInProgress ||
+      serverResetInProgress ||
       !episodeAcquisitionStarted
     ) {
       return;
     }
-    const result = await runCommand('Discard episode', 'discard_episode');
-    if (result && result.success) {
-      setOptimisticRecording(false);
-      setEpisodeAcquisitionStarted(false);
-      dispatch(resetSegmentProgress());
+    if (commandSequenceInProgressRef.current) return;
+    commandSequenceInProgressRef.current = true;
+    const targetFullEpisodeIndex = episodeFullIndexRef.current;
+    if (targetFullEpisodeIndex === null) {
+      commandSequenceInProgressRef.current = false;
+      return;
+    }
+    try {
+      const result = await runCommand('Discard episode', 'discard_episode', {
+        segmentIndex: targetFullEpisodeIndex + 1,
+      });
+      if (result && result.success) {
+        pendingEpisodeResetRef.current = {
+          type: 'discard',
+          fullEpisodeIndex: targetFullEpisodeIndex,
+        };
+        setServerResetInProgress(true);
+        setOptimisticRecording(false);
+        setEpisodeAcquisitionStarted(false);
+        episodeFullIndexRef.current = null;
+        dispatch(resetSegmentProgress());
+      }
+    } finally {
+      commandSequenceInProgressRef.current = false;
     }
   }, [
     dispatch,
     episodeAcquisitionStarted,
     runCommand,
     savingInProgress,
+    serverResetInProgress,
   ]);
 
-  const canSaveSingle = isSingleMode && isRecording && !savingInProgress;
+  const canSaveSingle =
+    isSingleMode && isRecording && !savingInProgress && !serverResetInProgress;
 
   const handlePrimaryRecordButton = useCallback(async () => {
     if (canSaveSingle) {
@@ -382,6 +528,7 @@ export default function SegmentPanel() {
 
   const handleResetPlan = useCallback(() => {
     setEpisodeAcquisitionStarted(false);
+    episodeFullIndexRef.current = null;
     dispatch(resetSegmentPlan());
     dispatch(markLocalTaskInfoEdited());
   }, [dispatch]);
@@ -400,9 +547,13 @@ export default function SegmentPanel() {
       if (e.key === ' ' || e.code === 'Space') {
         if (canStartRecord) handleRecordStart();
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'x' || e.key === 'X')) {
-        if (isRecording && !savingInProgress) handleSlotSave(isSingleMode ? 0 : activeSlotIndex);
+        if (isRecording && !savingInProgress && !serverResetInProgress) {
+          handleSlotSave(isSingleMode ? 0 : activeSlotIndex);
+        }
       } else if (e.key === 'Escape') {
-        if (isRecording && !savingInProgress) handleSlotTrash(activeSlotIndex);
+        if (isRecording && !savingInProgress && !serverResetInProgress) {
+          handleSlotTrash(activeSlotIndex);
+        }
       }
     };
     window.addEventListener('keyup', onKeyUp);
@@ -416,11 +567,18 @@ export default function SegmentPanel() {
     isRecording,
     isSingleMode,
     savingInProgress,
+    serverResetInProgress,
   ]);
 
-  const canResetPlan = isPlanMode && !isRecording && !savingInProgress && savedCount === 0;
+  const canResetPlan = (
+    isPlanMode &&
+    !isRecording &&
+    !savingInProgress &&
+    !serverResetInProgress &&
+    savedCount === 0
+  );
   const canDiscardEpisode =
-    !savingInProgress && episodeAcquisitionStarted;
+    !savingInProgress && !serverResetInProgress && episodeAcquisitionStarted;
 
   const secondaryBtn = (enabled, color) =>
     clsx(
@@ -438,8 +596,12 @@ export default function SegmentPanel() {
     const isActive = i === activeSlotIndex && !planComplete;
     const isCurrentlyRecording = isActive && isRecording;
     const inputDisabled = isSaved || isRecording || savingInProgress;
-    const saveEnabled = isCurrentlyRecording && !savingInProgress;
-    const trashEnabled = !savingInProgress && (isCurrentlyRecording || (isSaved && !isRecording));
+    const saveEnabled = isCurrentlyRecording && !savingInProgress && !serverResetInProgress;
+    const trashEnabled = (
+      !savingInProgress &&
+      !serverResetInProgress &&
+      (isCurrentlyRecording || (isSaved && !isRecording))
+    );
 
     return (
       <div

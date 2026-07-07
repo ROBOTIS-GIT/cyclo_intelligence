@@ -90,6 +90,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
 
         self.assertTrue(response.success)
         self.assertEqual(loop.configures[0]["publish_to_robot"], False)
+        self.assertEqual(loop.configures[0]["action_request_mode"], "async")
 
     def test_load_allows_empty_model_path_for_remote_backends(self) -> None:
         handler, _session, loop = self._handler()
@@ -122,6 +123,20 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
 
         self.assertTrue(response.success)
         self.assertEqual(loop.configures[0]["publish_to_robot"], True)
+
+    def test_load_configures_action_request_mode(self) -> None:
+        handler, _session, loop = self._handler()
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+            action_request_mode="sync",
+        ))
+
+        self.assertTrue(response.success)
+        self.assertEqual(loop.configures[0]["action_request_mode"], "sync")
 
     def test_start_applies_publish_mode(self) -> None:
         handler, _session, loop = self._handler()

@@ -53,9 +53,12 @@ from cyclo_data.recorder.transcoder import (  # noqa: E402
     STATUS_PENDING,
     TranscodeWorker,
     _detect_encoder,
+    _mp4_codec_name,
+    _mp4_dimensions,
     _mp4_frame_count,
     _patch_status,
 )
+import cyclo_data.recorder.transcoder as transcoder_module  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -66,11 +69,18 @@ from cyclo_data.recorder.transcoder import (  # noqa: E402
 @pytest.fixture(scope="session")
 def encoder():
     """Probe the H.264 encoder once for the whole session."""
-    return _detect_encoder()
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    try:
+        return _detect_encoder()
+    except FileNotFoundError as exc:
+        pytest.skip(f"ffmpeg is not installed: {exc}")
 
 
 def _make_mjpeg_mp4(path: Path, num_frames: int, *, w: int = 64, h: int = 48) -> None:
     """Build a tiny MJPEG-in-MP4 with ``num_frames`` solid-colour frames."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
     path.parent.mkdir(parents=True, exist_ok=True)
     if num_frames == 0:
         # ffmpeg can't make a zero-frame mp4 — emit an empty file. Callers
@@ -234,6 +244,22 @@ def test_patch_status_preserves_korean_instruction_as_utf8(tmp_path):
     assert "\\ud654" not in raw
 
 
+def test_ffprobe_helpers_handle_blank_stdout_without_index_error(monkeypatch, tmp_path):
+    blank = subprocess.CompletedProcess(
+        args=["ffprobe"], returncode=0, stdout="\n  \n",
+    )
+    monkeypatch.setattr(
+        transcoder_module.subprocess,
+        "run",
+        lambda *args, **kwargs: blank,
+    )
+
+    with pytest.raises(RuntimeError, match="could not determine codec"):
+        _mp4_codec_name(tmp_path / "blank.mp4")
+    with pytest.raises(RuntimeError, match="could not determine dimensions"):
+        _mp4_dimensions(tmp_path / "blank.mp4")
+
+
 def _ffprobe_codec(mp4: Path) -> str:
     out = subprocess.run(
         [
@@ -244,6 +270,214 @@ def _ffprobe_codec(mp4: Path) -> str:
         capture_output=True, text=True,
     )
     return out.stdout.strip()
+
+
+def test_pending_raw_spool_remuxes_to_mp4_before_h264(tmp_path, monkeypatch):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    raw = videos / "cam0.mjpeg.tmp"
+    raw.write_bytes(b"\xff\xd8jpeg")
+    (videos / "cam0_timestamps.parquet").write_bytes(b"sidecar")
+    stats = videos / "cam0_recorder_stats.json"
+    stats.write_text(
+        json.dumps({
+            "frames_written": 3,
+            "first_recv_ns": 1_000_000_000,
+            "last_recv_ns": 1_100_000_000,
+            "remux_status": STATUS_PENDING,
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, stdout, stderr, check=False, **kwargs):
+        Path(cmd[-1]).write_bytes(b"mjpeg-mp4")
+        return type("Result", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(transcoder_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(transcoder_module, "_mp4_frame_count", lambda _path: 3)
+    monkeypatch.setattr(transcoder_module, "_sidecar_row_count", lambda _path: 3)
+    monkeypatch.setattr(
+        transcoder_module,
+        "_estimate_raw_framerate",
+        lambda _sidecar, _stats: 30.0,
+    )
+
+    worker = TranscodeWorker(logger=None, parallelism=1)
+    try:
+        failed = worker._remux_pending_raw_spools(videos)
+    finally:
+        worker.shutdown(wait=True)
+
+    assert failed == {}
+    assert not raw.exists()
+    assert (videos / "cam0.mp4").read_bytes() == b"mjpeg-mp4"
+    updated = json.loads(stats.read_text())
+    assert updated["remux_status"] == STATUS_DONE
+    assert updated["frames_remuxed"] == 3
+    assert updated["remux_error"] is None
+
+
+def test_mp4_frame_count_uses_fast_container_counts(monkeypatch, tmp_path):
+    mp4 = tmp_path / "large.mp4"
+    mp4.write_bytes(b"placeholder")
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        if "-show_entries" in cmd and "stream=nb_frames" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="N/A\n", stderr="")
+        if "-show_entries" in cmd and "stream=nb_read_packets" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="16502\n", stderr="")
+        raise AssertionError("slow count_frames fallback should not be used")
+
+    monkeypatch.setattr(transcoder_module.subprocess, "run", fake_run)
+
+    assert _mp4_frame_count(mp4) == 16502
+    assert any("stream=nb_read_packets" in call for call in calls)
+    assert not any("stream=nb_read_frames" in call for call in calls)
+
+
+def test_raw_remux_probe_failure_cleans_tmp_and_marks_failed(tmp_path, monkeypatch):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    raw = videos / "cam0.mjpeg.tmp"
+    raw.write_bytes(b"\xff\xd8jpeg")
+    tmp_mp4 = videos / "cam0.remuxing.mp4"
+    stats = videos / "cam0_recorder_stats.json"
+    stats.write_text(
+        json.dumps({
+            "frames_written": 3,
+            "remux_status": STATUS_PENDING,
+        }),
+        encoding="utf-8",
+    )
+    (videos / "cam0_timestamps.parquet").write_bytes(b"sidecar")
+
+    def fake_run(cmd, stdout, stderr, check=False, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial mp4")
+        return type("Result", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(transcoder_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(transcoder_module, "_sidecar_row_count", lambda _path: 3)
+    monkeypatch.setattr(
+        transcoder_module,
+        "_estimate_raw_framerate",
+        lambda _sidecar, _stats: 30.0,
+    )
+
+    def probe_fails(_path):
+        raise RuntimeError("ffprobe frame-count timed out")
+
+    monkeypatch.setattr(transcoder_module, "_mp4_frame_count", probe_fails)
+
+    worker = TranscodeWorker(logger=None, parallelism=1)
+    try:
+        failed = worker._remux_pending_raw_spools(videos)
+    finally:
+        worker.shutdown(wait=True)
+
+    assert "cam0" in failed
+    assert raw.exists()
+    assert not tmp_mp4.exists()
+    updated = json.loads(stats.read_text())
+    assert updated["remux_status"] == STATUS_FAILED
+    assert "ffprobe frame-count timed out" in updated["remux_error"]
+
+
+def test_raw_remux_failure_is_failed_not_not_required(tmp_path, monkeypatch):
+    ep = tmp_path / "Task_X" / "0"
+    videos = ep / "videos"
+    videos.mkdir(parents=True)
+    raw = videos / "cam0.mjpeg.tmp"
+    raw.write_bytes(b"\xff\xd8jpeg")
+    (videos / "cam0_timestamps.parquet").write_bytes(b"sidecar")
+    (ep / "episode_info.json").write_text(
+        json.dumps({
+            "transcoding_status": STATUS_PENDING,
+            "video_remux_status": STATUS_PENDING,
+        })
+    )
+
+    def fake_run(cmd, stdout, stderr, check=False, **kwargs):
+        return type("Result", (), {"returncode": 1, "stderr": b"bad mjpeg"})()
+
+    monkeypatch.setattr(transcoder_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(transcoder_module, "_sidecar_row_count", lambda _path: 1)
+    monkeypatch.setattr(
+        transcoder_module,
+        "_estimate_raw_framerate",
+        lambda _sidecar, _stats: 30.0,
+    )
+
+    worker = TranscodeWorker(logger=None, parallelism=1)
+    worker._encoder = ("libx264", [])
+    try:
+        result = worker._run_one(ep)
+    finally:
+        worker.shutdown(wait=True)
+
+    assert not result.success
+    assert raw.exists()
+    info = _read_status(ep)
+    assert info["transcoding_status"] == STATUS_FAILED
+    assert info["video_remux_status"] == STATUS_FAILED
+    assert "cam0" in info["transcoding_cameras_failed"]
+    assert info["transcoding_status"] != STATUS_NOT_REQUIRED
+
+
+def test_remux_failure_stops_before_h264_encode(tmp_path, monkeypatch):
+    ep = _make_episode(tmp_path, {"cam_ok": (3, 3)})
+    raw = ep / "videos" / "cam_raw.mjpeg.tmp"
+    raw.write_bytes(b"\xff\xd8jpeg")
+    _make_sidecar(ep / "videos" / "cam_raw_timestamps.parquet", 1)
+
+    worker = TranscodeWorker(logger=None, parallelism=1)
+    worker._encoder = ("libx264", [])
+
+    monkeypatch.setattr(
+        worker,
+        "_remux_pending_raw_spools",
+        lambda _videos_dir: {"cam_raw": "RuntimeError('bad raw')"},
+    )
+
+    def should_not_encode(*args, **kwargs):
+        raise AssertionError("H.264 encode should wait until remux succeeds")
+
+    monkeypatch.setattr(worker, "_transcode_camera", should_not_encode)
+
+    try:
+        result = worker._run_one(ep)
+    finally:
+        worker.shutdown(wait=True)
+
+    assert not result.success
+    assert result.cameras_failed == {"cam_raw": "RuntimeError('bad raw')"}
+    info = _read_status(ep)
+    assert info["transcoding_status"] == STATUS_FAILED
+    assert info["video_remux_status"] == STATUS_FAILED
+
+
+def test_video_remux_status_done_before_h264_encode(tmp_path, monkeypatch):
+    ep = _make_episode(tmp_path, {"cam0": (3, 3)})
+    worker = TranscodeWorker(logger=None, parallelism=1)
+    worker._encoder = ("libx264", [])
+
+    monkeypatch.setattr(worker, "_remux_pending_raw_spools", lambda _videos_dir: {})
+
+    def assert_status_before_encode(*args, **kwargs):
+        info = _read_status(ep)
+        assert info["transcoding_status"] == "running"
+        assert info["video_remux_status"] == STATUS_DONE
+
+    monkeypatch.setattr(worker, "_transcode_camera", assert_status_before_encode)
+
+    try:
+        result = worker._run_one(ep)
+    finally:
+        worker.shutdown(wait=True)
+
+    assert result.success
+    assert _read_status(ep)["video_remux_status"] == STATUS_DONE
 
 
 @pytest.fixture
@@ -315,6 +549,31 @@ class TestHappyPath:
         w, h = probe.stdout.strip().split(",")
         assert int(w) == 48 and int(h) == 64, (
             f"expected 48x64 after rotation, got {w}x{h}"
+        )
+
+    def test_a4b_retry_skips_already_h264_camera(self, tmp_path, worker):
+        """Retrying a partially transcoded episode must not rotate twice."""
+        ep = _make_episode(
+            tmp_path,
+            {"cam_wrist": (20, 20)},
+            rotations={"cam_wrist": 270},
+        )
+        first = worker.submit(ep).result(timeout=60)
+        assert first.success, first
+        second = worker.submit(ep).result(timeout=60)
+        assert second.success, second
+
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                str(ep / "videos" / "cam_wrist.mp4"),
+            ],
+            capture_output=True, text=True,
+        )
+        w, h = probe.stdout.strip().split(",")
+        assert int(w) == 48 and int(h) == 64, (
+            f"retry should keep the first rotation result, got {w}x{h}"
         )
 
     def test_a5_rotation_0_no_change(self, tmp_path, worker):

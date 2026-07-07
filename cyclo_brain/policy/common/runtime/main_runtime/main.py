@@ -92,12 +92,14 @@ class MainRuntime:
             postprocess_actions=self._bool_env("POSTPROCESS_ACTIONS", True),
             alignment_mode=os.environ.get("ACTION_ALIGNMENT_MODE", "l2"),
             refill_margin_s=float(os.environ.get("REFILL_MARGIN_S", "0.2")),
+            refill_strategy=os.environ.get("REFILL_STRATEGY", "auto"),
             latency_warmup_samples=int(
                 os.environ.get("REFILL_LATENCY_WARMUP_SAMPLES", "1")
             ),
             max_refill_latency_s=self._optional_float_env(
                 "REFILL_LATENCY_SAMPLE_MAX_S", "2.0"
             ),
+            action_request_mode=os.environ.get("ACTION_REQUEST_MODE", "async"),
         )
         self._engine_client = engine_client
         self._command_srv = None

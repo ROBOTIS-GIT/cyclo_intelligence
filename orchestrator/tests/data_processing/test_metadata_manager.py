@@ -76,6 +76,20 @@ class TestMetadataManager:
         size = manager.get_directory_size(temp_bag_dir)
         assert size >= 100
 
+    def test_get_recording_date_returns_utc_iso_string(self, manager, temp_bag_dir):
+        metadata = {
+            "rosbag2_bagfile_information": {
+                "starting_time": {
+                    "nanoseconds_since_epoch": 1736692200000000000,
+                },
+            },
+        }
+        (temp_bag_dir / "metadata.yaml").write_text(
+            yaml.safe_dump(metadata), encoding="utf-8"
+        )
+
+        assert manager.get_recording_date(temp_bag_dir) == "2025-01-12T14:30:00Z"
+
     def test_get_task_markers_empty(self, manager, temp_bag_dir):
         markers = manager.get_task_markers(temp_bag_dir)
         assert markers == []

@@ -92,7 +92,7 @@ orchestrator:
             - arm_r_joint7
             - gripper_r_joint1
         head:
-          topic: /leader/joystick_controller_left/joint_trajectory
+          topic: /rldx/disabled/head_joint_trajectory
           msg_type: trajectory_msgs/msg/JointTrajectory
           joint_names:
             - head_joint1

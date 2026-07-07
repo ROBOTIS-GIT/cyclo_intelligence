@@ -1,3 +1,4 @@
+/* global BigInt */
 /**
  * FrameQueue — Ring buffer for raw JPEG frame data.
  *
@@ -39,6 +40,7 @@ export class FrameQueue {
     if (this._cache.has(key)) return;
     this._cache.set(key, data);
     this._insertTimeline(topicIdx, logTime);
+    this._evictOverLimit();
   }
 
   /**
@@ -146,6 +148,27 @@ export class FrameQueue {
     }
     if (lo < timeline.length && timeline[lo] === logTime) return;
     timeline.splice(lo, 0, logTime);
+  }
+
+  _evictOverLimit() {
+    while (this._cache.size > this.maxFrames) {
+      const oldestKey = this._cache.keys().next().value;
+      if (oldestKey === undefined) return;
+
+      this._cache.delete(oldestKey);
+      const [topicPart, logTimePart] = String(oldestKey).split(":");
+      const topicIdx = Number(topicPart);
+      if (!Number.isInteger(topicIdx) || !logTimePart) continue;
+
+      const timeline = this._timelines[topicIdx];
+      if (!timeline) continue;
+
+      const logTime = BigInt(logTimePart);
+      const index = timeline.findIndex((item) => item === logTime);
+      if (index >= 0) {
+        timeline.splice(index, 1);
+      }
+    }
   }
 
   _binarySearchNearest(sortedArr, targetNs) {

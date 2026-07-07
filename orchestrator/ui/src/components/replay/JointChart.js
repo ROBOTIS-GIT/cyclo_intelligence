@@ -14,7 +14,7 @@
 //
 // Author: Dongyun Kim
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MdExpandMore, MdExpandLess } from 'react-icons/md';
 import {
     LineChart,
@@ -31,6 +31,108 @@ import {
 // Fixed colors for state and action
 const STATE_COLOR = '#dc2626';  // Red for state
 const ACTION_COLOR = '#2563eb'; // Blue for action
+
+const closestPointForTime = (data, time) => {
+    if (!data.length) return null;
+    let low = 0;
+    let high = data.length - 1;
+    const target = Number(time) || 0;
+
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        const midTime = Number(data[mid]?.time) || 0;
+        if (midTime < target) {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    if (low <= 0) return data[0];
+    if (low >= data.length) return data[data.length - 1];
+
+    const before = data[low - 1];
+    const after = data[low];
+    return Math.abs((after.time || 0) - target) < Math.abs(target - (before.time || 0))
+        ? after
+        : before;
+};
+
+const valueForSeriesAtTime = (data, time, key) => {
+    const closest = closestPointForTime(data, time);
+    const value = closest?.[key];
+    return typeof value === 'number' ? value : null;
+};
+
+export const buildJointChartData = (stateData, actionData, name, hasAction = false) => {
+    const stateKey = `state_${name}`;
+    const actionKey = `action_${name}`;
+    const times = new Set();
+
+    stateData.forEach((point) => {
+        if (typeof point?.[stateKey] === 'number') {
+            times.add(point.time);
+        }
+    });
+    if (hasAction) {
+        actionData.forEach((point) => {
+            if (typeof point?.[actionKey] === 'number') {
+                times.add(point.time);
+            }
+        });
+    }
+
+    return Array.from(times)
+        .filter((time) => typeof time === 'number' && Number.isFinite(time))
+        .sort((a, b) => a - b)
+        .map((time) => {
+            const point = { time };
+            const stateValue = valueForSeriesAtTime(stateData, time, stateKey);
+            if (stateValue !== null) {
+                point[stateKey] = stateValue;
+            }
+            if (hasAction) {
+                const actionValue = valueForSeriesAtTime(actionData, time, actionKey);
+                if (actionValue !== null) {
+                    point[actionKey] = actionValue;
+                }
+            }
+            return point;
+        });
+};
+
+const JointTooltip = ({ active, label, stateData, actionData, name, hasAction }) => {
+    if (!active || label === undefined || label === null) return null;
+
+    const stateValue = valueForSeriesAtTime(stateData, label, `state_${name}`);
+    const actionValue = hasAction
+        ? valueForSeriesAtTime(actionData, label, `action_${name}`)
+        : null;
+
+    return (
+        <div className="rounded border border-gray-200 bg-white/95 px-2 py-1.5 text-[11px] shadow-sm">
+            <div className="mb-1 font-medium text-gray-700">
+                Time: {Number(label).toFixed(2)}s
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-700">
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: STATE_COLOR }} />
+                <span className="w-10">State</span>
+                <span className="font-mono">
+                    {stateValue !== null ? stateValue.toFixed(4) : '-'}
+                </span>
+            </div>
+            {hasAction && (
+                <div className="mt-0.5 flex items-center gap-1.5 text-gray-700">
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ACTION_COLOR }} />
+                    <span className="w-10">Action</span>
+                    <span className="font-mono">
+                        {actionValue !== null ? actionValue.toFixed(4) : '-'}
+                    </span>
+                </div>
+            )}
+        </div>
+    );
+};
 
 /**
  * Individual Joint Chart Component showing both State and Action.
@@ -57,51 +159,50 @@ function JointChart({
     hasAction = false,
     onSeek,
 }) {
+    const chartRef = useRef(null);
+    const [isChartVisible, setIsChartVisible] = useState(false);
+
+    useEffect(() => {
+        if (!isExpanded) {
+            setIsChartVisible(false);
+            return undefined;
+        }
+
+        const element = chartRef.current;
+        if (!element || typeof IntersectionObserver === 'undefined') {
+            setIsChartVisible(true);
+            return undefined;
+        }
+
+        const observer = new IntersectionObserver(
+            (entries) => {
+                setIsChartVisible(entries.some((entry) => entry.isIntersecting));
+            },
+            { root: null, rootMargin: '240px 0px' }
+        );
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [isExpanded]);
+
     // Get current state value at currentTime
     const currentStateValue = useMemo(() => {
         if (!stateData.length) return null;
-        const closest = stateData.reduce((prev, curr) =>
-            Math.abs(curr.time - currentTime) < Math.abs(prev.time - currentTime) ? curr : prev
-        );
-        const value = closest[`state_${name}`];
-        return typeof value === 'number' ? value : null;
+        return valueForSeriesAtTime(stateData, currentTime, `state_${name}`);
     }, [stateData, name, currentTime]);
 
     // Get current action value at currentTime
     const currentActionValue = useMemo(() => {
         if (!actionData.length) return null;
-        const closest = actionData.reduce((prev, curr) =>
-            Math.abs(curr.time - currentTime) < Math.abs(prev.time - currentTime) ? curr : prev
-        );
-        const value = closest[`action_${name}`];
-        return typeof value === 'number' ? value : null;
+        return valueForSeriesAtTime(actionData, currentTime, `action_${name}`);
     }, [actionData, name, currentTime]);
+
+    const shouldRenderChart = isExpanded && isChartVisible;
 
     // Merge state and action data for the chart
     const mergedData = useMemo(() => {
-        const timeMap = new Map();
-
-        // Add state data
-        stateData.forEach((point) => {
-            const time = point.time;
-            if (!timeMap.has(time)) {
-                timeMap.set(time, { time });
-            }
-            timeMap.get(time)[`state_${name}`] = point[`state_${name}`];
-        });
-
-        // Add action data
-        actionData.forEach((point) => {
-            const time = point.time;
-            if (!timeMap.has(time)) {
-                timeMap.set(time, { time });
-            }
-            timeMap.get(time)[`action_${name}`] = point[`action_${name}`];
-        });
-
-        // Sort by time and return
-        return Array.from(timeMap.values()).sort((a, b) => a.time - b.time);
-    }, [stateData, actionData, name]);
+        if (!shouldRenderChart) return [];
+        return buildJointChartData(stateData, actionData, name, hasAction);
+    }, [stateData, actionData, name, hasAction, shouldRenderChart]);
 
     // Calculate X-axis domain to include full duration
     const xDomain = useMemo(() => {
@@ -112,7 +213,7 @@ function JointChart({
     }, [mergedData, duration]);
 
     return (
-        <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+        <div ref={chartRef} className="border border-gray-200 rounded-lg overflow-hidden bg-white">
             {/* Header - always visible */}
             <button
                 onClick={onToggle}
@@ -152,8 +253,9 @@ function JointChart({
 
             {/* Chart - collapsible */}
             {isExpanded && (
-                <div className="h-28 px-2 pb-2">
-                    <ResponsiveContainer width="100%" height="100%">
+                <div className="h-36 px-2 pb-2">
+                    {shouldRenderChart ? (
+                      <ResponsiveContainer width="100%" height="100%">
                         <LineChart
                             data={mergedData}
                             margin={{ top: 5, right: 10, left: 0, bottom: 5 }}
@@ -183,17 +285,15 @@ function JointChart({
                                 tickFormatter={(value) => value.toFixed(2)}
                             />
                             <Tooltip
-                                formatter={(value, dataKey) => {
-                                    const label = dataKey.startsWith('state_') ? 'State' : 'Action';
-                                    return [value?.toFixed(4) ?? '-', label];
-                                }}
-                                labelFormatter={(label) => `Time: ${label?.toFixed(2) ?? '-'}s`}
-                                contentStyle={{
-                                    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                                    border: '1px solid #e5e7eb',
-                                    borderRadius: '6px',
-                                    fontSize: '11px',
-                                }}
+                                content={(props) => (
+                                    <JointTooltip
+                                        {...props}
+                                        stateData={stateData}
+                                        actionData={actionData}
+                                        name={name}
+                                        hasAction={hasAction}
+                                    />
+                                )}
                             />
                             {/* State line - Red */}
                             <Line
@@ -253,7 +353,12 @@ function JointChart({
                                 />
                             )}
                         </LineChart>
-                    </ResponsiveContainer>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center rounded bg-gray-50 text-[11px] text-gray-400">
+                        Chart paused off-screen
+                      </div>
+                    )}
                 </div>
             )}
         </div>

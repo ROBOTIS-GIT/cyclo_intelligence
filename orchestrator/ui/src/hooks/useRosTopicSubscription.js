@@ -23,12 +23,12 @@ import {
   receiveServerRecordTaskInfo,
   setRecordStatus,
   setInferenceStatus,
-  setTaskInfo,
   selectRobotType,
   setHeartbeatStatus,
   setLastHeartbeatTime,
   setJoystickMode,
   setRecordingMonitor,
+  setCameraRecordingMonitor,
 } from '../features/tasks/taskSlice';
 import {
   setIsTraining,
@@ -53,7 +53,16 @@ import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
-import { rosTaskInfoToUiTaskInfo } from '../utils/taskInfoSync';
+import {
+  hasRosTaskInfoPayload,
+  rosTaskInfoToUiTaskInfo,
+  shouldApplyServerTaskInfoToPage,
+} from '../utils/taskInfoSync';
+import {
+  buildCameraMonitorTopics,
+  isMonitorOnlyStatusMessage,
+  shouldAnnounceRecordingStart,
+} from '../utils/recordingStatusMonitor';
 
 export function useRosTopicSubscription() {
   const recordingStatusTopicRef = useRef(null);
@@ -62,75 +71,22 @@ export function useRosTopicSubscription() {
   const heartbeatTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
   const previousRecordPhaseRef = useRef(null);
-  const audioContextRef = useRef(null);
+  const hasSeenRecordPhaseRef = useRef(false);
   const hfStatusTopicRef = useRef(null);
   const actionEventTopicRef = useRef(null);
   const recordingMonitorTopicRef = useRef(null);
   const joystickModeTopicRef = useRef(null);
-  // One-shot guard so the backend's task_info echo only seeds redux on the
-  // first message; subsequent echoes would clobber whatever the user is
-  // currently typing in InfoPanel.
+  // HOME only seeds task_info once. Record/Inference pages accept later
+  // backend echoes so multiple browser tabs stay in sync.
   const initialTaskInfoSyncRef = useRef(false);
   // Dedup inference-status error toasts so a sticky error field doesn't spam.
   const previousInferenceErrorRef = useRef('');
+  const previousCameraMonitorIssueKeyRef = useRef('');
+  const lastCameraMonitorAlertAtRef = useRef(0);
 
   const dispatch = useDispatch();
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   const [connected, setConnected] = useState(false);
-
-  const initializeAudioContext = useCallback(() => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    return audioContextRef.current;
-  }, []);
-
-  const playBeep = useCallback(
-    async (frequency = 1000, duration = 400) => {
-      const INITIAL_GAIN = 1.0;
-      const FINAL_GAIN = 0.01;
-      const FALLBACK_VIBRATION_PATTERN = [200, 100, 200];
-
-      try {
-        const audioContext = initializeAudioContext();
-
-        if (audioContext.state === 'suspended') {
-          await audioContext.resume();
-        }
-
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
-
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-
-        oscillator.frequency.value = frequency;
-        oscillator.type = 'sine';
-
-        gainNode.gain.setValueAtTime(INITIAL_GAIN, audioContext.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(
-          FINAL_GAIN,
-          audioContext.currentTime + duration / 1000
-        );
-
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + duration / 1000);
-
-        console.log('🔊 Beep played successfully');
-      } catch (error) {
-        console.warn('Audio playback failed:', error);
-        try {
-          if (window.navigator && window.navigator.vibrate) {
-            window.navigator.vibrate(FALLBACK_VIBRATION_PATTERN);
-            console.log('📳 Fallback to vibration');
-          }
-        } catch (vibrationError) {
-          console.warn('Vibration fallback also failed:', vibrationError);
-        }
-      }
-    },
-    [initializeAudioContext]
-  );
 
   const preferredVoiceRef = useRef(null);
 
@@ -156,29 +112,74 @@ export function useRosTopicSubscription() {
   }, []);
 
   const speakText = useCallback(
-    (text) => {
+    (text, lang = 'en-US') => {
       try {
         if ('speechSynthesis' in window) {
           window.speechSynthesis.cancel();
           window.speechSynthesis.resume();
           const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = 'en-US';
+          utterance.lang = lang;
           utterance.rate = 1.1;
           utterance.pitch = 1.1;
           utterance.volume = 1.0;
-          if (preferredVoiceRef.current) utterance.voice = preferredVoiceRef.current;
+          if (lang === 'en-US' && preferredVoiceRef.current) {
+            utterance.voice = preferredVoiceRef.current;
+          }
           window.speechSynthesis.speak(utterance);
           console.log(`Speech: "${text}"`);
         } else {
-          console.warn('Speech synthesis not available, falling back to beep');
-          playBeep();
+          console.warn('Speech synthesis not available');
         }
       } catch (error) {
-        console.warn('Speech failed, falling back to beep:', error);
-        playBeep();
+        console.warn('Speech failed:', error);
       }
     },
-    [playBeep]
+    []
+  );
+
+  const notifyCameraMonitorIssues = useCallback(
+    (cameraTopics) => {
+      const issueRows = cameraTopics.filter((topic) => topic.status !== 0);
+      const issueKey = issueRows
+        .map((topic) => `${topic.name}:${topic.status}:${topic.timestampStatus}`)
+        .sort()
+        .join('|');
+
+      if (!issueKey) {
+        previousCameraMonitorIssueKeyRef.current = '';
+        return;
+      }
+
+      const now = Date.now();
+      const ALERT_COOLDOWN_MS = 10000;
+      if (
+        issueKey === previousCameraMonitorIssueKeyRef.current ||
+        now - lastCameraMonitorAlertAtRef.current < ALERT_COOLDOWN_MS
+      ) {
+        return;
+      }
+
+      const summary = issueRows
+        .slice(0, 3)
+        .map((topic) => {
+          const skewText = topic.timestampStatus !== 0
+            ? `, skew ${topic.timestampSkewS.toFixed(2)}s`
+            : '';
+          return `${topic.name}: ${topic.statusLabel}${skewText}`;
+        })
+        .join('\n');
+      const moreText = issueRows.length > 3
+        ? `\n+${issueRows.length - 3} more`
+        : '';
+
+      toast.error(`Camera monitor warning\n${summary}${moreText}`, {
+        duration: 9000,
+      });
+      speakText('camera warning');
+      previousCameraMonitorIssueKeyRef.current = issueKey;
+      lastCameraMonitorAlertAtRef.current = now;
+    },
+    [speakText]
   );
 
   // Helper function to unsubscribe from a topic
@@ -206,51 +207,20 @@ export function useRosTopicSubscription() {
 
     // Reset transition trackers
     previousRecordPhaseRef.current = null;
+    hasSeenRecordPhaseRef.current = false;
     previousInferenceErrorRef.current = '';
+    previousCameraMonitorIssueKeyRef.current = '';
+    lastCameraMonitorAlertAtRef.current = 0;
     initialTaskInfoSyncRef.current = false;
-
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
 
     setConnected(false);
     dispatch(setHeartbeatStatus('disconnected'));
     console.log('ROS task status cleanup completed');
   }, [dispatch, unsubscribeFromTopic]);
 
-  useEffect(() => {
-    const enableAudioOnUserGesture = () => {
-      const audioContext = initializeAudioContext();
-      if (audioContext.state === 'suspended') {
-        audioContext
-          .resume()
-          .then(() => {
-            console.log('🎵 Audio enabled by user gesture');
-          })
-          .catch((error) => {
-            console.warn('Failed to resume AudioContext on user gesture:', error);
-          });
-      }
-    };
-
-    const events = ['touchstart', 'touchend', 'mousedown', 'keydown', 'click'];
-    events.forEach((event) => {
-      document.addEventListener(event, enableAudioOnUserGesture, { once: true, passive: true });
-    });
-
-    return () => {
-      events.forEach((event) => {
-        document.removeEventListener(event, enableAudioOnUserGesture);
-      });
-    };
-  }, [initializeAudioContext]);
-
   const subscribeToRecordingStatus = useCallback(async () => {
     try {
-      const RECORDING_BEEP_FREQUENCY = 1000;
-      const RECORDING_BEEP_DURATION = 400;
-      const BEEP_DELAY = 100;
+      const VOICE_DELAY = 100;
 
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
@@ -270,83 +240,118 @@ export function useRosTopicSubscription() {
       recordingStatusTopicRef.current.subscribe((msg) => {
         const currentPhase = msg.record_phase;
         const previousPhase = previousRecordPhaseRef.current;
+        const cameraTopics = buildCameraMonitorTopics(msg);
+        const monitorOnlyMessage = isMonitorOnlyStatusMessage(msg, cameraTopics);
 
         if (
-          currentPhase === RecordPhase.RECORDING &&
-          previousPhase !== RecordPhase.RECORDING
+          !monitorOnlyMessage &&
+          shouldAnnounceRecordingStart({
+            hasSeenRecordPhase: hasSeenRecordPhaseRef.current,
+            previousPhase,
+            currentPhase,
+            proceedTime: msg.proceed_time,
+          })
         ) {
-          console.log('Recording started - playing beep sound');
+          console.log('Recording started - speaking notification');
           setTimeout(() => {
-            playBeep(RECORDING_BEEP_FREQUENCY, RECORDING_BEEP_DURATION);
-          }, BEEP_DELAY);
+            speakText('Recording started');
+          }, VOICE_DELAY);
           toast.success('Recording started!');
         }
-        previousRecordPhaseRef.current = currentPhase;
+        if (!monitorOnlyMessage) {
+          previousRecordPhaseRef.current = currentPhase;
+          hasSeenRecordPhaseRef.current = true;
+        }
 
         // SAVING (post-record encode) reports progress via encoding_progress.
         // Conversion progress is on /data/status (DataOperationStatus,
         // OP_CONVERSION) routed through editDatasetSlice.conversionStatus.
         const encodingProgress =
           currentPhase === RecordPhase.SAVING ? (msg.encoding_progress || 0) : 0;
+        const recordingWarnings = Array.isArray(msg.recording_warnings)
+          ? msg.recording_warnings.filter((warning) => !!warning)
+          : [];
+        dispatch(setCameraRecordingMonitor(cameraTopics));
+        notifyCameraMonitorIssues(cameraTopics);
 
         const isRunning =
           currentPhase === RecordPhase.RECORDING ||
           currentPhase === RecordPhase.SAVING;
-
         // Adopt robot_type as the global value when present.
-        if (msg.robot_type && msg.robot_type.trim() !== '' &&
-            msg.robot_type !== store.getState().tasks.robotType) {
-          dispatch(selectRobotType(msg.robot_type));
+        if (msg.robot_type && msg.robot_type.trim() !== '') {
+          const tasksState = store.getState().tasks;
+          const shouldUpdateRobotType =
+            msg.robot_type !== tasksState.robotType ||
+            Boolean(tasksState.robotTypeStatusGuardUntilMs);
+          if (shouldUpdateRobotType) {
+            dispatch(selectRobotType({
+              robotType: msg.robot_type,
+              source: 'status',
+              receivedAtMs: Date.now(),
+            }));
+          }
         }
 
-        dispatch(
-          setRecordStatus({
-            taskName: msg.task_info?.task_name || 'idle',
-            running: isRunning,
-            recordPhase: currentPhase || 0,
-            progress: Math.round(encodingProgress),
-            encodingProgress,
-            proceedTime: msg.proceed_time || 0,
-            currentEpisodeNumber: msg.current_episode_number || 0,
-            currentScenarioNumber: msg.current_scenario_number || 0,
-            currentTaskInstruction: msg.current_task_instruction || '',
-            currentSubtaskIndex: msg.current_subtask_index || 0,
-            subtaskCount: msg.subtask_count || 0,
-            currentSubtaskInstruction: msg.current_subtask_instruction || '',
-            subtaskInstructions: msg.subtask_instructions || [],
-            userId: msg.task_info?.user_id || '',
-            usedStorageSize: msg.used_storage_size || 0,
-            totalStorageSize: msg.total_storage_size || 0,
-            usedCpu: msg.used_cpu || 0,
-            usedRamSize: msg.used_ram_size || 0,
-            totalRamSize: msg.total_ram_size || 0,
-            topicReceived: true,
-          })
-        );
+        if (!monitorOnlyMessage) {
+          dispatch(
+            setRecordStatus({
+              taskName: msg.task_info?.task_name || 'idle',
+              running: isRunning,
+              recordPhase: currentPhase || 0,
+              progress: Math.round(encodingProgress),
+              encodingProgress,
+              proceedTime: msg.proceed_time || 0,
+              currentEpisodeNumber: msg.current_episode_number || 0,
+              currentScenarioNumber: msg.current_scenario_number || 0,
+              currentTaskInstruction: msg.current_task_instruction || '',
+              currentSubtaskIndex: msg.current_subtask_index || 0,
+              subtaskCount: msg.subtask_count || 0,
+              currentSubtaskInstruction: msg.current_subtask_instruction || '',
+              subtaskInstructions: msg.subtask_instructions || [],
+              savedSubtaskIndices: Array.isArray(msg.saved_subtask_indices)
+                ? msg.saved_subtask_indices.map((idx) => Number(idx))
+                : null,
+              userId: msg.task_info?.user_id || '',
+              usedStorageSize: msg.used_storage_size || 0,
+              totalStorageSize: msg.total_storage_size || 0,
+              usedCpu: msg.used_cpu || 0,
+              usedRamSize: msg.used_ram_size || 0,
+              totalRamSize: msg.total_ram_size || 0,
+              recordingWarnings,
+              topicReceived: true,
+            })
+          );
+        }
 
         // Keep Record-page task information aligned with the server echo,
         // unless this browser is protecting an in-progress local draft.
-        const hasTaskInfo = msg.task_info && (
-          (msg.task_info.task_name && msg.task_info.task_name.length > 0) ||
-          (msg.task_info.policy_path && msg.task_info.policy_path.length > 0)
-        );
-        const uiTaskInfo = hasTaskInfo ? rosTaskInfoToUiTaskInfo(msg.task_info) : null;
+        const uiTaskInfo = hasRosTaskInfoPayload(msg.task_info)
+          ? rosTaskInfoToUiTaskInfo(msg.task_info)
+          : null;
         const currentPage = store.getState().ui.currentPage;
-        if (uiTaskInfo && currentPage === PageType.RECORD) {
+        const currentInferencePhase = store.getState().tasks.inferenceStatus.inferencePhase;
+        const shouldApplyTaskInfo = shouldApplyServerTaskInfoToPage({
+          taskInfo: uiTaskInfo,
+          currentPage,
+          inferencePhase: currentInferencePhase,
+          initialTaskInfoSynced: initialTaskInfoSyncRef.current,
+        });
+        if (uiTaskInfo && shouldApplyTaskInfo) {
+          if (currentPage === PageType.HOME) {
+            initialTaskInfoSyncRef.current = true;
+          }
           dispatch(receiveServerRecordTaskInfo(uiTaskInfo));
-        } else if (
-          uiTaskInfo &&
-          currentPage === PageType.HOME &&
-          !initialTaskInfoSyncRef.current
-        ) {
-          initialTaskInfoSyncRef.current = true;
-          dispatch(setTaskInfo(uiTaskInfo));
         }
       });
     } catch (error) {
       console.error('Failed to subscribe to recording status topic:', error);
     }
-  }, [dispatch, rosbridgeUrl, playBeep]);
+  }, [
+    dispatch,
+    rosbridgeUrl,
+    speakText,
+    notifyCameraMonitorIssues,
+  ]);
 
   const subscribeToDataStatus = useCallback(async () => {
     try {
@@ -359,6 +364,7 @@ export function useRosTopicSubscription() {
 
       // DataOperationStatus enum values — must match
       // interfaces/msg/DataOperationStatus.msg.
+      const OP_RECORDING = 0;
       const OP_CONVERSION = 1;
       const STATUS_NAMES = {
         0: 'idle',
@@ -375,9 +381,20 @@ export function useRosTopicSubscription() {
       });
 
       dataStatusTopicRef.current.subscribe((msg) => {
+        if (msg.operation_type === OP_RECORDING) {
+          dispatch(
+            setRecordStatus({
+              recordingOperationStatus: STATUS_NAMES[msg.status] || 'idle',
+              recordingOperationStage: msg.stage || '',
+              recordingOperationMessage: msg.message || '',
+            })
+          );
+          return;
+        }
+
         if (msg.operation_type !== OP_CONVERSION) {
-          // OP_HF has its own /huggingface/status feed; OP_RECORDING and
-          // OP_EDIT aren't surfaced as live progress in the UI today.
+          // OP_HF has its own /huggingface/status feed; OP_EDIT is not
+          // surfaced as live progress in the UI today.
           return;
         }
         dispatch(
@@ -424,9 +441,18 @@ export function useRosTopicSubscription() {
         }
         previousInferenceErrorRef.current = msg.error || '';
 
-        if (msg.robot_type && msg.robot_type.trim() !== '' &&
-            msg.robot_type !== store.getState().tasks.robotType) {
-          dispatch(selectRobotType(msg.robot_type));
+        if (msg.robot_type && msg.robot_type.trim() !== '') {
+          const tasksState = store.getState().tasks;
+          const shouldUpdateRobotType =
+            msg.robot_type !== tasksState.robotType ||
+            Boolean(tasksState.robotTypeStatusGuardUntilMs);
+          if (shouldUpdateRobotType) {
+            dispatch(selectRobotType({
+              robotType: msg.robot_type,
+              source: 'status',
+              receivedAtMs: Date.now(),
+            }));
+          }
         }
 
         dispatch(

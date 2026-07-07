@@ -57,4 +57,20 @@ describe('getPolicyBackendReadiness', () => {
       message: 'Backend ready',
     });
   });
+
+  it('treats the RLDX policy server container as ready without s6 services', () => {
+    const readiness = getPolicyBackendReadiness({
+      name: 'rldx-server',
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'running',
+      services: [],
+    });
+
+    expect(readiness).toEqual({
+      ready: true,
+      state: 'ready',
+      message: 'Backend ready',
+    });
+  });
 });

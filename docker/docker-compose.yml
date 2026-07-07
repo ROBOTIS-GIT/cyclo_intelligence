@@ -11,7 +11,7 @@
 #
 # Usage: prefer the container.sh wrapper — it auto-detects ARCH from
 # `uname -m` and sets the compose env:
-#   docker/container.sh start              # → cyclo_intelligence + rldx runtime
+#   docker/container.sh start              # → cyclo_intelligence only
 #   docker/container.sh start-lerobot      # → lerobot (no ROBOT_TYPE
 #                                          #    needed; passed at LOAD)
 #   docker/container.sh enter              # → bash inside cyclo_intelligence
@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:${VERSION:-0.1.15}-${ARCH:-arm64}
+    image: robotis/cyclo-intelligence:${VERSION:-1.0.0}-${ARCH:-arm64}
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -63,7 +63,7 @@ services:
       memlock: 8428281856
 
     # Host network + IPC so rmw_zenoh on the orchestrator side can
-    # reach the policy containers (and anything else on the host).
+    # reach the policy containers and the externally managed Zenoh router.
     network_mode: host
     ipc: host
 
@@ -72,6 +72,7 @@ services:
       - QT_X11_NO_MITSHM=1
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      # Cyclo does not start rmw_zenohd. This points at the external router.
       - ZENOH_ROUTER_IP=127.0.0.1
       - ZENOH_ROUTER_PORT=7447
       - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
@@ -86,8 +87,8 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
-      - ${CYCLO_WORKSPACE_DIR:-./workspace}:/workspace
-      - ${CYCLO_HUGGINGFACE_DIR:-./huggingface}:/root/.cache/huggingface
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
       # Model dropboxes live under /workspace/model/{lerobot,groot}.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # Live-edit the ROS2 workspace at runtime so a 'colcon build'
@@ -196,9 +197,9 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
-      - ${CYCLO_WORKSPACE_DIR:-./workspace}:/workspace
+      - ./workspace:/workspace
       # User-visible LeRobot models live under /workspace/model/lerobot.
-      - ${CYCLO_HUGGINGFACE_DIR:-./huggingface}:/root/.cache/huggingface
+      - ./huggingface:/root/.cache/huggingface
       # Live-edit SDKs (mounted read-only so the container can't mutate
       # the host tree accidentally).
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
@@ -235,7 +236,9 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
-    restart: unless-stopped
+    # Policy containers are started on demand by the UI/supervisor API.
+    # Do not auto-start them on host boot.
+    restart: "no"
     runtime: nvidia
     healthcheck:
       test:
@@ -262,7 +265,7 @@ services:
   # ============================================================
   groot:
     container_name: groot_server
-    image: robotis/groot-zenoh:1.3.0-${ARCH:-arm64}
+    image: robotis/groot-zenoh:1.3.2-${ARCH:-arm64}
     build:
       context: ../cyclo_brain/policy/groot
       dockerfile: Dockerfile.${ARCH:-arm64}
@@ -270,6 +273,9 @@ services:
       network: host
       args:
         GPU_ARCH: ${GPU_ARCH:-default}
+        FLASH_ATTN_BUILD_JOBS: ${FLASH_ATTN_BUILD_JOBS:-1}
+        FLASH_ATTN_NVCC_THREADS: ${FLASH_ATTN_NVCC_THREADS:-1}
+        FLASH_ATTN_CUDA_ARCHS: ${FLASH_ATTN_CUDA_ARCHS:-120}
 
     # Main runtime's control loop tries SCHED_FIFO — let the kernel grant it.
     cap_add:
@@ -321,8 +327,8 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
-      - ${CYCLO_WORKSPACE_DIR:-./workspace}:/workspace
-      - ${CYCLO_HUGGINGFACE_DIR:-./huggingface}:/root/.cache/huggingface
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
       # User-visible GR00T models live under /workspace/model/groot.
       # Live-edit SDKs (mounted read-only so the container can't mutate
       # the host tree accidentally).
@@ -355,7 +361,9 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
-    restart: unless-stopped
+    # Policy containers are started on demand by the UI/supervisor API.
+    # Do not auto-start them on host boot.
+    restart: "no"
     runtime: nvidia
     healthcheck:
       test:
@@ -414,17 +422,22 @@ services:
       - RLDX_ZMQ_PORT=${RLDX_ZMQ_PORT:-5555}
       - RLDX_ZMQ_TIMEOUT_MS=${RLDX_ZMQ_TIMEOUT_MS:-300000}
       - RLDX_IMAGE_SIZE=${RLDX_IMAGE_SIZE:-256}
+      - RLDX_SEND_ACTION_PREFIX=${RLDX_SEND_ACTION_PREFIX:-true}
+      - RLDX_RTC_PREFIX_LEN=${RLDX_RTC_PREFIX_LEN:-4}
+      - RLDX_RTC_EXEC_HORIZON=${RLDX_RTC_EXEC_HORIZON:-12}
       - CONTROL_HZ=${CONTROL_HZ:-100}
       - INFERENCE_HZ=${INFERENCE_HZ:-15}
       - TARGET_CHUNK_SIZE=none
-      - REFILL_MARGIN_S=0.2
+      - ACTION_ALIGNMENT_MODE=${RLDX_ACTION_ALIGNMENT_MODE:-rtc}
+      - REFILL_MARGIN_S=${RLDX_REFILL_MARGIN_S:-0.27}
+      - REFILL_STRATEGY=${RLDX_REFILL_STRATEGY:-auto}
       - GET_ACTION_TIMEOUT_S=${RLDX_GET_ACTION_TIMEOUT_S:-5.0}
       - PYTHONUNBUFFERED=1
 
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
-      - ${CYCLO_WORKSPACE_DIR:-./workspace}:/workspace
+      - ./workspace:/workspace
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
@@ -433,12 +446,15 @@ services:
       - ../cyclo_brain/policy/rldx/s6-services/engine-process:/etc/s6-overlay/s6-rc.d/engine-process:ro
       - ../cyclo_brain/policy/rldx/s6-services/user/contents.d:/etc/s6-overlay/s6-rc.d/user/contents.d:ro
       - ../cyclo_brain/policy/rldx/rldx_engine:/app/rldx_engine:ro
+      - ../cyclo_brain/policy/rldx/zmq_transport:/app/zmq_transport:ro
       - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
       - ../shared/shared/robot_configs:/orchestrator_config:ro
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
-    restart: unless-stopped
+    # Policy containers are started on demand by the UI/supervisor API.
+    # Do not auto-start them on host boot.
+    restart: "no"
     healthcheck:
       test:
         [
@@ -472,27 +488,36 @@ services:
       - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface/hub
       - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
       - NO_ALBUMENTATIONS_UPDATE=1
+      # The RLDX fork defaults the Qwen3-VL backbone to FlashAttention2.
+      # Keep the container bootable before flash-attn is source-built for the
+      # target GPU; 5090 deployments can opt back in with RLDX_ATTN_IMPL=flash_attention_2.
+      - RLDX_ATTN_IMPL=${RLDX_ATTN_IMPL:-sdpa}
       - RLDX_SERVER_REPO_DIR=/opt/RLDX-1
       - RLDX_SERVER_MODEL_PATH=${RLDX_SERVER_MODEL_PATH:-/model/rldx}
       - RLDX_SERVER_EMBODIMENT_TAG=${RLDX_SERVER_EMBODIMENT_TAG:-}
       - RLDX_SERVER_HOST=${RLDX_SERVER_HOST:-0.0.0.0}
       - RLDX_SERVER_PORT=${RLDX_ZMQ_PORT:-5555}
       - RLDX_SERVER_COMPILE=${RLDX_SERVER_COMPILE:-none}
+      - RLDX_SERVER_RTC_INFERENCE_MODE=${RLDX_SERVER_RTC_INFERENCE_MODE:-guided}
+      - RLDX_SERVER_RTC_INFERENCE_DELAY=${RLDX_SERVER_RTC_INFERENCE_DELAY:-4}
+      - RLDX_SERVER_RTC_INFERENCE_EXEC_HORIZON=${RLDX_SERVER_RTC_INFERENCE_EXEC_HORIZON:-}
+      - RLDX_SERVER_RTC_JACOBIAN_BETA=${RLDX_SERVER_RTC_JACOBIAN_BETA:-}
+      - RLDX_SERVER_RTC_JACOBIAN_STEPS_ONLY=${RLDX_SERVER_RTC_JACOBIAN_STEPS_ONLY:-}
       - RLDX_SERVER_EXTRA_ARGS=${RLDX_SERVER_EXTRA_ARGS:-}
 
     volumes:
       # RLDX-1 repo. Mounted rw so pixi can create/update .pixi on first use.
-      - ${RLDX_REPO_DIR:-./RLDX-1}:/opt/RLDX-1:rw
+      - ${RLDX_REPO_DIR:-../cyclo_brain/policy/rldx/RLDX-1}:/opt/RLDX-1:rw
       # Local checkpoint directory. Inside the container the server sees it as
       # /model/rldx by default.
       - ${RLDX_MODEL_PATH:-./workspace/model/rldx}:/model/rldx:ro
-      - ${CYCLO_HUGGINGFACE_DIR:-./huggingface}:/root/.cache/huggingface
-      - ../cyclo_brain/policy/rldx/server/run_policy_server.sh:/usr/local/bin/run_rldx_policy_server:ro
+      - ./huggingface:/root/.cache/huggingface
+      - ../cyclo_brain/policy/rldx/zmq_transport/server/run_policy_server.sh:/usr/local/bin/run_rldx_policy_server:ro
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
     command: ["/usr/local/bin/run_rldx_policy_server"]
-    restart: unless-stopped
+    restart: "no"
     runtime: nvidia
     deploy:
       resources:

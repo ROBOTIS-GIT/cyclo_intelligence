@@ -16,6 +16,7 @@ publishing, and robot command publishing.
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import os
 import sys
@@ -51,8 +52,10 @@ from .mapping import (  # noqa: E402
     build_state_observation,
     delta_indices,
     modality_keys,
+    policy_action_chunk_from_rldx,
     robot_action_keys_from_policy,
     robot_action_chunk_from_rldx,
+    stack_history_window,
 )
 
 
@@ -104,10 +107,17 @@ class RLDXEngine(InferenceEngine):
         self._action_keys: list[str] = []
         self._robot_action_keys: list[str] = []
         self._video_t = 1
+        self._video_delta_indices: list[int] = [0]
+        self._video_history_size = 1
+        self._video_history: dict[str, deque[np.ndarray]] = {}
         self._state_t = 1
         self._language_t = 1
         self._camera_rotations: dict[str, int] = {}
         self._reset_next = True
+        self._last_policy_action_chunk: Optional[np.ndarray] = None
+        self._send_action_prefix = self._bool_env("RLDX_SEND_ACTION_PREFIX", True)
+        self._rtc_prefix_len = max(0, int(os.environ.get("RLDX_RTC_PREFIX_LEN", "4")))
+        self._rtc_exec_horizon = max(0, int(os.environ.get("RLDX_RTC_EXEC_HORIZON", "12")))
 
     @property
     def is_ready(self) -> bool:
@@ -188,18 +198,27 @@ class RLDXEngine(InferenceEngine):
                 "session_ids": [self._session_id],
                 "reset_memory": [bool(reset)],
             }
+            action_prefix = self._build_action_prefix(reset=reset)
+            if action_prefix is not None:
+                options["action_prefix"] = action_prefix
+                options["rtc_prefix_len"] = int(action_prefix.shape[0])
             started = time.monotonic()
             actions, _info = self._client.get_action(obs, options=options)
             elapsed_ms = (time.monotonic() - started) * 1000.0
             self._reset_next = False
 
+            self._last_policy_action_chunk = policy_action_chunk_from_rldx(
+                actions,
+                self._action_keys,
+            )
             chunk = robot_action_chunk_from_rldx(actions, self._robot_action_keys)
             logger.info(
-                "RLDX chunk T=%d D=%d remote_ms=%.1f reset=%s",
+                "RLDX chunk T=%d D=%d remote_ms=%.1f reset=%s rtc_prefix=%d",
                 chunk.shape[0],
                 chunk.shape[1],
                 elapsed_ms,
                 reset,
+                0 if action_prefix is None else int(action_prefix.shape[0]),
             )
             return {
                 "success": True,
@@ -237,10 +256,14 @@ class RLDXEngine(InferenceEngine):
         self._action_keys = []
         self._robot_action_keys = []
         self._video_t = 1
+        self._video_delta_indices = [0]
+        self._video_history_size = 1
+        self._video_history = {}
         self._state_t = 1
         self._language_t = 1
         self._camera_rotations = {}
         self._reset_next = True
+        self._last_policy_action_chunk = None
 
     def _load_modality_config(self) -> None:
         if self._client is None:
@@ -254,7 +277,16 @@ class RLDXEngine(InferenceEngine):
         self._state_keys = modality_keys(state_cfg)
         self._language_keys = modality_keys(language_cfg)
         self._action_keys = modality_keys(action_cfg)
-        self._video_t = max(1, len(delta_indices(video_cfg)))
+        self._video_delta_indices = delta_indices(video_cfg) or [0]
+        self._video_t = max(1, len(self._video_delta_indices))
+        self._video_history_size = max(
+            1,
+            abs(min(self._video_delta_indices)) + 1,
+        )
+        self._video_history = {
+            key: deque(maxlen=self._video_history_size)
+            for key in self._video_keys
+        }
         self._state_t = max(1, len(delta_indices(state_cfg)))
         self._language_t = max(1, len(delta_indices(language_cfg)))
         if (
@@ -295,11 +327,13 @@ class RLDXEngine(InferenceEngine):
         images = self._robot.get_images(format="rgb")
         for key in self._video_keys:
             image = self._select_image(images, key)
-            obs["video"][key] = np.repeat(
-                image[None, None, :, :, :],
-                self._video_t,
-                axis=1,
-            ).astype(np.uint8)
+            history = self._video_history.setdefault(
+                key,
+                deque(maxlen=self._video_history_size),
+            )
+            history.append(image)
+            frames = stack_history_window(history, self._video_delta_indices)
+            obs["video"][key] = frames[None, :, :, :, :].astype(np.uint8)
 
         joints = self._robot.get_joint_positions()
         odom = self._robot.get_odom()
@@ -348,8 +382,23 @@ class RLDXEngine(InferenceEngine):
             image = image[y0 : y0 + crop_h, x0 : x0 + crop_w]
         return np.ascontiguousarray(image, dtype=np.uint8)
 
+    def _build_action_prefix(self, *, reset: bool) -> np.ndarray | None:
+        if reset or not self._send_action_prefix or self._rtc_prefix_len <= 0:
+            return None
+        if self._last_policy_action_chunk is None:
+            return None
+
+        start = self._rtc_exec_horizon
+        stop = start + self._rtc_prefix_len
+        if self._last_policy_action_chunk.shape[0] < stop:
+            return None
+        return np.ascontiguousarray(
+            self._last_policy_action_chunk[start:stop],
+            dtype=np.float32,
+        )
+
     def _make_remote_client(self) -> Any:
-        from .wire import RLDXRemoteClient
+        from zmq_transport.client import RLDXRemoteClient
 
         return RLDXRemoteClient(
             host=self._remote_host,
@@ -384,6 +433,13 @@ class RLDXEngine(InferenceEngine):
             getattr(request, "remote_timeout_ms", 0)
             or os.environ.get("RLDX_ZMQ_TIMEOUT_MS", "300000")
         )
+
+    @staticmethod
+    def _bool_env(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _fail(message: str) -> Dict[str, Any]:

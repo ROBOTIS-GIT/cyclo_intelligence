@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import numpy as np
 import sys
 import types
 import unittest
@@ -75,6 +76,90 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.create_engine()
 
         self.assertIsInstance(engine, module.GR00TInference)
+
+    def test_acceleration_request_resolves_model_local_engine_path(self):
+        spec = importlib.util.spec_from_file_location(
+            "groot_runtime_inference_engine_under_test",
+            INFERENCE_ENGINE,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        engine = module.create_engine()
+
+        mode, engine_path, strict = engine._resolve_acceleration_request(
+            types.SimpleNamespace(
+                acceleration_mode="tensorrt",
+                acceleration_engine_path="custom.trt",
+            ),
+            "/models/policy",
+        )
+
+        self.assertEqual(mode, "tensorrt_dit")
+        self.assertEqual(engine_path, "/models/policy/custom.trt")
+        self.assertTrue(strict)
+
+    def test_synthetic_observation_uses_model_schema(self):
+        spec = importlib.util.spec_from_file_location(
+            "groot_runtime_inference_engine_under_test",
+            INFERENCE_ENGINE,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        def modality(keys, deltas):
+            return types.SimpleNamespace(
+                modality_keys=keys,
+                delta_indices=deltas,
+            )
+
+        state_action_processor = types.SimpleNamespace(
+            norm_params={
+                "new_embodiment": {
+                    "state": {
+                        "arm": {
+                            "dim": np.array(2),
+                            "mean": np.array([0.25, -0.5], dtype=np.float32),
+                        }
+                    }
+                }
+            }
+        )
+        processor = types.SimpleNamespace(
+            image_target_size=[12, 16],
+            processor=types.SimpleNamespace(
+                image_processor=types.SimpleNamespace(
+                    image_mean=[0.5, 0.5, 0.5],
+                )
+            ),
+            state_action_processor=state_action_processor,
+        )
+        policy = types.SimpleNamespace(
+            embodiment_tag=types.SimpleNamespace(value="new_embodiment"),
+            processor=processor,
+            modality_configs={
+                "video": modality(["cam"], [0, 1]),
+                "state": modality(["arm"], [0]),
+                "action": modality(["arm"], [0, 1, 2]),
+                "language": modality(["task"], [0]),
+            },
+        )
+
+        engine = module.create_engine()
+        engine.policy = policy
+        engine.init_policy_info()
+
+        observation = engine.build_synthetic_observation("pick")
+
+        self.assertEqual(observation["video"]["cam"].shape, (1, 2, 12, 16, 3))
+        self.assertEqual(observation["video"]["cam"].dtype, np.uint8)
+        self.assertEqual(observation["state"]["arm"].shape, (1, 1, 2))
+        np.testing.assert_allclose(
+            observation["state"]["arm"][0, 0],
+            np.array([0.25, -0.5], dtype=np.float32),
+        )
+        self.assertEqual(observation["language"]["task"], [["pick"]])
 
 
 if __name__ == "__main__":

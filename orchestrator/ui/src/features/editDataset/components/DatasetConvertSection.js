@@ -14,10 +14,13 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { useDispatch, useSelector } from 'react-redux';
+import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import { MdFolderOpen, MdMovie } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
-import { setTaskInfo } from '../../../features/tasks/taskSlice';
+import {
+  selectRecordTaskInfo,
+  setRecordTaskInfo,
+} from '../../../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 
@@ -40,7 +43,7 @@ const normalizeRosbagTaskPath = (item) => {
 export default function DatasetConvertSection({ isEditable = true }) {
   const dispatch = useDispatch();
   const { sendRecordCommand } = useRosServiceCaller();
-  const info = useSelector((state) => state.tasks.taskInfo);
+  const info = useSelector(selectRecordTaskInfo, shallowEqual);
   const conversionStatus = useSelector(
     (state) => state.editDataset.conversionStatus
   );
@@ -106,14 +109,13 @@ export default function DatasetConvertSection({ isEditable = true }) {
     setIsConverting(true);
 
     dispatch(
-      setTaskInfo({
-        ...info,
+      setRecordTaskInfo({
         taskName: singleTaskName,
         taskInstruction: [singleTaskName],
       })
     );
     setPendingSingleConvert(true);
-  }, [singleTaskName, info, dispatch, convertV21, convertV30, conversionFps]);
+  }, [singleTaskName, dispatch, convertV21, convertV30, conversionFps]);
 
   useEffect(() => {
     if (!pendingSingleConvert) return;

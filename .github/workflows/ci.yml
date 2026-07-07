@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  push:
+    branches: [main, jazzy]
+  pull_request:
+    branches: [main, jazzy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  submodule-check:
+    name: Submodule check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify submodules are pinned and clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule status --recursive
+          if git submodule status --recursive | grep -E '^[+-]'; then
+            echo "Submodule checkout is missing or not at the pinned commit." >&2
+            exit 1
+          fi
+          git diff --submodule=short --exit-code
+
+  ros-ci:
+    name: ROS_CI (jazzy)
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:noble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Setup ROS environment
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Create focused ROS workspace
+        run: |
+          set -euo pipefail
+          mkdir -p ros_ws/src
+          ln -s "${GITHUB_WORKSPACE}/repo/orchestrator" ros_ws/src/orchestrator
+          ln -s "${GITHUB_WORKSPACE}/repo/cyclo_data" ros_ws/src/cyclo_data
+          ln -s "${GITHUB_WORKSPACE}/repo/cyclo_data/recorder/rosbag_recorder" ros_ws/src/rosbag_recorder
+          ln -s "${GITHUB_WORKSPACE}/repo/interfaces" ros_ws/src/interfaces
+          ln -s "${GITHUB_WORKSPACE}/repo/shared" ros_ws/src/shared
+
+      - name: Install ROS and Python dependencies
+        run: |
+          set -eo pipefail
+          source /opt/ros/jazzy/setup.bash
+          set -u
+          apt-get update
+          apt-get install -y --no-install-recommends ffmpeg python3-pip
+          rosdep update
+          rosdep install \
+            --from-paths ros_ws/src \
+            --ignore-src \
+            --rosdistro jazzy \
+            -y -r
+          rosdep check \
+            --from-paths ros_ws/src \
+            --ignore-src \
+            --rosdistro jazzy
+          python3 -m pip install --no-cache-dir --break-system-packages \
+            setuptools==68.1.2 \
+            'numpy<2' \
+            huggingface_hub \
+            matplotlib \
+            mcap \
+            mcap-ros2-support \
+            pandas \
+            pillow \
+            psutil \
+            pyarrow \
+            pytest \
+            pyyaml
+
+      - name: Build ROS packages
+        run: |
+          set -eo pipefail
+          source /opt/ros/jazzy/setup.bash
+          set -u
+          cd ros_ws
+          colcon build \
+            --symlink-install \
+            --paths \
+              src/orchestrator \
+              src/cyclo_data \
+              src/rosbag_recorder \
+              src/interfaces \
+              src/shared \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test ROS packages
+        run: |
+          set -eo pipefail
+          source /opt/ros/jazzy/setup.bash
+          cd ros_ws
+          source install/setup.bash
+          set -u
+          colcon test \
+            --paths \
+              src/cyclo_data \
+              src/rosbag_recorder \
+              src/interfaces \
+              src/shared \
+            --event-handlers console_cohesion+
+          colcon test-result --verbose
+
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install \
+            'numpy<2' \
+            huggingface_hub \
+            matplotlib \
+            mcap \
+            mcap-ros2-support \
+            pandas \
+            pillow \
+            psutil \
+            pyarrow \
+            pytest \
+            pyyaml
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Run cyclo_data tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_data:orchestrator:shared
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            cyclo_data/tests/recorder/test_recording_service.py \
+            cyclo_data/tests/recorder/test_session_archive.py \
+            cyclo_data/tests/recorder/test_transcoder.py \
+            cyclo_data/tests/recorder/test_video_recorder.py
+
+      - name: Run orchestrator tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: orchestrator:cyclo_data:shared
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            orchestrator/tests/bt/test_review_fixes.py \
+            orchestrator/tests/test_inference_mode.py \
+            orchestrator/tests/data_processing/test_metadata_manager.py \
+            orchestrator/tests/data_processing/test_video_metadata_extractor.py \
+            orchestrator/tests/data_processing/test_episode_editor.py \
+            orchestrator/tests/data_processing/test_replay_handler.py
+
+      - name: Run shared policy runtime tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_brain/policy/common
+        run: python -m pytest cyclo_brain/policy/common/runtime/tests
+
+      - name: Run GR00T policy tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_brain/policy/groot
+        run: python -m pytest cyclo_brain/policy/groot/tests
+
+      - name: Run LeRobot policy tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_brain/policy/lerobot
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            cyclo_brain/policy/lerobot/tests \
+            cyclo_brain/policy/lerobot/lerobot_engine/tests
+
+  docker-supervisor-tests:
+    name: Docker supervisor tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install supervisor API dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r docker/supervisor_api/requirements.txt pytest
+
+      - name: Run Docker helper tests
+        run: python -m pytest docker/test_dockerfiles.py docker/test_container_sh.py
+
+      - name: Run supervisor API tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: python -m pytest docker/supervisor_api/test_app.py
+
+  ui-build:
+    name: UI build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: orchestrator/ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: orchestrator/ui
+        run: npm ci --legacy-peer-deps
+
+      - name: Build UI
+        working-directory: orchestrator/ui
+        run: npm run build

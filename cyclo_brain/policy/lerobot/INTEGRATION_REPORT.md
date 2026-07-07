@@ -98,8 +98,8 @@ docker compose -f docker/docker-compose.yml build lerobot
 ### Run
 
 ```bash
-# Start with Zenoh router and server
-docker compose -f docker/docker-compose.yml up zenoh_router lerobot
+# Start the external Zenoh router first, then the policy server.
+docker compose -f docker/docker-compose.yml up lerobot
 
 # Or start all services
 docker compose -f docker/docker-compose.yml up

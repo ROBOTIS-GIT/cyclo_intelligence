@@ -54,6 +54,8 @@ const ENUM_PARAMS = {
     'lerobot',
   ],
   inference_mode: ['simulation', 'robot'],
+  action_request_mode: ['async', 'sync'],
+  acceleration_mode: ['pytorch', 'tensorrt_dit'],
 };
 
 // SendCommand inputs that are meaningful per command. Anything outside
@@ -65,6 +67,7 @@ const SEND_COMMAND_ACTIVE_FIELDS = {
     'command', 'model', 'policy_path', 'task_instruction',
     'inference_mode', 'inference_hz', 'control_hz', 'chunk_align_window_s',
     'remote_host', 'remote_port', 'remote_timeout_ms',
+    'action_request_mode', 'acceleration_mode', 'acceleration_engine_path',
   ]),
   // Resume can re-condition language mid-run; output mode is fixed by LOAD.
   RESUME: new Set(['command', 'task_instruction']),

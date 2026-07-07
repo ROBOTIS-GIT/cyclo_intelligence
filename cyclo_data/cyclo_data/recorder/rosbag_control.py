@@ -31,6 +31,7 @@ from std_msgs.msg import String
 
 
 _DEFAULT_REQUEST_TIMEOUT_SEC = 5.0
+_STOP_REQUEST_TIMEOUT_SEC = 30.0
 _SERVICE_WAIT_TIMEOUT_SEC = 3.0
 _PUB_QOS_SIZE = 10
 
@@ -92,16 +93,28 @@ class RosbagControl:
             timeout_sec=timeout_sec,
         )
 
-    def stop_rosbag(self) -> None:
-        self._send_rosbag_command(command=SendCommand.Request.STOP)
+    def stop_rosbag(
+        self,
+        timeout_sec: float = _STOP_REQUEST_TIMEOUT_SEC,
+        wait_for_response: bool = True,
+    ) -> None:
+        self._send_rosbag_command(
+            command=SendCommand.Request.STOP,
+            wait_for_response=wait_for_response,
+            timeout_sec=timeout_sec,
+        )
 
-    def stop_and_delete_rosbag(self) -> None:
+    def stop_and_delete_rosbag(
+        self,
+        timeout_sec: float = _STOP_REQUEST_TIMEOUT_SEC,
+    ) -> None:
         # Wait synchronously so the caller knows the bag directory has
         # actually been removed before it does its own follow-up cleanup
         # (mp4/yaml left behind by VideoRecorder, defensive rmtree).
         self._send_rosbag_command(
             command=SendCommand.Request.STOP_AND_DELETE,
             wait_for_response=True,
+            timeout_sec=timeout_sec,
         )
 
     def finish_rosbag(self) -> None:
@@ -121,7 +134,7 @@ class RosbagControl:
         if not self._service_available:
             return
         try:
-            self.stop_rosbag()
+            self.stop_rosbag(wait_for_response=False)
         except Exception as exc:  # noqa: BLE001 — shutdown is best-effort
             self._node.get_logger().warning(
                 f'Best-effort rosbag stop on shutdown failed: {exc}')

@@ -16,6 +16,7 @@
 
 import {
     lttbDownsample,
+    downsampleMultiSeriesExtrema,
     prepareChartData,
     formatFileSize,
     formatDateTime,
@@ -93,6 +94,26 @@ describe('chartUtils', () => {
         });
     });
 
+    describe('downsampleMultiSeriesExtrema', () => {
+        it('should preserve peaks from non-primary series', () => {
+            const data = Array.from({ length: 2000 }, (_, i) => ({
+                time: i,
+                joint1: 0,
+                joint2: i === 1500 ? 100 : 0,
+            }));
+
+            const result = downsampleMultiSeriesExtrema(
+                data,
+                120,
+                'time',
+                ['joint1', 'joint2']
+            );
+
+            expect(result.length).toBeLessThanOrEqual(120);
+            expect(result.some((point) => point.joint2 === 100)).toBe(true);
+        });
+    });
+
     describe('prepareChartData', () => {
         it('should return empty array for empty inputs', () => {
             expect(prepareChartData([], [], [], 'state_')).toEqual([]);
@@ -130,6 +151,21 @@ describe('chartUtils', () => {
             expect(result.length).toBeLessThanOrEqual(500);
             expect(result.length).toBeGreaterThan(0);
         });
+
+        it('should preserve peaks for every named series', () => {
+            const timestamps = Array.from({ length: 2000 }, (_, i) => i * 0.1);
+            const names = ['joint1', 'joint2'];
+            const values = [];
+            timestamps.forEach((_, i) => {
+                values.push(0);
+                values.push(i === 1500 ? 42 : 0);
+            });
+
+            const result = prepareChartData(timestamps, names, values, 'state_', 120);
+
+            expect(result.length).toBeLessThanOrEqual(120);
+            expect(result.some((point) => point.state_joint2 === 42)).toBe(true);
+        });
     });
 
     describe('formatFileSize', () => {
@@ -163,10 +199,17 @@ describe('chartUtils', () => {
 
         it('should format valid ISO date string', () => {
             const result = formatDateTime('2025-01-12T14:30:00Z');
-            // Should contain date parts
-            expect(result).toMatch(/2025/);
-            expect(result).toMatch(/01/);
-            expect(result).toMatch(/12/);
+            expect(result).toBe('2025-01-12 14:30:00 UTC');
+        });
+
+        it('should treat timezone-less ISO date strings as UTC', () => {
+            const result = formatDateTime('2025-01-12T14:30:00');
+            expect(result).toBe('2025-01-12 14:30:00 UTC');
+        });
+
+        it('should not use Korean locale markers', () => {
+            const result = formatDateTime('2025-01-12T14:30:00Z');
+            expect(result).not.toMatch(/[가-힣]/);
         });
 
         it('should return original string for invalid date', () => {

@@ -14,13 +14,15 @@ appends those JPEG bytes to ``videos/<cam>.mjpeg.tmp``. ffmpeg and
 Parquet writes stay off the video hot path so pipe backpressure and
 pyarrow warm-up cannot make the camera queue backlog.
 
-On STOP, each raw MJPEG spool is remuxed into ``videos/<cam>.mp4`` with
-``-c:v copy`` and the spool is removed only after frame-count validation
-passes. A Parquet sidecar (``videos/<cam>_timestamps.parquet``) still
-tracks ``header.stamp`` (publisher clock) and ``recv_ns`` (subscriber
-clock) for every frame written. LeRobot resampling maps the synced grid
-to MP4 frame indices using ``header_stamp_ns`` by default so transport
-delay does not shift image selection; ``recv_ns`` stays available for
+On STOP, writers are drained and the raw MJPEG spool is left on disk as
+``videos/<cam>.mjpeg.tmp`` so the service response is not blocked by
+ffmpeg. The background transcoder later remuxes it into
+``videos/<cam>.mp4`` with ``-c:v copy`` before doing H.264 work. A
+Parquet sidecar (``videos/<cam>_timestamps.parquet``) still tracks
+``header.stamp`` (publisher clock) and ``recv_ns`` (subscriber clock)
+for every frame written. LeRobot resampling maps the synced grid to MP4
+frame indices using ``header_stamp_ns`` by default so transport delay
+does not shift image selection; ``recv_ns`` stays available for
 diagnostics and legacy fallback.
 
 Subscriptions are created once at ``__init__`` (= when the robot_type is
@@ -68,10 +70,28 @@ _SOFT_CALLBACK_QUEUE_MB_ENV = "CYCLO_VIDEO_RECORDER_SOFT_CALLBACK_QUEUE_MB"
 _SOFT_RAW_QUEUE_FRAMES_ENV = "CYCLO_VIDEO_RECORDER_SOFT_RAW_QUEUE_FRAMES"
 _SOFT_RAW_QUEUE_MB_ENV = "CYCLO_VIDEO_RECORDER_SOFT_RAW_QUEUE_MB"
 _SOFT_METADATA_QUEUE_ROWS_ENV = "CYCLO_VIDEO_RECORDER_SOFT_METADATA_QUEUE_ROWS"
+_TIMESTAMP_FUTURE_WARNING_S_ENV = "CYCLO_VIDEO_TIMESTAMP_FUTURE_WARNING_S"
+_TIMESTAMP_PAST_WARNING_S_ENV = "CYCLO_VIDEO_TIMESTAMP_PAST_WARNING_S"
+_CAMERA_MONITOR_STALL_WINDOW_S_ENV = "CYCLO_CAMERA_MONITOR_STALL_WINDOW_S"
+_CAMERA_MONITOR_STALL_RATIO_ENV = "CYCLO_CAMERA_MONITOR_STALL_RATIO"
+_CAMERA_MONITOR_SLOW_RATIO_ENV = "CYCLO_CAMERA_MONITOR_SLOW_RATIO"
+_CAMERA_MONITOR_EMA_ALPHA_ENV = "CYCLO_CAMERA_MONITOR_EMA_ALPHA"
+_CAMERA_MONITOR_MIN_BASELINE_HZ_ENV = "CYCLO_CAMERA_MONITOR_MIN_BASELINE_HZ"
+_CAMERA_MONITOR_WARMUP_S_ENV = "CYCLO_CAMERA_MONITOR_WARMUP_S"
+_CAMERA_MONITOR_RATE_WINDOW_S_ENV = "CYCLO_CAMERA_MONITOR_RATE_WINDOW_S"
 
 _DEFAULT_SOFT_CALLBACK_QUEUE_MB = 128
 _DEFAULT_SOFT_RAW_QUEUE_MB = 256
 _DEFAULT_SOFT_METADATA_QUEUE_ROWS = 16_384
+_DEFAULT_TIMESTAMP_FUTURE_WARNING_S = 0.5
+_DEFAULT_TIMESTAMP_PAST_WARNING_S = 2.0
+_DEFAULT_CAMERA_MONITOR_STALL_WINDOW_S = 2.0
+_DEFAULT_CAMERA_MONITOR_STALL_RATIO = 0.2
+_DEFAULT_CAMERA_MONITOR_SLOW_RATIO = 0.6
+_DEFAULT_CAMERA_MONITOR_EMA_ALPHA = 0.2
+_DEFAULT_CAMERA_MONITOR_MIN_BASELINE_HZ = 1.0
+_DEFAULT_CAMERA_MONITOR_WARMUP_S = 3.0
+_DEFAULT_CAMERA_MONITOR_RATE_WINDOW_S = 1.0
 _PRESSURE_WARN_INTERVAL_NS = 1_000_000_000
 
 
@@ -91,6 +111,16 @@ def _resolve_positive_int_env(name: str, default: int) -> int:
         return default
     try:
         return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _resolve_positive_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(0.0, float(raw))
     except ValueError:
         return default
 
@@ -204,7 +234,29 @@ class _CameraStream:
     max_metadata_flush_ns: int = 0
     pressure_warning_count: int = 0
     last_pressure_warn_monotonic_ns: int = 0
+    timestamp_warning_count: int = 0
+    timestamp_future_warning_count: int = 0
+    timestamp_past_warning_count: int = 0
+    max_header_ahead_ns: int = 0
+    max_header_behind_ns: int = 0
+    last_timestamp_warn_monotonic_ns: int = 0
     remux_duration_ns: int = 0
+
+    # Persistent live monitor state. This is intentionally separate from
+    # per-episode stats so idle camera health checks do not contaminate
+    # saved recorder diagnostics.
+    monitor_subscribe_start_ns: int = 0
+    monitor_message_count: int = 0
+    monitor_last_recv_ns: int = 0
+    monitor_last_tick_ns: int = 0
+    monitor_last_count_snapshot: int = 0
+    monitor_rate_hz: float = 0.0
+    monitor_ema_hz: float = 0.0
+    monitor_ema_initialised: bool = False
+    monitor_status: int = 0
+    monitor_rate_status: int = 0
+    monitor_timestamp_status: int = 0
+    monitor_timestamp_skew_ns: int = 0
 
 
 class VideoRecorder:
@@ -247,6 +299,55 @@ class VideoRecorder:
         )
         self._soft_metadata_queue_rows = _resolve_positive_int_env(
             _SOFT_METADATA_QUEUE_ROWS_ENV, _DEFAULT_SOFT_METADATA_QUEUE_ROWS,
+        )
+        self._timestamp_future_warning_ns = int(
+            _resolve_positive_float_env(
+                _TIMESTAMP_FUTURE_WARNING_S_ENV,
+                _DEFAULT_TIMESTAMP_FUTURE_WARNING_S,
+            ) * 1_000_000_000
+        )
+        self._timestamp_past_warning_ns = int(
+            _resolve_positive_float_env(
+                _TIMESTAMP_PAST_WARNING_S_ENV,
+                _DEFAULT_TIMESTAMP_PAST_WARNING_S,
+            ) * 1_000_000_000
+        )
+        self._camera_monitor_stall_window_ns = int(
+            _resolve_positive_float_env(
+                _CAMERA_MONITOR_STALL_WINDOW_S_ENV,
+                _DEFAULT_CAMERA_MONITOR_STALL_WINDOW_S,
+            ) * 1_000_000_000
+        )
+        self._camera_monitor_stall_ratio = _resolve_positive_float_env(
+            _CAMERA_MONITOR_STALL_RATIO_ENV,
+            _DEFAULT_CAMERA_MONITOR_STALL_RATIO,
+        )
+        self._camera_monitor_slow_ratio = _resolve_positive_float_env(
+            _CAMERA_MONITOR_SLOW_RATIO_ENV,
+            _DEFAULT_CAMERA_MONITOR_SLOW_RATIO,
+        )
+        self._camera_monitor_ema_alpha = min(
+            1.0,
+            _resolve_positive_float_env(
+                _CAMERA_MONITOR_EMA_ALPHA_ENV,
+                _DEFAULT_CAMERA_MONITOR_EMA_ALPHA,
+            ),
+        )
+        self._camera_monitor_min_baseline_hz = _resolve_positive_float_env(
+            _CAMERA_MONITOR_MIN_BASELINE_HZ_ENV,
+            _DEFAULT_CAMERA_MONITOR_MIN_BASELINE_HZ,
+        )
+        self._camera_monitor_warmup_ns = int(
+            _resolve_positive_float_env(
+                _CAMERA_MONITOR_WARMUP_S_ENV,
+                _DEFAULT_CAMERA_MONITOR_WARMUP_S,
+            ) * 1_000_000_000
+        )
+        self._camera_monitor_rate_window_ns = int(
+            _resolve_positive_float_env(
+                _CAMERA_MONITOR_RATE_WINDOW_S_ENV,
+                _DEFAULT_CAMERA_MONITOR_RATE_WINDOW_S,
+            ) * 1_000_000_000
         )
         self._diagnostics_mode = _resolve_diagnostics_mode()
         self._diagnostics_enabled = self._diagnostics_mode == "detailed"
@@ -330,8 +431,8 @@ class VideoRecorder:
 
             self._recording_active.set()
 
-    def stop_episode(self) -> Dict[str, Dict[str, int]]:
-        """Drain workers, close sidecars, remux spools, and return stats."""
+    def stop_episode(self) -> Dict[str, Dict[str, object]]:
+        """Drain workers, close sidecars, leave remux work to the background."""
         with self._lifecycle_lock:
             if not self._recording_active.is_set():
                 return {}
@@ -339,7 +440,7 @@ class VideoRecorder:
             self._recording_active.clear()
             self._wait_for_active_callbacks()
             streams = list(self._streams.values())
-            stats: Dict[str, Dict[str, int]] = {}
+            stats: Dict[str, Dict[str, object]] = {}
 
             try:
                 for stream in streams:
@@ -364,8 +465,8 @@ class VideoRecorder:
                 for stream in streams:
                     self._close_writer(stream)
                     self._close_diagnostics_writer(stream)
-
-                self._remux_streams(streams)
+                for stream in streams:
+                    self._cleanup_empty_raw_spool(stream)
 
                 for stream in streams:
                     self._write_stats_json(stream)
@@ -415,6 +516,7 @@ class VideoRecorder:
                 raw_queue=Queue(),
                 metadata_queue=Queue(),
             )
+            self._reset_camera_monitor_state(stream, time.monotonic_ns())
             stream.subscription = self._node.create_subscription(
                 CompressedImage,
                 topic,
@@ -508,7 +610,32 @@ class VideoRecorder:
             stream.max_metadata_flush_ns = 0
             stream.pressure_warning_count = 0
             stream.last_pressure_warn_monotonic_ns = 0
+            stream.timestamp_warning_count = 0
+            stream.timestamp_future_warning_count = 0
+            stream.timestamp_past_warning_count = 0
+            stream.max_header_ahead_ns = 0
+            stream.max_header_behind_ns = 0
+            stream.last_timestamp_warn_monotonic_ns = 0
             stream.remux_duration_ns = 0
+
+    def _reset_camera_monitor_state(
+        self, stream: _CameraStream, now_ns: Optional[int] = None,
+    ) -> None:
+        if now_ns is None:
+            now_ns = time.monotonic_ns()
+        with stream.state_lock:
+            stream.monitor_subscribe_start_ns = now_ns
+            stream.monitor_message_count = 0
+            stream.monitor_last_recv_ns = 0
+            stream.monitor_last_tick_ns = 0
+            stream.monitor_last_count_snapshot = 0
+            stream.monitor_rate_hz = 0.0
+            stream.monitor_ema_hz = 0.0
+            stream.monitor_ema_initialised = False
+            stream.monitor_status = 0
+            stream.monitor_rate_status = 0
+            stream.monitor_timestamp_status = 0
+            stream.monitor_timestamp_skew_ns = 0
 
     def _wait_for_active_callbacks(self) -> None:
         with self._callback_cond:
@@ -581,6 +708,88 @@ class VideoRecorder:
                 should_log = True
         if should_log:
             self._node.get_logger().warn(message)
+
+    def _note_timestamp_skew(
+        self, stream: _CameraStream, header_minus_recv_ns: int,
+    ) -> None:
+        future_threshold_ns = int(getattr(
+            self,
+            "_timestamp_future_warning_ns",
+            int(_DEFAULT_TIMESTAMP_FUTURE_WARNING_S * 1_000_000_000),
+        ))
+        past_threshold_ns = int(getattr(
+            self,
+            "_timestamp_past_warning_ns",
+            int(_DEFAULT_TIMESTAMP_PAST_WARNING_S * 1_000_000_000),
+        ))
+        kind: Optional[str] = None
+        if header_minus_recv_ns > future_threshold_ns:
+            kind = "future"
+        elif -header_minus_recv_ns > past_threshold_ns:
+            kind = "past"
+        if kind is None:
+            return
+
+        now_ns = time.monotonic_ns()
+        should_log = False
+        with stream.state_lock:
+            stream.timestamp_warning_count += 1
+            if kind == "future":
+                stream.timestamp_future_warning_count += 1
+                stream.max_header_ahead_ns = max(
+                    stream.max_header_ahead_ns,
+                    header_minus_recv_ns,
+                )
+            else:
+                stream.timestamp_past_warning_count += 1
+                stream.max_header_behind_ns = max(
+                    stream.max_header_behind_ns,
+                    -header_minus_recv_ns,
+                )
+            if (
+                now_ns - stream.last_timestamp_warn_monotonic_ns
+                >= _PRESSURE_WARN_INTERVAL_NS
+            ):
+                stream.last_timestamp_warn_monotonic_ns = now_ns
+                should_log = True
+
+        if should_log:
+            skew_s = header_minus_recv_ns / 1_000_000_000.0
+            self._node.get_logger().warning(
+                f"VideoRecorder: {stream.name} camera timestamp skew "
+                f"header_minus_recv={skew_s:.3f}s"
+            )
+
+    def _camera_timestamp_status(self, header_minus_recv_ns: int) -> int:
+        future_threshold_ns = int(getattr(
+            self,
+            "_timestamp_future_warning_ns",
+            int(_DEFAULT_TIMESTAMP_FUTURE_WARNING_S * 1_000_000_000),
+        ))
+        past_threshold_ns = int(getattr(
+            self,
+            "_timestamp_past_warning_ns",
+            int(_DEFAULT_TIMESTAMP_PAST_WARNING_S * 1_000_000_000),
+        ))
+        if header_minus_recv_ns > future_threshold_ns:
+            return 2
+        if -header_minus_recv_ns > past_threshold_ns:
+            return 2
+        return 0
+
+    def _note_camera_monitor_sample(
+        self,
+        stream: _CameraStream,
+        *,
+        recv_monotonic_ns: int,
+        header_minus_recv_ns: int,
+    ) -> None:
+        timestamp_status = self._camera_timestamp_status(header_minus_recv_ns)
+        with stream.state_lock:
+            stream.monitor_message_count += 1
+            stream.monitor_last_recv_ns = recv_monotonic_ns
+            stream.monitor_timestamp_skew_ns = header_minus_recv_ns
+            stream.monitor_timestamp_status = timestamp_status
 
     def _note_callback_enqueue(
         self,
@@ -686,12 +895,26 @@ class VideoRecorder:
         self._streams.clear()
 
     def _on_frame(self, stream: _CameraStream, msg: CompressedImage) -> None:
+        callback_enter_ns = self._now_ns()
+        recv_monotonic_ns = time.monotonic_ns()
+        header_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000
+            + int(msg.header.stamp.nanosec)
+        )
+        header_read_ns = self._now_ns()
+        recv_ns = header_read_ns
+        header_minus_recv_ns = header_ns - recv_ns
+        self._note_camera_monitor_sample(
+            stream,
+            recv_monotonic_ns=recv_monotonic_ns,
+            header_minus_recv_ns=header_minus_recv_ns,
+        )
+
         with self._callback_cond:
             if not self._recording_active.is_set():
                 return
             self._active_callbacks += 1
         try:
-            callback_enter_ns = self._now_ns()
             with stream.state_lock:
                 stream.frames_received += 1
             bytes_copy_start_ns = self._now_ns()
@@ -701,12 +924,7 @@ class VideoRecorder:
                 with stream.state_lock:
                     stream.frames_dropped_invalid += 1
                 return
-            header_ns = (
-                int(msg.header.stamp.sec) * 1_000_000_000
-                + int(msg.header.stamp.nanosec)
-            )
-            header_read_ns = self._now_ns()
-            recv_ns = header_read_ns
+            self._note_timestamp_skew(stream, header_minus_recv_ns)
             queue_size_before = self._queue_size(stream.queue)
             enqueue_start_ns = self._now_ns()
             diagnostics = {
@@ -1064,6 +1282,15 @@ class VideoRecorder:
                 "max_raw_write_ns": stream.max_raw_write_ns,
                 "max_metadata_flush_ns": stream.max_metadata_flush_ns,
                 "pressure_warning_count": stream.pressure_warning_count,
+                "timestamp_warning_count": stream.timestamp_warning_count,
+                "timestamp_future_warning_count": (
+                    stream.timestamp_future_warning_count
+                ),
+                "timestamp_past_warning_count": (
+                    stream.timestamp_past_warning_count
+                ),
+                "max_header_ahead_ns": stream.max_header_ahead_ns,
+                "max_header_behind_ns": stream.max_header_behind_ns,
                 "remux_duration_ns": stream.remux_duration_ns,
                 "soft_callback_queue_frames": self._soft_callback_queue_frames,
                 "soft_callback_queue_bytes": self._soft_callback_queue_bytes,
@@ -1072,7 +1299,19 @@ class VideoRecorder:
                 "soft_metadata_queue_rows": self._soft_metadata_queue_rows,
             }
 
-    def _public_stats(self, stream: _CameraStream) -> Dict[str, int]:
+    @staticmethod
+    def _remux_status_from_snapshot(snapshot: dict) -> str:
+        if snapshot.get("remux_error"):
+            return "failed"
+        frames_written = int(snapshot.get("frames_written") or 0)
+        frames_remuxed = int(snapshot.get("frames_remuxed") or 0)
+        if frames_written <= 0:
+            return "not_required"
+        if frames_remuxed >= frames_written:
+            return "done"
+        return "pending"
+
+    def _public_stats(self, stream: _CameraStream) -> Dict[str, object]:
         snapshot = self._stream_stats_snapshot(stream)
         return {
             "frames_received": int(snapshot["frames_received"]),
@@ -1082,18 +1321,215 @@ class VideoRecorder:
             "frames_dropped_invalid": int(snapshot["frames_dropped_invalid"]),
             "frames_remuxed": int(snapshot["frames_remuxed"]),
             "pressure_warning_count": int(snapshot["pressure_warning_count"]),
+            "timestamp_warning_count": int(snapshot["timestamp_warning_count"]),
+            "timestamp_future_warning_count": int(
+                snapshot["timestamp_future_warning_count"]
+            ),
+            "timestamp_past_warning_count": int(
+                snapshot["timestamp_past_warning_count"]
+            ),
+            "max_header_ahead_ns": int(snapshot["max_header_ahead_ns"]),
+            "max_header_behind_ns": int(snapshot["max_header_behind_ns"]),
             "max_callback_queue_items": int(snapshot["max_callback_queue_items"]),
             "max_raw_queue_items": int(snapshot["max_raw_queue_items"]),
             "max_metadata_queue_items": int(snapshot["max_metadata_queue_items"]),
             "max_callback_queue_bytes": int(snapshot["max_callback_queue_bytes"]),
             "max_raw_queue_bytes": int(snapshot["max_raw_queue_bytes"]),
+            "raw_write_error": snapshot["raw_write_error"],
+            "metadata_error": snapshot["metadata_error"],
+            "remux_error": snapshot["remux_error"],
+            "remux_status": self._remux_status_from_snapshot(snapshot),
         }
+
+    def camera_monitor_snapshot(self) -> Dict[str, list]:
+        now_ns = time.monotonic_ns()
+        stall_window_ns = int(getattr(
+            self,
+            "_camera_monitor_stall_window_ns",
+            int(_DEFAULT_CAMERA_MONITOR_STALL_WINDOW_S * 1_000_000_000),
+        ))
+        warmup_ns = int(getattr(
+            self,
+            "_camera_monitor_warmup_ns",
+            int(_DEFAULT_CAMERA_MONITOR_WARMUP_S * 1_000_000_000),
+        ))
+        slow_ratio = float(getattr(
+            self,
+            "_camera_monitor_slow_ratio",
+            _DEFAULT_CAMERA_MONITOR_SLOW_RATIO,
+        ))
+        stall_ratio = float(getattr(
+            self,
+            "_camera_monitor_stall_ratio",
+            _DEFAULT_CAMERA_MONITOR_STALL_RATIO,
+        ))
+        ema_alpha = float(getattr(
+            self,
+            "_camera_monitor_ema_alpha",
+            _DEFAULT_CAMERA_MONITOR_EMA_ALPHA,
+        ))
+        min_baseline_hz = float(getattr(
+            self,
+            "_camera_monitor_min_baseline_hz",
+            _DEFAULT_CAMERA_MONITOR_MIN_BASELINE_HZ,
+        ))
+        rate_window_ns = int(getattr(
+            self,
+            "_camera_monitor_rate_window_ns",
+            int(_DEFAULT_CAMERA_MONITOR_RATE_WINDOW_S * 1_000_000_000),
+        ))
+
+        snapshot: Dict[str, list] = {
+            "names": [],
+            "topics": [],
+            "rates_hz": [],
+            "baseline_hz": [],
+            "seconds_since_last": [],
+            "status": [],
+            "timestamp_skew_s": [],
+            "timestamp_status": [],
+        }
+
+        for stream in self._streams.values():
+            with stream.state_lock:
+                count_now = stream.monitor_message_count
+                last_recv_ns = stream.monitor_last_recv_ns
+                last_tick_ns = stream.monitor_last_tick_ns
+                last_count_snapshot = stream.monitor_last_count_snapshot
+                subscribe_start_ns = stream.monitor_subscribe_start_ns
+                rate_hz = stream.monitor_rate_hz
+                ema_hz = stream.monitor_ema_hz
+                ema_initialised = stream.monitor_ema_initialised
+                rate_status = stream.monitor_rate_status
+                timestamp_status = stream.monitor_timestamp_status
+                timestamp_skew_ns = stream.monitor_timestamp_skew_ns
+
+            should_update_rate = last_tick_ns == 0 or (
+                now_ns > last_tick_ns
+                and (now_ns - last_tick_ns) >= rate_window_ns
+            )
+            if should_update_rate and last_tick_ns != 0 and now_ns > last_tick_ns:
+                dt_s = (now_ns - last_tick_ns) / 1_000_000_000.0
+                if dt_s > 0.0:
+                    rate_hz = max(
+                        0.0,
+                        (count_now - last_count_snapshot) / dt_s,
+                    )
+
+            in_warmup = (
+                subscribe_start_ns != 0
+                and now_ns >= subscribe_start_ns
+                and (now_ns - subscribe_start_ns) < warmup_ns
+            )
+            no_recent_msg = False
+            if last_recv_ns != 0:
+                no_recent_msg = (
+                    now_ns > last_recv_ns
+                    and (now_ns - last_recv_ns) > stall_window_ns
+                )
+            elif subscribe_start_ns != 0:
+                no_recent_msg = (
+                    now_ns > subscribe_start_ns
+                    and (now_ns - subscribe_start_ns) > stall_window_ns
+                )
+
+            stalled = False
+            slow = False
+            if not in_warmup:
+                effective_baseline = ema_hz if ema_hz > min_baseline_hz else 0.0
+                if no_recent_msg:
+                    stalled = True
+                elif should_update_rate and effective_baseline > 0.0:
+                    if rate_hz < effective_baseline * stall_ratio:
+                        stalled = True
+                    elif rate_hz < effective_baseline * slow_ratio:
+                        slow = True
+
+                if should_update_rate and not stalled and not slow and rate_hz > 0.0:
+                    if not ema_initialised:
+                        ema_hz = rate_hz
+                        ema_initialised = True
+                    else:
+                        ema_hz = (ema_alpha * rate_hz) + (
+                            (1.0 - ema_alpha) * ema_hz
+                        )
+
+            if stalled:
+                rate_status = 2
+            elif slow:
+                rate_status = 1
+            elif should_update_rate:
+                rate_status = 0
+            combined_status = max(rate_status, timestamp_status)
+            seconds_since_last = (
+                -1.0
+                if last_recv_ns == 0
+                else max(0.0, (now_ns - last_recv_ns) / 1_000_000_000.0)
+            )
+
+            with stream.state_lock:
+                if should_update_rate:
+                    stream.monitor_last_tick_ns = now_ns
+                    stream.monitor_last_count_snapshot = count_now
+                stream.monitor_rate_hz = rate_hz
+                stream.monitor_ema_hz = ema_hz
+                stream.monitor_ema_initialised = ema_initialised
+                stream.monitor_rate_status = rate_status
+                stream.monitor_status = combined_status
+
+            snapshot["names"].append(stream.name)
+            snapshot["topics"].append(stream.topic)
+            snapshot["rates_hz"].append(float(rate_hz))
+            snapshot["baseline_hz"].append(float(ema_hz))
+            snapshot["seconds_since_last"].append(float(seconds_since_last))
+            snapshot["status"].append(int(combined_status))
+            snapshot["timestamp_skew_s"].append(
+                float(timestamp_skew_ns / 1_000_000_000.0)
+            )
+            snapshot["timestamp_status"].append(int(timestamp_status))
+
+        return snapshot
+
+    def recording_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        future_threshold_s = (
+            int(getattr(
+                self,
+                "_timestamp_future_warning_ns",
+                int(_DEFAULT_TIMESTAMP_FUTURE_WARNING_S * 1_000_000_000),
+            ))
+            / 1_000_000_000.0
+        )
+        past_threshold_s = (
+            int(getattr(
+                self,
+                "_timestamp_past_warning_ns",
+                int(_DEFAULT_TIMESTAMP_PAST_WARNING_S * 1_000_000_000),
+            ))
+            / 1_000_000_000.0
+        )
+        for stream in self._streams.values():
+            with stream.state_lock:
+                future_count = stream.timestamp_future_warning_count
+                past_count = stream.timestamp_past_warning_count
+            if future_count > 0:
+                warnings.append(
+                    f"{stream.name}: camera header timestamp is more than "
+                    f"{future_threshold_s:g}s ahead of receive time."
+                )
+            if past_count > 0:
+                warnings.append(
+                    f"{stream.name}: camera header timestamp is more than "
+                    f"{past_threshold_s:g}s behind receive time."
+                )
+        return warnings
 
     def _write_stats_json(self, stream: _CameraStream) -> None:
         if self._diagnostics_mode == "off" or stream.stats_path is None:
             return
         payload = self._stream_stats_snapshot(stream)
         payload.update({
+            "remux_status": self._remux_status_from_snapshot(payload),
             "mp4_path": str(stream.mp4_path) if stream.mp4_path else None,
             "raw_path": str(stream.raw_path) if stream.raw_path else None,
             "sidecar_path": str(stream.sidecar_path) if stream.sidecar_path else None,
@@ -1112,6 +1548,20 @@ class VideoRecorder:
             self._node.get_logger().warning(
                 f"VideoRecorder: {stream.name} stats json write failed: {exc!r}"
             )
+
+    def _cleanup_empty_raw_spool(self, stream: _CameraStream) -> None:
+        raw_path = stream.raw_path
+        if raw_path is None:
+            return
+        with stream.state_lock:
+            frames_written = stream.frames_written
+        if frames_written > 0:
+            return
+        try:
+            if raw_path.exists():
+                raw_path.unlink()
+        except OSError:
+            pass
 
     def _remux_streams(self, streams: list[_CameraStream]) -> None:
         active_streams = [stream for stream in streams if stream.frames_written > 0]

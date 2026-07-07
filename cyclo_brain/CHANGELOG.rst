@@ -2,6 +2,42 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
+0.2.2 (2026-06-26)
+------------------
+* Updated Cyclo release metadata to 0.2.2.
+* Contributors: Taehyeong Kim
+
+0.2.1 (2026-06-26)
+------------------
+* Updated the Isaac-GR00T submodule to include Cyclo GR00T modality configuration examples.
+* Scoped GR00T Blackwell flash-attn source builds to sm_120 with single-job defaults for safer amd64 image validation.
+* Contributors: Taehyeong Kim
+
+0.2.0 (2026-06-25)
+------------------
+* None
+
+0.1.16 (2026-06-23)
+-------------------
+* Documented the externally managed Zenoh router flow for policy-runtime integration.
+* Contributors: Taehyeong Kim
+
+0.1.15 (2026-06-22)
+-------------------
+* Added async/sync action request modes with updated buffer refill behavior for the shared policy runtime.
+* Added GR00T TensorRT DiT acceleration selection, synthetic observation-based engine preparation, and model-local engine reuse.
+* Updated GR00T policy image support to ``robotis/groot-zenoh:1.3.2``.
+* Contributors: Taehyeong Kim
+
+0.1.14 (2026-06-17)
+-------------------
+* None
+
 0.1.13 (2026-06-11)
 -------------------
 * Restored the shared policy runtime architecture around ``main-runtime`` and ``engine-process`` services for LeRobot and GR00T.

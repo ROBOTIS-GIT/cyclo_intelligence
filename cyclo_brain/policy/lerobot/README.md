@@ -160,9 +160,8 @@ docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
 ### Zenoh connection failed
 
 ```bash
-# Ensure Zenoh daemon is running in orchestrator
-docker exec -it orchestrator bash
-zenoh  # or: ros2 run rmw_zenoh_cpp rmw_zenohd
+# Ensure the externally managed Zenoh router is running on ZENOH_ROUTER_IP:ZENOH_ROUTER_PORT.
+ss -ltnp 'sport = :7447'
 ```
 
 ### LeRobot import error

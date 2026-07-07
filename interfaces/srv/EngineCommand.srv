@@ -23,6 +23,8 @@ string task_instruction
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+string acceleration_mode
+string acceleration_engine_path
 ---
 uint64 seq_id
 bool success

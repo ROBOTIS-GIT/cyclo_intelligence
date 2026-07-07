@@ -40,6 +40,8 @@ uint8 CANCEL_SEGMENT = 24
 
 uint8 command
 TaskInfo task_info
+# Planned subtask/segment index. For DISCARD_EPISODE only, 0 keeps legacy
+# behavior (delete current cursor) and N > 0 targets full_episode_index N - 1.
 uint16 segment_index
 
 # Conversion-only knobs. Only meaningful when command == CONVERT_MP4

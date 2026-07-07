@@ -41,8 +41,7 @@ Record-side status (cyclo_data → UI direct on `/data/recording/status`).
 | `READY` | 0 | Idle |
 | `RECORDING` | 1 | Recording |
 | `SAVING` | 2 | Saving (post-record encode) |
-| `CONVERTING` | 3 | Converting rosbag → MP4 → LeRobot |
-| `PAUSED` | 4 | Paused |
+| `PAUSED` | 3 | Paused |
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -57,6 +56,16 @@ Record-side status (cyclo_data → UI direct on `/data/recording/status`).
 | `subtask_count` | uint16 | Subtask count |
 | `current_subtask_instruction` | string | Current subtask instruction |
 | `subtask_instructions` | string[] | Subtask instruction list |
+| `saved_subtask_indices` | uint16[] | Saved subtask indices in the current full episode |
+| `recording_warnings` | string[] | Live record-side warnings such as camera timestamp skew |
+| `camera_monitor_names` | string[] | Camera stream names monitored by the video recorder |
+| `camera_monitor_topics` | string[] | Camera image topics monitored by the video recorder |
+| `camera_monitor_rates_hz` | float32[] | Current camera image rate estimates |
+| `camera_monitor_baseline_hz` | float32[] | Healthy camera image rate baseline estimates |
+| `camera_monitor_seconds_since_last` | float32[] | Seconds since each camera topic was last received |
+| `camera_monitor_status` | uint8[] | Combined camera monitor status: 0 OK, 1 slow, 2 stalled/error |
+| `camera_monitor_timestamp_skew_s` | float32[] | Latest header timestamp minus receive time for each camera |
+| `camera_monitor_timestamp_status` | uint8[] | Timestamp-only camera status: 0 OK, 2 skew error |
 | `encoding_progress` | float32 | Encoding/conversion progress (%) |
 | `used_storage_size` | float32 | Used storage (GB) |
 | `total_storage_size` | float32 | Total storage (GB) |

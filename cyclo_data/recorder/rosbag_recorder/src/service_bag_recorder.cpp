@@ -16,7 +16,6 @@
 
 
 #include <chrono>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -38,16 +37,6 @@ ServiceBagRecorder::ServiceBagRecorder()
 : rclcpp::Node("service_bag_recorder")
 {
   RCLCPP_INFO(this->get_logger(), "Starting rosbag recorder node");
-
-  // Preflight check: how long to wait for the first message on each requested
-  // topic before failing the START command. Set <= 0 to disable.
-  this->declare_parameter<int>("preflight_wait_timeout_ms", 2000);
-  preflight_wait_timeout_ms_ =
-    this->get_parameter("preflight_wait_timeout_ms").as_int();
-  RCLCPP_INFO(
-    this->get_logger(),
-    "Preflight wait timeout: %d ms (<=0 disables the check)",
-    preflight_wait_timeout_ms_);
 
   // Live per-topic monitor parameters. The monitor publishes a snapshot at
   // ``monitor_publish_hz`` while a recording is in progress; a topic is
@@ -201,8 +190,8 @@ void ServiceBagRecorder::handle_prepare(const std::vector<std::string> & topics)
   messages_written_ = 0;
 
   // Resolve topic types from the ROS graph. Topics not yet available
-  // (e.g. robot not running) are skipped with a warning — they will be
-  // caught by the preflight check when START is called.
+  // (e.g. robot not running) are kept in the monitor list, but no
+  // subscription can be created until they appear in the graph.
   auto names_and_types = this->get_topic_names_and_types();
   RCLCPP_INFO(this->get_logger(), "Found %zu active topics in system", names_and_types.size());
 
@@ -324,27 +313,18 @@ void ServiceBagRecorder::handle_start(const std::string & uri)
       }
     }
 
-    // Check for topics still missing from the graph.
+    // Topics still missing from the graph are omitted from this bag. The live
+    // monitor remains seeded with the full requested list, so the UI can keep
+    // warning about silent/missing topics without blocking acquisition.
     auto still_missing = get_missing_topics(names_and_types);
     if (!still_missing.empty()) {
       std::ostringstream oss;
-      oss << "Topics not available in ROS graph:";
+      oss << "Recording will start without " << still_missing.size()
+          << " unavailable topics:";
       for (const auto & t : still_missing) {
         oss << " " << t;
       }
-      throw std::runtime_error(oss.str());
-    }
-
-    // Preflight: confirm every topic is actually publishing data.
-    auto inactive_topics = wait_for_first_messages();
-    if (!inactive_topics.empty()) {
-      std::ostringstream oss;
-      oss << "No messages received within " << preflight_wait_timeout_ms_
-          << "ms from topics:";
-      for (const auto & t : inactive_topics) {
-        oss << " " << t;
-      }
-      throw std::runtime_error(oss.str());
+      RCLCPP_WARN(this->get_logger(), "%s", oss.str().c_str());
     }
 
     // Open the bag writer.
@@ -483,7 +463,11 @@ void ServiceBagRecorder::create_topics_in_bag(
   for (const auto & topic : topics_to_record_) {
     auto it = names_and_types.find(topic);
     if (it == names_and_types.end() || it->second.empty()) {
-      throw std::runtime_error("Type not found while creating bag topic: " + topic);
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Skipping unavailable topic while creating bag: %s",
+        topic.c_str());
+      continue;
     }
     const std::string & type = it->second.front();
 
@@ -551,54 +535,6 @@ void ServiceBagRecorder::create_subscriptions()
       "Subscribed to topic: %s (group: %s, depth: %zu)",
       topic.c_str(), group_name.c_str(), qos.depth());
   }
-}
-
-std::vector<std::string> ServiceBagRecorder::wait_for_first_messages()
-{
-  if (preflight_wait_timeout_ms_ <= 0) {
-    RCLCPP_INFO(this->get_logger(), "Preflight check disabled (timeout <= 0)");
-    return {};
-  }
-
-  RCLCPP_INFO(
-    this->get_logger(),
-    "Preflight: waiting up to %d ms for first message on each of %zu topics",
-    preflight_wait_timeout_ms_, topics_to_record_.size());
-
-  {
-    std::scoped_lock<std::mutex> lk(preflight_mutex_);
-    preflight_received_topics_.clear();
-  }
-  preflight_active_.store(true, std::memory_order_release);
-
-  std::vector<std::string> missing;
-  {
-    std::unique_lock<std::mutex> lk(preflight_mutex_);
-    preflight_cv_.wait_for(
-      lk,
-      std::chrono::milliseconds(preflight_wait_timeout_ms_),
-      [this]() {
-        for (const auto & topic : topics_to_record_) {
-          if (preflight_received_topics_.count(topic) == 0) {
-            return false;
-          }
-        }
-        return true;
-      });
-
-    for (const auto & topic : topics_to_record_) {
-      if (preflight_received_topics_.count(topic) == 0) {
-        missing.push_back(topic);
-      }
-    }
-    RCLCPP_INFO(
-      this->get_logger(),
-      "Preflight done: %zu/%zu topics produced data",
-      preflight_received_topics_.size(), topics_to_record_.size());
-  }
-
-  preflight_active_.store(false, std::memory_order_release);
-  return missing;
 }
 
 rclcpp::QoS ServiceBagRecorder::get_qos_for_topic(const std::string & topic)
@@ -792,18 +728,6 @@ void ServiceBagRecorder::handle_serialized_message(
   const std::shared_ptr<rclcpp::SerializedMessage> & serialized_msg,
   const rclcpp::MessageInfo & message_info)
 {
-  // Preflight tracking: must run before the is_recording_ early return.
-  if (preflight_active_.load(std::memory_order_acquire)) {
-    bool newly_inserted = false;
-    {
-      std::scoped_lock<std::mutex> lk(preflight_mutex_);
-      newly_inserted = preflight_received_topics_.insert(topic).second;
-    }
-    if (newly_inserted) {
-      preflight_cv_.notify_all();
-    }
-  }
-
   // Per-topic monitor counter — runs even when not recording so the
   // operator can see topic health before pressing record.
   if (!per_topic_metrics_.empty()) {

@@ -2,6 +2,44 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
+0.2.2 (2026-06-26)
+------------------
+* Optimized recording startup by caching existing episode metadata scans while initializing and refreshing recording sessions.
+* Preserved segmented recording subtask cache updates across save, rerecord, and discard flows.
+* Contributors: Taehyeong Kim
+
+0.2.1 (2026-06-26)
+------------------
+* None
+
+0.2.0 (2026-06-25)
+------------------
+* Added segment-aware Replay data extraction with video segment metadata, configured robot state/action topic layouts, and Twist/Odometry motion values.
+* Normalized replay recording dates to UTC ISO timestamps.
+* Contributors: Taehyeong Kim
+
+0.1.16 (2026-06-23)
+-------------------
+* None
+
+0.1.15 (2026-06-22)
+-------------------
+* Normalized inference recording folder metadata with unique timestamp IDs.
+* Preserved active recording sessions across robot type refreshes and kept status robot type synchronized.
+* Contributors: Taehyeong Kim
+
+0.1.14 (2026-06-17)
+-------------------
+* Added saved-subtask tracking and full-episode validation for segmented recording finish/discard flows.
+* Added camera stream monitoring, recording warnings, and raw MJPEG spool remux handling for recorder video output.
+* Hardened recording start/stop cleanup paths and added regression coverage for segmented recording and transcoding behavior.
+* Contributors: Taehyeong Kim
+
 0.1.13 (2026-06-11)
 -------------------
 * None

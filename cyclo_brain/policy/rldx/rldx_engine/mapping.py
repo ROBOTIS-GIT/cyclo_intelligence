@@ -15,6 +15,7 @@ runtime server remains mostly lifecycle and transport code.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Iterable
 
 import numpy as np
@@ -31,6 +32,12 @@ ACTION_KEY_TO_ROBOT_GROUP = {
     "base": "mobile",
     "odometry": "mobile",
 }
+
+
+def skipped_robot_action_keys() -> set[str]:
+    raw = os.environ.get("RLDX_SKIP_ROBOT_ACTION_KEYS", "head,lift")
+    return {key.strip() for key in raw.split(",") if key.strip()}
+
 
 
 def aspect_area_resize_crop_sizes(
@@ -78,6 +85,25 @@ def delta_indices(config_entry: Any) -> list[int]:
     if isinstance(config_entry, dict):
         return [int(v) for v in (config_entry.get("delta_indices") or [])]
     return [int(v) for v in (getattr(config_entry, "delta_indices", []) or [])]
+
+
+def stack_history_window(
+    history: Iterable[np.ndarray],
+    deltas: Iterable[int],
+) -> np.ndarray:
+    """Select a chronological observation window from a latest-ended history."""
+    frames = [np.asarray(frame) for frame in history]
+    if not frames:
+        raise ValueError("history is empty")
+
+    selected: list[np.ndarray] = []
+    for delta in deltas:
+        offset = int(delta)
+        if offset > 0:
+            raise ValueError(f"Observation delta index must be <= 0, got {offset}")
+        index = len(frames) - 1 + offset
+        selected.append(frames[max(0, index)])
+    return np.stack(selected, axis=0)
 
 
 def _first_array(mapping: dict[str, Any], keys: Iterable[str]) -> np.ndarray | None:
@@ -170,9 +196,12 @@ def robot_action_keys_from_policy(
     """Return robot action groups needed by the policy action modalities."""
     policy_keys = [str(key) for key in policy_action_keys]
     available = set(str(key) for key in available_robot_action_keys)
+    skipped = skipped_robot_action_keys()
     out: list[str] = []
     for key in policy_keys:
         robot_key = ACTION_KEY_TO_ROBOT_GROUP.get(key, key)
+        if robot_key in skipped:
+            continue
         if robot_key not in available or robot_key in out:
             continue
         out.append(robot_key)
@@ -234,6 +263,26 @@ def robot_action_chunk_from_rldx(
 
     if not chunks:
         raise ValueError("robot_action_keys is empty")
+    horizon = chunks[0].shape[0]
+    for chunk in chunks:
+        if chunk.shape[0] != horizon:
+            raise ValueError(
+                f"RLDX action horizon mismatch: {chunk.shape[0]} != {horizon}"
+            )
+    return np.ascontiguousarray(np.concatenate(chunks, axis=1), dtype=np.float64)
+
+
+def policy_action_chunk_from_rldx(
+    actions: dict[str, Any],
+    policy_action_keys: Iterable[str],
+) -> np.ndarray:
+    """Flatten RLDX action dict in policy modality order for RTC prefixes."""
+    chunks: list[np.ndarray] = []
+    for key in policy_action_keys:
+        chunks.append(_require_action(actions, str(key)))
+
+    if not chunks:
+        raise ValueError("policy_action_keys is empty")
     horizon = chunks[0].shape[0]
     for chunk in chunks:
         if chunk.shape[0] != horizon:

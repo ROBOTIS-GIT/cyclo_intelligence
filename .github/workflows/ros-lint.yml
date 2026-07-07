@@ -1,0 +1,56 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, jazzy]
+  pull_request:
+    branches: [main, jazzy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ament-lint:
+    name: ament_lint (${{ matrix.linter }})
+    runs-on: ubuntu-latest
+    container:
+      image: rostooling/setup-ros-docker:ubuntu-noble-ros-rolling-ros-base-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - linter: flake8
+            arguments: --config ${GITHUB_WORKSPACE}/repo/.github/ament_flake8_ci.ini
+          - linter: xmllint
+            arguments: ''
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Create focused ROS workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ros_ws/src
+          ln -s "${GITHUB_WORKSPACE}/repo/orchestrator" ros_ws/src/orchestrator
+          ln -s "${GITHUB_WORKSPACE}/repo/cyclo_data" ros_ws/src/cyclo_data
+          ln -s "${GITHUB_WORKSPACE}/repo/cyclo_data/recorder/rosbag_recorder" ros_ws/src/rosbag_recorder
+          ln -s "${GITHUB_WORKSPACE}/repo/interfaces" ros_ws/src/interfaces
+          ln -s "${GITHUB_WORKSPACE}/repo/shared" ros_ws/src/shared
+
+      - name: Run linter
+        uses: ros-tooling/action-ros-lint@master
+        with:
+          linter: ${{ matrix.linter }}
+          arguments: ${{ matrix.arguments }}
+          distribution: rolling
+          workspace-directory: ros_ws
+          package-name: |
+            orchestrator
+            cyclo_data
+            rosbag_recorder
+            interfaces
+            shared

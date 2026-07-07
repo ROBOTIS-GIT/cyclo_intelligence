@@ -2,6 +2,44 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
+0.2.2 (2026-06-26)
+------------------
+* Updated Cyclo release metadata to 0.2.2.
+* Contributors: Taehyeong Kim
+
+0.2.1 (2026-06-26)
+------------------
+* Updated Cyclo release metadata to 0.2.1.
+* Contributors: Taehyeong Kim
+
+0.2.0 (2026-06-25)
+------------------
+* Added Replay regression coverage for segmented video metadata and robot-configured joint/action layouts.
+* Contributors: Taehyeong Kim
+
+0.1.16 (2026-06-23)
+-------------------
+* Removed the Cyclo-managed ``zenoh_router`` service from supervisor user controls so Cyclo uses the externally managed router on port 7447.
+* Contributors: Taehyeong Kim
+
+0.1.15 (2026-06-22)
+-------------------
+* Propagated action request mode and TensorRT acceleration options through inference task info, behavior tree SendCommand, and backend load requests.
+* Hardened inference recording task sync so trigger and UI recording flows keep inference metadata.
+* Added supervisor endpoints for GR00T TensorRT engine status and build requests.
+* Contributors: Taehyeong Kim
+
+0.1.14 (2026-06-17)
+-------------------
+* Serialized recording command forwarding to avoid overlapping UI and trigger commands.
+* Avoided forwarding stale idle cancel/rerecord commands that could race with a new recording start.
+* Contributors: Taehyeong Kim
+
 0.1.13 (2026-06-11)
 -------------------
 * Added simulation-first inference mode handling so policy actions can be previewed without publishing robot commands.

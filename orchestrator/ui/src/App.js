@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdPlayCircle, MdAccountTree } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
 import toast from 'react-hot-toast';
@@ -27,12 +27,12 @@ import RecordPage from './pages/RecordPage';
 import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
-import ReplayPage from './pages/ReplayPage';
 import BTManagerPage from './pages/BTManagerPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
-import { moveToPage } from './features/ui/uiSlice';
+import { moveToPage, persistCurrentPage } from './features/ui/uiSlice';
+import { persistRobotType } from './features/tasks/taskSlice';
 import PageType from './constants/pageType';
 
 function App() {
@@ -47,7 +47,14 @@ function App() {
   const trainingTopicReceived = useSelector((state) => state.training.topicReceived);
 
   const page = useSelector((state) => state.ui.currentPage);
+  const restoredPageFromSession = useSelector(
+    (state) => state.ui.restoredPageFromSession
+  );
   const robotType = useSelector((state) => state.tasks.robotType);
+  const hasSyncedTaskInfo = useSelector((state) => Boolean(
+    state.tasks.taskInfoSync.serverTaskInfo ||
+    state.tasks.inferenceTaskInfoSync.serverTaskInfo
+  ));
   const taskStatusReceived = recordTopicReceived || inferenceTopicReceived;
 
   const isFirstLoad = useRef(true);
@@ -92,7 +99,25 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (isFirstLoad.current && page === PageType.HOME && taskStatusReceived) {
+    persistCurrentPage(page);
+  }, [page]);
+
+  useEffect(() => {
+    persistRobotType(robotType);
+  }, [robotType]);
+
+  useEffect(() => {
+    if (isFirstLoad.current && restoredPageFromSession) {
+      isFirstLoad.current = false;
+      return;
+    }
+
+    if (
+      isFirstLoad.current &&
+      page === PageType.HOME &&
+      taskStatusReceived &&
+      hasSyncedTaskInfo
+    ) {
       if (taskInfo?.taskType === PageType.RECORD) {
         dispatch(moveToPage(PageType.RECORD));
       } else if (taskInfo?.taskType === PageType.INFERENCE) {
@@ -103,7 +128,15 @@ function App() {
       dispatch(moveToPage(PageType.TRAINING));
       isFirstLoad.current = false;
     }
-  }, [page, taskInfo?.taskType, taskStatusReceived, trainingTopicReceived, dispatch]);
+  }, [
+    dispatch,
+    hasSyncedTaskInfo,
+    page,
+    restoredPageFromSession,
+    taskInfo?.taskType,
+    taskStatusReceived,
+    trainingTopicReceived,
+  ]);
 
   const handleHomePageNavigation = () => {
     isFirstLoad.current = false;
@@ -186,7 +219,7 @@ function App() {
 
     // Allow navigation if task is in progress
     if (robotType && robotType !== '') {
-      console.log('robot type:', robotType, '=> allowing navigation to Training page');
+      console.log('robot type:', robotType, '=> allowing navigation to Training Guide page');
       isFirstLoad.current = false;
       dispatch(moveToPage(PageType.TRAINING));
       return;
@@ -197,50 +230,18 @@ function App() {
       toast.error('Please select a robot type first in the Home page', {
         duration: 4000,
       });
-      console.log('Robot type not set, blocking navigation to Training page');
+      console.log('Robot type not set, blocking navigation to Training Guide page');
       return;
     }
 
     // Allow navigation if conditions are met
-    console.log('Robot type set, allowing navigation to Training page');
+    console.log('Robot type set, allowing navigation to Training Guide page');
     dispatch(moveToPage(PageType.TRAINING));
   };
 
   const handleEditDatasetPageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      console.log('handleEditDatasetPageNavigation');
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.EDIT_DATASET));
-      return;
-    }
-
-    // Allow navigation if task is in progress
-    if (robotType && robotType !== '') {
-      console.log(
-        'robot type:',
-        robotType,
-        '=> allowing navigation to Edit Dataset page'
-      );
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.EDIT_DATASET));
-      return;
-    }
-
-    // Block navigation if robot type is not set
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
-        duration: 4000,
-      });
-      return;
-    }
-
-    // Allow navigation if conditions are met
-    dispatch(moveToPage(PageType.EDIT_DATASET));
-  };
-
-  const handleReplayPageNavigation = () => {
     isFirstLoad.current = false;
-    dispatch(moveToPage(PageType.REPLAY));
+    dispatch(moveToPage(PageType.EDIT_DATASET));
   };
 
   const handleBTManagerPageNavigation = () => {
@@ -356,7 +357,7 @@ function App() {
             <MdVideocam size={32} className="mb-1.5" />
             <span className="mt-1 text-sm">Record</span>
           </button>
-          {/* Training page button */}
+          {/* Training Guide page button */}
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.TRAINING,
@@ -365,7 +366,9 @@ function App() {
             onClick={handleTrainingPageNavigation}
           >
             <GoGraph size={28} className="mb-1.5" />
-            <span className="mt-1 text-sm">Training</span>
+            <span className="mt-1 text-center text-sm leading-tight">
+              Training<br />Guide
+            </span>
           </button>
           {/* Inference page button */}
           <button
@@ -406,18 +409,6 @@ function App() {
             <span className="mt-1 text-sm whitespace-nowrap">Data Tools</span>
           </button>
 
-          {/* Replay page button */}
-          <button
-            className={clsx(classPageButton, {
-              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.REPLAY,
-              'bg-gray-300 dark:bg-slate-700': page === PageType.REPLAY,
-            })}
-            onClick={handleReplayPageNavigation}
-          >
-            <MdPlayCircle size={28} className="mb-2" />
-            <span className="mt-1 text-sm whitespace-nowrap">Replay</span>
-          </button>
-
         </div>
       </aside>
       <main className="flex-1 flex flex-col h-screen bg-white dark:bg-slate-950">
@@ -431,8 +422,6 @@ function App() {
           <TrainingPage isActive={page === PageType.TRAINING} />
         ) : page === PageType.EDIT_DATASET ? (
           <EditDatasetPage isActive={page === PageType.EDIT_DATASET} />
-        ) : page === PageType.REPLAY ? (
-          <ReplayPage isActive={page === PageType.REPLAY} />
         ) : page === PageType.BT_MANAGER ? (
           <BTManagerPage isActive={page === PageType.BT_MANAGER} />
         ) : (

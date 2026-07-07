@@ -17,7 +17,7 @@
 """Metadata manager for ROSbag robot_config.yaml files."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -116,8 +116,8 @@ class MetadataManager:
                 starting_time = bag_info.get("starting_time", {})
                 ns_since_epoch = starting_time.get("nanoseconds_since_epoch", 0)
                 if ns_since_epoch > 0:
-                    dt = datetime.fromtimestamp(ns_since_epoch / 1e9)
-                    return dt.isoformat()
+                    dt = datetime.fromtimestamp(ns_since_epoch / 1e9, tz=timezone.utc)
+                    return dt.isoformat().replace("+00:00", "Z")
         except Exception as e:
             self._log_error(f"Failed to get recording date: {e}")
 

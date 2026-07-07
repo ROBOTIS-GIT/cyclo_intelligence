@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import RobotViewer3D from '../RobotViewer3D';
 
 function Viewer3DPanel({
+  robotType,
   jointTimestamps,
   jointNames,
   jointPositions,
@@ -9,7 +10,21 @@ function Viewer3DPanel({
   actionNames,
   actionValues,
   currentTime,
+  isPlaying,
+  playbackSpeed,
 }) {
+  const jointData = useMemo(() => ({
+    timestamps: jointTimestamps,
+    names: jointNames,
+    positions: jointPositions,
+  }), [jointTimestamps, jointNames, jointPositions]);
+
+  const actionData = useMemo(() => ({
+    timestamps: actionTimestamps,
+    names: actionNames,
+    values: actionValues,
+  }), [actionTimestamps, actionNames, actionValues]);
+
   return (
     <div className="w-full h-full bg-gray-900 rounded-lg overflow-hidden relative" style={{ minHeight: 0, minWidth: 0 }}>
       <div className="absolute top-2 left-2 z-10 px-2 py-1 bg-black bg-opacity-60 text-white text-xs rounded font-medium">
@@ -17,17 +32,12 @@ function Viewer3DPanel({
       </div>
       <RobotViewer3D
         mode="replay"
-        jointData={{
-          timestamps: jointTimestamps,
-          names: jointNames,
-          positions: jointPositions,
-        }}
-        actionData={{
-          timestamps: actionTimestamps,
-          names: actionNames,
-          values: actionValues,
-        }}
+        robotTypeOverride={robotType}
+        jointData={jointData}
+        actionData={actionData}
         currentTime={currentTime}
+        isPlaying={isPlaying}
+        playbackSpeed={playbackSpeed}
         className="w-full h-full"
       />
     </div>

@@ -44,6 +44,18 @@ except Exception:  # pragma: no cover
 
 
 logger = get_logger("main_runtime.control_loop")
+_REFILL_STRATEGIES = {"auto", "latency_margin", "fixed_window"}
+
+ACTION_REQUEST_MODE_ASYNC = "async"
+ACTION_REQUEST_MODE_SYNC = "sync"
+ACTION_REQUEST_MODES = {ACTION_REQUEST_MODE_ASYNC, ACTION_REQUEST_MODE_SYNC}
+
+
+def normalize_action_request_mode(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == ACTION_REQUEST_MODE_SYNC:
+        return ACTION_REQUEST_MODE_SYNC
+    return ACTION_REQUEST_MODE_ASYNC
 
 
 class ControlLoop:
@@ -59,8 +71,10 @@ class ControlLoop:
         postprocess_actions: bool = True,
         alignment_mode: str = "l2",
         refill_margin_s: float = 0.2,
+        refill_strategy: str = "auto",
         latency_warmup_samples: int = 1,
         max_refill_latency_s: Optional[float] = 2.0,
+        action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
     ) -> None:
         self._requester = requester
         self._inference_hz = float(inference_hz)
@@ -70,6 +84,12 @@ class ControlLoop:
         self._postprocess_actions = bool(postprocess_actions)
         self._alignment_mode = alignment_mode
         self._refill_margin_s = float(refill_margin_s)
+        self._refill_strategy = str(refill_strategy or "auto").strip().lower()
+        if self._refill_strategy not in _REFILL_STRATEGIES:
+            raise ValueError(
+                "refill_strategy must be one of: "
+                f"{', '.join(sorted(_REFILL_STRATEGIES))}"
+            )
         self._request_latency_ema_s: Optional[float] = None
         self._request_latency_alpha = 0.2
         self._latency_warmup_samples = max(0, int(latency_warmup_samples))
@@ -79,6 +99,10 @@ class ControlLoop:
             if max_refill_latency_s is None or max_refill_latency_s <= 0.0
             else float(max_refill_latency_s)
         )
+        self._default_action_request_mode = normalize_action_request_mode(
+            action_request_mode
+        )
+        self._action_request_mode = self._default_action_request_mode
 
         self._lock = threading.RLock()
         self._robot: Optional[RobotClient] = None
@@ -98,9 +122,15 @@ class ControlLoop:
         task_instruction: str = "",
         action_keys: Optional[list[str]] = None,
         publish_to_robot: bool = False,
+        action_request_mode: Optional[str] = None,
     ) -> None:
         with self._lock:
             self.deconfigure()
+            self._action_request_mode = normalize_action_request_mode(
+                action_request_mode
+                if action_request_mode is not None
+                else self._default_action_request_mode
+            )
             self._robot = RobotClient(
                 robot_type,
                 enable_command_publishers=True,
@@ -120,9 +150,11 @@ class ControlLoop:
             self._reset_request_latency_locked()
             self._generation += 1
             logger.info(
-                "configured RobotClient command path for %s (publish_to_robot=%s)",
+                "configured RobotClient command path for %s "
+                "(publish_to_robot=%s action_request_mode=%s)",
                 robot_type,
                 self._publish_to_robot,
+                self._action_request_mode,
             )
 
     def deconfigure(self) -> None:
@@ -131,6 +163,7 @@ class ControlLoop:
             self._task_instruction = ""
             self._action_keys = []
             self._publish_to_robot = False
+            self._action_request_mode = self._default_action_request_mode
             self._processor = None
             self._generation += 1
             if self._robot is not None:
@@ -208,6 +241,7 @@ class ControlLoop:
             action_keys = list(self._action_keys)
             generation = self._generation
             publish_to_robot = self._publish_to_robot
+            action_request_mode = self._action_request_mode
 
             action = processor.pop_action()
             if action is not None:
@@ -222,22 +256,38 @@ class ControlLoop:
                         robot.publish_action(action, action_keys)
                     except Exception as e:
                         logger.error("failed to publish robot action: %s", e)
+            elif publish_to_robot:
+                idle = getattr(robot, "publish_idle_action", None)
+                if callable(idle):
+                    try:
+                        idle(action_keys)
+                    except Exception as e:
+                        logger.error("failed to publish idle robot action: %s", e)
 
-            refill_threshold = self._refill_threshold(processor)
-            should_request = (
-                processor.buffer_size < refill_threshold
-                and (self._request_thread is None or not self._request_thread.is_alive())
-            )
+            should_request = self._should_request_actions(processor)
+            had_buffer_at_request = processor.buffer_size > 0
 
         if should_request:
             self._request_thread = threading.Thread(
                 target=self._request_and_buffer,
-                args=(task_instruction, generation),
+                args=(
+                    task_instruction,
+                    generation,
+                    action_request_mode,
+                    had_buffer_at_request,
+                ),
                 daemon=True,
             )
             self._request_thread.start()
 
-    def _request_and_buffer(self, task_instruction: str, generation: int) -> None:
+    def _request_and_buffer(
+        self,
+        task_instruction: str,
+        generation: int,
+        action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
+        had_buffer_at_request: bool = False,
+    ) -> None:
+        action_request_mode = normalize_action_request_mode(action_request_mode)
         started_at = time.monotonic()
         try:
             response = self._requester.get_action(task_instruction)
@@ -274,26 +324,56 @@ class ControlLoop:
                     1.0,
                     self._processor.output_hz,
                 )
-                scheduled_start_delay_s = latency_s + buffer_delay_s
+                if action_request_mode == ACTION_REQUEST_MODE_SYNC:
+                    scheduled_start_delay_s = None
+                elif self._alignment_mode.lower() == "rtc" and not had_buffer_at_request:
+                    scheduled_start_delay_s = 0.0
+                else:
+                    scheduled_start_delay_s = latency_s + buffer_delay_s
                 produced = self._processor.push_actions(
                     chunk,
                     scheduled_start_delay_s=scheduled_start_delay_s,
+                    align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                )
+                scheduled_start_text = (
+                    "none"
+                    if scheduled_start_delay_s is None
+                    else f"{scheduled_start_delay_s:.3f}s"
                 )
                 logger.debug(
                     "buffered action chunk: source=%d produced=%d "
-                    "latency=%.3fs buffer_delay=%.3fs scheduled_start=%.3fs",
+                    "mode=%s latency=%.3fs buffer_delay=%.3fs "
+                    "scheduled_start=%s",
                     response.chunk_size,
                     produced,
+                    action_request_mode,
                     latency_s,
                     buffer_delay_s,
-                    scheduled_start_delay_s,
+                    scheduled_start_text,
                 )
+
+    def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
+        if self._request_thread is not None and self._request_thread.is_alive():
+            return False
+        if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
+            return processor.buffer_size <= 0
+        return processor.buffer_size < self._refill_threshold(processor)
 
     def _refill_threshold(self, processor: ActionChunkProcessor) -> int:
         threshold_s = max(0.0, self._refill_margin_s)
-        if self._request_latency_ema_s is not None:
+        if (
+            self._effective_refill_strategy() == "latency_margin"
+            and self._request_latency_ema_s is not None
+        ):
             threshold_s += max(0.0, self._request_latency_ema_s)
         return max(1, int(math.ceil(threshold_s * processor.output_hz)))
+
+    def _effective_refill_strategy(self) -> str:
+        if self._refill_strategy != "auto":
+            return self._refill_strategy
+        if self._alignment_mode.lower() == "rtc":
+            return "fixed_window"
+        return "latency_margin"
 
     def _record_request_latency(self, latency_s: float) -> None:
         latency_s = max(0.0, float(latency_s))

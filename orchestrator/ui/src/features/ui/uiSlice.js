@@ -20,10 +20,63 @@ import { createSlice } from '@reduxjs/toolkit';
 
 import PageType from '../../constants/pageType';
 
+export const CURRENT_PAGE_STORAGE_KEY = 'cyclo_intelligence.current_page';
+
+const validPages = new Set(Object.values(PageType));
+
+const getSessionStorage = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    return window.sessionStorage;
+  } catch (_error) {
+    return null;
+  }
+};
+
+export const resolveInitialPageState = (storage = getSessionStorage()) => {
+  if (!storage) {
+    return {
+      currentPage: PageType.HOME,
+      restoredPageFromSession: false,
+    };
+  }
+  try {
+    const storedPage = storage.getItem(CURRENT_PAGE_STORAGE_KEY);
+    if (validPages.has(storedPage)) {
+      return {
+        currentPage: storedPage,
+        restoredPageFromSession: true,
+      };
+    }
+  } catch (_error) {
+    // Ignore blocked storage and fall back to Home.
+  }
+  return {
+    currentPage: PageType.HOME,
+    restoredPageFromSession: false,
+  };
+};
+
+export const persistCurrentPage = (page, storage = getSessionStorage()) => {
+  if (!storage || !validPages.has(page)) {
+    return;
+  }
+  try {
+    storage.setItem(CURRENT_PAGE_STORAGE_KEY, page);
+  } catch (_error) {
+    // Storage can be disabled in private/browser-restricted contexts.
+  }
+};
+
+const initialPageState = resolveInitialPageState();
+
 const initialState = {
   isLoading: false,
   error: null,
-  currentPage: PageType.HOME,
+  currentPage: initialPageState.currentPage,
+  restoredPageFromSession: initialPageState.restoredPageFromSession,
   sidebarOpen: false,
   modalOpen: false,
   notifications: [],

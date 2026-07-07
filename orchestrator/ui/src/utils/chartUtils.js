@@ -95,6 +95,69 @@ export function lttbDownsample(data, threshold, xKey, yKey) {
     return sampled;
 }
 
+export function downsampleMultiSeriesExtrema(data, threshold, xKey, yKeys) {
+    if (threshold >= data.length || threshold === 0) {
+        return data;
+    }
+
+    const keys = (yKeys || []).filter(Boolean);
+    if (keys.length === 0) {
+        if (threshold <= 1) return data.slice(0, 1);
+        return [
+            ...data.slice(0, threshold - 1),
+            data[data.length - 1],
+        ];
+    }
+    if (keys.length <= 1) {
+        return lttbDownsample(data, threshold, xKey, keys[0]);
+    }
+
+    const bucketCount = Math.floor((threshold - 2) / (keys.length * 2));
+    if (bucketCount < 1) {
+        return lttbDownsample(data, threshold, xKey, keys[0]);
+    }
+
+    const selectedIndexes = new Set([0, data.length - 1]);
+    const bucketSize = (data.length - 2) / bucketCount;
+
+    for (let bucket = 0; bucket < bucketCount; bucket++) {
+        const start = Math.floor(bucket * bucketSize) + 1;
+        const end = Math.min(Math.floor((bucket + 1) * bucketSize) + 1, data.length - 1);
+        if (start >= end) continue;
+
+        keys.forEach((key) => {
+            let minIndex = start;
+            let maxIndex = start;
+            let minValue = Number(data[start]?.[key]);
+            let maxValue = minValue;
+            if (!Number.isFinite(minValue)) {
+                minValue = 0;
+                maxValue = 0;
+            }
+
+            for (let i = start + 1; i < end; i++) {
+                let value = Number(data[i]?.[key]);
+                if (!Number.isFinite(value)) value = 0;
+                if (value < minValue) {
+                    minValue = value;
+                    minIndex = i;
+                }
+                if (value > maxValue) {
+                    maxValue = value;
+                    maxIndex = i;
+                }
+            }
+
+            selectedIndexes.add(minIndex);
+            selectedIndexes.add(maxIndex);
+        });
+    }
+
+    return Array.from(selectedIndexes)
+        .sort((a, b) => a - b)
+        .map((index) => data[index]);
+}
+
 /**
  * Prepare chart data from timestamps, names, and values arrays.
  * Applies LTTB downsampling for large datasets.
@@ -128,9 +191,8 @@ export function prepareChartData(timestamps, names, values, prefix, targetPoints
         return fullData;
     }
 
-    // Apply LTTB using the first field as reference
-    const firstKey = `${prefix}${names[0]}`;
-    return lttbDownsample(fullData, targetPoints, 'time', firstKey);
+    const keys = names.map((name) => `${prefix}${name}`);
+    return downsampleMultiSeriesExtrema(fullData, targetPoints, 'time', keys);
 }
 
 /**
@@ -146,8 +208,21 @@ export function formatFileSize(bytes) {
     return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
+const pad2 = (value) => String(value).padStart(2, '0');
+
+const normalizeIsoDateTimeAsUtc = (value) => {
+    const text = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+        return `${text}T00:00:00Z`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}T/.test(text) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+        return `${text}Z`;
+    }
+    return text;
+};
+
 /**
- * Format datetime to locale string (Korean format).
+ * Format datetime to a locale-independent UTC timestamp.
  *
  * @param {string} isoString - ISO format datetime string
  * @returns {string} Formatted datetime string
@@ -155,15 +230,13 @@ export function formatFileSize(bytes) {
 export function formatDateTime(isoString) {
     if (!isoString) return '-';
     try {
-        const date = new Date(isoString);
-        return date.toLocaleString('ko-KR', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-        });
+        const date = new Date(normalizeIsoDateTimeAsUtc(isoString));
+        if (Number.isNaN(date.getTime())) return isoString;
+        return [
+            `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`,
+            `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}`,
+            'UTC',
+        ].join(' ');
     } catch {
         return isoString;
     }

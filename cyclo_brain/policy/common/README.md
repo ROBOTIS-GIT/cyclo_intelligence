@@ -70,7 +70,9 @@ For LeRobot, user-trained models can be placed under
 | `INFERENCE_HZ` | no | `15.0` | Main action waypoint timing |
 | `CONTROL_HZ` | no | `100.0` | Main robot command loop |
 | `TARGET_CHUNK_SIZE` | no | `none` | Fixed-size resampling override; `none` keeps chunk duration |
-| `REFILL_MARGIN_S` | no | `0.2` | Extra buffer time after observed GET_ACTION latency |
+| `ACTION_ALIGNMENT_MODE` | no | `l2` | Chunk alignment mode: `l2`, `none`, or `rtc` |
+| `REFILL_MARGIN_S` | no | `0.2` | Buffer refill window in seconds |
+| `REFILL_STRATEGY` | no | `auto` | `latency_margin` adds observed GET_ACTION latency; `fixed_window` uses `REFILL_MARGIN_S` as-is. `auto` uses `fixed_window` for `rtc`, otherwise `latency_margin` |
 | `REFILL_LATENCY_WARMUP_SAMPLES` | no | `1` | Initial GET_ACTION latency samples ignored for warmup |
 | `REFILL_LATENCY_SAMPLE_MAX_S` | no | `2.0` | Ignore longer latency samples; `none` disables filtering |
 | `ZENOH_ROUTER_IP` / `ZENOH_ROUTER_PORT` / `ROS_DOMAIN_ID` | no | `127.0.0.1 / 7447 / 30` | both |

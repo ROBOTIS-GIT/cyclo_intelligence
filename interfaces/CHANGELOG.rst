@@ -2,6 +2,39 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.0 (2026-06-29)
+------------------
+* Updated Cyclo release metadata to 1.0.0.
+* Contributors: Taehyeong Kim
+
+0.2.2 (2026-06-26)
+------------------
+* Updated Cyclo release metadata to 0.2.2.
+* Contributors: Taehyeong Kim
+
+0.2.1 (2026-06-26)
+------------------
+* None
+
+0.2.0 (2026-06-25)
+------------------
+* None
+
+0.1.16 (2026-06-23)
+-------------------
+* None
+
+0.1.15 (2026-06-22)
+-------------------
+* Added action request scheduling and acceleration metadata to TaskInfo, InferenceCommand, and EngineCommand for policy runtime selection.
+* Contributors: Taehyeong Kim
+
+0.1.14 (2026-06-17)
+-------------------
+* Added RecordingStatus fields for saved subtask indices, recording warnings, and camera monitor diagnostics.
+* Documented targeted full-episode discard encoding on recording command segment_index.
+* Contributors: Taehyeong Kim
+
 0.1.13 (2026-06-11)
 -------------------
 * Added inference mode task metadata and command fields for 3D simulation versus real robot deployment.

@@ -42,6 +42,17 @@ bool publish_to_robot
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+
+# Action chunk request scheduling at LOAD time. Empty / "async" preserves the
+# current prefetch behavior. "sync" requests only after the active buffer drains.
+string action_request_mode
+# Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
+# PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
+# supported by the backend.
+string acceleration_mode
+# Optional engine file/directory. Empty lets the backend use its model-local
+# default path.
+string acceleration_engine_path
 ---
 bool success
 string message

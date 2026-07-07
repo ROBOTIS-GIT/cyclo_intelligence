@@ -14,10 +14,15 @@ importing the full RLDX package into the Cyclo policy container.
 from __future__ import annotations
 
 import io
+import logging
+import time
 from typing import Any
 
 import msgpack
 import numpy as np
+
+
+logger = logging.getLogger("rldx.zmq.client")
 
 
 class MsgSerializer:
@@ -96,18 +101,99 @@ class RLDXRemoteClient:
         if self.api_token:
             request["api_token"] = self.api_token
 
+        summary = self._request_summary(endpoint, request)
+        logger.info(
+            "[RLDX-ZMQ] -> endpoint=%s remote=%s:%s%s",
+            endpoint,
+            self.host,
+            self.port,
+            f" {summary}" if summary else "",
+        )
+        started = time.monotonic()
         try:
             self.socket.send(MsgSerializer.to_bytes(request))
             response = MsgSerializer.from_bytes(self.socket.recv())
         except self._zmq.Again as exc:
             self._init_socket()
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            logger.warning(
+                "[RLDX-ZMQ] <- endpoint=%s timeout %.1fms remote=%s:%s",
+                endpoint,
+                elapsed_ms,
+                self.host,
+                self.port,
+            )
             raise TimeoutError(
                 f"RLDX endpoint {endpoint!r} timed out after {self.timeout_ms} ms"
             ) from exc
 
         if isinstance(response, dict) and "error" in response:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            logger.warning(
+                "[RLDX-ZMQ] <- endpoint=%s error %.1fms message=%s",
+                endpoint,
+                elapsed_ms,
+                response["error"],
+            )
             raise RuntimeError(f"RLDX server error: {response['error']}")
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        response_summary = self._response_summary(endpoint, response)
+        logger.info(
+            "[RLDX-ZMQ] <- endpoint=%s ok %.1fms%s",
+            endpoint,
+            elapsed_ms,
+            f" {response_summary}" if response_summary else "",
+        )
         return response
+
+    @staticmethod
+    def _shape(value: Any) -> str:
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            return ""
+        return "x".join(str(dim) for dim in tuple(shape))
+
+    def _request_summary(self, endpoint: str, request: dict[str, Any]) -> str:
+        data = request.get("data", {}) or {}
+        if endpoint == "get_action":
+            observation = data.get("observation", {}) or {}
+            options = data.get("options", {}) or {}
+            video_keys = [key for key in observation if str(key).startswith("video.")]
+            state_keys = [key for key in observation if str(key).startswith("state.")]
+            parts = [
+                f"video={len(video_keys)}",
+                f"state={len(state_keys)}",
+            ]
+            session_ids = options.get("session_ids") or []
+            if session_ids:
+                parts.append(f"session={session_ids[0]}")
+            reset_memory = options.get("reset_memory")
+            if reset_memory is not None:
+                parts.append(f"reset={reset_memory}")
+            action_prefix = options.get("action_prefix")
+            prefix_shape = self._shape(action_prefix)
+            if prefix_shape:
+                parts.append(f"action_prefix={prefix_shape}")
+            if "rtc_prefix_len" in options:
+                parts.append(f"rtc_prefix_len={options['rtc_prefix_len']}")
+            return " ".join(parts)
+        if endpoint == "reset":
+            options = data.get("options", {}) or {}
+            session_ids = options.get("session_ids") or []
+            return f"session={session_ids[0]}" if session_ids else ""
+        return ""
+
+    def _response_summary(self, endpoint: str, response: Any) -> str:
+        if endpoint != "get_action":
+            return ""
+        actions = response[0] if isinstance(response, (tuple, list)) and response else response
+        if not isinstance(actions, dict):
+            return ""
+        shapes = []
+        for key, value in actions.items():
+            shape = self._shape(value)
+            shapes.append(f"{key}={shape}" if shape else str(key))
+        return "actions=" + ",".join(shapes)
 
     def ping(self) -> bool:
         self.call_endpoint("ping", requires_input=False)

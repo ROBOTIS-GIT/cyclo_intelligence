@@ -82,6 +82,7 @@ describe('btXmlSerializer', () => {
             policy_path: '/workspace/model/groot/test',
             task_instruction: '',
             inference_mode: 'robot',
+            action_request_mode: 'sync',
             inference_hz: '10',
             control_hz: '100',
             chunk_align_window_s: '0.3',
@@ -100,6 +101,7 @@ describe('btXmlSerializer', () => {
             model: 'groot:n17',
             policy_path: '',
             task_instruction: '',
+            action_request_mode: 'sync',
             inference_hz: '10',
             control_hz: '100',
             chunk_align_window_s: '0.3',
@@ -126,8 +128,11 @@ describe('btXmlSerializer', () => {
     expect(xml).not.toContain('model="groot:n17"');
     expect(xml).not.toContain('policy_path=');
     expect(xml).not.toContain('inference_mode=');
+    expect(xml).not.toContain('action_request_mode=');
     expect(xml).not.toContain('inference_hz=');
     expect(xml).not.toContain('control_hz=');
     expect(xml).not.toContain('chunk_align_window_s=');
+    expect(xml).not.toContain('acceleration_mode=');
+    expect(xml).not.toContain('acceleration_engine_path=');
   });
 });

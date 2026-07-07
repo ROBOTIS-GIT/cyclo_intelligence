@@ -16,9 +16,13 @@
 
 """Replay data handler for ROSbag visualization."""
 
+import math
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 import yaml
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions, StorageFilter
 from rclpy.serialization import deserialize_message
@@ -92,6 +96,153 @@ class ReplayDataHandler:
             return topic in action_topic_paths
         return "action" in topic.lower() or "leader" in topic.lower()
 
+    def _load_robot_semantic_layout(self, robot_type: str) -> Dict[str, Any]:
+        if not robot_type:
+            return {}
+
+        candidates: List[Path] = []
+        for env_var in ("ORCHESTRATOR_CONFIG_PATH", "ROBOT_CLIENT_CONFIG_DIR"):
+            env_dir = os.environ.get(env_var)
+            if env_dir:
+                candidates.append(Path(env_dir) / f"{robot_type}_config.yaml")
+
+        candidates.extend(
+            [
+                Path("/orchestrator_config") / f"{robot_type}_config.yaml",
+                Path("/root/ros2_ws/src/cyclo_intelligence/shared/shared/robot_configs")
+                / f"{robot_type}_config.yaml",
+                Path("/root/ros2_ws/install/shared/share/shared/robot_configs")
+                / f"{robot_type}_config.yaml",
+            ]
+        )
+
+        for prefix in os.environ.get("AMENT_PREFIX_PATH", "").split(":"):
+            if prefix:
+                candidates.append(
+                    Path(prefix)
+                    / "share"
+                    / "shared"
+                    / "robot_configs"
+                    / f"{robot_type}_config.yaml"
+                )
+
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidates.extend(
+                [
+                    parent
+                    / "shared"
+                    / "shared"
+                    / "robot_configs"
+                    / f"{robot_type}_config.yaml",
+                    parent / "shared" / "robot_configs" / f"{robot_type}_config.yaml",
+                ]
+            )
+
+        config_path = next((path for path in candidates if path.exists()), None)
+        if config_path is None:
+            self._log_error(
+                f"replay: robot config for {robot_type} not found; searched "
+                f"{[str(path) for path in candidates]}"
+            )
+            return {}
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            section = raw["orchestrator"]["ros__parameters"][robot_type]
+            observation = section.get("observation") or {}
+            return {
+                "state": observation.get("state") or {},
+                "action": section.get("action") or {},
+            }
+        except Exception as exc:
+            self._log_error(
+                f"replay: failed to load robot config {config_path}: {exc!r}"
+            )
+            return {}
+
+    def _topic_name_layout(
+        self, groups: Optional[Dict[str, Dict[str, Any]]]
+    ) -> Tuple[List[str], Dict[str, List[str]]]:
+        topic_order: List[str] = []
+        names_by_topic: Dict[str, List[str]] = {}
+
+        for cfg in (groups or {}).values():
+            topic = cfg.get("topic")
+            names = list(cfg.get("joint_names") or [])
+            if not topic or not names:
+                continue
+            if topic not in names_by_topic:
+                topic_order.append(topic)
+                names_by_topic[topic] = []
+            existing = set(names_by_topic[topic])
+            for name in names:
+                if name not in existing:
+                    names_by_topic[topic].append(name)
+                    existing.add(name)
+
+        return topic_order, names_by_topic
+
+    def _topic_order(
+        self,
+        data_by_topic: Dict[str, List[Tuple[float, List[str], List[float]]]],
+        configured_order: List[str],
+    ) -> List[str]:
+        topic_order = [topic for topic in configured_order if topic in data_by_topic]
+        for topic in sorted(data_by_topic.keys()):
+            if topic not in topic_order:
+                topic_order.append(topic)
+        return topic_order
+
+    def _values_for_names(
+        self,
+        source_names: List[str],
+        source_values: List[float],
+        target_names: List[str],
+    ) -> List[float]:
+        if not target_names:
+            return [float(value) for value in source_values]
+
+        index_by_name = {name: idx for idx, name in enumerate(source_names)}
+        values: List[float] = []
+        for name in target_names:
+            idx = index_by_name.get(name)
+            if idx is None or idx >= len(source_values):
+                values.append(0.0)
+                continue
+            try:
+                values.append(float(source_values[idx]))
+            except (TypeError, ValueError):
+                values.append(0.0)
+        return values
+
+    def _twist_values_by_name(self, msg: Twist) -> Dict[str, float]:
+        return {
+            "linear_x": float(msg.linear.x),
+            "linear_y": float(msg.linear.y),
+            "linear_z": float(msg.linear.z),
+            "angular_x": float(msg.angular.x),
+            "angular_y": float(msg.angular.y),
+            "angular_z": float(msg.angular.z),
+        }
+
+    def _odom_values_by_name(self, msg: Odometry) -> Dict[str, float]:
+        twist = msg.twist.twist
+        return {
+            "linear_x": float(twist.linear.x),
+            "linear_y": float(twist.linear.y),
+            "linear_z": float(twist.linear.z),
+            "angular_x": float(twist.angular.x),
+            "angular_y": float(twist.angular.y),
+            "angular_z": float(twist.angular.z),
+        }
+
+    def _synthetic_values_for_names(
+        self, values_by_name: Dict[str, float], target_names: List[str]
+    ) -> List[float]:
+        return [float(values_by_name.get(name, 0.0)) for name in target_names]
+
     def update_task_markers(
         self,
         bag_path: str,
@@ -139,6 +290,9 @@ class ReplayDataHandler:
             "file_size_bytes": 0,
             "task_markers": [],
             "segments": [],
+            # Segment-aware video playback for recording format v2. Built
+            # from existing episode_info.json + metadata.yaml + videos/<mcap-stem>/.
+            "video_segments": [],
             "trim_points": None,
             "exclude_regions": [],
             "frame_counts": {},
@@ -161,12 +315,28 @@ class ReplayDataHandler:
             result["metadata"] = metadata
             result["robot_type"] = metadata.get("robot_type", "")
 
+        episode_info = self._metadata_manager.load_episode_info(bag_path_obj)
+        if not result["robot_type"] and episode_info.get("robot_type"):
+            result["robot_type"] = str(episode_info.get("robot_type") or "")
+
+        semantic_layout = self._load_robot_semantic_layout(result["robot_type"])
+        state_topic_order_config, state_names_by_topic_config = (
+            self._topic_name_layout(semantic_layout.get("state"))
+        )
+        action_topic_order_config, action_names_by_topic_config = (
+            self._topic_name_layout(semantic_layout.get("action"))
+        )
+
         # Get extended metadata
         result["recording_date"] = self._get_recording_date(bag_path_obj)
         result["file_size_bytes"] = self._get_directory_size(bag_path_obj)
         result["task_markers"] = self._get_task_markers(bag_path_obj)
         result["trim_points"] = self._get_trim_points(bag_path_obj)
         result["exclude_regions"] = self._get_exclude_regions(bag_path_obj)
+        result["segments"] = self._metadata_manager.get_episode_segments(bag_path_obj)
+        segment_time_map = self._build_segment_time_map(
+            bag_path_obj, result["segments"]
+        )
 
         # Find MCAP file
         mcap_files = list(bag_path_obj.glob("*.mcap"))
@@ -181,19 +351,16 @@ class ReplayDataHandler:
         # Surface recording format v2 transcode state so the UI can
         # gate playback (raw MJPEG MP4 doesn't play in Chromium).
         info_path = bag_path_obj / "episode_info.json"
-        if info_path.exists():
+        if episode_info:
             try:
-                import json as _json
-                with open(info_path) as f:
-                    info = _json.load(f) or {}
                 # If the episode predates the transcoder ("no field"),
                 # treat as ready — its source MP4 (if any) is whatever
                 # the legacy pipeline produced.
                 result["transcoding_status"] = str(
-                    info.get("transcoding_status", "done")
+                    episode_info.get("transcoding_status", "done")
                 )
                 result["transcoding_cameras_failed"] = dict(
-                    info.get("transcoding_cameras_failed") or {}
+                    episode_info.get("transcoding_cameras_failed") or {}
                 )
             except Exception as exc:
                 self._log_error(f"replay: failed to read {info_path.name}: {exc!r}")
@@ -241,12 +408,16 @@ class ReplayDataHandler:
             action_data_by_topic: Dict[
                 str, List[Tuple[float, List[str], List[float]]]
             ] = {}
-            min_time = float("inf")
+            min_time = 0.0 if segment_time_map else float("inf")
             max_time = float("-inf")
 
             while reader.has_next():
                 topic, data, timestamp = reader.read_next()
-                timestamp_sec = timestamp / 1e9
+                timestamp_sec = self._timestamp_to_replay_seconds(
+                    int(timestamp), segment_time_map
+                )
+                if timestamp_sec is None:
+                    continue
 
                 min_time = min(min_time, timestamp_sec)
                 max_time = max(max_time, timestamp_sec)
@@ -257,7 +428,14 @@ class ReplayDataHandler:
                 if topic_type == "sensor_msgs/msg/JointState":
                     try:
                         msg = deserialize_message(data, JointState)
-                        if self._is_action_topic(topic, metadata):
+                        is_action = (
+                            topic in action_names_by_topic_config
+                            or (
+                                topic not in state_names_by_topic_config
+                                and self._is_action_topic(topic, metadata)
+                            )
+                        )
+                        if is_action:
                             if topic not in action_data_by_topic:
                                 action_data_by_topic[topic] = []
                             action_data_by_topic[topic].append(
@@ -271,6 +449,44 @@ class ReplayDataHandler:
                             )
                     except Exception as e:
                         self._log_error(f"Failed to deserialize JointState: {e}")
+
+                # Handle Odometry state values from robot config.
+                elif topic_type == "nav_msgs/msg/Odometry":
+                    target_names = state_names_by_topic_config.get(topic)
+                    if not target_names:
+                        continue
+                    try:
+                        msg = deserialize_message(data, Odometry)
+                        values = self._synthetic_values_for_names(
+                            self._odom_values_by_name(msg),
+                            target_names,
+                        )
+                        if topic not in state_data_by_topic:
+                            state_data_by_topic[topic] = []
+                        state_data_by_topic[topic].append(
+                            (timestamp_sec, list(target_names), values)
+                        )
+                    except Exception as e:
+                        self._log_error(f"Failed to deserialize Odometry: {e}")
+
+                # Handle Twist action values from robot config.
+                elif topic_type == "geometry_msgs/msg/Twist":
+                    target_names = action_names_by_topic_config.get(topic)
+                    if not target_names:
+                        continue
+                    try:
+                        msg = deserialize_message(data, Twist)
+                        values = self._synthetic_values_for_names(
+                            self._twist_values_by_name(msg),
+                            target_names,
+                        )
+                        if topic not in action_data_by_topic:
+                            action_data_by_topic[topic] = []
+                        action_data_by_topic[topic].append(
+                            (timestamp_sec, list(target_names), values)
+                        )
+                    except Exception as e:
+                        self._log_error(f"Failed to deserialize Twist: {e}")
 
                 # Handle JointTrajectory messages (leader topics are action)
                 elif topic_type == "trajectory_msgs/msg/JointTrajectory":
@@ -355,12 +571,14 @@ class ReplayDataHandler:
                         # Use header.stamp seconds (publisher clock) so
                         # the timeline lines up with anything that
                         # publishes header.stamp in the MCAP.
-                        per_frame = [
-                            (int(idx), stamp / 1e9)
-                            for idx, stamp in zip(
-                                ft.frame_index, ft.header_stamp_ns
+                        per_frame = []
+                        for idx, stamp in zip(ft.frame_index, ft.header_stamp_ns):
+                            mapped_stamp = self._timestamp_to_replay_seconds(
+                                int(stamp), segment_time_map
                             )
-                        ]
+                            if mapped_stamp is None:
+                                continue
+                            per_frame.append((int(idx), mapped_stamp))
                         if per_frame:
                             image_metadata_by_topic[sidecar_topic] = per_frame
                             matching_topic = sidecar_topic
@@ -393,13 +611,14 @@ class ReplayDataHandler:
 
                     # Calculate FPS from metadata
                     if matching_topic and matching_topic in image_metadata_by_topic:
-                        metadata = image_metadata_by_topic[matching_topic]
-                        if len(metadata) > 1:
+                        topic_frame_metadata = image_metadata_by_topic[matching_topic]
+                        if len(topic_frame_metadata) > 1:
                             # Sort by frame index
-                            metadata.sort(key=lambda x: x[0])
+                            topic_frame_metadata.sort(key=lambda x: x[0])
                             time_diffs = [
-                                metadata[i + 1][1] - metadata[i][1]
-                                for i in range(len(metadata) - 1)
+                                topic_frame_metadata[i + 1][1]
+                                - topic_frame_metadata[i][1]
+                                for i in range(len(topic_frame_metadata) - 1)
                             ]
                             avg_diff = sum(time_diffs) / len(time_diffs)
                             fps = 1.0 / avg_diff if avg_diff > 0 else 30.0
@@ -408,6 +627,12 @@ class ReplayDataHandler:
                             result["video_fps"].append(30.0)
                     else:
                         result["video_fps"].append(30.0)
+
+            result["video_segments"] = self._build_video_segments(
+                bag_path_obj,
+                result["segments"],
+                image_metadata_by_topic,
+            )
 
             # Process frame timestamps (use first video topic)
             if image_metadata_by_topic:
@@ -419,46 +644,63 @@ class ReplayDataHandler:
                     result["frame_indices"].append(frame_idx)
                     result["frame_timestamps"].append(timestamp - min_time)
 
-            # Build frame counts per camera
-            for i, video_name in enumerate(result["video_names"]):
-                topic = (
-                    result["video_topics"][i]
-                    if i < len(result["video_topics"])
-                    else None
-                )
-                if topic and topic in image_metadata_by_topic:
-                    result["frame_counts"][video_name] = len(
-                        image_metadata_by_topic[topic]
-                    )
-                else:
-                    result["frame_counts"][video_name] = 0
+            result["frame_counts"] = self._build_frame_counts(
+                result["video_names"],
+                result["video_topics"],
+                image_metadata_by_topic,
+                result["video_segments"],
+            )
+            replay_sample_bucket_s = self._replay_sample_bucket_seconds(
+                result["video_fps"],
+                result["video_segments"],
+            )
+            replay_sample_origin_s = (
+                min_time if math.isfinite(min_time) else 0.0
+            )
 
             # Process joint (state) data — per-topic merge
             # Multiple JointState topics have different joint counts,
             # so we must merge them by timestamp (same logic as action data).
             if state_data_by_topic:
-                # Auto-detect topic order (sorted for consistency)
-                state_topic_order = sorted(state_data_by_topic.keys())
+                state_topic_order = self._topic_order(
+                    state_data_by_topic,
+                    state_topic_order_config,
+                )
 
                 # Collect all joint names in topic order
                 all_joint_names: List[str] = []
                 state_topic_joint_names: Dict[str, List[str]] = {}
                 for topic in state_topic_order:
                     if state_data_by_topic[topic]:
-                        names = state_data_by_topic[topic][0][1]
+                        names = state_names_by_topic_config.get(
+                            topic, state_data_by_topic[topic][0][1]
+                        )
                         state_topic_joint_names[topic] = names
                         all_joint_names.extend(names)
 
                 result["joint_names"] = all_joint_names
 
-                # Group data by approximate timestamp (within 10ms)
+                # Group data at replay display resolution. The bucket is
+                # derived from camera FPS so dense joint streams do not make
+                # replay payloads much heavier than the video they accompany.
                 state_timestamp_data: Dict[float, Dict] = {}
                 for topic in state_topic_order:
                     for ts, names, values in state_data_by_topic[topic]:
-                        ts_key = round(ts * 100) / 100
+                        ts_key = self._timestamp_bucket_key(
+                            ts,
+                            replay_sample_bucket_s,
+                            replay_sample_origin_s,
+                        )
                         if ts_key not in state_timestamp_data:
                             state_timestamp_data[ts_key] = {}
-                        state_timestamp_data[ts_key][topic] = (names, values)
+                        state_timestamp_data[ts_key][topic] = (
+                            names,
+                            self._values_for_names(
+                                names,
+                                values,
+                                state_topic_joint_names.get(topic, names),
+                            ),
+                        )
 
                 # Build flat array with forward fill for missing topics
                 last_state_values: Dict[str, List[float]] = {}
@@ -482,8 +724,9 @@ class ReplayDataHandler:
 
             # Process action data from all topics
             if action_data_by_topic:
-                # Get topic order from metadata or use default
-                topic_order = self._get_action_topic_order(metadata)
+                topic_order = list(action_topic_order_config)
+                if not topic_order:
+                    topic_order = self._get_action_topic_order(metadata)
 
                 # Also include any topics not in the predefined order
                 for topic in action_data_by_topic.keys():
@@ -495,24 +738,36 @@ class ReplayDataHandler:
                 topic_joint_names = {}
                 for topic in topic_order:
                     if topic in action_data_by_topic and action_data_by_topic[topic]:
-                        names = action_data_by_topic[topic][0][1]
+                        names = action_names_by_topic_config.get(
+                            topic, action_data_by_topic[topic][0][1]
+                        )
                         topic_joint_names[topic] = names
                         all_action_names.extend(names)
 
                 result["action_names"] = all_action_names
 
-                # Merge action data by timestamp
-                # Group data by approximate timestamp (within 10ms)
+                # Merge action data by timestamp using the same replay
+                # display-resolution bucket as state data.
                 timestamp_data = {}
                 for topic in topic_order:
                     if topic not in action_data_by_topic:
                         continue
                     for ts, names, values in action_data_by_topic[topic]:
-                        # Round to 10ms for grouping
-                        ts_key = round(ts * 100) / 100
+                        ts_key = self._timestamp_bucket_key(
+                            ts,
+                            replay_sample_bucket_s,
+                            replay_sample_origin_s,
+                        )
                         if ts_key not in timestamp_data:
                             timestamp_data[ts_key] = {}
-                        timestamp_data[ts_key][topic] = (names, values)
+                        timestamp_data[ts_key][topic] = (
+                            names,
+                            self._values_for_names(
+                                names,
+                                values,
+                                topic_joint_names.get(topic, names),
+                            ),
+                        )
 
                 # Build action values in correct order (with forward fill for missing data)
                 last_values_by_topic = {}  # Store last known values for each topic
@@ -540,10 +795,24 @@ class ReplayDataHandler:
                 result["start_time"] = 0.0
                 result["end_time"] = max_time - min_time
                 result["duration"] = max_time - min_time
+            if segment_time_map:
+                segment_end = max(
+                    float(item["replay_end_s"]) for item in segment_time_map
+                )
+                result["start_time"] = 0.0
+                result["end_time"] = segment_end
+                result["duration"] = segment_end
 
-            result["segments"] = self._metadata_manager.get_episode_segments(
-                bag_path_obj, duration=result["duration"]
-            )
+            if not result["segments"]:
+                result["segments"] = self._metadata_manager.get_episode_segments(
+                    bag_path_obj, duration=result["duration"]
+                )
+            if not result["video_segments"]:
+                result["video_segments"] = self._build_video_segments(
+                    bag_path_obj,
+                    result["segments"],
+                    image_metadata_by_topic,
+                )
 
             result["success"] = True
             result["message"] = "Replay data loaded successfully"
@@ -559,6 +828,289 @@ class ReplayDataHandler:
             self._log_error(result["message"])
 
         return result
+
+    def _load_rosbag_metadata(self, bag_path: Path) -> Dict:
+        metadata_path = Path(bag_path) / "metadata.yaml"
+        if not metadata_path.exists():
+            return {}
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = yaml.safe_load(f) or {}
+            bag_info = metadata.get("rosbag2_bagfile_information", {})
+            return bag_info if isinstance(bag_info, dict) else {}
+        except Exception as exc:
+            self._log_error(f"replay: failed to read metadata.yaml: {exc!r}")
+            return {}
+
+    def _metadata_file_entries(self, bag_path: Path) -> List[Dict]:
+        bag_info = self._load_rosbag_metadata(bag_path)
+        files = bag_info.get("files") or []
+        if isinstance(files, list) and files:
+            entries = [item for item in files if isinstance(item, dict)]
+            if entries:
+                return entries
+
+        paths = bag_info.get("relative_file_paths") or []
+        if isinstance(paths, list) and paths:
+            return [{"path": path} for path in paths if isinstance(path, str)]
+
+        return [{"path": path.name} for path in sorted(Path(bag_path).glob("*.mcap"))]
+
+    def _build_segment_time_map(
+        self, bag_path: Path, segments: List[Dict]
+    ) -> List[Dict]:
+        entries = self._metadata_file_entries(bag_path)
+        if not entries or not segments:
+            return []
+
+        time_map: List[Dict] = []
+        for index, entry in enumerate(entries):
+            if index >= len(segments):
+                break
+            segment = segments[index]
+            frame_duration = segment.get("frame_duration")
+            starting_time = entry.get("starting_time", {}) or {}
+            duration = entry.get("duration", {}) or {}
+            wall_start_ns = starting_time.get("nanoseconds_since_epoch")
+            wall_duration_ns = duration.get("nanoseconds")
+            if (
+                not isinstance(frame_duration, list)
+                or len(frame_duration) != 2
+                or wall_start_ns is None
+                or wall_duration_ns is None
+            ):
+                continue
+            try:
+                replay_start_s = float(frame_duration[0])
+                replay_end_s = float(frame_duration[1])
+                wall_start_ns = int(wall_start_ns)
+                wall_duration_ns = int(wall_duration_ns)
+            except (TypeError, ValueError):
+                continue
+            if replay_end_s < replay_start_s or wall_duration_ns <= 0:
+                continue
+            time_map.append({
+                "replay_start_s": replay_start_s,
+                "replay_end_s": replay_end_s,
+                "wall_start_ns": wall_start_ns,
+                "wall_end_ns": wall_start_ns + wall_duration_ns,
+            })
+        return time_map
+
+    def _timestamp_to_replay_seconds(
+        self, timestamp_ns: int, segment_time_map: List[Dict]
+    ) -> Optional[float]:
+        if not segment_time_map:
+            return float(timestamp_ns) / 1e9
+
+        # Small tolerance avoids dropping boundary samples with minor clock
+        # jitter between MCAP file metadata and message/header stamps.
+        tolerance_ns = 50_000_000
+        for item in segment_time_map:
+            wall_start_ns = int(item["wall_start_ns"])
+            wall_end_ns = int(item["wall_end_ns"])
+            if wall_start_ns - tolerance_ns <= timestamp_ns <= wall_end_ns + tolerance_ns:
+                offset_s = max(0.0, float(timestamp_ns - wall_start_ns) / 1e9)
+                replay_start_s = float(item["replay_start_s"])
+                replay_end_s = float(item["replay_end_s"])
+                return min(replay_end_s, replay_start_s + offset_s)
+        return None
+
+    def _camera_name_for_video(self, video_file: Path) -> str:
+        return self._extract_camera_name_from_topic(video_file.stem)
+
+    def _target_replay_sample_hz(
+        self,
+        video_fps: List[float],
+        video_segments: Optional[List[Dict]] = None,
+    ) -> Optional[int]:
+        fps_values: List[float] = []
+
+        def add_fps(value: Any) -> None:
+            try:
+                fps = float(value)
+            except (TypeError, ValueError):
+                return
+            if math.isfinite(fps) and fps > 0:
+                fps_values.append(fps)
+
+        for fps in video_fps or []:
+            add_fps(fps)
+
+        for segment in video_segments or []:
+            segment_fps = segment.get("video_fps")
+            if not isinstance(segment_fps, list):
+                continue
+            for fps in segment_fps:
+                add_fps(fps)
+
+        if not fps_values:
+            return None
+
+        return int(math.ceil(max(fps_values) / 5.0) * 5)
+
+    def _replay_sample_bucket_seconds(
+        self,
+        video_fps: List[float],
+        video_segments: Optional[List[Dict]] = None,
+    ) -> Optional[float]:
+        target_hz = self._target_replay_sample_hz(video_fps, video_segments)
+        if not target_hz:
+            return None
+        return 1.0 / float(target_hz)
+
+    def _timestamp_bucket_key(
+        self,
+        timestamp_s: float,
+        bucket_s: Optional[float],
+        origin_s: float = 0.0,
+    ) -> float:
+        if not bucket_s or not math.isfinite(bucket_s) or bucket_s <= 0:
+            return round(timestamp_s * 100) / 100
+
+        origin = origin_s if math.isfinite(origin_s) else 0.0
+        bucket_index = math.floor(((timestamp_s - origin) / bucket_s) + 1e-9)
+        return round(origin + bucket_index * bucket_s, 9)
+
+    def _build_frame_counts(
+        self,
+        video_names: List[str],
+        video_topics: List[str],
+        image_metadata_by_topic: Dict[str, List[Tuple[int, float]]],
+        video_segments: Optional[List[Dict]] = None,
+    ) -> Dict[str, int]:
+        frame_counts: Dict[str, int] = {}
+        has_segment_counts = False
+
+        for segment in video_segments or []:
+            segment_counts = segment.get("frame_counts")
+            if not isinstance(segment_counts, dict):
+                continue
+
+            for camera_name, count in segment_counts.items():
+                name = str(camera_name or "")
+                if not name:
+                    continue
+                try:
+                    count_value = max(0, int(count))
+                except (TypeError, ValueError):
+                    count_value = 0
+                frame_counts[name] = frame_counts.get(name, 0) + count_value
+                has_segment_counts = True
+
+        if has_segment_counts:
+            return frame_counts
+
+        for i, video_name in enumerate(video_names):
+            name = str(video_name or f"video_{i}")
+            topic = video_topics[i] if i < len(video_topics) else None
+            count = len(image_metadata_by_topic.get(topic, [])) if topic else 0
+            frame_counts[name] = frame_counts.get(name, 0) + count
+
+        return frame_counts
+
+    def _build_video_segments(
+        self,
+        bag_path: Path,
+        segments: List[Dict],
+        image_metadata_by_topic: Dict[str, List[Tuple[int, float]]],
+    ) -> List[Dict]:
+        """Build a light segment/video map from existing episode files.
+
+        The UI can use this to show only the cameras for the active subtask
+        segment instead of loading every segment's MP4s at once.
+        """
+        bag_path = Path(bag_path)
+        videos_root = bag_path / "videos"
+        file_entries = self._metadata_file_entries(bag_path)
+        if not file_entries:
+            return []
+
+        video_segments: List[Dict] = []
+        for index, file_entry in enumerate(file_entries):
+            mcap_name = str(file_entry.get("path") or "")
+            if not mcap_name:
+                continue
+            segment_name = Path(mcap_name).stem
+            video_dir = videos_root / segment_name
+            video_files = [
+                path
+                for path in sorted(video_dir.glob("*.mp4"))
+                if not path.stem.endswith("_synced")
+            ]
+            if not video_files:
+                continue
+
+            segment = segments[index] if index < len(segments) else {}
+            frame_duration = segment.get("frame_duration")
+            if (
+                not isinstance(frame_duration, list)
+                or len(frame_duration) != 2
+            ):
+                start_s = 0.0
+                duration_ns = (
+                    file_entry.get("duration", {}) or {}
+                ).get("nanoseconds", 0)
+                end_s = float(duration_ns) / 1e9 if duration_ns else 0.0
+            else:
+                start_s = float(frame_duration[0])
+                end_s = float(frame_duration[1])
+
+            names: List[str] = []
+            fps_values: List[float] = []
+            frame_counts: Dict[str, int] = {}
+            rel_video_files: List[str] = []
+            timestamp_sidecars: Dict[str, str] = {}
+
+            for video_file in video_files:
+                rel_path = video_file.relative_to(bag_path).as_posix()
+                rel_video_files.append(rel_path)
+                camera_name = self._camera_name_for_video(video_file)
+                names.append(camera_name)
+
+                sidecar = video_file.with_name(f"{video_file.stem}_timestamps.parquet")
+                if sidecar.exists():
+                    timestamp_sidecars[camera_name] = sidecar.relative_to(
+                        bag_path
+                    ).as_posix()
+
+                topic_key = video_file.relative_to(bag_path).with_suffix("").as_posix()
+                per_frame = image_metadata_by_topic.get(topic_key, [])
+                frame_counts[camera_name] = len(per_frame)
+                if len(per_frame) > 1:
+                    sorted_frames = sorted(per_frame, key=lambda x: x[0])
+                    diffs = [
+                        sorted_frames[i + 1][1] - sorted_frames[i][1]
+                        for i in range(len(sorted_frames) - 1)
+                    ]
+                    avg_diff = sum(diffs) / len(diffs)
+                    fps_values.append(1.0 / avg_diff if avg_diff > 0 else 30.0)
+                else:
+                    fps_values.append(30.0)
+
+            starting_time = file_entry.get("starting_time", {}) or {}
+            duration_info = file_entry.get("duration", {}) or {}
+            video_segments.append({
+                "index": index,
+                "name": segment_name,
+                "mcap": mcap_name,
+                "video_dir": video_dir.relative_to(bag_path).as_posix(),
+                "video_files": rel_video_files,
+                "video_names": names,
+                "video_fps": fps_values,
+                "frame_counts": frame_counts,
+                "timestamp_sidecars": timestamp_sidecars,
+                "sub_task_instruction": str(
+                    segment.get("sub_task_instruction", "") or ""
+                ),
+                "frame_duration": [float(start_s), float(end_s)],
+                "replay_start_s": float(start_s),
+                "replay_end_s": float(end_s),
+                "wall_start_ns": starting_time.get("nanoseconds_since_epoch"),
+                "wall_duration_ns": duration_info.get("nanoseconds"),
+            })
+
+        return video_segments
 
     def get_video_file_path(self, bag_path: str, video_file: str) -> Optional[str]:
         """

@@ -18,6 +18,7 @@ import React from 'react';
 import clsx from 'clsx';
 
 import { useSelector } from 'react-redux';
+import { selectRecordTaskInfo } from '../features/tasks/taskSlice';
 
 const classEpisodeStatusBody = clsx(
   'h-full',
@@ -44,7 +45,7 @@ const NumberFontSize = 'clamp(1.5rem, 1.5vw, 2rem)';
 
 export default function EpisodeStatus() {
   const currentEpisodeNumber = useSelector((state) => state.tasks.recordStatus.currentEpisodeNumber);
-  const numEpisodes = useSelector((state) => state.tasks.taskInfo.numEpisodes);
+  const numEpisodes = useSelector((state) => selectRecordTaskInfo(state).numEpisodes);
 
   return (
     <div className={classEpisodeStatusBody}>

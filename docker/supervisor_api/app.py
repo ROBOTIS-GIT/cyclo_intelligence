@@ -48,12 +48,16 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 import docker
 from docker.errors import DockerException, ImageNotFound, NotFound
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -67,7 +71,6 @@ logger = logging.getLogger("supervisor_api")
 # Names the UI may start/stop. Kept explicit so a stray POST can't
 # poke at s6-agent or the log pipelines.
 _USER_SERVICES: tuple[str, ...] = (
-    "zenoh_router",
     "orchestrator",
     "cyclo_data",
     "bt_node",
@@ -150,12 +153,46 @@ class WorkspaceMountResponse(BaseModel):
 class BackendStatus(BaseModel):
     name: str
     image: str
+    arch: str = ""
     image_pulled: bool
     image_status: Literal["current", "stale", "missing"]
     container_state: Literal["running", "exited", "not_created", "unknown"]
     container_id: Optional[str] = None
     raw_state: Optional[str] = None
     services: List[ServiceStatus] = Field(default_factory=list)
+
+
+class BackendLogs(BaseModel):
+    name: str
+    container_state: Literal["running", "exited", "not_created", "unknown"]
+    raw_state: Optional[str] = None
+    lines: List[str] = Field(default_factory=list)
+
+
+class BackendActionRequest(BaseModel):
+    model_path: str = ""
+
+
+class TrtBuildRequest(BaseModel):
+    model_path: str
+    engine_path: str = ""
+    robot_type: str
+    task_instruction: str = ""
+    workspace_mb: Optional[int] = None
+    force: bool = False
+
+
+class TrtEngineStatus(BaseModel):
+    model_path: str
+    engine_path: str
+    status: Literal["missing", "building", "ready", "failed", "unknown"]
+    message: str = ""
+    engine_size_bytes: Optional[int] = None
+    started_at: Optional[float] = None
+    updated_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    returncode: Optional[int] = None
+    log_tail: List[str] = Field(default_factory=list)
 
 
 # -- Backend (policy container) wiring -----------------------------------------
@@ -202,7 +239,7 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
     "groot": {
         "service": "groot",
         "container": "groot_server",
-        "image": f"robotis/groot-zenoh:1.3.0-{_BACKEND_ARCH}",
+        "image": f"robotis/groot-zenoh:1.3.2-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
     "rldx": {
@@ -211,13 +248,40 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
         "image": f"robotis/rldx-zenoh:{_RLDX_VERSION}-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
+    "rldx-server": {
+        "service": "rldx_policy_server",
+        "container": "rldx_policy_server",
+        "image": "ghcr.io/prefix-dev/pixi:0.70.1",
+        "services": [],
+    },
 }
 
 _REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
     "lerobot": ("/workspace",),
     "groot": ("/workspace",),
     "rldx": ("/workspace",),
+    "rldx-server": ("/opt/RLDX-1", "/model/rldx"),
 }
+
+_GROOT_MODEL_ROOT = "/workspace/model/groot"
+_RLDX_MODEL_ROOT = "/workspace/model/rldx"
+
+
+@dataclass
+class _TrtBuildJob:
+    model_path: str
+    engine_path: str
+    log_path: str
+    started_at: float
+    status: str = "building"
+    message: str = "Building TensorRT engine"
+    process: Optional[subprocess.Popen] = None
+    finished_at: Optional[float] = None
+    returncode: Optional[int] = None
+
+
+_TRT_BUILD_JOBS: Dict[str, _TrtBuildJob] = {}
+_TRT_BUILD_LOCK = threading.Lock()
 
 
 def _docker_client() -> docker.DockerClient:
@@ -248,6 +312,19 @@ def _mount_source_for_destination(mounts, destination: str) -> Optional[str]:
 def _normalized_host_path(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
+    project_dir = None
+    try:
+        project_dir = _host_project_dir()
+    except Exception as e:  # pragma: no cover - defensive around Docker SDK
+        logger.debug("could not resolve host project dir for path normalization: %s", e)
+    if project_dir:
+        host_repo = os.path.dirname(project_dir)
+        if path == host_repo or path.startswith(host_repo + os.sep):
+            translated = os.path.join(
+                _CYCLO_REPO_MOUNT,
+                os.path.relpath(path, host_repo),
+            )
+            return os.path.realpath(translated)
     return os.path.realpath(path)
 
 
@@ -313,32 +390,35 @@ def _host_workspace_dir() -> Optional[str]:
     if _HOST_WORKSPACE_DIR_CACHE is not None:
         return _HOST_WORKSPACE_DIR_CACHE
 
-    env_path = os.environ.get("CYCLO_WORKSPACE_DIR")
-    if env_path:
-        _HOST_WORKSPACE_DIR_CACHE = env_path
-        return _HOST_WORKSPACE_DIR_CACHE
-
     try:
         client = _docker_client()
     except DockerException as e:
         logger.warning("docker init failed during workspace self-inspect: %s", e)
-        return None
+    else:
+        for own_id in _self_container_candidates():
+            try:
+                ctr = client.containers.get(own_id)
+            except NotFound:
+                continue
+            except DockerException as e:
+                logger.warning("self-inspect for workspace mount failed: %s", e)
+                continue
+            host_workspace = _mount_source_for_destination(
+                ctr.attrs.get("Mounts", []),
+                "/workspace",
+            )
+            if host_workspace:
+                _HOST_WORKSPACE_DIR_CACHE = host_workspace
+                return _HOST_WORKSPACE_DIR_CACHE
 
-    for own_id in _self_container_candidates():
-        try:
-            ctr = client.containers.get(own_id)
-        except NotFound:
-            continue
-        except DockerException as e:
-            logger.warning("self-inspect for workspace mount failed: %s", e)
-            continue
-        host_workspace = _mount_source_for_destination(
-            ctr.attrs.get("Mounts", []),
-            "/workspace",
+    env_path = os.environ.get("CYCLO_WORKSPACE_DIR")
+    if env_path:
+        logger.warning(
+            "using legacy CYCLO_WORKSPACE_DIR fallback for /workspace: %s",
+            env_path,
         )
-        if host_workspace:
-            _HOST_WORKSPACE_DIR_CACHE = host_workspace
-            return _HOST_WORKSPACE_DIR_CACHE
+        _HOST_WORKSPACE_DIR_CACHE = env_path
+        return _HOST_WORKSPACE_DIR_CACHE
     return None
 
 
@@ -377,7 +457,7 @@ def _host_huggingface_dir() -> Optional[str]:
     return None
 
 
-def _compose_env() -> Dict[str, str]:
+def _compose_env(overrides: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Build env for host docker compose calls made from this container."""
     env = os.environ.copy()
     workspace_dir = _host_workspace_dir()
@@ -387,7 +467,50 @@ def _compose_env() -> Dict[str, str]:
     if huggingface_dir:
         env["CYCLO_HUGGINGFACE_DIR"] = huggingface_dir
     env.setdefault("ARCH", _BACKEND_ARCH)
+    if overrides:
+        env.update({
+            key: value
+            for key, value in overrides.items()
+            if value is not None and value != ""
+        })
     return env
+
+
+def _resolve_rldx_model_host_path(model_path: str) -> str:
+    model = os.path.normpath((model_path or "").strip())
+    if not model:
+        return ""
+    if not os.path.isabs(model):
+        raise HTTPException(
+            400,
+            "RLDX server model_path must be an absolute path visible from "
+            f"Cyclo, e.g. {_RLDX_MODEL_ROOT}/my_model",
+        )
+
+    if model == "/workspace" or model.startswith("/workspace" + os.sep):
+        workspace_dir = _host_workspace_dir()
+        if not workspace_dir:
+            raise HTTPException(
+                500,
+                "could not resolve host workspace path for RLDX model mount",
+            )
+        rel = os.path.relpath(model, "/workspace")
+        return os.path.normpath(os.path.join(workspace_dir, rel))
+
+    return model
+
+
+def _backend_compose_env(
+    name: str,
+    request: Optional[BackendActionRequest],
+) -> Dict[str, str]:
+    overrides: Dict[str, str] = {}
+    if name == "rldx-server" and request:
+        model_path = _resolve_rldx_model_host_path(request.model_path)
+        if model_path:
+            overrides["RLDX_MODEL_PATH"] = model_path
+            overrides["RLDX_SERVER_MODEL_PATH"] = "/model/rldx"
+    return _compose_env(overrides)
 
 
 def _compose_base_cmd() -> List[str]:
@@ -425,6 +548,387 @@ def _container_raw_state(container) -> str:
     except DockerException:
         pass
     return container.attrs.get("State", {}).get("Status", "unknown")
+
+
+def _mapped_container_state(raw: str) -> Literal["running", "exited", "not_created", "unknown"]:
+    if raw == "running":
+        return "running"
+    if raw in ("exited", "dead", "created", "paused"):
+        return "exited"
+    return "unknown"
+
+
+_BACKEND_TRAFFIC_MARKERS: Dict[str, tuple[str, ...]] = {
+    "rldx": (
+        "[RLDX-ZMQ]",
+        "RLDX loaded:",
+        "RLDX chunk ",
+        "get_action failed:",
+        "load_policy failed:",
+    ),
+    "rldx-server": (
+        "[RLDX-ZMQ]",
+        "[rldx_policy_server]",
+    ),
+}
+
+
+def _decode_backend_log_lines(raw: bytes | str, limit: int) -> List[str]:
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw)
+    lines = [line.rstrip("\r") for line in text.splitlines()]
+    if limit > 0:
+        return lines[-limit:]
+    return lines
+
+
+def _container_started_since(container) -> Optional[int]:
+    started_at = container.attrs.get("State", {}).get("StartedAt", "")
+    if not started_at or started_at.startswith("0001-"):
+        return None
+    text = started_at.replace("Z", "+00:00")
+    if "." in text:
+        prefix, rest = text.split(".", 1)
+        fraction = rest
+        suffix = ""
+        for marker in ("+", "-"):
+            if marker in rest:
+                fraction, suffix = rest.split(marker, 1)
+                suffix = marker + suffix
+                break
+        text = f"{prefix}.{fraction[:6]:0<6}{suffix}"
+    try:
+        return int(datetime.fromisoformat(text).timestamp())
+    except ValueError:
+        return None
+
+
+def _filter_backend_log_lines(
+    name: str,
+    lines: List[str],
+    *,
+    traffic_only: bool,
+    limit: int,
+) -> List[str]:
+    if traffic_only:
+        markers = _BACKEND_TRAFFIC_MARKERS.get(name, ())
+        if markers:
+            lines = [
+                line for line in lines
+                if any(marker in line for marker in markers)
+            ]
+    return lines[-limit:] if limit > 0 else lines
+
+
+def _resolve_groot_trt_paths(
+    model_path: str,
+    engine_path: str = "",
+) -> tuple[str, str]:
+    model = os.path.normpath((model_path or "").strip())
+    if not model or not os.path.isabs(model):
+        raise HTTPException(400, "model_path must be an absolute path")
+    root = os.path.normpath(_GROOT_MODEL_ROOT)
+    if model != root and not model.startswith(root + os.sep):
+        raise HTTPException(
+            400,
+            f"model_path must be under {_GROOT_MODEL_ROOT}",
+        )
+
+    engine = (engine_path or "").strip()
+    if engine:
+        if not os.path.isabs(engine):
+            engine = os.path.join(model, engine)
+        engine = os.path.normpath(engine)
+    else:
+        engine = os.path.join(model, "dit_model_bf16.trt")
+
+    if engine != model and not engine.startswith(model + os.sep):
+        raise HTTPException(400, "engine_path must be inside model_path")
+    return model, engine
+
+
+def _trt_manifest_path(engine_path: str) -> str:
+    return f"{engine_path}.json"
+
+
+def _trt_log_path(engine_path: str) -> str:
+    return f"{engine_path}.build.log"
+
+
+def _read_json_file(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug("could not read json file %s: %s", path, e)
+        return {}
+
+
+def _write_json_file(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _tail_log(path: str, max_bytes: int = 12000, max_lines: int = 40) -> List[str]:
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+            text = f.read().decode(errors="replace")
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if line][-max_lines:]
+
+
+def _trt_returncode_from_log(lines: List[str]) -> Optional[int]:
+    marker = "=== TensorRT build exited rc="
+    for line in reversed(lines):
+        if marker not in line:
+            continue
+        suffix = line.split(marker, 1)[1].split(None, 1)[0]
+        try:
+            return int(suffix)
+        except ValueError:
+            return None
+    return None
+
+
+def _trt_failure_message(returncode: Optional[int]) -> str:
+    if returncode == 137:
+        return (
+            "TensorRT build was killed (rc=137), likely due to out-of-memory"
+        )
+    if returncode is not None:
+        return f"TensorRT build failed (rc={returncode})"
+    return "TensorRT build failed"
+
+
+def _active_trt_job(engine_path: str) -> Optional[_TrtBuildJob]:
+    with _TRT_BUILD_LOCK:
+        job = _TRT_BUILD_JOBS.get(engine_path)
+        if job and job.status == "building":
+            return job
+    return None
+
+
+def _trt_status(model_path: str, engine_path: str) -> TrtEngineStatus:
+    log_path = _trt_log_path(engine_path)
+    log_tail = _tail_log(log_path)
+    job = _active_trt_job(engine_path)
+    if job is not None:
+        return TrtEngineStatus(
+            model_path=model_path,
+            engine_path=engine_path,
+            status="building",
+            message=job.message,
+            started_at=job.started_at,
+            updated_at=time.time(),
+            returncode=job.returncode,
+            log_tail=log_tail,
+        )
+
+    manifest = _read_json_file(_trt_manifest_path(engine_path))
+    engine_ready = os.path.exists(engine_path) and os.path.getsize(engine_path) > 0
+    if engine_ready:
+        return TrtEngineStatus(
+            model_path=model_path,
+            engine_path=engine_path,
+            status="ready",
+            message=manifest.get("message", "TensorRT engine ready"),
+            engine_size_bytes=os.path.getsize(engine_path),
+            started_at=manifest.get("started_at"),
+            updated_at=manifest.get("updated_at"),
+            finished_at=manifest.get("finished_at"),
+            returncode=manifest.get("returncode"),
+            log_tail=log_tail,
+        )
+
+    manifest_status = str(manifest.get("status", "") or "")
+    if manifest_status == "building":
+        returncode = _trt_returncode_from_log(log_tail)
+        return TrtEngineStatus(
+            model_path=model_path,
+            engine_path=engine_path,
+            status="failed",
+            message=(
+                _trt_failure_message(returncode)
+                if returncode is not None
+                else "Previous TensorRT build did not finish"
+            ),
+            started_at=manifest.get("started_at"),
+            updated_at=manifest.get("updated_at"),
+            finished_at=manifest.get("finished_at"),
+            returncode=returncode,
+            log_tail=log_tail,
+        )
+    if manifest_status == "failed":
+        return TrtEngineStatus(
+            model_path=model_path,
+            engine_path=engine_path,
+            status="failed",
+            message=manifest.get("message", "TensorRT build failed"),
+            started_at=manifest.get("started_at"),
+            updated_at=manifest.get("updated_at"),
+            finished_at=manifest.get("finished_at"),
+            returncode=manifest.get("returncode"),
+            log_tail=log_tail,
+        )
+
+    if not os.path.isdir(model_path):
+        return TrtEngineStatus(
+            model_path=model_path,
+            engine_path=engine_path,
+            status="unknown",
+            message="Model path does not exist",
+            log_tail=log_tail,
+        )
+
+    return TrtEngineStatus(
+        model_path=model_path,
+        engine_path=engine_path,
+        status="missing",
+        message="TensorRT engine is missing",
+        log_tail=log_tail,
+    )
+
+
+def _assert_backend_container_running(name: str, spec: Dict[str, str]):
+    try:
+        ctr = _docker_client().containers.get(spec["container"])
+    except NotFound:
+        raise HTTPException(409, f"{spec['container']} is not created")
+    except DockerException as e:
+        raise HTTPException(500, f"docker inspect failed: {e}")
+    state = _container_raw_state(ctr)
+    if state != "running":
+        raise HTTPException(409, f"{spec['container']} is not running ({state})")
+    return ctr
+
+
+def _monitor_trt_build_job(job: _TrtBuildJob, cmd: List[str]) -> None:
+    try:
+        os.makedirs(os.path.dirname(job.log_path), exist_ok=True)
+        with open(job.log_path, "ab") as log:
+            log.write(
+                (
+                    f"\n=== TensorRT build started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                    f"model_path={job.model_path}\n"
+                    f"engine_path={job.engine_path}\n"
+                ).encode()
+            )
+            process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+            with _TRT_BUILD_LOCK:
+                job.process = process
+            rc = process.wait()
+            log.write(
+                (
+                    f"\n=== TensorRT build exited rc={rc} at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                ).encode()
+            )
+    except Exception as e:
+        rc = -1
+        message = f"TensorRT build launch failed: {e}"
+        logger.error(message, exc_info=True)
+    else:
+        engine_ready = (
+            os.path.exists(job.engine_path)
+            and os.path.getsize(job.engine_path) > 0
+        )
+        message = (
+            "TensorRT engine ready"
+            if rc == 0 and engine_ready
+            else _trt_failure_message(rc)
+        )
+
+    with _TRT_BUILD_LOCK:
+        engine_ready = (
+            os.path.exists(job.engine_path)
+            and os.path.getsize(job.engine_path) > 0
+        )
+        job.returncode = rc
+        job.finished_at = time.time()
+        job.status = "ready" if rc == 0 and engine_ready else "failed"
+        job.message = message
+
+    manifest = {
+        "status": job.status,
+        "model_path": job.model_path,
+        "engine_path": job.engine_path,
+        "message": job.message,
+        "started_at": job.started_at,
+        "updated_at": time.time(),
+        "finished_at": job.finished_at,
+        "returncode": job.returncode,
+    }
+    if engine_ready:
+        manifest["engine_size_bytes"] = os.path.getsize(job.engine_path)
+    try:
+        _write_json_file(_trt_manifest_path(job.engine_path), manifest)
+    except OSError as e:
+        logger.warning("could not write TensorRT manifest: %s", e)
+
+
+def _start_trt_build_job(
+    model_path: str,
+    engine_path: str,
+    robot_type: str,
+    task_instruction: str,
+    workspace_mb: Optional[int],
+    force: bool,
+) -> _TrtBuildJob:
+    log_path = _trt_log_path(engine_path)
+    cmd = [
+        "docker",
+        "exec",
+        _BACKENDS["groot"]["container"],
+        "python3",
+        "-m",
+        "runtime.prepare_trt_engine",
+        "--model-path",
+        model_path,
+        "--engine-path",
+        engine_path,
+        "--robot-type",
+        robot_type,
+        "--task-instruction",
+        task_instruction,
+    ]
+    if workspace_mb:
+        cmd.extend(["--workspace-mb", str(workspace_mb)])
+    if force:
+        cmd.append("--force")
+
+    job = _TrtBuildJob(
+        model_path=model_path,
+        engine_path=engine_path,
+        log_path=log_path,
+        started_at=time.time(),
+    )
+    with _TRT_BUILD_LOCK:
+        active = _TRT_BUILD_JOBS.get(engine_path)
+        if active and active.status == "building":
+            return active
+        _TRT_BUILD_JOBS[engine_path] = job
+
+    thread = threading.Thread(
+        target=_monitor_trt_build_job,
+        args=(job, cmd),
+        daemon=True,
+        name="groot-trt-build",
+    )
+    thread.start()
+    return job
 
 
 def _backend_container_image_mismatch(
@@ -515,6 +1019,8 @@ def _backend_service_statuses(
     service_names: List[str],
 ) -> List[ServiceStatus]:
     """Inspect the two s6-managed policy runtime processes."""
+    if not service_names:
+        return []
     if raw_state != "running":
         return []
 
@@ -613,7 +1119,7 @@ def _parse_svstat(raw: str) -> dict:
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="0.2.0",
+    version="1.0.0",
 )
 
 
@@ -710,6 +1216,48 @@ async def service_stop(name: str) -> ActionResult:
 #   - status → docker-py images.get + containers.get
 
 
+@app.get("/backends/groot/trt/status", response_model=TrtEngineStatus)
+async def groot_trt_status(
+    model_path: str,
+    engine_path: str = "",
+) -> TrtEngineStatus:
+    model, engine = _resolve_groot_trt_paths(model_path, engine_path)
+    return _trt_status(model, engine)
+
+
+@app.post("/backends/groot/trt/build", response_model=TrtEngineStatus)
+async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
+    model, engine = _resolve_groot_trt_paths(
+        request.model_path,
+        request.engine_path,
+    )
+    robot_type = request.robot_type.strip()
+    if not robot_type:
+        raise HTTPException(400, "robot_type is required")
+    if request.workspace_mb is not None and request.workspace_mb <= 0:
+        raise HTTPException(400, "workspace_mb must be positive")
+    if not os.path.isdir(model):
+        raise HTTPException(404, f"model_path does not exist: {model}")
+
+    spec = _require_known_backend("groot")
+    await asyncio.to_thread(_assert_backend_container_running, "groot", spec)
+
+    current = _trt_status(model, engine)
+    if current.status == "ready" and not request.force:
+        return current
+
+    await asyncio.to_thread(
+        _start_trt_build_job,
+        model,
+        engine,
+        robot_type,
+        request.task_instruction,
+        request.workspace_mb,
+        request.force,
+    )
+    return _trt_status(model, engine)
+
+
 @app.post("/backends/{name}/pull")
 async def backend_pull(name: str) -> StreamingResponse:
     spec = _require_known_backend(name)
@@ -748,20 +1296,30 @@ async def backend_pull(name: str) -> StreamingResponse:
 
 
 @app.post("/backends/{name}/start", response_model=ActionResult)
-async def backend_start(name: str) -> ActionResult:
+async def backend_start(
+    name: str,
+    request: Optional[BackendActionRequest] = None,
+) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(name, spec)
+    return await _ensure_backend_running(name, spec, request)
 
 
 @app.post("/backends/{name}/restart", response_model=ActionResult)
-async def backend_restart(name: str) -> ActionResult:
+async def backend_restart(
+    name: str,
+    request: Optional[BackendActionRequest] = None,
+) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(name, spec)
+    return await _ensure_backend_running(name, spec, request)
 
 
 @app.post("/backends/{name}/recreate", response_model=ActionResult)
-async def backend_recreate(name: str) -> ActionResult:
+async def backend_recreate(
+    name: str,
+    request: Optional[BackendActionRequest] = None,
+) -> ActionResult:
     spec = _require_known_backend(name)
+    compose_env = _backend_compose_env(name, request)
 
     def _remove_existing() -> tuple[str, str]:
         try:
@@ -792,7 +1350,7 @@ async def backend_recreate(name: str) -> ActionResult:
 
     local_image, removed = await asyncio.to_thread(_remove_existing)
     cmd = _compose_base_cmd() + ["create", "--no-build", spec["service"]]
-    result = await _run(*cmd, timeout=60.0, env=_compose_env())
+    result = await _run(*cmd, timeout=60.0, env=compose_env)
     ok = result.rc == 0
     msg = result.stderr or result.stdout or f"rc={result.rc}"
     if ok:
@@ -835,10 +1393,16 @@ async def backend_stop(name: str) -> ActionResult:
     return ActionResult(ok=ok, message=msg)
 
 
-async def _ensure_backend_running(name: str, spec: Dict[str, str]) -> ActionResult:
+async def _ensure_backend_running(
+    name: str,
+    spec: Dict[str, str],
+    request: Optional[BackendActionRequest] = None,
+) -> ActionResult:
     """Start policy backend without building; reset if it is already running."""
 
     container_name = spec["container"]
+    compose_env = _backend_compose_env(name, request)
+    expected_rldx_model_path = compose_env.get("RLDX_MODEL_PATH", "")
 
     def _start_or_restart_existing() -> tuple[Optional[bool], str]:
         try:
@@ -860,6 +1424,16 @@ async def _ensure_backend_running(name: str, spec: Dict[str, str]) -> ActionResu
                 spec,
                 _host_workspace_dir(),
             )
+            if not stale_reason and expected_rldx_model_path:
+                current_model_path = _mount_source_for_destination(
+                    ctr.attrs.get("Mounts", []),
+                    "/model/rldx",
+                )
+                if (
+                    _normalized_host_path(current_model_path)
+                    != _normalized_host_path(expected_rldx_model_path)
+                ):
+                    stale_reason = "rldx_model_mount_mismatch"
             if stale_reason:
                 ctr.remove(force=True)
                 return None, stale_reason
@@ -899,7 +1473,7 @@ async def _ensure_backend_running(name: str, spec: Dict[str, str]) -> ActionResu
         )
 
     cmd = _compose_base_cmd() + ["up", "-d", "--no-build", spec["service"]]
-    result = await _run(*cmd, timeout=60.0, env=_compose_env())
+    result = await _run(*cmd, timeout=60.0, env=compose_env)
     ok = result.rc == 0
     msg = result.stderr or result.stdout or f"rc={result.rc}"
     if ok:
@@ -960,10 +1534,62 @@ async def backend_status(name: str) -> BackendStatus:
     return BackendStatus(
         name=name,
         image=spec["image"],
+        arch=_BACKEND_ARCH,
         image_pulled=pulled,
         image_status=image_status,
         container_state=container_state,
         container_id=container_id,
         raw_state=raw,
         services=services,
+    )
+
+
+@app.get("/backends/{name}/logs", response_model=BackendLogs)
+async def backend_logs(
+    name: str,
+    tail: int = Query(default=120, ge=1, le=500),
+    traffic_only: bool = Query(default=True),
+) -> BackendLogs:
+    spec = _require_known_backend(name)
+
+    def _inspect():
+        client = _docker_client()
+        try:
+            ctr = client.containers.get(spec["container"])
+        except NotFound:
+            return "not_created", None, []
+        except DockerException as e:
+            raise HTTPException(500, f"docker inspect failed: {e}")
+
+        raw_state = _container_raw_state(ctr)
+        read_tail = min(max(tail * 4, tail), 1000) if traffic_only else tail
+        log_kwargs = {
+            "stdout": True,
+            "stderr": True,
+            "tail": read_tail,
+            "timestamps": True,
+        }
+        since = _container_started_since(ctr)
+        if since is not None:
+            log_kwargs["since"] = since
+        try:
+            raw_logs = ctr.logs(**log_kwargs)
+        except DockerException as e:
+            raise HTTPException(500, f"docker logs failed: {e}")
+
+        decoded = _decode_backend_log_lines(raw_logs, read_tail)
+        lines = _filter_backend_log_lines(
+            name,
+            decoded,
+            traffic_only=traffic_only,
+            limit=tail,
+        )
+        return _mapped_container_state(raw_state), raw_state, lines
+
+    container_state, raw_state, lines = await asyncio.to_thread(_inspect)
+    return BackendLogs(
+        name=name,
+        container_state=container_state,
+        raw_state=raw_state,
+        lines=lines,
     )

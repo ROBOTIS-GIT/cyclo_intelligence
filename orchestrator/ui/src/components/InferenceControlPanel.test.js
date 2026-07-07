@@ -10,6 +10,7 @@ import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 jest.mock('react-hot-toast', () => {
   const toast = jest.fn();
+  toast.loading = jest.fn();
   toast.error = jest.fn();
   toast.success = jest.fn();
   toast.dismiss = jest.fn();
@@ -37,7 +38,12 @@ jest.mock('../hooks/usePolicyBackendStatus', () => ({
   getPolicyBackendReadiness: (status) => status,
 }));
 
-const renderPanel = ({ inferenceMode = 'robot', sendRecordCommand: sendOverride = null } = {}) => {
+const renderPanel = ({
+  inferenceMode = 'robot',
+  inferencePhase = InferencePhase.READY,
+  taskOverrides = {},
+  sendRecordCommand: sendOverride = null,
+} = {}) => {
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
     success: true,
     message: 'ok',
@@ -46,6 +52,9 @@ const renderPanel = ({ inferenceMode = 'robot', sendRecordCommand: sendOverride 
 
   const initialTasks = taskReducer(undefined, { type: '@@INIT' });
   const initialRos = rosReducer(undefined, { type: '@@INIT' });
+  const { taskInstruction, ...inferenceOverrides } = taskOverrides;
+  const sharedTaskInstruction =
+    taskInstruction ?? initialTasks.sharedTaskInfo.taskInstruction;
   const store = configureStore({
     reducer: {
       tasks: taskReducer,
@@ -54,14 +63,25 @@ const renderPanel = ({ inferenceMode = 'robot', sendRecordCommand: sendOverride 
     preloadedState: {
       tasks: {
         ...initialTasks,
+        sharedTaskInfo: {
+          ...initialTasks.sharedTaskInfo,
+          taskInstruction: sharedTaskInstruction,
+        },
+        inferenceTaskInfo: {
+          ...initialTasks.inferenceTaskInfo,
+          policyPath: '/policy_checkpoints/lerobot/model',
+          inferenceMode,
+          ...inferenceOverrides,
+        },
         taskInfo: {
           ...initialTasks.taskInfo,
           policyPath: '/policy_checkpoints/lerobot/model',
           inferenceMode,
+          ...taskOverrides,
         },
         inferenceStatus: {
           ...initialTasks.inferenceStatus,
-          inferencePhase: InferencePhase.READY,
+          inferencePhase,
         },
       },
       ros: {
@@ -147,7 +167,10 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(toast).toHaveBeenCalledWith(
-        'Model loading is still running. Large downloads can take several minutes.'
+        'Model loading is still running. Large downloads can take several minutes.',
+        expect.objectContaining({
+          id: 'inference-command-start_inference',
+        })
       );
     });
     expect(toast.error).not.toHaveBeenCalledWith(
@@ -155,5 +178,83 @@ describe('InferenceControlPanel deploy safety', () => {
     );
     expect(store.getState().tasks.inferenceStatus.inferencePhase)
       .toBe(InferencePhase.LOADING);
+  });
+
+  test('explains why Start is disabled while loading', () => {
+    renderPanel({
+      inferenceMode: 'simulation',
+      inferencePhase: InferencePhase.LOADING,
+    });
+
+    const startButton = screen.getByRole('button', {
+      name: /Start disabled: Model is loading/i,
+    });
+
+    fireEvent.click(startButton);
+
+    expect(toast).toHaveBeenCalledWith(
+      'Model is loading. Wait until loading completes, or use Clear to cancel and unload.',
+      expect.objectContaining({
+        id: 'inference-control-blocked-Start',
+      })
+    );
+  });
+
+  test('does not expose recording controls on the inference panel', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      inferencePhase: InferencePhase.INFERENCING,
+    });
+
+    expect(screen.queryByRole('button', { name: /start recording/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /save recording/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /discard recording/i })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'r', code: 'KeyR' });
+    fireEvent.keyUp(window, { key: 'r', code: 'KeyR' });
+
+    await waitFor(() => {
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  test('requires shared task instruction for language-conditioned inference', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        taskInstruction: [],
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Missing required fields: Task Instruction',
+        expect.objectContaining({ duration: 3500 })
+      );
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  test('allows language-conditioned inference when shared task instruction is set', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        taskInstruction: ['pick up the red cup'],
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+        inferenceMode: 'simulation',
+      });
+    });
   });
 });

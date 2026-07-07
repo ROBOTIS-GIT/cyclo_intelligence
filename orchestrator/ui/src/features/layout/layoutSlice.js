@@ -19,7 +19,7 @@ const DEFAULT_PANELS = {
     gridRow: '1 / 3',
     visible: true,
     expanded: false,
-    // Expanded: takes cols 1-7
+    expandable: false,
     expandedGridColumn: '1 / 7',
     expandedGridRow: '1 / 3',
   },
@@ -30,6 +30,7 @@ const DEFAULT_PANELS = {
     gridRow: '1 / 3',
     visible: true,
     expanded: false,
+    expandable: true,
     expandedGridColumn: '1 / 10',
     expandedGridRow: '1 / 3',
   },
@@ -40,6 +41,7 @@ const DEFAULT_PANELS = {
     gridRow: '3 / 4',
     visible: true,
     expanded: false,
+    expandable: true,
     expandedGridColumn: '1 / 13',
     expandedGridRow: '1 / 4',
   },
@@ -50,6 +52,7 @@ const DEFAULT_PANELS = {
     gridRow: '1 / 4',
     visible: true,
     expanded: false,
+    expandable: true,
     expandedGridColumn: '7 / 13',
     expandedGridRow: '1 / 4',
   },
@@ -156,6 +159,7 @@ const layoutSlice = createSlice({
       const panelId = action.payload;
       const panel = state.panels[panelId];
       if (!panel) return;
+      if (panel.expandable === false) return;
 
       const wasExpanded = panel.expanded;
 

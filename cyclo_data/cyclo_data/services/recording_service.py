@@ -266,6 +266,21 @@ class RecordingService:
         with self._session_lock:
             self._robot_type = robot_type
             existing = self._data_manager
+            if existing is not None and existing.is_recording():
+                return existing
+        save_repo_name = DataManager._make_save_repo_name(
+            self.DEFAULT_SAVE_ROOT_PATH,
+            task_info,
+        )
+        if (existing is not None
+                and getattr(existing, '_save_repo_name', None) == save_repo_name):
+            # Same task as before — reuse existing manager but refresh
+            # its task_info so per-session knobs (e.g. UI's
+            # include_robotis_license checkbox) flipped between
+            # episodes are picked up on the next save_robotis_metadata.
+            existing.update_task_info(task_info)
+            return existing
+
         candidate = DataManager(
             save_root_path=self.DEFAULT_SAVE_ROOT_PATH,
             robot_type=robot_type,
@@ -280,10 +295,6 @@ class RecordingService:
                 f'DataManager initialised: repo={candidate._save_repo_name} '
                 f'robot_type={robot_type}')
             return candidate
-        # Same task as before — reuse existing manager but refresh
-        # its task_info so per-session knobs (e.g. UI's
-        # include_robotis_license checkbox) flipped between
-        # episodes are picked up on the next save_robotis_metadata.
         existing.update_task_info(task_info)
         return existing
 
@@ -326,8 +337,32 @@ class RecordingService:
             total_storage, used_storage = StorageChecker.get_storage_gb('/')
             status.used_storage_size = float(used_storage)
             status.total_storage_size = float(total_storage)
-        if robot_type and not status.robot_type:
+        if robot_type:
             status.robot_type = robot_type
+        if self._video_recorder is not None and hasattr(status, 'recording_warnings'):
+            try:
+                status.recording_warnings = self._video_recorder.recording_warnings()
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warn(
+                    f'VideoRecorder.recording_warnings() raised: {exc}')
+        if self._video_recorder is not None and hasattr(status, 'camera_monitor_names'):
+            try:
+                camera_monitor = self._video_recorder.camera_monitor_snapshot()
+                status.camera_monitor_names = camera_monitor.get('names', [])
+                status.camera_monitor_topics = camera_monitor.get('topics', [])
+                status.camera_monitor_rates_hz = camera_monitor.get('rates_hz', [])
+                status.camera_monitor_baseline_hz = camera_monitor.get(
+                    'baseline_hz', [])
+                status.camera_monitor_seconds_since_last = camera_monitor.get(
+                    'seconds_since_last', [])
+                status.camera_monitor_status = camera_monitor.get('status', [])
+                status.camera_monitor_timestamp_skew_s = camera_monitor.get(
+                    'timestamp_skew_s', [])
+                status.camera_monitor_timestamp_status = camera_monitor.get(
+                    'timestamp_status', [])
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warn(
+                    f'VideoRecorder.camera_monitor_snapshot() raised: {exc}')
         self._recording_status_pub.publish(status)
 
     def _publish_umbrella_status(self, status: int, stage: str, message: str) -> None:
@@ -355,7 +390,8 @@ class RecordingService:
         task_num = request.task_info.task_num or '<unset>'
         self._node.get_logger().info(
             f'RecordingCommand.{command_name} received '
-            f'(task_num={task_num}, robot_type={request.robot_type or "<unset>"})')
+            f'(task_num={task_num}, robot_type={request.robot_type or "<unset>"}, '
+            f'segment_index={int(getattr(request, "segment_index", 0) or 0)})')
 
         cmd = request.command
         Req = RecordingCommand.Request
@@ -427,6 +463,8 @@ class RecordingService:
         # poison the response — rosbag is already prepared, and the
         # next REFRESH_TOPICS will retry.
         if request.robot_type:
+            with self._session_lock:
+                self._robot_type = request.robot_type
             try:
                 self._ensure_video_pipeline(request.robot_type)
             except Exception as exc:  # noqa: BLE001
@@ -550,7 +588,14 @@ class RecordingService:
             response.message = 'rosbag_recorder service unavailable'
             return response
         dm = self._ensure_data_manager(request.task_info, request.robot_type)
+        if dm.is_recording():
+            response.success = False
+            response.message = 'START blocked: recording already active'
+            self._node.get_logger().warn(response.message)
+            return response
         if request.command == RecordingCommand.Request.START_SEGMENT:
+            if not self._validate_start_segment(dm, request, response):
+                return response
             dm.set_current_subtask_index(int(request.segment_index))
 
         # rosbag_recorder is normally prepared at REFRESH_TOPICS time
@@ -574,29 +619,46 @@ class RecordingService:
             response.message = 'Failed to resolve rosbag path'
             return response
 
-        # Recording format v2: per-camera MP4 writers + one-shot
-        # camera_info snapshotter live in ``videos/`` and ``camera_info/``
-        # subdirs of the rosbag episode dir. Spin them up AFTER the
-        # rosbag service starts — rosbag_recorder's storage plugin
-        # treats the URI as a fresh bag root and may rewrite it on open,
-        # which would wipe any subdirectory we created first.
-        self._rosbag.start_rosbag(rosbag_uri=rosbag_path)
-
         episode_dir = Path(rosbag_path)
-        episode_dir.mkdir(parents=True, exist_ok=True)
+        rosbag_started = False
+        dm_started = False
+        try:
+            # Recording format v2: per-camera MP4 writers + one-shot
+            # camera_info snapshotter live in ``videos/`` and ``camera_info/``
+            # subdirs of the rosbag episode dir. Spin them up AFTER the
+            # rosbag service starts — rosbag_recorder's storage plugin
+            # treats the URI as a fresh bag root and may rewrite it on open,
+            # which would wipe any subdirectory we created first.
+            self._rosbag.start_rosbag(rosbag_uri=rosbag_path)
+            rosbag_started = True
 
-        # Subscriptions were built up-front in REFRESH_TOPICS, so START
-        # only opens the per-episode writers. Defensive ensure for the
-        # rare case where START arrived without a preceding
-        # REFRESH_TOPICS (tests, recovery paths) — same robot_type re-
-        # entry is a no-op inside _ensure_video_pipeline.
-        self._ensure_video_pipeline(request.robot_type)
-        if self._video_recorder is not None:
-            self._video_recorder.start_episode(episode_dir)
-        if self._camera_info is not None:
-            self._camera_info.start_episode(episode_dir)
+            episode_dir.mkdir(parents=True, exist_ok=True)
 
-        dm.start_recording()
+            # Subscriptions were built up-front in REFRESH_TOPICS, so START
+            # only opens the per-episode writers. Defensive ensure for the
+            # rare case where START arrived without a preceding
+            # REFRESH_TOPICS (tests, recovery paths) — same robot_type re-
+            # entry is a no-op inside _ensure_video_pipeline.
+            self._ensure_video_pipeline(request.robot_type)
+            if self._video_recorder is not None:
+                self._video_recorder.start_episode(episode_dir)
+            if self._camera_info is not None:
+                self._camera_info.start_episode(episode_dir)
+
+            dm.start_recording()
+            dm_started = True
+        except Exception as exc:  # noqa: BLE001
+            self._cleanup_failed_start(
+                episode_dir=episode_dir,
+                data_manager=dm if dm_started else None,
+                rosbag_started=rosbag_started,
+            )
+            response.success = False
+            response.message = f'START failed: {exc}'
+            self._node.get_logger().error(response.message)
+            self._publish_umbrella_status(
+                DataOperationStatus.FAILED, 'START', response.message)
+            return response
         self._rosbag.publish_action_event('start')
 
         self._publish_umbrella_status(
@@ -606,6 +668,48 @@ class RecordingService:
         response.success = True
         response.message = 'Recording started'
         return response
+
+    def _cleanup_failed_start(
+        self,
+        *,
+        episode_dir: Path,
+        data_manager: Optional[DataManager],
+        rosbag_started: bool,
+    ) -> None:
+        """Best-effort rollback for failures after rosbag START.
+
+        START spans multiple resources: rosbag, per-camera writers, and
+        DataManager state. If any writer setup fails after rosbag has opened
+        the directory, leaving the bag active would make the next user action
+        operate on a half-started recording. Roll back everything we may have
+        touched and let the caller return a failed START response.
+        """
+        try:
+            self._stop_episode_writers()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._node.get_logger().warning(
+                f'Failed-start writer cleanup raised: {exc!r}')
+
+        if rosbag_started:
+            try:
+                self._rosbag.stop_and_delete_rosbag()
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'Failed-start rosbag cleanup raised: {exc!r}')
+
+        if episode_dir.exists():
+            try:
+                shutil.rmtree(episode_dir)
+            except Exception as exc:  # noqa: BLE001
+                self._node.get_logger().warning(
+                    f'Failed-start episode cleanup raised: {episode_dir}: {exc!r}')
+
+        if data_manager is not None:
+            try:
+                data_manager.discard_recording(reset_subtask_index=False)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._node.get_logger().warning(
+                    f'Failed-start DataManager cleanup raised: {exc!r}')
 
     def _do_set_task_info(self, request, response):
         if not request.robot_type:
@@ -715,14 +819,23 @@ class RecordingService:
         an inference-only context.
         """
         if self._data_manager is None:
-            response.success = True
-            response.message = f'{command_name}: no DataManager — no-op'
+            response.success = command_name != 'STOP_SEGMENT'
+            response.message = (
+                f'{command_name}: no DataManager — no-op'
+                if response.success
+                else f'{command_name}: no active recording session'
+            )
             return response
         if not self._data_manager.is_recording():
-            response.success = True
+            response.success = command_name != 'STOP_SEGMENT'
             response.message = (
                 f'{command_name}: no active recording — no-op'
+                if response.success
+                else f'{command_name}: no active recording'
             )
+            return response
+        if command_name == 'STOP_SEGMENT' and not self._validate_active_segment(
+                request, response, command_name):
             return response
 
         self._node.get_logger().info(
@@ -733,15 +846,14 @@ class RecordingService:
         self._rosbag.stop_rosbag()
         self._stop_episode_writers()
 
-        if request.urdf_path:
-            self._data_manager.save_robotis_metadata(
-                urdf_path=request.urdf_path,
-                video_stats=self._last_video_stats,
-                camera_info_files=self._last_camera_info_files,
-                camera_rotations=self._last_camera_rotations,
-                image_topics=self._last_image_topics,
-                camera_info_topics=self._last_camera_info_topics,
-            )
+        self._data_manager.save_robotis_metadata(
+            urdf_path=getattr(request, 'urdf_path', '') or '',
+            video_stats=self._last_video_stats,
+            camera_info_files=self._last_camera_info_files,
+            camera_rotations=self._last_camera_rotations,
+            image_topics=self._last_image_topics,
+            camera_info_topics=self._last_camera_info_topics,
+        )
 
         is_segmented_storage = bool(
             getattr(self._data_manager, '_segmented_storage_mode', False)
@@ -818,6 +930,12 @@ class RecordingService:
             response.success = False
             response.message = 'FINISH_EPISODE: save active subtask first'
             return response
+        archive_errors = self._archive_errors_for_finish(self._data_manager)
+        if archive_errors:
+            response.success = False
+            response.message = 'FINISH_EPISODE: ' + '; '.join(archive_errors)
+            self._node.get_logger().warn(response.message)
+            return response
         if not self._start_finish_episode_thread(self._data_manager):
             response.success = True
             response.message = 'Episode finish already in progress'
@@ -835,11 +953,28 @@ class RecordingService:
             response.success = False
             response.message = 'DISCARD_EPISODE: episode archive still running'
             return response
+        target_full_idx = self._extract_full_episode_index(request)
+
+        def discard_saved():
+            if target_full_idx is not None:
+                return self._data_manager.discard_full_episode(target_full_idx)
+            return self._data_manager.discard_current_full_episode()
+
         if self._data_manager.is_recording():
-            response = self._do_discard(request, response, event='cancel')
+            self._node.get_logger().info(
+                f'DISCARD_EPISODE: target_full_idx={target_full_idx} active=True')
+            response = self._do_discard(
+                request,
+                response,
+                event='cancel',
+                reset_subtask_index=True,
+            )
             if not response.success:
                 return response
-            deleted = self._data_manager.discard_current_full_episode()
+            deleted = discard_saved()
+            self._node.get_logger().info(
+                f'DISCARD_EPISODE: target_full_idx={target_full_idx} '
+                f'deleted_saved_subtasks={deleted}')
             response.message = (
                 f'Episode discarded ({deleted} saved subtask(s) removed)'
                 if deleted else 'Episode discarded'
@@ -848,7 +983,12 @@ class RecordingService:
                 DataOperationStatus.CANCELLED, 'DISCARD_EPISODE',
                 response.message)
             return response
-        deleted = self._data_manager.discard_current_full_episode()
+        self._node.get_logger().info(
+            f'DISCARD_EPISODE: target_full_idx={target_full_idx} active=False')
+        deleted = discard_saved()
+        self._node.get_logger().info(
+            f'DISCARD_EPISODE: target_full_idx={target_full_idx} '
+            f'deleted_saved_subtasks={deleted}')
         response.success = True
         response.message = (
             f'Episode discarded ({deleted} saved subtask(s) removed)'
@@ -858,6 +998,29 @@ class RecordingService:
             DataOperationStatus.CANCELLED, 'DISCARD_EPISODE',
             response.message)
         return response
+
+    @staticmethod
+    def _extract_full_episode_index(request):
+        encoded = int(getattr(request, 'segment_index', 0) or 0)
+        if encoded > 0:
+            return encoded - 1
+
+        # Transitional compatibility: intermediate builds may have carried
+        # the explicit target via generated fields or TaskInfo tags.
+        if bool(getattr(request, 'has_full_episode_index', False)):
+            return int(getattr(request, 'full_episode_index', 0))
+        task_info = getattr(request, 'task_info', None)
+        for tag in getattr(task_info, 'tags', []) or []:
+            text = str(tag)
+            if ':' not in text:
+                continue
+            key, value = text.split(':', 1)
+            if key.strip() in {'recording_full_episode_index', 'full_episode_index'}:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     def _do_cancel_with_review(self, request, response, event: str):
         """RERECORD — stop current episode and save (no review flag).
@@ -916,15 +1079,33 @@ class RecordingService:
             return response
 
         if self._data_manager.is_recording():
+            if (
+                request.command == RecordingCommand.Request.CANCEL_SEGMENT
+                and not self._validate_active_segment(request, response, 'CANCEL_SEGMENT')
+            ):
+                return response
             return self._do_discard(request, response, event='cancel')
 
-        response.success = True
-        response.message = 'CANCEL: no active recording — nothing to discard'
+        is_segment_cancel = (
+            request.command == RecordingCommand.Request.CANCEL_SEGMENT
+        )
+        response.success = not is_segment_cancel
+        response.message = (
+            'CANCEL_SEGMENT: no active recording'
+            if is_segment_cancel
+            else 'CANCEL: no active recording — nothing to discard'
+        )
         self._publish_umbrella_status(
             DataOperationStatus.IDLE, 'CANCEL', response.message)
         return response
 
-    def _do_discard(self, request, response, event: str):
+    def _do_discard(
+        self,
+        request,
+        response,
+        event: str,
+        reset_subtask_index: bool = False,
+    ):
         """Active-recording CANCEL — drop the episode without saving.
 
         Order matters: drain VideoRecorder/CameraInfoSnapshot writers
@@ -964,7 +1145,9 @@ class RecordingService:
                     f'episode_dir cleanup failed: {episode_dir}: {exc!r}')
 
         # 4. Flip session to idle without bumping the episode counter.
-        self._data_manager.discard_recording()
+        self._data_manager.discard_recording(
+            reset_subtask_index=reset_subtask_index,
+        )
         self._rosbag.publish_action_event(event)
 
         self._publish_umbrella_status(
@@ -974,6 +1157,91 @@ class RecordingService:
         response.success = True
         response.message = 'Recording discarded'
         return response
+
+    def _validate_active_segment(self, request, response, command_name: str) -> bool:
+        if self._data_manager is None:
+            return True
+        if not bool(getattr(self._data_manager, '_segmented_storage_mode', False)):
+            return True
+        requested = int(getattr(request, 'segment_index', 0) or 0)
+        getter = getattr(self._data_manager, 'get_current_subtask_index', None)
+        active = int(
+            getter() if callable(getter)
+            else getattr(self._data_manager, '_current_subtask_index', 0)
+        )
+        if requested == active:
+            return True
+        response.success = False
+        response.message = (
+            f'{command_name}: active subtask is {active}, '
+            f'but request targeted {requested}'
+        )
+        self._node.get_logger().warn(response.message)
+        return False
+
+    def _validate_start_segment(self, data_manager, request, response) -> bool:
+        if not bool(getattr(data_manager, '_segmented_storage_mode', False)):
+            return True
+
+        requested = int(getattr(request, 'segment_index', 0) or 0)
+        missing_getter = getattr(
+            data_manager,
+            'missing_subtasks_for_full_episode',
+            None,
+        )
+        if callable(missing_getter):
+            missing = [int(idx) for idx in missing_getter()]
+        else:
+            current_getter = getattr(data_manager, 'get_current_subtask_index', None)
+            missing = [
+                int(
+                    current_getter() if callable(current_getter)
+                    else getattr(data_manager, '_current_subtask_index', 0)
+                )
+            ]
+
+        if not missing:
+            response.success = False
+            response.message = (
+                'START_SEGMENT: current episode already has all subtasks; '
+                'finish or discard episode before starting again'
+            )
+            self._node.get_logger().warn(response.message)
+            return False
+
+        expected = missing[0]
+        if requested == expected:
+            return True
+
+        response.success = False
+        response.message = (
+            f'START_SEGMENT: next available subtask is {expected}, '
+            f'but request targeted {requested}'
+        )
+        self._node.get_logger().warn(response.message)
+        return False
+
+    @staticmethod
+    def _archive_errors_for_finish(data_manager) -> list[str]:
+        if not bool(getattr(data_manager, '_segmented_storage_mode', False)):
+            return []
+        errors_getter = getattr(
+            data_manager,
+            'full_episode_archive_errors',
+            None,
+        )
+        if callable(errors_getter):
+            return [str(error) for error in errors_getter()]
+
+        missing_getter = getattr(
+            data_manager,
+            'missing_subtasks_for_full_episode',
+            None,
+        )
+        if not callable(missing_getter):
+            return []
+        missing = [int(idx) for idx in missing_getter()]
+        return [f'missing subtask(s) {missing}'] if missing else []
 
     def _do_skip_task(self, request, response):
         # Orchestrator never defined SKIP_TASK dispatch in send_command —

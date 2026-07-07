@@ -75,6 +75,11 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _csv_env(name: str, default: str = "") -> set[str]:
+    raw = os.environ.get(name, default)
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
 def _deadband(value: float, threshold: float) -> float:
     return 0.0 if abs(value) < threshold else value
 
@@ -214,6 +219,7 @@ class RobotClient:
         self._command_msg_types: dict[str, str] = {}
         self._command_joint_names: dict[str, list[str]] = {}
         self._action_keys = sorted(self._action_groups.keys())
+        self._skip_command_action_keys = _csv_env("ROBOT_CLIENT_SKIP_COMMAND_ACTION_KEYS")
         self._cmd_vel_linear_deadband = max(
             0.0,
             _float_env("CMD_VEL_LINEAR_DEADBAND", 0.0),
@@ -600,6 +606,8 @@ class RobotClient:
             width = 3 if msg_type == "geometry_msgs/msg/Twist" else len(cfg["joint_names"])
             segment = values[offset:offset + width]
             offset += width
+            if publish_key in self._skip_command_action_keys:
+                continue
 
             publisher = self._command_publishers.get(publisher_key)
             if publisher is None:
@@ -612,6 +620,27 @@ class RobotClient:
                     self._command_joint_names.get(publisher_key, []),
                     segment,
                 )
+
+    def publish_idle_action(self, action_keys: Optional[list[str]] = None) -> None:
+        """Publish safe idle commands for velocity-like action topics.
+
+        Position trajectory controllers hold their last target when the action
+        buffer is empty. Twist command topics do not have that same semantics,
+        so publish an explicit zero velocity for any commanded Twist modality.
+        """
+        if not self._command_publishers:
+            raise RuntimeError("RobotClient command publishers are not enabled")
+
+        keys = list(action_keys) if action_keys else self._action_keys
+        for action_key in keys:
+            publish_key = self._resolve_action_key(action_key)
+            cfg = self._action_groups.get(publish_key)
+            if cfg is None or cfg["msg_type"] != "geometry_msgs/msg/Twist":
+                continue
+            publisher = self._command_publishers.get(f"leader_{publish_key}")
+            if publisher is None:
+                continue
+            self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
 
     def build_action_preview(
         self,
@@ -633,6 +662,8 @@ class RobotClient:
             width = 3 if msg_type == "geometry_msgs/msg/Twist" else len(cfg["joint_names"])
             segment = values[offset:offset + width]
             offset += width
+            if publish_key in self._skip_command_action_keys:
+                continue
             if msg_type == "geometry_msgs/msg/Twist":
                 continue
             names = list(cfg.get("joint_names", []))

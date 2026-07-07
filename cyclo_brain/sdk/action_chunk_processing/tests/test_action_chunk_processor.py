@@ -102,6 +102,93 @@ class ActionChunkProcessorTests(unittest.TestCase):
         np.testing.assert_allclose(last_old_action, np.asarray([9.0]))
         self.assertGreater(first_new_action[0], last_old_action[0])
 
+    def test_sync_chunk_can_skip_alignment(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=10.0,
+            control_hz=10.0,
+            chunk_align_window_s=0.3,
+        )
+        processor._last_output_action = np.asarray([20.0])
+
+        produced = processor.push_actions(
+            np.arange(20, 31, dtype=np.float64).reshape(11, 1),
+            align=False,
+        )
+        first_new_action = processor.pop_action()
+
+        self.assertEqual(produced, 10)
+        np.testing.assert_allclose(first_new_action, np.asarray([20.0]))
+
+    def test_late_async_chunk_falls_back_instead_of_dropping_all(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            chunk_align_window_s=0.3,
+        )
+        processor.push_actions(np.arange(16, dtype=np.float64).reshape(16, 1))
+        while processor.pop_action() is not None:
+            pass
+
+        produced = processor.push_actions(
+            np.arange(16, 32, dtype=np.float64).reshape(16, 1),
+            scheduled_start_delay_s=1.5,
+        )
+
+        self.assertGreater(produced, 0)
+
+    def test_late_async_chunk_never_drops_all_when_window_covers_chunk(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=10.0,
+            control_hz=10.0,
+            chunk_align_window_s=10.0,
+        )
+        processor._last_output_action = np.asarray([99.0])
+
+        produced = processor.push_actions(
+            np.arange(5, dtype=np.float64).reshape(5, 1),
+            scheduled_start_delay_s=99.0,
+        )
+
+        self.assertGreater(produced, 0)
+
+    def test_rtc_alignment_drops_latency_prefix_without_blending(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=10.0,
+            control_hz=10.0,
+            alignment_mode="rtc",
+        )
+        processor.push_actions(np.arange(11, dtype=np.float64).reshape(11, 1))
+
+        for _ in range(7):
+            processor.pop_action()
+
+        produced = processor.push_actions(
+            np.arange(100, 111, dtype=np.float64).reshape(11, 1),
+            scheduled_start_delay_s=0.3,
+        )
+
+        self.assertEqual(produced, 7)
+        for _ in range(3):
+            old_action = processor.pop_action()
+        first_new_action = processor.pop_action()
+
+        np.testing.assert_allclose(old_action, np.asarray([9.0]))
+        np.testing.assert_allclose(first_new_action, np.asarray([103.0]))
+
+    def test_rtc_alignment_returns_empty_when_delay_consumes_chunk(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=10.0,
+            control_hz=10.0,
+            alignment_mode="rtc",
+        )
+
+        produced = processor.push_actions(
+            np.arange(5, dtype=np.float64).reshape(5, 1),
+            scheduled_start_delay_s=0.5,
+        )
+
+        self.assertEqual(produced, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

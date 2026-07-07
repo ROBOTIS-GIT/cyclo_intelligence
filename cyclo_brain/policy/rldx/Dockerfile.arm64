@@ -51,6 +51,7 @@ RUN mkdir -p /app /policy_runtime /zenoh_sdk /robot_client_sdk \
 WORKDIR /app
 
 COPY rldx/rldx_engine/ /app/rldx_engine/
+COPY rldx/zmq_transport/ /app/zmq_transport/
 COPY rldx/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
              /etc/s6-overlay/s6-rc.d/engine-process/run
@@ -68,10 +69,15 @@ ENV POLICY_ENGINE_MODULE=rldx_engine
 ENV RLDX_ZMQ_HOST=127.0.0.1
 ENV RLDX_ZMQ_PORT=5555
 ENV RLDX_ZMQ_TIMEOUT_MS=300000
+ENV RLDX_SEND_ACTION_PREFIX=true
+ENV RLDX_RTC_PREFIX_LEN=4
+ENV RLDX_RTC_EXEC_HORIZON=12
 ENV CONTROL_HZ=100
 ENV INFERENCE_HZ=15
 ENV TARGET_CHUNK_SIZE=none
-ENV REFILL_MARGIN_S=0.2
+ENV ACTION_ALIGNMENT_MODE=rtc
+ENV REFILL_MARGIN_S=0.27
+ENV REFILL_STRATEGY=auto
 ENV GET_ACTION_TIMEOUT_S=5.0
 ENV PYTHONUNBUFFERED=1
 

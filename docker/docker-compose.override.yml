@@ -1,0 +1,12 @@
+# Local no-GPU development override.
+#
+# container.sh automatically layers this file over docker-compose.yml.
+# It lets the main Cyclo UI/data container run on machines without the
+# NVIDIA Container Toolkit. Policy containers (lerobot/groot) still need GPU.
+services:
+  cyclo_intelligence:
+    runtime: runc
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []

@@ -56,6 +56,10 @@ class InferenceRequester:
             remote_host=str(getattr(request, "remote_host", "") or ""),
             remote_port=int(getattr(request, "remote_port", 0) or 0),
             remote_timeout_ms=int(getattr(request, "remote_timeout_ms", 0) or 0),
+            acceleration_mode=str(getattr(request, "acceleration_mode", "") or ""),
+            acceleration_engine_path=str(
+                getattr(request, "acceleration_engine_path", "") or ""
+            ),
         )
         return self._call(
             engine_request,

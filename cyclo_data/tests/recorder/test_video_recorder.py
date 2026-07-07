@@ -302,6 +302,38 @@ def test_stop_episode_final_join_happens_before_writer_close():
     assert stream.metadata_worker is None
 
 
+def test_stop_episode_returns_before_raw_remux(tmp_path, monkeypatch):
+    stream = _CameraStream(name="cam0", topic="/cam0", queue=Queue())
+    recorder, events = _recorder_with_stream(stream)
+    stream.worker = _FakeWorker(events, "video_worker")
+    stream.raw_worker = _FakeWorker(events, "raw_worker")
+    stream.metadata_worker = _FakeWorker(events, "metadata_worker")
+    stream.writer = _FakeWriter(events)
+    stream.frames_written = 3
+    stream.frames_metadata_written = 3
+    stream.raw_path = tmp_path / "cam0.mjpeg.tmp"
+    stream.mp4_path = tmp_path / "cam0.mp4"
+    stream.sidecar_path = tmp_path / "cam0_timestamps.parquet"
+    stream.stats_path = tmp_path / "cam0_recorder_stats.json"
+    raw_path = stream.raw_path
+    mp4_path = stream.mp4_path
+    stats_path = stream.stats_path
+    raw_path.write_bytes(b"\xff\xd8jpeg" + _JPEG_SENTINEL)
+
+    def fail_if_called(_streams):
+        raise AssertionError("STOP must not synchronously remux raw spools")
+
+    monkeypatch.setattr(recorder, "_remux_streams", fail_if_called)
+
+    stats = recorder.stop_episode()
+
+    assert stats["cam0"]["remux_status"] == "pending"
+    assert raw_path.exists()
+    assert not mp4_path.exists()
+    text = stats_path.read_text(encoding="utf-8")
+    assert '"remux_status": "pending"' in text
+
+
 def test_no_drop_callback_enqueues_valid_frame_under_soft_pressure():
     events = []
     recorder = VideoRecorder.__new__(VideoRecorder)
@@ -331,6 +363,91 @@ def test_no_drop_callback_enqueues_valid_frame_under_soft_pressure():
     assert stream.pressure_warning_count >= 1
     queued = stream.queue.get_nowait()
     assert queued[0] == b"\xff\xd8jpeg"
+
+
+def test_idle_callback_updates_camera_monitor_without_recording_stats():
+    recorder = _bare_recorder([])
+    recorder._recording_active = threading.Event()
+    recorder._callback_cond = threading.Condition()
+    recorder._active_callbacks = 0
+    stream = _CameraStream(name="cam0", topic="/cam0", queue=Queue())
+    recorder._streams = {"cam0": stream}
+    recorder._reset_camera_monitor_state(stream)
+    now_ns = recorder._now_ns()
+    stamp = types.SimpleNamespace(
+        sec=now_ns // 1_000_000_000,
+        nanosec=now_ns % 1_000_000_000,
+    )
+    msg = types.SimpleNamespace(
+        data=bytearray(b"\xff\xd8jpeg"),
+        header=types.SimpleNamespace(stamp=stamp),
+    )
+
+    recorder._on_frame(stream, msg)
+
+    assert stream.queue.empty()
+    assert stream.frames_received == 0
+    assert recorder.recording_warnings() == []
+    snapshot = recorder.camera_monitor_snapshot()
+    assert snapshot["names"] == ["cam0"]
+    assert snapshot["topics"] == ["/cam0"]
+    assert snapshot["seconds_since_last"][0] >= 0
+    assert snapshot["status"][0] == 0
+    assert snapshot["timestamp_status"][0] == 0
+
+
+def test_idle_callback_reports_camera_timestamp_skew_in_monitor_only():
+    recorder = _bare_recorder([])
+    recorder._timestamp_future_warning_ns = 500_000_000
+    recorder._timestamp_past_warning_ns = 2_000_000_000
+    recorder._recording_active = threading.Event()
+    recorder._callback_cond = threading.Condition()
+    recorder._active_callbacks = 0
+    stream = _CameraStream(name="cam0", topic="/cam0", queue=Queue())
+    recorder._streams = {"cam0": stream}
+    recorder._reset_camera_monitor_state(stream)
+    future_ns = recorder._now_ns() + 2_000_000_000
+    stamp = types.SimpleNamespace(
+        sec=future_ns // 1_000_000_000,
+        nanosec=future_ns % 1_000_000_000,
+    )
+    msg = types.SimpleNamespace(
+        data=bytearray(b"\xff\xd8jpeg"),
+        header=types.SimpleNamespace(stamp=stamp),
+    )
+
+    recorder._on_frame(stream, msg)
+
+    assert stream.queue.empty()
+    assert recorder.recording_warnings() == []
+    snapshot = recorder.camera_monitor_snapshot()
+    assert snapshot["status"] == [2]
+    assert snapshot["timestamp_status"] == [2]
+    assert snapshot["timestamp_skew_s"][0] > 0.5
+
+
+def test_timestamp_skew_warnings_are_reported_in_status_and_stats():
+    recorder = _bare_recorder([])
+    recorder._timestamp_future_warning_ns = 500_000_000
+    recorder._timestamp_past_warning_ns = 2_000_000_000
+    stream = _CameraStream(name="cam0", topic="/cam0")
+    recorder._streams = {"cam0": stream}
+
+    recorder._note_timestamp_skew(stream, 1_900_000_000)
+    recorder._note_timestamp_skew(stream, -43_900_000_000_000)
+
+    warnings = recorder.recording_warnings()
+    assert warnings == [
+        "cam0: camera header timestamp is more than 0.5s ahead of receive time.",
+        "cam0: camera header timestamp is more than 2s behind receive time.",
+    ]
+
+    stats = recorder._public_stats(stream)
+    assert stats["timestamp_warning_count"] == 2
+    assert stats["timestamp_future_warning_count"] == 1
+    assert stats["timestamp_past_warning_count"] == 1
+    assert stats["max_header_ahead_ns"] == 1_900_000_000
+    assert stats["max_header_behind_ns"] == 43_900_000_000_000
 
 
 def test_invalid_jpeg_is_the_only_callback_drop_path():

@@ -15,7 +15,7 @@
 // Author: Kiwoong Park
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { MdInfoOutline } from 'react-icons/md';
@@ -28,7 +28,8 @@ import {
   markTaskInfoSyncMissing,
   markTaskInfoSyncPending,
   markTaskInfoSyncSuccess,
-  setTaskInfo,
+  selectRecordTaskInfo,
+  setRecordTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { getRecordTaskInfoKey } from '../utils/taskInfoSync';
@@ -40,7 +41,7 @@ const InfoPanel = ({ variant = 'card' }) => {
   const dispatch = useDispatch();
   const embedded = variant === 'embedded';
 
-  const info = useSelector((state) => state.tasks.taskInfo);
+  const info = useSelector(selectRecordTaskInfo, shallowEqual);
   const recordStatus = useSelector((state) => state.tasks.recordStatus);
   const taskInfoSync = useSelector((state) => state.tasks.taskInfoSync);
 
@@ -62,7 +63,7 @@ const InfoPanel = ({ variant = 'card' }) => {
   const handleChange = useCallback(
     (field, value) => {
       if (!isEditable) return; // Block changes when not editable
-      dispatch(setTaskInfo({ [field]: value }));
+      dispatch(setRecordTaskInfo({ [field]: value }));
       dispatch(markLocalTaskInfoEdited());
     },
     [isEditable, dispatch]

@@ -16,6 +16,5 @@
 
 // Re-export all replay components
 export { default as VideoPlayer } from './VideoPlayer';
-export { default as PlaybackControls } from './PlaybackControls';
 export { default as RosbagInfoPanel } from './RosbagInfoPanel';
 export { default as JointChart } from './JointChart';

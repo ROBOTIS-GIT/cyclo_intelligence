@@ -11,10 +11,13 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
   MdCloudDownload,
+  MdExpandLess,
+  MdExpandMore,
   MdKey,
   MdPowerSettingsNew,
   MdRefresh,
   MdStop,
+  MdTerminal,
 } from 'react-icons/md';
 import Tooltip from './Tooltip';
 import TokenInputPopup from './TokenInputPopup';
@@ -45,6 +48,7 @@ const stateLabels = {
 
 const getBackendLabel = (serviceType) => {
   if (serviceType === 'groot') return 'GR00T Docker';
+  if (serviceType === 'rldx-server') return 'RLDX Server Docker';
   if (serviceType === 'rldx') return 'RLDX Docker';
   if (serviceType === 'lerobot') return 'LeRobot Docker';
   return 'Policy Docker';
@@ -119,13 +123,20 @@ async function readPullStream(response, onProgress) {
   }
 }
 
-export default function PolicyBackendControl({ serviceType }) {
-  const backend = serviceType === 'groot' || serviceType === 'rldx'
-    ? serviceType
-    : 'lerobot';
+export default function PolicyBackendControl({
+  serviceType,
+  backendName,
+  label: labelOverride,
+  actionPayload = null,
+}) {
+  const backend = backendName || (
+    ['groot', 'rldx', 'rldx-server'].includes(serviceType)
+      ? serviceType
+      : 'lerobot'
+  );
   const label = useMemo(
-    () => getBackendLabel(serviceType),
-    [serviceType]
+    () => labelOverride || getBackendLabel(backendName || serviceType),
+    [backendName, labelOverride, serviceType]
   );
 
   const [status, setStatus] = useState(null);
@@ -135,6 +146,10 @@ export default function PolicyBackendControl({ serviceType }) {
   const [showTokenPopup, setShowTokenPopup] = useState(false);
   const [isRegisteringToken, setIsRegisteringToken] = useState(false);
   const [tokenRegistered, setTokenRegistered] = useState(false);
+  const [showTrafficLog, setShowTrafficLog] = useState(false);
+  const [trafficLines, setTrafficLines] = useState([]);
+  const [trafficError, setTrafficError] = useState('');
+  const [isRefreshingTraffic, setIsRefreshingTraffic] = useState(false);
   const { registerHFUser, listHFEndpoints } = useRosServiceCaller();
 
   useEffect(() => {
@@ -165,11 +180,37 @@ export default function PolicyBackendControl({ serviceType }) {
     }
   }, [backend, label]);
 
+  const refreshTrafficLog = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setIsRefreshingTraffic(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/backends/${backend}/logs?tail=120&traffic_only=true`
+      );
+      const data = await readJsonResponse(response);
+      if (!response.ok) {
+        throw new Error(data.detail || `logs failed (${response.status})`);
+      }
+      setTrafficLines(Array.isArray(data.lines) ? data.lines : []);
+      setTrafficError('');
+    } catch (error) {
+      setTrafficError(error.message || 'Failed to load traffic log');
+    } finally {
+      if (!quiet) setIsRefreshingTraffic(false);
+    }
+  }, [backend]);
+
   useEffect(() => {
     refreshStatus({ quiet: true });
     const id = setInterval(() => refreshStatus({ quiet: true }), 5000);
     return () => clearInterval(id);
   }, [refreshStatus]);
+
+  useEffect(() => {
+    if (!showTrafficLog) return undefined;
+    refreshTrafficLog({ quiet: true });
+    const id = setInterval(() => refreshTrafficLog({ quiet: true }), 2000);
+    return () => clearInterval(id);
+  }, [refreshTrafficLog, showTrafficLog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,9 +232,17 @@ export default function PolicyBackendControl({ serviceType }) {
   const callBackend = useCallback(async (action, successLabel) => {
     setPendingAction(action);
     try {
-      const response = await fetch(`${API_BASE}/backends/${backend}/${action}`, {
+      const requestOptions = {
         method: 'POST',
-      });
+      };
+      const shouldSendPayload =
+        actionPayload &&
+        ['start', 'restart', 'recreate'].includes(action);
+      if (shouldSendPayload) {
+        requestOptions.headers = { 'Content-Type': 'application/json' };
+        requestOptions.body = JSON.stringify(actionPayload);
+      }
+      const response = await fetch(`${API_BASE}/backends/${backend}/${action}`, requestOptions);
       const data = await readJsonResponse(response);
       if (!response.ok || data.ok === false) {
         throw new Error(data.detail || data.message || `${action} failed`);
@@ -206,7 +255,7 @@ export default function PolicyBackendControl({ serviceType }) {
     } finally {
       setPendingAction(null);
     }
-  }, [backend, label, refreshStatus]);
+  }, [actionPayload, backend, label, refreshStatus]);
 
   const pullBackendImage = useCallback(async () => {
     setPendingAction('pull');
@@ -334,6 +383,22 @@ export default function PolicyBackendControl({ serviceType }) {
     }
   );
 
+  const trafficButtonClass = clsx(
+    'h-7',
+    'px-2',
+    'rounded-md',
+    'text-xs',
+    'font-semibold',
+    'flex',
+    'items-center',
+    'gap-1',
+    'border',
+    'transition-colors',
+    showTrafficLog
+      ? 'bg-gray-800 text-white border-gray-800'
+      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+  );
+
   const buttonClass = (variant) => clsx(
     'h-8',
     'px-2.5',
@@ -367,12 +432,27 @@ export default function PolicyBackendControl({ serviceType }) {
     ? (layerPercent === null ? '...' : `Layer ${layerPercent}%`)
     : `${pullPercent}%`;
   const pullBarWidth = `${pullPercent ?? layerPercent ?? (isPulling ? 8 : 0)}%`;
+  const trafficText = trafficError ||
+    (trafficLines.length > 0
+      ? trafficLines.join('\n')
+      : (isRefreshingTraffic ? 'Loading traffic log...' : 'No traffic messages yet.'));
 
   return (
     <div className="mb-3 border-t border-b border-gray-200 py-2">
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="text-sm font-semibold text-gray-700">{label}</div>
         <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className={trafficButtonClass}
+            onClick={() => setShowTrafficLog((value) => !value)}
+            aria-label={`${label} traffic log`}
+            title="Show backend traffic log"
+          >
+            <MdTerminal size={15} />
+            <span>Traffic</span>
+            {showTrafficLog ? <MdExpandLess size={15} /> : <MdExpandMore size={15} />}
+          </button>
           <span className={statusClass}>
             {statusLabel}
           </span>
@@ -582,6 +662,43 @@ export default function PolicyBackendControl({ serviceType }) {
             </div>
           )}
         </>
+      )}
+      {showTrafficLog && (
+        <div className="mt-2 rounded-md border border-gray-200 bg-gray-50 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-700">
+              <MdTerminal size={15} />
+              Traffic
+            </div>
+            <button
+              type="button"
+              className="h-7 rounded-md border border-gray-200 bg-white px-2 text-xs font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+              disabled={isRefreshingTraffic}
+              onClick={() => refreshTrafficLog()}
+              aria-label={`${label} refresh traffic log`}
+            >
+              <MdRefresh size={14} className="inline-block align-[-2px]" />
+              <span className="ml-1">Refresh</span>
+            </button>
+          </div>
+          <pre className={clsx(
+            'mt-2',
+            'max-h-40',
+            'overflow-auto',
+            'whitespace-pre-wrap',
+            'break-words',
+            'rounded-md',
+            'bg-gray-900',
+            'p-2',
+            'font-mono',
+            'text-[11px]',
+            'leading-4',
+            trafficError ? 'text-red-200' : 'text-gray-100'
+          )}
+          >
+            {trafficText}
+          </pre>
+        </div>
       )}
       {showTokenControl && tokenRegistered && (
         <div className="mt-2 text-xs text-green-700">

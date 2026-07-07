@@ -15,7 +15,7 @@
 // Author: Kiwoong Park
 
 import { useCallback, useRef, useEffect } from 'react';
-import { useSelector } from 'react-redux';
+import { shallowEqual, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import PageType from '../constants/pageType';
 import TaskCommand from '../constants/taskCommand';
@@ -24,6 +24,10 @@ import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { DEFAULT_PATHS } from '../constants/paths';
 import { buildRuntimeRequestFields } from '../utils/inferenceRuntime';
+import {
+  selectInferenceTaskInfo,
+  selectRecordTaskInfo,
+} from '../features/tasks/taskSlice';
 
 const DEFAULT_SERVICE_TIMEOUT_MS = 10000;
 const START_INFERENCE_SERVICE_TIMEOUT_MS = 30000;
@@ -59,7 +63,8 @@ export function getRecordCommandServiceTimeoutMs(command, options = {}) {
 }
 
 export function useRosServiceCaller() {
-  const taskInfo = useSelector((state) => state.tasks.taskInfo);
+  const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
+  const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const trainingInfo = useSelector((state) => state.training.trainingInfo);
   const trainingResumePolicyPath = useSelector((state) => state.training.resumePolicyPath);
   const editDatasetInfo = useSelector((state) => state.editDataset);
@@ -74,12 +79,16 @@ export function useRosServiceCaller() {
   // useEffect — most painfully Record/InferencePage's mount-time
   // `sendRecordCommand('refresh_topics')`, which then tears down and
   // re-prepares all rosbag subscriptions per keystroke.
-  const taskInfoRef = useRef(taskInfo);
+  const recordTaskInfoRef = useRef(recordTaskInfo);
+  const inferenceTaskInfoRef = useRef(inferenceTaskInfo);
   const trainingInfoRef = useRef(trainingInfo);
   const trainingResumePolicyPathRef = useRef(trainingResumePolicyPath);
   const editDatasetInfoRef = useRef(editDatasetInfo);
   const pageRef = useRef(page);
-  useEffect(() => { taskInfoRef.current = taskInfo; }, [taskInfo]);
+  useEffect(() => { recordTaskInfoRef.current = recordTaskInfo; }, [recordTaskInfo]);
+  useEffect(() => {
+    inferenceTaskInfoRef.current = inferenceTaskInfo;
+  }, [inferenceTaskInfo]);
   useEffect(() => { trainingInfoRef.current = trainingInfo; }, [trainingInfo]);
   useEffect(() => {
     trainingResumePolicyPathRef.current = trainingResumePolicyPath;
@@ -164,8 +173,10 @@ export function useRosServiceCaller() {
     async (command, options = {}) => {
       // Read latest values from refs at call time so this callback's
       // identity stays stable across taskInfo / page mutations.
-      const taskInfo = taskInfoRef.current;
       const page = pageRef.current;
+      const taskInfo = page === PageType.INFERENCE
+        ? inferenceTaskInfoRef.current
+        : recordTaskInfoRef.current;
       try {
         let command_enum;
         switch (command) {
@@ -256,7 +267,10 @@ export function useRosServiceCaller() {
           taskType = 'inference';
         }
 
-        // Auto-fill taskName and taskInstruction if empty
+        // Auto-fill taskName and taskInstruction if empty. Inference-page
+        // autosync can opt out so clearing the language prompt propagates as
+        // empty instead of being replaced by a generated task name.
+        const autofillEmptyTaskFields = options.autofillEmptyTaskFields !== false;
         let taskName = taskInfo.taskName || '';
         let taskInstruction = (taskInfo.taskInstruction || []).filter(
           (instruction) => instruction.trim() !== ''
@@ -272,13 +286,13 @@ export function useRosServiceCaller() {
           ? rawSubtaskInstruction
           : rawSubtaskInstruction.filter((instruction) => instruction.trim() !== '');
 
-        if (!taskName.trim()) {
+        if (!taskName.trim() && autofillEmptyTaskFields) {
           const now = new Date();
           const pad = (n) => String(n).padStart(2, '0');
           const yy = String(now.getFullYear()).slice(2);
           taskName = `task_${yy}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`;
         }
-        if (taskInstruction.length === 0) {
+        if (taskInstruction.length === 0 && autofillEmptyTaskFields) {
           taskInstruction = [taskName];
         }
 
@@ -298,7 +312,17 @@ export function useRosServiceCaller() {
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
         const policyPath = String(taskInfo.policyPath || '').trim();
         const runtimeFields = buildRuntimeRequestFields(taskInfo);
-
+        const accelerationMode = taskInfo.serviceType === 'groot'
+          ? String(taskInfo.accelerationMode || 'pytorch').trim()
+          : 'pytorch';
+        const accelerationEnginePath = taskInfo.serviceType === 'groot'
+          ? String(taskInfo.accelerationEnginePath || '').trim()
+          : '';
+        const actionRequestMode = (
+          String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
+            ? 'sync'
+            : 'async'
+        );
         const request = {
           task_info: {
             task_num: String(taskInfo.taskNum ?? ''),
@@ -320,6 +344,9 @@ export function useRosServiceCaller() {
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             ...runtimeFields,
+            action_request_mode: actionRequestMode,
+            acceleration_mode: accelerationMode || 'pytorch',
+            acceleration_engine_path: accelerationEnginePath,
           },
           command: Number(command_enum),
           segment_index: Number(options.segmentIndex || 0),
@@ -904,6 +931,7 @@ export function useRosServiceCaller() {
           video_topics: result.video_topics || [],
           video_names: result.video_names || [],
           video_fps: result.video_fps || [],
+          video_segments: result.video_segments || [],
           frame_indices: result.frame_indices || [],
           frame_timestamps: result.frame_timestamps || [],
           joint_timestamps: result.joint_timestamps || [],
@@ -912,6 +940,7 @@ export function useRosServiceCaller() {
           action_timestamps: result.action_timestamps || [],
           action_names: result.action_names || [],
           action_values: result.action_values || [],
+          video_server_port: result.video_server_port || 8082,
           start_time: result.start_time || 0,
           end_time: result.end_time || 0,
           duration: result.duration || 0,

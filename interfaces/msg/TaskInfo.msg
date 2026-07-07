@@ -33,3 +33,15 @@ string inference_mode
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+
+# Action chunk request scheduling. "async" requests the next chunk while the
+# current buffer is still executing. "sync" waits until the buffer is empty.
+string action_request_mode
+
+# Policy acceleration mode. Empty and "pytorch" mean the normal model path.
+# "tensorrt_dit" enables GR00T DiT-only TensorRT acceleration when supported.
+string acceleration_mode
+
+# Optional TensorRT engine file/directory. Empty lets the backend pick the
+# model-local default, e.g. <model_path>/dit_model_bf16.trt for GR00T DiT-only.
+string acceleration_engine_path

@@ -40,6 +40,25 @@ const shortenTopic = (name) => {
   return '.../' + parts.slice(-2).join('/');
 };
 
+const formatRate = (value) => Number(value || 0).toFixed(1);
+
+const rowLabel = (topic) => {
+  return shortenTopic(topic.name);
+};
+
+const rowStatusTitle = (topic) => {
+  const statusText = topic.source === 'camera' && topic.timestampStatus === STATUS_STALLED
+    ? 'Timestamp skew'
+    : statusLabel[topic.status] || '?';
+  const lastText = topic.secondsSinceLast >= 0
+    ? `${topic.secondsSinceLast.toFixed(1)}s ago`
+    : 'never';
+  const cameraText = topic.source === 'camera'
+    ? `, timestamp ${topic.timestampStatus === STATUS_STALLED ? 'skew' : 'OK'}, skew ${(topic.timestampSkewS || 0).toFixed(3)}s`
+    : '';
+  return `${statusText} (baseline ${formatRate(topic.baselineHz)} Hz, last ${lastText}${cameraText})`;
+};
+
 export default function RecordTopicMonitor() {
   const monitor = useSelector((state) => state.tasks.recordingMonitor);
   const { sendRecordCommand } = useRosServiceCaller();
@@ -58,11 +77,16 @@ export default function RecordTopicMonitor() {
     }
   };
 
-  if (!monitor?.topics?.length) return null;
+  const rows = [
+    ...(monitor?.topics || []).map((topic) => ({ ...topic, source: topic.source || 'rosbag' })),
+    ...(monitor?.cameraTopics || []),
+  ];
 
-  const sorted = [...monitor.topics].sort((a, b) => b.status - a.status);
-  const problemCount = monitor.topics.filter((t) => t.status !== STATUS_OK).length;
-  const worstStatus = monitor.topics.reduce((max, t) => Math.max(max, t.status), STATUS_OK);
+  if (!rows.length) return null;
+
+  const sorted = [...rows].sort((a, b) => b.status - a.status);
+  const problemCount = rows.filter((t) => t.status !== STATUS_OK).length;
+  const worstStatus = rows.reduce((max, t) => Math.max(max, t.status), STATUS_OK);
   const overallColor = statusColor[worstStatus] || 'bg-green-500';
 
   return (
@@ -73,7 +97,7 @@ export default function RecordTopicMonitor() {
         <span className="text-xs text-gray-400 ml-auto">
           {problemCount > 0
             ? `${problemCount} issue(s)`
-            : `All ${monitor.topics.length} OK`}
+            : `All ${rows.length} OK`}
         </span>
         <button
           type="button"
@@ -98,12 +122,17 @@ export default function RecordTopicMonitor() {
         </thead>
         <tbody>
           {sorted.map((t) => (
-            <tr key={t.name} className="border-b border-gray-50 last:border-0">
-              <td className="py-1 truncate max-w-[160px]" title={t.name}>
-                {shortenTopic(t.name)}
+            <tr key={`${t.source}:${t.name}`} className="border-b border-gray-50 last:border-0">
+              <td
+                className="py-1 truncate max-w-[160px]"
+                title={t.source === 'camera' && t.cameraName
+                  ? `${t.name} (${t.cameraName})`
+                  : t.name}
+              >
+                {rowLabel(t)}
               </td>
               <td className="py-1 text-right font-mono text-gray-700">
-                {t.rateHz.toFixed(1)}
+                {formatRate(t.rateHz)}
               </td>
               <td className="py-1 text-center">
                 <span
@@ -111,7 +140,7 @@ export default function RecordTopicMonitor() {
                     'inline-block w-2.5 h-2.5 rounded-full',
                     statusColor[t.status] || 'bg-gray-300'
                   )}
-                  title={`${statusLabel[t.status] || '?'} (baseline ${t.baselineHz.toFixed(1)} Hz, last ${t.secondsSinceLast >= 0 ? t.secondsSinceLast.toFixed(1) + 's ago' : 'never'})`}
+                  title={rowStatusTitle(t)}
                 />
               </td>
             </tr>

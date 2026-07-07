@@ -35,9 +35,18 @@ class InferenceRequesterTests(unittest.TestCase):
         )
         requester = InferenceRequester(client)
 
-        requester.load_policy(type("Req", (), {"model_path": "/models/policy"})())
+        requester.load_policy(type("Req", (), {
+            "model_path": "/models/policy",
+            "acceleration_mode": "tensorrt_dit",
+            "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
+        })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
+        self.assertEqual(client.calls[0][0].acceleration_mode, "tensorrt_dit")
+        self.assertEqual(
+            client.calls[0][0].acceleration_engine_path,
+            "/models/policy/dit_model_bf16.trt",
+        )
 
     def test_load_policy_forwards_remote_endpoint_fields(self) -> None:
         client = FakeEngineClient(

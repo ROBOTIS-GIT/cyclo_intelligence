@@ -39,6 +39,8 @@ string task_instruction
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
+string acceleration_mode
+string acceleration_engine_path
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -63,6 +65,8 @@ class EngineCommandRequest:
     remote_host: str = ""
     remote_port: int = 0
     remote_timeout_ms: int = 0
+    acceleration_mode: str = ""
+    acceleration_engine_path: str = ""
 
 
 @dataclass
@@ -88,6 +92,10 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         remote_host=str(getattr(message, "remote_host", "") or ""),
         remote_port=int(getattr(message, "remote_port", 0) or 0),
         remote_timeout_ms=int(getattr(message, "remote_timeout_ms", 0) or 0),
+        acceleration_mode=str(getattr(message, "acceleration_mode", "") or ""),
+        acceleration_engine_path=str(
+            getattr(message, "acceleration_engine_path", "") or ""
+        ),
     )
 
 
@@ -131,6 +139,8 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "remote_host": str(request.remote_host),
         "remote_port": int(request.remote_port),
         "remote_timeout_ms": int(request.remote_timeout_ms),
+        "acceleration_mode": str(request.acceleration_mode),
+        "acceleration_engine_path": str(request.acceleration_engine_path),
     }
 
 

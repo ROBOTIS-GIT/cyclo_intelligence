@@ -39,6 +39,7 @@ def main() -> None:
         "triton",
         "torchcodec",
         "cv2",
+        "tensorrt",
         "zenoh",
         "gr00t",
     ):
