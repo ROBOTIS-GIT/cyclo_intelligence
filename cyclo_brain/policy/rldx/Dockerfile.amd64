@@ -81,6 +81,18 @@ ENV REFILL_STRATEGY=auto
 ENV GET_ACTION_TIMEOUT_S=5.0
 ENV PYTHONUNBUFFERED=1
 
+RUN { \
+    echo ""; \
+    echo "# Cyclo ROS/Zenoh runtime environment."; \
+    echo "# For a remote Zenoh router, comment the local line and uncomment the remote example."; \
+    echo "export ROS_DOMAIN_ID=30"; \
+    echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp"; \
+    echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'"; \
+    echo "# export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true;mode=\"client\";connect/endpoints=[\"tcp/192.168.60.139:7447\"]'"; \
+    } > /tmp/cyclo_bashrc && \
+    if [ -f /root/.bashrc ]; then cat /root/.bashrc >> /tmp/cyclo_bashrc; fi && \
+    mv /tmp/cyclo_bashrc /root/.bashrc
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD S6_SVSTAT=$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); \
         [ -n "$S6_SVSTAT" ] \

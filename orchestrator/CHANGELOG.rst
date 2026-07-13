@@ -2,6 +2,43 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.0 (2026-07-10)
+------------------
+* None
+
+1.1.5 (2026-07-07)
+------------------
+* Moved Cyclo rosbridge, replay data, and web video server defaults to the 7xxx port range to avoid physical_ai_tools conflicts.
+* Added environment-backed runtime port defaults for rosbridge and web video launch paths.
+* Updated Cyclo release metadata to 1.1.5.
+* Contributors: Taehyeong Kim
+
+1.1.4 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.4.
+* Contributors: Taehyeong Kim
+
+1.1.3 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.3.
+* Contributors: Taehyeong Kim
+
+1.1.2 (2026-07-06)
+------------------
+* Updated Cyclo release metadata to 1.1.2.
+* Contributors: Taehyeong Kim
+
+1.1.1 (2026-07-03)
+------------------
+* Updated Cyclo release metadata to 1.1.1.
+* Contributors: Taehyeong Kim
+
+1.1.0 (2026-07-01)
+------------------
+* Added support for the current robot type configurations across orchestrator runtime flows.
+* Fixed policy load lifecycle handling so stale loaded-policy state is cleared correctly.
+* Contributors: Taehyeong Kim
+
 1.0.0 (2026-06-29)
 ------------------
 * Updated Cyclo release metadata to 1.0.0.

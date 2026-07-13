@@ -117,13 +117,13 @@ const inferenceTaskInfoInitialState = {
   serviceType: 'lerobot',
   policyType: 'act',
   inferenceMode: 'simulation',
-  actionRequestMode: 'async',
-  accelerationMode: 'pytorch',
-  accelerationEnginePath: '',
   rldxRuntimeMode: 'client',
   remoteHost: '127.0.0.1',
   remotePort: 5555,
   remoteTimeoutMs: 300000,
+  actionRequestMode: 'async',
+  accelerationMode: 'pytorch',
+  accelerationEnginePath: '',
 };
 
 const stringArray = (items) => (
@@ -297,6 +297,18 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
+    rldxRuntimeMode: String(
+      taskInfo.rldxRuntimeMode ?? state.inferenceTaskInfo.rldxRuntimeMode ?? 'client'
+    ),
+    remoteHost: String(
+      taskInfo.remoteHost ?? state.inferenceTaskInfo.remoteHost ?? '127.0.0.1'
+    ),
+    remotePort: Number(
+      taskInfo.remotePort ?? state.inferenceTaskInfo.remotePort ?? 5555
+    ),
+    remoteTimeoutMs: Number(
+      taskInfo.remoteTimeoutMs ?? state.inferenceTaskInfo.remoteTimeoutMs ?? 300000
+    ),
     actionRequestMode:
       String(
         taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode ?? ''
@@ -309,13 +321,6 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     accelerationEnginePath: String(
       taskInfo.accelerationEnginePath ?? state.inferenceTaskInfo.accelerationEnginePath ?? ''
     ),
-    rldxRuntimeMode: String(
-      taskInfo.rldxRuntimeMode ?? state.inferenceTaskInfo.rldxRuntimeMode ?? 'client'
-    ),
-    remoteHost: String(taskInfo.remoteHost ?? state.inferenceTaskInfo.remoteHost ?? ''),
-    remotePort: taskInfo.remotePort ?? state.inferenceTaskInfo.remotePort ?? 0,
-    remoteTimeoutMs:
-      taskInfo.remoteTimeoutMs ?? state.inferenceTaskInfo.remoteTimeoutMs ?? 0,
   };
   syncLegacyTaskInfo(state, 'inference');
 };

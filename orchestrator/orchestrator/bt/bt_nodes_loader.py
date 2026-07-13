@@ -47,6 +47,9 @@ class LoaderContext:
         self.joint_names = loader.joint_names
         self.topic_config = loader.topic_config
         self.get_joint_names_for_group = loader._get_joint_names_for_group
+        self.get_topic_for_group = loader._get_topic_for_group
+        self.get_topic_type_for_group = loader._get_topic_type_for_group
+        self.get_joint_state_topics = loader._get_joint_state_topics
 
 
 class TreeLoader:
@@ -174,6 +177,34 @@ class TreeLoader:
 
         joint_order = self.topic_config['joint_order']
         return joint_order.get(group_name, [])
+
+    def _get_topic_for_group(self, group_name: str) -> str:
+        """Get topic name for a specific runtime group from topic_config."""
+        if not self.topic_config or 'topic_map' not in self.topic_config:
+            return ''
+        return self.topic_config['topic_map'].get(group_name, '')
+
+    def _get_topic_type_for_group(self, group_name: str) -> str:
+        """Get ROS message type for a specific runtime group."""
+        if not self.topic_config or 'topic_type_map' not in self.topic_config:
+            return ''
+        return self.topic_config['topic_type_map'].get(group_name, '')
+
+    def _get_joint_state_topics(self) -> list[str]:
+        """Return configured state topics publishing JointState messages."""
+        if not self.topic_config:
+            return []
+        topic_map = self.topic_config.get('topic_map', {})
+        topic_type_map = self.topic_config.get('topic_type_map', {})
+        topics = []
+        for group, topic in topic_map.items():
+            if (
+                group.startswith('follower_')
+                and topic_type_map.get(group) == 'sensor_msgs/msg/JointState'
+                and topic not in topics
+            ):
+                topics.append(topic)
+        return topics
 
     def _create_node(self, node_class, name: str, params: dict) -> BTNode:
         """Create a BT node using a class factory or generic ctor wiring."""

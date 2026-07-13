@@ -25,8 +25,17 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def generate_launch_description():
     pkg_dir = get_package_share_directory('orchestrator')
+    rosbridge_port = _env_int('CYCLO_ROSBRIDGE_PORT', '7090')
+    web_video_server_port = _env_int('CYCLO_WEB_VIDEO_SERVER_PORT', '7085')
 
     # Include orchestrator.launch.py
     orchestrator_launch = IncludeLaunchDescription(
@@ -47,6 +56,7 @@ def generate_launch_description():
             'unregister_timeout': 10.0,
             'default_call_service_timeout': 0.0,
             'call_services_in_new_thread': True,
+            'port': rosbridge_port,
         }],
     )
 
@@ -64,7 +74,7 @@ def generate_launch_description():
         executable='web_video_server',
         name='web_video_server',
         output='screen',
-        parameters=[{'port': 8085}]
+        parameters=[{'port': web_video_server_port}]
     )
 
     return LaunchDescription([

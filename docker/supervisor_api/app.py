@@ -25,13 +25,13 @@ Thin FastAPI layer sitting between the UI (via nginx /api/) and:
 Run as:
     uvicorn supervisor_api.app:app \
         --host "${CYCLO_SUPERVISOR_API_HOST:-127.0.0.1}" \
-        --port "${CYCLO_SUPERVISOR_API_PORT:-8100}"
+        --port "${CYCLO_SUPERVISOR_API_PORT:-7100}"
 
-nginx proxies /api/ → 127.0.0.1:8100 (Step 6-E).
+nginx proxies /api/ → 127.0.0.1:7100 (Step 6-E).
 
 Environment overrides:
     CYCLO_SUPERVISOR_API_HOST         bind host (default 127.0.0.1)
-    CYCLO_SUPERVISOR_API_PORT         bind port (default 8100)
+    CYCLO_SUPERVISOR_API_PORT         bind port (default 7100)
     CYCLO_SUPERVISOR_API_REPO_MOUNT   in-container path of the repo bind-mount
                                       (default /root/ros2_ws/src/cyclo_intelligence)
     CYCLO_SUPERVISOR_API_COMPOSE_FILE absolute path to docker-compose.yml inside
@@ -45,14 +45,17 @@ Environment overrides:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
+import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
 import docker
@@ -61,8 +64,54 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+# Tests load this file directly under the synthetic module name
+# ``supervisor_api_app``. Pin the package parent and load the navigation
+# router from the sibling file so route registration does not depend on
+# pytest's import path or module cache state.
+_PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PACKAGE_PARENT not in sys.path:
+    sys.path.insert(0, _PACKAGE_PARENT)
+
+_NAVIGATION_PATH = Path(__file__).resolve().with_name("navigation.py")
+_NAVIGATION_SPEC = importlib.util.spec_from_file_location(
+    "supervisor_api.navigation",
+    _NAVIGATION_PATH,
+)
+if _NAVIGATION_SPEC is None or _NAVIGATION_SPEC.loader is None:
+    raise ImportError(f"Cannot load navigation router from {_NAVIGATION_PATH}")
+_navigation_module = importlib.util.module_from_spec(_NAVIGATION_SPEC)
+sys.modules[_NAVIGATION_SPEC.name] = _navigation_module
+_NAVIGATION_SPEC.loader.exec_module(_navigation_module)
+navigation_router = _navigation_module.router
+
 
 logger = logging.getLogger("supervisor_api")
+
+
+def _include_router_with_eager_routes(fastapi_app, router) -> None:
+    """Register a router and keep concrete route paths visible.
+
+    FastAPI 0.139 stores included routers as lazy ``_IncludedRouter`` entries.
+    Runtime dispatch can still resolve them, but tests and simple health checks
+    that inspect ``app.routes`` do not see the concrete ``route.path`` values.
+    Keep the normal include call for older FastAPI releases, then expand the
+    router routes only when the concrete paths are absent.
+    """
+    fastapi_app.include_router(router)
+    expected_paths = {
+        route.path for route in router.routes if hasattr(route, "path")
+    }
+    registered_paths = {
+        route.path for route in fastapi_app.routes if hasattr(route, "path")
+    }
+    if expected_paths.issubset(registered_paths):
+        return
+
+    fastapi_app.router.routes = [
+        route for route in fastapi_app.router.routes
+        if getattr(route, "original_router", None) is not router
+    ]
+    fastapi_app.router.routes.extend(router.routes)
 
 
 # -- s6-rc runner --------------------------------------------------------------
@@ -76,6 +125,10 @@ _USER_SERVICES: tuple[str, ...] = (
     "bt_node",
     "web_video_server",
 )
+
+_BT_ROBOT_TYPE_FILE = "/run/cyclo_intelligence/bt_node_robot_type"
+_BT_SUPPORTED_ROBOT_TYPE = "ffw_sg2_rev1"
+_ROBOT_TYPE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 @dataclass
@@ -117,6 +170,33 @@ def _require_known_service(name: str) -> None:
         )
 
 
+def _validate_robot_type(robot_type: str) -> str:
+    normalized = robot_type.strip()
+    if not normalized:
+        raise HTTPException(400, "robot_type is required")
+    if not _ROBOT_TYPE_RE.fullmatch(normalized):
+        raise HTTPException(400, "robot_type contains unsupported characters")
+    return normalized
+
+
+def _validate_bt_robot_type(robot_type: str = "") -> str:
+    normalized = robot_type.strip() or _BT_SUPPORTED_ROBOT_TYPE
+    normalized = _validate_robot_type(normalized)
+    if normalized != _BT_SUPPORTED_ROBOT_TYPE:
+        raise HTTPException(
+            400,
+            "bt_node currently supports only "
+            f"{_BT_SUPPORTED_ROBOT_TYPE}",
+        )
+    return normalized
+
+
+def _write_bt_robot_type(robot_type: str) -> None:
+    os.makedirs(os.path.dirname(_BT_ROBOT_TYPE_FILE), exist_ok=True)
+    with open(_BT_ROBOT_TYPE_FILE, "w", encoding="utf-8") as f:
+        f.write(robot_type + "\n")
+
+
 # -- API models ----------------------------------------------------------------
 
 
@@ -137,6 +217,10 @@ class ActionResult(BaseModel):
     message: str
 
 
+class ServiceActionRequest(BaseModel):
+    robot_type: str = ""
+
+
 class HealthResponse(BaseModel):
     ok: bool
     container: str
@@ -153,7 +237,6 @@ class WorkspaceMountResponse(BaseModel):
 class BackendStatus(BaseModel):
     name: str
     image: str
-    arch: str = ""
     image_pulled: bool
     image_status: Literal["current", "stale", "missing"]
     container_state: Literal["running", "exited", "not_created", "unknown"]
@@ -233,13 +316,13 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
     "lerobot": {
         "service": "lerobot",
         "container": "lerobot_server",
-        "image": f"robotis/lerobot-zenoh:1.3.0-{_BACKEND_ARCH}",
+        "image": f"robotis/lerobot-zenoh:1.3.2-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
     "groot": {
         "service": "groot",
         "container": "groot_server",
-        "image": f"robotis/groot-zenoh:1.3.2-{_BACKEND_ARCH}",
+        "image": f"robotis/groot-zenoh:1.3.4-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
     "rldx": {
@@ -257,9 +340,32 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
 }
 
 _REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
-    "lerobot": ("/workspace",),
-    "groot": ("/workspace",),
-    "rldx": ("/workspace",),
+    "lerobot": (
+        "/workspace",
+        "/robot_client_sdk",
+        "/action_chunk_processing_sdk",
+        "/policy_runtime",
+        "/app/lerobot_engine",
+        "/orchestrator_config",
+    ),
+    "groot": (
+        "/workspace",
+        "/robot_client_sdk",
+        "/action_chunk_processing_sdk",
+        "/policy_runtime",
+        "/app/groot_engine",
+        "/app/runtime",
+        "/orchestrator_config",
+    ),
+    "rldx": (
+        "/workspace",
+        "/robot_client_sdk",
+        "/action_chunk_processing_sdk",
+        "/policy_runtime",
+        "/app/rldx_engine",
+        "/app/zmq_transport",
+        "/orchestrator_config",
+    ),
     "rldx-server": ("/opt/RLDX-1", "/model/rldx"),
 }
 
@@ -477,27 +583,31 @@ def _compose_env(overrides: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 def _resolve_rldx_model_host_path(model_path: str) -> str:
-    model = os.path.normpath((model_path or "").strip())
-    if not model:
+    raw_model = (model_path or "").strip()
+    if not raw_model:
         return ""
+    model = os.path.normpath(raw_model)
     if not os.path.isabs(model):
         raise HTTPException(
             400,
             "RLDX server model_path must be an absolute path visible from "
             f"Cyclo, e.g. {_RLDX_MODEL_ROOT}/my_model",
         )
-
-    if model == "/workspace" or model.startswith("/workspace" + os.sep):
-        workspace_dir = _host_workspace_dir()
-        if not workspace_dir:
-            raise HTTPException(
-                500,
-                "could not resolve host workspace path for RLDX model mount",
-            )
-        rel = os.path.relpath(model, "/workspace")
-        return os.path.normpath(os.path.join(workspace_dir, rel))
-
-    return model
+    if model != _RLDX_MODEL_ROOT and not model.startswith(
+        _RLDX_MODEL_ROOT + os.sep
+    ):
+        raise HTTPException(
+            400,
+            f"RLDX server model_path must be under {_RLDX_MODEL_ROOT}",
+        )
+    workspace_dir = _host_workspace_dir()
+    if not workspace_dir:
+        raise HTTPException(
+            500,
+            "could not resolve host workspace path for RLDX model mount",
+        )
+    rel = os.path.relpath(model, "/workspace")
+    return os.path.normpath(os.path.join(workspace_dir, rel))
 
 
 def _backend_compose_env(
@@ -550,7 +660,9 @@ def _container_raw_state(container) -> str:
     return container.attrs.get("State", {}).get("Status", "unknown")
 
 
-def _mapped_container_state(raw: str) -> Literal["running", "exited", "not_created", "unknown"]:
+def _mapped_container_state(
+    raw: str,
+) -> Literal["running", "exited", "not_created", "unknown"]:
     if raw == "running":
         return "running"
     if raw in ("exited", "dead", "created", "paused"):
@@ -566,60 +678,8 @@ _BACKEND_TRAFFIC_MARKERS: Dict[str, tuple[str, ...]] = {
         "get_action failed:",
         "load_policy failed:",
     ),
-    "rldx-server": (
-        "[RLDX-ZMQ]",
-        "[rldx_policy_server]",
-    ),
+    "rldx-server": ("[RLDX-ZMQ]", "[rldx_policy_server]"),
 }
-
-
-def _decode_backend_log_lines(raw: bytes | str, limit: int) -> List[str]:
-    if isinstance(raw, bytes):
-        text = raw.decode("utf-8", errors="replace")
-    else:
-        text = str(raw)
-    lines = [line.rstrip("\r") for line in text.splitlines()]
-    if limit > 0:
-        return lines[-limit:]
-    return lines
-
-
-def _container_started_since(container) -> Optional[int]:
-    started_at = container.attrs.get("State", {}).get("StartedAt", "")
-    if not started_at or started_at.startswith("0001-"):
-        return None
-    text = started_at.replace("Z", "+00:00")
-    if "." in text:
-        prefix, rest = text.split(".", 1)
-        fraction = rest
-        suffix = ""
-        for marker in ("+", "-"):
-            if marker in rest:
-                fraction, suffix = rest.split(marker, 1)
-                suffix = marker + suffix
-                break
-        text = f"{prefix}.{fraction[:6]:0<6}{suffix}"
-    try:
-        return int(datetime.fromisoformat(text).timestamp())
-    except ValueError:
-        return None
-
-
-def _filter_backend_log_lines(
-    name: str,
-    lines: List[str],
-    *,
-    traffic_only: bool,
-    limit: int,
-) -> List[str]:
-    if traffic_only:
-        markers = _BACKEND_TRAFFIC_MARKERS.get(name, ())
-        if markers:
-            lines = [
-                line for line in lines
-                if any(marker in line for marker in markers)
-            ]
-    return lines[-limit:] if limit > 0 else lines
 
 
 def _resolve_groot_trt_paths(
@@ -1019,9 +1079,7 @@ def _backend_service_statuses(
     service_names: List[str],
 ) -> List[ServiceStatus]:
     """Inspect the two s6-managed policy runtime processes."""
-    if not service_names:
-        return []
-    if raw_state != "running":
+    if raw_state != "running" or not service_names:
         return []
 
     services = " ".join(service_names)
@@ -1119,8 +1177,10 @@ def _parse_svstat(raw: str) -> dict:
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.0.0",
+    version="1.2.0",
 )
+
+_include_router_with_eager_routes(app, navigation_router)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -1185,8 +1245,16 @@ async def service_status(name: str) -> ServiceStatus:
 
 
 @app.post("/services/{name}/start", response_model=ActionResult)
-async def service_start(name: str) -> ActionResult:
+async def service_start(
+    name: str,
+    request: Optional[ServiceActionRequest] = None,
+) -> ActionResult:
     _require_known_service(name)
+    if name == "bt_node":
+        robot_type = _validate_bt_robot_type(
+            request.robot_type if request else ""
+        )
+        _write_bt_robot_type(robot_type)
     # s6-rc -u change <name> brings the service up (idempotent).
     result = await _run("s6-rc", "-u", "change", name)
     ok = result.rc == 0
@@ -1534,7 +1602,6 @@ async def backend_status(name: str) -> BackendStatus:
     return BackendStatus(
         name=name,
         image=spec["image"],
-        arch=_BACKEND_ARCH,
         image_pulled=pulled,
         image_status=image_status,
         container_state=container_state,
@@ -1563,28 +1630,24 @@ async def backend_logs(
 
         raw_state = _container_raw_state(ctr)
         read_tail = min(max(tail * 4, tail), 1000) if traffic_only else tail
-        log_kwargs = {
-            "stdout": True,
-            "stderr": True,
-            "tail": read_tail,
-            "timestamps": True,
-        }
-        since = _container_started_since(ctr)
-        if since is not None:
-            log_kwargs["since"] = since
         try:
-            raw_logs = ctr.logs(**log_kwargs)
+            raw_logs = ctr.logs(
+                stdout=True,
+                stderr=True,
+                tail=read_tail,
+                timestamps=True,
+            )
         except DockerException as e:
             raise HTTPException(500, f"docker logs failed: {e}")
-
-        decoded = _decode_backend_log_lines(raw_logs, read_tail)
-        lines = _filter_backend_log_lines(
-            name,
-            decoded,
-            traffic_only=traffic_only,
-            limit=tail,
-        )
-        return _mapped_container_state(raw_state), raw_state, lines
+        if isinstance(raw_logs, bytes):
+            text = raw_logs.decode("utf-8", errors="replace")
+        else:
+            text = str(raw_logs)
+        lines = [line.rstrip("\r") for line in text.splitlines()]
+        markers = _BACKEND_TRAFFIC_MARKERS.get(name, ())
+        if traffic_only and markers:
+            lines = [line for line in lines if any(marker in line for marker in markers)]
+        return _mapped_container_state(raw_state), raw_state, lines[-tail:]
 
     container_state, raw_state, lines = await asyncio.to_thread(_inspect)
     return BackendLogs(

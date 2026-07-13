@@ -38,13 +38,15 @@ from orchestrator.bt.controls.base_control import BaseControl
 # Bumped whenever the catalog schema changes shape (new required field, etc).
 # The UI compares this against its cached copy to decide whether to invalidate
 # localStorage. Bumping is cheap — just remember to do it.
-SCHEMA_VERSION = '1.1'
+SCHEMA_VERSION = '1.0'
 
 # Internal ctor kwargs that should never appear as XML ports. The loader
 # supplies these from runtime config (node handle, joint topology, etc).
 _INTERNAL_KWARGS = frozenset({
     'node',
     'name',
+    'groups',
+    'positions',
     'topic_config',
     'service_name',
     'head_joint_names',

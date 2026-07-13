@@ -1,113 +1,32 @@
 # Cyclo Intelligence
 
-Open-source full-stack Physical AI platform — data recording, conversion,
-training, inference, and robot execution in a single repository.
+Cyclo Intelligence is a Physical AI platform for data recording, dataset
+conversion, policy training, inference, and robot execution with AI Worker.
+For detailed usage instructions, please refer to the documentation below.
+  - [Documentation for AI Worker Imitation Learning](https://docs.robotis.com/docs/systems/aiworker/imitation_learning/)
 
-For detailed usage and tutorials, please refer to the documentation below.
-  - [Documentation for AI Worker](https://ai.robotis.com/)
-
-## Clone
-
-```bash
-git clone --recurse-submodules https://github.com/ROBOTIS-GIT/cyclo_intelligence.git
-cd cyclo_intelligence
-```
-
-### Updating an existing checkout
-
-After switching branches or pulling a new release, sync the pinned
-submodule commits from the repository root:
+To install Cyclo Intelligence:
 
 ```bash
-git pull --ff-only
-git submodule update --init --recursive
+curl -fsSL https://raw.githubusercontent.com/ROBOTIS-GIT/cyclo_intelligence/main/install.sh | bash
 ```
 
-## Folders at a glance
+On ROBOTIS robot PCs whose host name starts with `ffw`, the installer places
+the checkout under `/mnt/ssd/cyclo_intelligence` and bind-mounts it at
+`~/cyclo_intelligence`. On other PCs, it installs directly under
+`~/cyclo_intelligence`.
 
-| Folder | Role |
-| --- | --- |
-| [`shared/`](shared/) | Robot configs, IO helpers, logger |
-| [`cyclo_brain/`](cyclo_brain/) | Training + inference (per-backend containers under `policy/`) |
-| [`cyclo_data/`](cyclo_data/) | Data recording / conversion / hub upload (ROS2 node) |
-| [`orchestrator/`](orchestrator/) | Session state, UI, behaviour-tree control (ships React UI) |
-| [`interfaces/`](interfaces/) | ROS2 msg / srv definitions |
-| [`docker/`](docker/) | Unified compose, s6-services, Dockerfiles (arm64 / amd64) |
-| [`docs/`](docs/) | Architecture |
-
-## Prerequisites
-
-- Docker 24+ with the Compose plugin (`docker compose version`)
-- NVIDIA Container Toolkit configured as the default runtime
-  (`docker info | grep "Default Runtime: nvidia"`)
-- ~35 GB free disk for the three pre-built images
-- Ports 80, 8100, 9090 free on the host
-
-No Docker Hub login is required — the published images
-(`robotis/cyclo-intelligence`, `robotis/groot-zenoh`,
-`robotis/lerobot-zenoh`) are public and pulled anonymously by default.
-
-## Quick start (Jetson / ARM64 — same on AMD64)
-
-```bash
-docker/container.sh start          # pull + start unified image (no rebuild)
-docker/container.sh status         # check s6 service state
-# UI:          http://localhost/
-# control API: http://localhost/api/health
-docker/container.sh start-lerobot  # policy on demand (LOAD via UI)
-docker/container.sh start-groot    # policy on demand (LOAD via UI)
-docker/container.sh stop           # tear everything down
-```
-
-`docker/container.sh` auto-detects `uname -m`, so the same commands work on
-both Jetson and an AMD64 workstation. The default `start*` flow uses the
-pre-built image from Docker Hub. Pass `--build` to rebuild from local
-Dockerfile (only needed when iterating on Dockerfile changes).
-
-### Troubleshooting
-
-- **`personal access token is expired` on pull** — A previous `docker
-  login` left an expired token in `~/.docker/config.json`. Run
-  `docker logout` to clear it; the published images pull anonymously.
-- **`Default Runtime: runc` instead of `nvidia`** — Install the NVIDIA
-  Container Toolkit and set `nvidia` as the default runtime in
-  `/etc/docker/daemon.json`, then `sudo systemctl restart docker`.
-- **Use SSD storage on a robot** — containers always mount
-  `docker/workspace` and `docker/huggingface`. On robots with NVMe storage,
-  `docker/container.sh start` uses `/mnt/ssd/cyclo_intelligence` when that
-  path is writable by replacing those repo-local paths with symlinks. Existing
-  local-only files are migrated to SSD without overwriting files already on
-  SSD; any remaining local conflicts are preserved next to the original path.
-  Use
-  `CYCLO_STORAGE_MODE=ssd` to require SSD storage, or
-  `CYCLO_STORAGE_MODE=local` to keep repo-local directories.
-- **`/var/run/robotis/agent_sockets/...: permission denied`** —
-  `container.sh` will create this with `mkdir -p` (using `sudo` if
-  needed). If sudo prompts, grant once or pre-create the directory.
-
-## Architecture
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for runtime topology
-and data flow.
-
-## Submodules (pinned commit)
-
-- `cyclo_brain/sdk/zenoh_ros2_sdk/` ← [ROBOTIS-GIT/zenoh_ros2_sdk](https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk)
-- `cyclo_brain/policy/lerobot/lerobot/` ← [huggingface/lerobot](https://github.com/huggingface/lerobot)
-- `cyclo_brain/policy/groot/Isaac-GR00T/` ← [NVIDIA/Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T)
-
-These paths are pinned to exact commits by the parent repository. If a
-submodule directory is empty or stale, run
-`git submodule update --init --recursive` before building images.
-
-## Related
-
+To learn more about the ROS 2 packages for the AI Worker, visit:
   - [AI Worker ROS 2 Packages](https://github.com/ROBOTIS-GIT/ai_worker)
+
+To explore our open-source platforms in a simulation environment, visit:
   - [Simulation Models](https://github.com/ROBOTIS-GIT/robotis_mujoco_menagerie)
+
+For usage instructions and demonstrations of the AI Worker, check out:
   - [Tutorial Videos](https://www.youtube.com/@ROBOTISOpenSourceTeam)
+
+To access datasets and pre-trained models for our open-source platforms, see:
   - [AI Models & Datasets](https://huggingface.co/ROBOTIS)
-  - [Docker Images](https://hub.docker.com/r/robotis/ros/tags)
 
-## License
-
-Apache License 2.0 — see [`LICENSE`](LICENSE).
+To use Docker images for running Cyclo Intelligence, visit:
+  - [Docker Images](https://hub.docker.com/u/robotis)

@@ -50,6 +50,7 @@ import Viewer3DPanel from '../components/replay/Viewer3DPanel';
 import JointDataPanel from '../components/replay/JointDataPanel';
 import SidebarPanel from '../components/replay/SidebarPanel';
 import TimelineControls from '../components/replay/TimelineControls';
+import { CYCLO_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
 
 const rosbagNameCollator = new Intl.Collator(undefined, {
   numeric: true,
@@ -92,6 +93,8 @@ function ReplayPage({ isActive }) {
     isVideoLoaded,
     // Extended metadata
     robotType,
+    urdfPath,
+    endEffectorLinks,
     recordingDate,
     fileSizeBytes,
     segments: replaySegments,
@@ -133,11 +136,11 @@ function ReplayPage({ isActive }) {
   // MCAP direct streaming mode detection
   const isDirectMcapMode = isLoaded && hasRawImages && videoFiles.length === 0;
 
-  // MCAP frame player hook — serve via the video file server (port 8082),
+  // MCAP frame player hook — serve via the video file server,
   // not nginx, because only the video server has Range support + access to
   // the rosbag2 filesystem.
   const mcapUrl = isDirectMcapMode && bagPath && mcapFile && rosHost
-    ? `http://${rosHost}:${videoServerPort || 8082}${bagPath}/${mcapFile}`
+    ? `http://${rosHost}:${videoServerPort || CYCLO_VIDEO_SERVER_PORT}${bagPath}/${mcapFile}`
     : null;
 
   const mcapPlayer = useMcapFramePlayer({
@@ -1339,6 +1342,8 @@ function ReplayPage({ isActive }) {
                   actionTimestamps={actionTimestamps}
                   actionNames={actionNames}
                   actionValues={actionValues}
+                  urdfPath={urdfPath}
+                  endEffectorLinks={endEffectorLinks}
                   currentTime={currentTime}
                   isPlaying={isPlaying}
                   playbackSpeed={playbackSpeed}

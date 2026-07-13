@@ -1,47 +1,31 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
-
-// Single unified joint_states topic — carries all upper-body joints
-// (arm_l × 8, arm_r × 8, head × 2, lift × 1 = 19 joints) at 100 Hz.
-// Phase 4 yaml's observation.state.upper_body.topic. The legacy
-// cyclo_intelligence four-topic split (per-arm-controller) caused each
-// joint group to update at only ~7.5 Hz on the URDF (one global throttle
-// shared across four 100 Hz streams), which is why the 3D viewer used
-// to lag the real robot.
-const JOINT_STATE_TOPIC = {
-  name: '/joint_states',
-  type: 'sensor_msgs/msg/JointState',
-};
 
 const ACTION_CHUNK_TOPIC = {
   name: '/inference/trajectory_preview',
   type: 'trajectory_msgs/msg/JointTrajectory',
 };
 
-const ACTION_COMMAND_TOPICS = [
-  {
-    name: '/leader/joint_trajectory_command_broadcaster_left/joint_trajectory',
-    type: 'trajectory_msgs/msg/JointTrajectory',
-  },
-  {
-    name: '/leader/joint_trajectory_command_broadcaster_right/joint_trajectory',
-    type: 'trajectory_msgs/msg/JointTrajectory',
-  },
-  {
-    name: '/leader/joystick_controller_left/joint_trajectory',
-    type: 'trajectory_msgs/msg/JointTrajectory',
-  },
-  {
-    name: '/leader/joystick_controller_right/joint_trajectory',
-    type: 'trajectory_msgs/msg/JointTrajectory',
-  },
-];
-
 const DEFAULT_LIVE_UPDATE_HZ = 15;
 const MIN_THROTTLE_MS = 1;
 const TOPIC_QUEUE_LENGTH = 1;
+
+function normalizeTopics(topics, defaultType) {
+  if (!Array.isArray(topics)) return [];
+  return topics
+    .map((topic) => {
+      if (typeof topic === 'string') {
+        return { name: topic, type: defaultType };
+      }
+      return {
+        name: topic?.name || '',
+        type: topic?.type || defaultType,
+      };
+    })
+    .filter((topic) => topic.name && topic.type);
+}
 
 export default function useJointStateSubscription(
   setJointValues,
@@ -61,6 +45,20 @@ export default function useJointStateSubscription(
   const throttleMs = Math.max(MIN_THROTTLE_MS, Math.round(1000 / liveUpdateHz));
   const actionSubscriptionsEnabled =
     Boolean(options.enableActionPreview) && visualizationSource === 'action';
+  const stateTopics = useMemo(
+    () => normalizeTopics(
+      options.stateTopics,
+      'sensor_msgs/msg/JointState'
+    ),
+    [options.stateTopics]
+  );
+  const actionCommandTopics = useMemo(
+    () => normalizeTopics(
+      options.actionTopics,
+      'trajectory_msgs/msg/JointTrajectory'
+    ),
+    [options.actionTopics]
+  );
 
   const handleJointState = useCallback(
     (msg) => {
@@ -158,13 +156,15 @@ export default function useJointStateSubscription(
         if (cancelled || !ros) return;
 
         if (!actionSubscriptionsEnabled) {
-          subscribeTopic(ros, JOINT_STATE_TOPIC, handleJointState);
+          stateTopics.forEach((topic) => {
+            subscribeTopic(ros, topic, handleJointState);
+          });
         }
 
         if (actionSubscriptionsEnabled) {
           subscribeTopic(ros, ACTION_CHUNK_TOPIC, handleActionChunk);
 
-          ACTION_COMMAND_TOPICS.forEach((topic) => {
+          actionCommandTopics.forEach((topic) => {
             subscribeTopic(ros, topic, handleActionCommand);
           });
         }
@@ -196,6 +196,8 @@ export default function useJointStateSubscription(
     handleActionCommand,
     visualizationSource,
     actionSubscriptionsEnabled,
+    stateTopics,
+    actionCommandTopics,
     throttleMs,
   ]);
 }

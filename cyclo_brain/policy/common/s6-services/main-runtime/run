@@ -1,5 +1,21 @@
 #!/command/with-contenv bash
 # Main process — external service + robot-facing control loop.
 
+set -e
+
+exec bash -ic '
+set -e
+
+export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+export ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-transport/shared_memory/enabled=true}
+export ZENOH_SHM_ENABLED=${ZENOH_SHM_ENABLED:-true}
+export ZENOH_TRANSPORT_SHM_ENABLED=${ZENOH_TRANSPORT_SHM_ENABLED:-true}
+
+echo "[main-runtime] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+echo "[main-runtime] RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
+echo "[main-runtime] ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE}"
+
 export PYTHONPATH="/app:/policy_runtime:${ZENOH_SDK_PATH:-/zenoh_sdk}:${ROBOT_CLIENT_SDK_PATH:-/robot_client_sdk}:${ACTION_CHUNK_PROCESSING_SDK_PATH:-/action_chunk_processing_sdk}${PYTHONPATH:+:${PYTHONPATH}}"
 exec python3 -m main_runtime
+'

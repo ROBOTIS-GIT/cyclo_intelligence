@@ -14,7 +14,7 @@
 //
 // Author: Dongyun Kim
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
@@ -40,10 +40,7 @@ import { requiresInstruction } from '../constants/policyCapabilities';
 import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
-import {
-  getRuntimeValidationErrors,
-  shouldUseRemoteRuntime,
-} from '../utils/inferenceRuntime';
+import { getRuntimeValidationErrors } from '../utils/inferenceRuntime';
 
 const phaseGuideMessages = {
   [InferencePhase.READY]: 'Ready to start',
@@ -53,59 +50,15 @@ const phaseGuideMessages = {
 };
 
 const buildRequiredFields = (taskInfo) => {
-  const serviceType = taskInfo.serviceType;
-  const policyType = taskInfo.policyType;
-  const rldxRuntimeMode = String(taskInfo.rldxRuntimeMode || 'client')
-    .trim()
-    .toLowerCase();
-  const isRldxClientMode = serviceType === 'rldx' &&
-    rldxRuntimeMode === 'client';
-  const fields = isRldxClientMode
+  const { serviceType, policyType } = taskInfo;
+  const rldxRuntimeMode = String(taskInfo.rldxRuntimeMode || 'client').toLowerCase();
+  const fields = serviceType === 'rldx' && rldxRuntimeMode === 'client'
     ? []
     : [{ key: 'policyPath', label: 'Policy Path' }];
   if (requiresInstruction(serviceType, policyType)) {
     fields.unshift({ key: 'taskInstruction', label: 'Task Instruction' });
   }
   return fields;
-};
-
-const getTaskInfoValidation = (taskInfo) => {
-  const missingFields = [];
-  const fields = buildRequiredFields(taskInfo);
-  for (const field of fields) {
-    const value = taskInfo[field.key];
-    if (
-      value === null ||
-      value === undefined ||
-      value === '' ||
-      (typeof value === 'string' && value.trim() === '') ||
-      (Array.isArray(value) && value.length === 0) ||
-      (Array.isArray(value) && value.every((item) => item.trim() === ''))
-    ) {
-      missingFields.push(field.label);
-    }
-  }
-  missingFields.push(...getRuntimeValidationErrors(taskInfo));
-  return { isValid: missingFields.length === 0, missingFields };
-};
-
-const buildInferenceIdentity = (taskInfo) => {
-  const rldxRuntimeMode = String(taskInfo.rldxRuntimeMode || 'client')
-    .trim()
-    .toLowerCase();
-  const isRldxClientMode = taskInfo.serviceType === 'rldx' &&
-    rldxRuntimeMode === 'client';
-  if (shouldUseRemoteRuntime(taskInfo) && isRldxClientMode) {
-    return [
-      'rldx',
-      String(taskInfo.serviceType || ''),
-      String(taskInfo.policyType || ''),
-      String(taskInfo.remoteHost || ''),
-      String(taskInfo.remotePort || ''),
-      String(taskInfo.remoteTimeoutMs || ''),
-    ].join('|');
-  }
-  return String(taskInfo.policyPath || '').trim();
 };
 
 const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -136,7 +89,7 @@ export default function InferenceControlPanel() {
 
   const [hovered, setHovered] = useState(null);
   const [pressed, setPressed] = useState(null);
-  const [lastInferenceIdentity, setLastInferenceIdentity] = useState('');
+  const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
@@ -150,8 +103,7 @@ export default function InferenceControlPanel() {
   const isLoading = phase === InferencePhase.LOADING;
   const isInferencing = phase === InferencePhase.INFERENCING;
   const isPaused = phase === InferencePhase.PAUSED;
-  const isRldxServerOnlyMode =
-    taskInfo.serviceType === 'rldx' &&
+  const isRldxServerOnlyMode = taskInfo.serviceType === 'rldx' &&
     String(taskInfo.rldxRuntimeMode || 'client').toLowerCase() === 'server';
   const inferencePhaseRef = useRef(phase);
   const isModelLoaded = isInferencing || isPaused;
@@ -164,14 +116,9 @@ export default function InferenceControlPanel() {
     enabled: shouldCheckBackend && !isRldxServerOnlyMode,
     intervalMs: 2000,
   });
-  const backendReadinessOptions = useMemo(() => ({
-    minMainUptimeS: taskInfo.serviceType === 'rldx' ? 5 : undefined,
-  }), [taskInfo.serviceType]);
 
-  const isBackendStartBlocked =
-    !isRldxServerOnlyMode &&
-    shouldCheckBackend &&
-    !backendReadiness.ready;
+  const isBackendStartBlocked = !isRldxServerOnlyMode &&
+    shouldCheckBackend && !backendReadiness.ready;
   const isBackendWarming = isBackendStartBlocked &&
     (backendReadiness.state === 'checking' || backendReadiness.state === 'warming');
 
@@ -200,20 +147,25 @@ export default function InferenceControlPanel() {
     return () => clearInterval(id);
   }, [isLoading, isInferencing, isBackendWarming]);
 
-  const startValidation = useMemo(
-    () => getTaskInfoValidation(taskInfo),
-    [taskInfo]
-  );
-  const validationMessage = startValidation.isValid
-    ? ''
-    : `Fill required fields: ${startValidation.missingFields.join(', ')}`;
-  const inferenceIdentity = useMemo(
-    () => buildInferenceIdentity(taskInfo),
-    [taskInfo]
-  );
-  const isResumeAction = isPaused && inferenceIdentity === lastInferenceIdentity;
-
-  const validateTaskInfo = useCallback(() => startValidation, [startValidation]);
+  const validateTaskInfo = useCallback(() => {
+    const missingFields = [];
+    const fields = buildRequiredFields(taskInfo);
+    for (const field of fields) {
+      const value = taskInfo[field.key];
+      if (
+        value === null ||
+        value === undefined ||
+        value === '' ||
+        (typeof value === 'string' && value.trim() === '') ||
+        (Array.isArray(value) && value.length === 0) ||
+        (Array.isArray(value) && value.every((item) => item.trim() === ''))
+      ) {
+        missingFields.push(field.label);
+      }
+    }
+    missingFields.push(...getRuntimeValidationErrors(taskInfo));
+    return { isValid: missingFields.length === 0, missingFields };
+  }, [taskInfo]);
 
   const ensureTensorRtReady = useCallback(async () => {
     if (
@@ -253,8 +205,6 @@ export default function InferenceControlPanel() {
 
   const executeCommand = useCallback(
     async (commandName, commandString, options = {}) => {
-      const toastId = `inference-command-${commandString}`;
-      toast.loading(`${commandName}...`, { id: toastId });
       const isStartTimeoutDuringLoading = (message = '') => (
         commandString === 'start_inference' &&
         String(message).toLowerCase().includes('timeout') &&
@@ -265,30 +215,18 @@ export default function InferenceControlPanel() {
         const result = await sendRecordCommand(commandString, options);
         if (result && result.success === false) {
           if (isStartTimeoutDuringLoading(result.message)) {
-            toast('Model loading is still running. Large downloads can take several minutes.', {
-              id: toastId,
-              duration: 3500,
-            });
+            toast('Model loading is still running. Large downloads can take several minutes.');
             return result;
           }
-          toast.error(`Command failed: ${result.message || 'Unknown error'}`, {
-            id: toastId,
-            duration: 5000,
-          });
+          toast.error(`Command failed: ${result.message || 'Unknown error'}`);
           // Backend may have left phase in LOADING/INFERENCING after a failed
           // setup; force the local phase back to READY so the panel becomes
           // editable and the user can retry.
           dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
         } else if (result && result.success === true) {
-          toast.success(`${commandName} executed successfully`, {
-            id: toastId,
-            duration: 1800,
-          });
+          toast.success(`${commandName} executed successfully`);
         } else {
-          toast.error(`${commandName} completed with uncertain status`, {
-            id: toastId,
-            duration: 5000,
-          });
+          toast.error(`${commandName} completed with uncertain status`);
           dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
         }
         return result;
@@ -298,29 +236,17 @@ export default function InferenceControlPanel() {
           errorMessage.includes('ROS connection failed') ||
           errorMessage.includes('WebSocket')
         ) {
-          toast.error(`ROS connection failed: rosbridge server is not running (${rosHost})`, {
-            id: toastId,
-            duration: 5000,
-          });
+          toast.error(`ROS connection failed: rosbridge server is not running (${rosHost})`);
         } else if (isStartTimeoutDuringLoading(errorMessage)) {
-          toast('Model loading is still running. Large downloads can take several minutes.', {
-            id: toastId,
-            duration: 3500,
-          });
+          toast('Model loading is still running. Large downloads can take several minutes.');
           return {
             success: true,
             message: 'Model loading is still running',
           };
         } else if (errorMessage.includes('timeout')) {
-          toast.error(`Command timeout [${commandName}]: Server did not respond`, {
-            id: toastId,
-            duration: 5000,
-          });
+          toast.error(`Command timeout [${commandName}]: Server did not respond`);
         } else {
-          toast.error(`Command failed [${commandName}]: ${errorMessage}`, {
-            id: toastId,
-            duration: 5000,
-          });
+          toast.error(`Command failed [${commandName}]: ${errorMessage}`);
         }
         // Same reasoning as the success===false branch above.
         dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
@@ -332,27 +258,36 @@ export default function InferenceControlPanel() {
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {
     if (!intent) return;
-    if (intent.identity) {
-      setLastInferenceIdentity(intent.identity);
+    if (intent.policyPath) {
+      setLastPolicyPath(intent.policyPath);
     }
     await executeCommand(intent.commandName, intent.commandString, {
       inferenceMode,
     });
   }, [executeCommand]);
 
-  const handleBlockedControl = useCallback((label, description) => {
-    console.warn('Inference control blocked:', label, description);
-    toast(description || `${label} is not available`, {
-      id: `inference-control-blocked-${label}`,
-      duration: 2200,
-    });
-  }, []);
+  const inferenceIdentity = taskInfo.serviceType === 'rldx'
+    ? [
+      taskInfo.serviceType,
+      taskInfo.rldxRuntimeMode || 'client',
+      taskInfo.policyPath || '',
+      taskInfo.remoteHost || '',
+      taskInfo.remotePort || '',
+      taskInfo.remoteTimeoutMs || '',
+    ].join('|')
+    : taskInfo.policyPath;
 
   const handleStart = useCallback(async () => {
     let readiness = backendReadiness;
+    if (isRldxServerOnlyMode) {
+      toast.error('RLDX Server mode does not run robot-side inference. Use Client or Local mode.');
+      return;
+    }
     if (!readiness.ready) {
       const refreshedStatus = await refreshBackendStatus({ quiet: true });
-      readiness = getPolicyBackendReadiness(refreshedStatus, backendReadinessOptions);
+      readiness = getPolicyBackendReadiness(refreshedStatus, {
+        minMainUptimeS: taskInfo.serviceType === 'rldx' ? 5 : undefined,
+      });
     }
     if (!readiness.ready) {
       const message = readiness.message || 'Policy backend is not ready yet';
@@ -365,24 +300,22 @@ export default function InferenceControlPanel() {
     }
 
     let startIntent;
-    if (isResumeAction) {
+    if (isPaused && inferenceIdentity === lastPolicyPath) {
       startIntent = {
         commandName: 'Resume',
         commandString: 'resume_inference',
-        identity: inferenceIdentity,
+        policyPath: '',
       };
     } else {
       const validation = validateTaskInfo();
       if (!validation.isValid) {
-        const message = `Missing required fields: ${validation.missingFields.join(', ')}`;
-        console.warn('Inference start blocked:', message);
-        toast.error(message, { duration: 3500 });
+        toast.error(`Missing required fields: ${validation.missingFields.join(', ')}`);
         return;
       }
       startIntent = {
         commandName: 'Start Inference',
         commandString: 'start_inference',
-        identity: inferenceIdentity,
+        policyPath: inferenceIdentity,
       };
     }
 
@@ -402,12 +335,15 @@ export default function InferenceControlPanel() {
     await executeStartIntent(startIntent, 'simulation');
   }, [
     backendReadiness,
-    backendReadinessOptions,
     refreshBackendStatus,
-    taskInfo.inferenceMode,
-    executeStartIntent,
-    isResumeAction,
+    isRldxServerOnlyMode,
+    isPaused,
     inferenceIdentity,
+    taskInfo.serviceType,
+    taskInfo.policyPath,
+    taskInfo.inferenceMode,
+    lastPolicyPath,
+    executeStartIntent,
     ensureTensorRtReady,
     validateTaskInfo,
   ]);
@@ -436,62 +372,22 @@ export default function InferenceControlPanel() {
 
   const handleClear = useCallback(async () => {
     await executeCommand('Clear', 'finish');
-    setLastInferenceIdentity('');
+    setLastPolicyPath('');
   }, [executeCommand]);
 
-  const isValidationStartBlocked = shouldCheckBackend &&
-    backendReadiness.ready &&
-    !isResumeAction &&
-    !startValidation.isValid;
-  const startDisabledReason = (() => {
-    if (isRldxServerOnlyMode) {
-      return 'RLDX Server Mode only exposes the ZMQ server. Switch Runtime Role to Client or Local to start robot-side inference.';
-    }
-    if (isLoading) {
-      return 'Model is loading. Wait until loading completes, or use Clear to cancel and unload.';
-    }
-    if (isInferencing) {
-      return 'Inference is already running. Use Stop to pause or Clear to unload.';
-    }
-    if (!shouldCheckBackend) {
-      return 'Start is only available from Ready or Paused state.';
-    }
-    if (isBackendStartBlocked) {
-      return backendReadiness.message || 'Policy backend is not ready yet.';
-    }
-    return '';
-  })();
-  const stopDisabledReason = (() => {
-    if (isLoading) return 'Model is still loading. Use Clear to cancel loading.';
-    if (isPaused) return 'Inference is already paused. Use Start to resume or Clear to unload.';
-    if (isIdle) return 'No active inference session to stop.';
-    return 'Stop is available only while inferencing.';
-  })();
-  const clearDisabledReason = (() => {
-    if (isIdle) return 'No loaded inference session to clear.';
-    return 'Clear is available while loading, inferencing, or paused.';
-  })();
-  const startEnabled =
-    !isRldxServerOnlyMode &&
-    shouldCheckBackend &&
-    backendReadiness.ready;
+  const startEnabled = !isRldxServerOnlyMode &&
+    shouldCheckBackend && backendReadiness.ready;
   const stopEnabled = isInferencing;
-  const clearEnabled = isModelLoaded || isLoading;
-  const startDescription = startDisabledReason
-    ? startDisabledReason
+  const clearEnabled = isModelLoaded;
+  const startDescription = isRldxServerOnlyMode
+    ? 'Use Client or Local mode for robot-side inference'
     : isBackendStartBlocked
     ? backendReadiness.message
-    : isValidationStartBlocked
-      ? validationMessage
     : isPaused
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = isRldxServerOnlyMode
-    ? 'RLDX Server Mode'
-    : isBackendStartBlocked
+  const guideMessage = isBackendStartBlocked
     ? backendReadiness.message
-    : isValidationStartBlocked
-      ? validationMessage
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner = isInferencing || isLoading || isBackendWarming;
 
@@ -605,9 +501,7 @@ export default function InferenceControlPanel() {
       color: '#f57c00',
       enabled: stopEnabled,
       handler: handleStop,
-      description: stopEnabled
-        ? 'Pause inference (model stays loaded)'
-        : stopDisabledReason,
+      description: 'Pause inference (model stays loaded)',
       shortcut: 'Ctrl+Shift+S',
     },
     {
@@ -616,9 +510,7 @@ export default function InferenceControlPanel() {
       color: '#d32f2f',
       enabled: clearEnabled,
       handler: handleClear,
-      description: clearEnabled
-        ? 'Stop inference and unload model'
-        : clearDisabledReason,
+      description: 'Stop inference and unload model',
       shortcut: 'Escape',
     },
   ];
@@ -630,25 +522,12 @@ export default function InferenceControlPanel() {
         <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
         {controlButtons.map(({ label, icon: Icon, color, enabled, handler, description, shortcut }) => {
           const isDisabled = !enabled;
-          const actionLabel = label === 'Start'
-            ? (isResumeAction ? 'Resume inference' : 'Start inference')
-            : label === 'Stop'
-              ? 'Stop inference'
-              : 'Clear inference';
-          const enabledAriaLabel = description.toLowerCase() === actionLabel.toLowerCase()
-            ? actionLabel
-            : `${actionLabel}: ${description}`;
           return (
             <Tooltip
               key={label}
               position="bottom"
               content={
                 <div className="text-center">
-                  {isDisabled && (
-                    <div className="text-[11px] uppercase tracking-wide text-yellow-300">
-                      Disabled
-                    </div>
-                  )}
                   <div className="font-semibold">{description}</div>
                   {!isDisabled && (
                     <div className="text-sm mt-1 text-gray-300">
@@ -661,31 +540,14 @@ export default function InferenceControlPanel() {
               className="relative h-full shrink-0"
             >
               <button
-                type="button"
                 className={classBtn(label, isDisabled)}
-                onClick={() => (
-                  isDisabled
-                    ? handleBlockedControl(label, description)
-                    : handler()
-                )}
-                onPointerUp={(event) => {
-                  if (event.pointerType === 'mouse') return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  if (isDisabled) {
-                    handleBlockedControl(label, description);
-                  } else {
-                    handler();
-                  }
-                }}
+                onClick={() => !isDisabled && handler()}
                 onMouseEnter={() => !isDisabled && setHovered(label)}
                 onMouseLeave={() => { setHovered(null); setPressed(null); }}
                 onMouseDown={() => !isDisabled && setPressed(label)}
                 onMouseUp={() => setPressed(null)}
-                aria-disabled={isDisabled}
-                aria-label={isDisabled
-                  ? `${label} disabled: ${description}`
-                  : enabledAriaLabel}
+                disabled={isDisabled}
+                aria-label={description}
               >
                 <Icon
                   style={{ fontSize: '1.1rem' }}

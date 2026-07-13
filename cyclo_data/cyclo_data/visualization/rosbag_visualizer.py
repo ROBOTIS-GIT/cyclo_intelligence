@@ -270,15 +270,15 @@ class RosbagVisualizer:
                 elif 'compressed' in topic:
                     return f'{cam_name}/compressed'
 
-        # Joint topics: /robot/arm_left_follower/joint_states -> arm_left_follower
+        # Joint topics with follower/leader in the namespace use that segment.
         if 'joint_states' in topic:
             for part in parts:
                 if 'follower' in part or 'leader' in part:
                     return part
 
-        # TF, odom, cmd_vel - return as is
-        if topic in ['/tf', '/odom', '/cmd_vel']:
-            return topic.lstrip('/')
+        basename = topic.rstrip('/').split('/')[-1]
+        if topic == '/tf' or basename in ('odom', 'cmd_vel'):
+            return basename
 
         # Default: return last meaningful part
         if len(parts) > 1:
@@ -735,13 +735,24 @@ class RosbagVisualizer:
             print('No joint state data found. Re-loading with joint data...')
             self._reload_joint_data()
 
-        # Define follower-leader pairs
-        joint_pairs = [
-            ('/robot/arm_left_follower/joint_states', '/robot/arm_left_leader/joint_states'),
-            ('/robot/arm_right_follower/joint_states', '/robot/arm_right_leader/joint_states'),
-            ('/robot/head_follower/joint_states', '/robot/head_leader/joint_states'),
-            ('/robot/lift_follower/joint_states', '/robot/lift_leader/joint_states'),
-        ]
+        joint_pairs = []
+        available_topics = set(self.joint_data.keys())
+        for follower_topic in sorted(available_topics):
+            if 'follower' not in follower_topic:
+                continue
+            leader_candidates = [
+                follower_topic.replace('_follower', '_leader'),
+                follower_topic.replace('/follower', '/leader'),
+                follower_topic.replace('follower', 'leader'),
+            ]
+            for leader_topic in leader_candidates:
+                if leader_topic in available_topics:
+                    joint_pairs.append((follower_topic, leader_topic))
+                    break
+
+        if not joint_pairs:
+            print('No follower/leader joint topic pairs found')
+            return []
 
         saved_paths = []
         base_dir = Path(self.output_dir)
@@ -784,8 +795,11 @@ class RosbagVisualizer:
             if n_joints == 1:
                 axes = [axes]
 
-            # Get pair name for title
-            pair_name = follower_topic.split('/')[2].replace('_follower', '')
+            pair_name = (
+                follower_topic.strip('/')
+                .replace('/', '_')
+                .replace('_follower', '')
+            )
 
             for idx, joint_name in enumerate(joint_names):
                 ax = axes[idx]

@@ -1,6 +1,8 @@
 import {
+  buildRuntimeRequestFields,
   formatZmqEndpoint,
   getBackendArch,
+  getRuntimeValidationErrors,
   isArmBackend,
   parseZmqEndpoint,
 } from './inferenceRuntime';
@@ -67,5 +69,41 @@ describe('ZMQ endpoint helpers', () => {
       hasPort: false,
       isValidPort: true,
     });
+  });
+});
+
+describe('RLDX runtime request fields', () => {
+  it('uses remote defaults for client mode', () => {
+    expect(buildRuntimeRequestFields({
+      serviceType: 'rldx',
+      rldxRuntimeMode: 'client',
+    })).toEqual({
+      remote_host: '127.0.0.1',
+      remote_port: 5555,
+      remote_timeout_ms: 300000,
+    });
+  });
+
+  it('clears remote fields for server-only mode', () => {
+    expect(buildRuntimeRequestFields({
+      serviceType: 'rldx',
+      rldxRuntimeMode: 'server',
+      remoteHost: '10.0.0.2',
+      remotePort: 6000,
+    })).toEqual({
+      remote_host: '',
+      remote_port: 0,
+      remote_timeout_ms: 0,
+    });
+  });
+
+  it('rejects invalid explicit endpoint values', () => {
+    expect(getRuntimeValidationErrors({
+      serviceType: 'rldx',
+      rldxRuntimeMode: 'client',
+      remoteHost: '10.0.0.2',
+      remotePort: 70000,
+      remoteTimeoutMs: -1,
+    })).toEqual(['ZMQ Endpoint port', 'Timeout ms']);
   });
 });

@@ -466,13 +466,7 @@ class MetadataManager:
             action_topics = config["action_topics"]
             return [action_topics[k] for k in sorted(action_topics.keys())]
 
-        # Default order if no config available
-        return [
-            "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory",
-            "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory",
-            "/leader/joystick_controller_left/joint_trajectory",
-            "/leader/joystick_controller_right/joint_trajectory",
-        ]
+        return []
 
     def is_action_topic(self, topic: str, bag_path: Path) -> bool:
         """

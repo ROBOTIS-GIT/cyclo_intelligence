@@ -320,7 +320,7 @@ npm run build
 ---
 
 ## Notes
-- rosbridge WebSocket port: 9090 (default)
+- rosbridge WebSocket port: 7090 (default)
 - Camera images subscribe to ROS2 CompressedImage topics
 - Auto page transition during training
 - Recording/inference/training pages blocked if robot type not selected

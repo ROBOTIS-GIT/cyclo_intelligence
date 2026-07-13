@@ -14,7 +14,6 @@ import {
   selectInferenceTaskInfo,
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
-import { withRuntimeDefaults } from '../utils/inferenceRuntime';
 
 // Inference models. Each option pairs a backend (orchestrator routing
 // via TaskInfo.service_type) with a policy class (drives instruction
@@ -90,18 +89,18 @@ const InferenceModelSelector = ({ readonly = false }) => {
   const handleChange = (e) => {
     const sel = AVAILABLE_MODEL_OPTIONS.find((o) => o.value === e.target.value);
     if (!sel) return;
-    const nextInfo = {
-      ...info,
-      serviceType: sel.serviceType,
-      policyType: sel.policyType,
-      accelerationMode: sel.serviceType === 'groot'
-        ? (info.accelerationMode || 'pytorch')
-        : 'pytorch',
-      accelerationEnginePath: sel.serviceType === 'groot'
-        ? (info.accelerationEnginePath || '')
-        : '',
-    };
-    dispatch(setInferenceTaskInfo(withRuntimeDefaults(nextInfo)));
+    dispatch(
+      setInferenceTaskInfo({
+        serviceType: sel.serviceType,
+        policyType: sel.policyType,
+        accelerationMode: sel.serviceType === 'groot'
+          ? (info.accelerationMode || 'pytorch')
+          : 'pytorch',
+        accelerationEnginePath: sel.serviceType === 'groot'
+          ? (info.accelerationEnginePath || '')
+          : '',
+      })
+    );
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
   };
 

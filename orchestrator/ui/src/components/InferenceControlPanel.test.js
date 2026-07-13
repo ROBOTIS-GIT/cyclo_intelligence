@@ -10,7 +10,6 @@ import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 jest.mock('react-hot-toast', () => {
   const toast = jest.fn();
-  toast.loading = jest.fn();
   toast.error = jest.fn();
   toast.success = jest.fn();
   toast.dismiss = jest.fn();
@@ -167,10 +166,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(toast).toHaveBeenCalledWith(
-        'Model loading is still running. Large downloads can take several minutes.',
-        expect.objectContaining({
-          id: 'inference-command-start_inference',
-        })
+        'Model loading is still running. Large downloads can take several minutes.'
       );
     });
     expect(toast.error).not.toHaveBeenCalledWith(
@@ -178,26 +174,6 @@ describe('InferenceControlPanel deploy safety', () => {
     );
     expect(store.getState().tasks.inferenceStatus.inferencePhase)
       .toBe(InferencePhase.LOADING);
-  });
-
-  test('explains why Start is disabled while loading', () => {
-    renderPanel({
-      inferenceMode: 'simulation',
-      inferencePhase: InferencePhase.LOADING,
-    });
-
-    const startButton = screen.getByRole('button', {
-      name: /Start disabled: Model is loading/i,
-    });
-
-    fireEvent.click(startButton);
-
-    expect(toast).toHaveBeenCalledWith(
-      'Model is loading. Wait until loading completes, or use Clear to cancel and unload.',
-      expect.objectContaining({
-        id: 'inference-control-blocked-Start',
-      })
-    );
   });
 
   test('does not expose recording controls on the inference panel', async () => {
@@ -231,10 +207,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
 
     await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith(
-        'Missing required fields: Task Instruction',
-        expect.objectContaining({ duration: 3500 })
-      );
+      expect(toast.error).toHaveBeenCalledWith('Missing required fields: Task Instruction');
       expect(sendRecordCommand).not.toHaveBeenCalled();
     });
   });

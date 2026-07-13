@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import URDFLoader from 'urdf-loader';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 
-const EE_LINKS = ['end_effector_l_link', 'end_effector_r_link'];
 const ROS_TO_THREE = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
 
 function createFkSolver(robot) {
@@ -29,12 +28,19 @@ function createFkSolver(robot) {
   return solver;
 }
 
-export default function useUrdfRobot(urdfPath) {
+export default function useUrdfRobot(urdfPath, endEffectorLinks = []) {
   const [robot, setRobot] = useState(null);
   const [loading, setLoading] = useState(!!urdfPath);
   const [error, setError] = useState(null);
   const robotRef = useRef(null);
   const fkSolverRef = useRef(null);
+  const eeLinksRef = useRef([]);
+
+  useEffect(() => {
+    eeLinksRef.current = Array.isArray(endEffectorLinks)
+      ? endEffectorLinks.filter(Boolean)
+      : [];
+  }, [endEffectorLinks]);
 
   const loadRobot = useCallback(() => {
     if (!urdfPath) {
@@ -51,6 +57,7 @@ export default function useUrdfRobot(urdfPath) {
 
     loader.packages = {
       'ffw_description': '/urdf/ffw_description',
+      'open_manipulator_description': '/urdf/open_manipulator_description',
     };
 
     const makeFallback = (color = 0x888888) => new THREE.Mesh(
@@ -196,7 +203,12 @@ export default function useUrdfRobot(urdfPath) {
     const fk = fkSolverRef.current;
     const r = robotRef.current;
     if (!fk || !r || !trajectoryData?.names || !trajectoryData?.points?.length) {
-      return { left: [], right: [] };
+      return [];
+    }
+
+    const eeLinks = eeLinksRef.current;
+    if (eeLinks.length === 0) {
+      return [];
     }
 
     Object.keys(r.joints).forEach((name) => {
@@ -210,17 +222,18 @@ export default function useUrdfRobot(urdfPath) {
 
     const eeObjects = {};
     fk.traverse((child) => {
-      if (EE_LINKS.includes(child.name)) {
+      if (eeLinks.includes(child.name)) {
         eeObjects[child.name] = child;
       }
     });
 
-    if (!eeObjects[EE_LINKS[0]] && !eeObjects[EE_LINKS[1]]) {
-      return { left: [], right: [] };
+    if (!eeLinks.some((link) => eeObjects[link])) {
+      return [];
     }
 
-    const leftPath = [];
-    const rightPath = [];
+    const pathsByLink = new Map(
+      eeLinks.map((link) => [link, []])
+    );
     const localPos = new THREE.Vector3();
 
     for (const positions of trajectoryData.points) {
@@ -232,18 +245,30 @@ export default function useUrdfRobot(urdfPath) {
 
       fk.updateMatrixWorld(true);
 
-      if (eeObjects[EE_LINKS[0]]) {
-        eeObjects[EE_LINKS[0]].getWorldPosition(localPos);
-        leftPath.push(localPos.clone().applyMatrix4(ROS_TO_THREE));
-      }
-      if (eeObjects[EE_LINKS[1]]) {
-        eeObjects[EE_LINKS[1]].getWorldPosition(localPos);
-        rightPath.push(localPos.clone().applyMatrix4(ROS_TO_THREE));
-      }
+      eeLinks.forEach((link) => {
+        if (eeObjects[link]) {
+          eeObjects[link].getWorldPosition(localPos);
+          pathsByLink.get(link).push(
+            localPos.clone().applyMatrix4(ROS_TO_THREE)
+          );
+        }
+      });
     }
 
-    return { left: leftPath, right: rightPath };
+    return eeLinks
+      .map((link) => ({
+        name: link,
+        points: pathsByLink.get(link) || [],
+      }))
+      .filter((path) => path.points.length > 0);
   }, []);
 
-  return { robot, loading, error, setJointValues, computeTrajectoryPaths, reload: loadRobot };
+  return {
+    robot,
+    loading,
+    error,
+    setJointValues,
+    computeTrajectoryPaths,
+    reload: loadRobot,
+  };
 }

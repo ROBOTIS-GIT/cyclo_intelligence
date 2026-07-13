@@ -4,7 +4,28 @@
 set -e
 
 SERVICE_NAME="bt_node"
-ROS2_COMMAND="ros2 launch orchestrator bt_node.launch.py"
+BT_ROBOT_TYPE_FILE="/run/cyclo_intelligence/bt_node_robot_type"
+BT_SUPPORTED_ROBOT_TYPE="ffw_sg2_rev1"
+
+if [ -s "$BT_ROBOT_TYPE_FILE" ]; then
+    BT_ROBOT_TYPE="$(tr -d '[:space:]' < "$BT_ROBOT_TYPE_FILE")"
+else
+    BT_ROBOT_TYPE="$BT_SUPPORTED_ROBOT_TYPE"
+fi
+
+case "$BT_ROBOT_TYPE" in
+    ""|*[!A-Za-z0-9_.-]*)
+        echo "Error: invalid bt_node robot_type: $BT_ROBOT_TYPE" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$BT_ROBOT_TYPE" != "$BT_SUPPORTED_ROBOT_TYPE" ]; then
+    echo "Error: bt_node currently supports only ${BT_SUPPORTED_ROBOT_TYPE}; got ${BT_ROBOT_TYPE}" >&2
+    exit 1
+fi
+
+ROS2_COMMAND="ros2 launch orchestrator bt_node.launch.py robot_type:=${BT_ROBOT_TYPE}"
 COMMON_SCRIPT="/usr/local/lib/s6-services/ros2_service_run.sh"
 
 if [ -f "${COMMON_SCRIPT}" ]; then

@@ -1,0 +1,207 @@
+orchestrator:
+  ros__parameters:
+    ffw_sh5_rev1:
+      robot_name: "FFW SH5 Rev1"
+      urdf_path: urdf/ffw_sh5_follower.urdf
+      joystick:
+        trigger_topic: /leader/joystick_controller/tact_trigger
+
+      # part of the default SH5 recording layout.
+      observation:
+        images:
+          # Initial live camera grid placement follows YAML insertion order.
+          # UI cell indexes: 0=left, 1=center, 2=right.
+          # The first three image entries map to UI cells [1, 0, 2].
+          # rotation_deg, when set, must be one of: 0, 90, 180, 270.
+          cam_left_head:
+            topic: /zed/zed_node/left/image_rect_color/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          cam_left_wrist:
+            topic: /camera_left/camera_left/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+            rotation_deg: 270
+          cam_right_wrist:
+            topic: /camera_right/camera_right/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+            rotation_deg: 270
+          cam_right_head:
+            topic: /zed/zed_node/right/image_rect_color/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+
+        # Raw tactile observations are recorded to MCAP, but not flattened
+        # into observation.state until the converter has a HandPressures parser.
+        tactile:
+          left_hand_pressure:
+            topic: /left_hand/finger_pressures
+            msg_type: robotis_interfaces/msg/HandPressures
+          right_hand_pressure:
+            topic: /right_hand/finger_pressures
+            msg_type: robotis_interfaces/msg/HandPressures
+
+        state:
+          upper_body:
+            topic: /joint_states
+            msg_type: sensor_msgs/msg/JointState
+            joint_names:
+              - arm_l_joint1
+              - arm_l_joint2
+              - arm_l_joint3
+              - arm_l_joint4
+              - arm_l_joint5
+              - arm_l_joint6
+              - arm_l_joint7
+              - finger_l_joint1
+              - finger_l_joint2
+              - finger_l_joint3
+              - finger_l_joint4
+              - finger_l_joint5
+              - finger_l_joint6
+              - finger_l_joint7
+              - finger_l_joint8
+              - finger_l_joint9
+              - finger_l_joint10
+              - finger_l_joint11
+              - finger_l_joint12
+              - finger_l_joint13
+              - finger_l_joint14
+              - finger_l_joint15
+              - finger_l_joint16
+              - finger_l_joint17
+              - finger_l_joint18
+              - finger_l_joint19
+              - finger_l_joint20
+              - arm_r_joint1
+              - arm_r_joint2
+              - arm_r_joint3
+              - arm_r_joint4
+              - arm_r_joint5
+              - arm_r_joint6
+              - arm_r_joint7
+              - finger_r_joint1
+              - finger_r_joint2
+              - finger_r_joint3
+              - finger_r_joint4
+              - finger_r_joint5
+              - finger_r_joint6
+              - finger_r_joint7
+              - finger_r_joint8
+              - finger_r_joint9
+              - finger_r_joint10
+              - finger_r_joint11
+              - finger_r_joint12
+              - finger_r_joint13
+              - finger_r_joint14
+              - finger_r_joint15
+              - finger_r_joint16
+              - finger_r_joint17
+              - finger_r_joint18
+              - finger_r_joint19
+              - finger_r_joint20
+              - head_joint1
+              - head_joint2
+              - lift_joint
+          mobile:
+            topic: /odom
+            msg_type: nav_msgs/msg/Odometry
+            joint_names:
+              - linear_x
+              - linear_y
+              - angular_z
+
+      action:
+        arm_left:
+          topic: /leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_l_joint1
+            - arm_l_joint2
+            - arm_l_joint3
+            - arm_l_joint4
+            - arm_l_joint5
+            - arm_l_joint6
+            - arm_l_joint7
+        arm_right:
+          topic: /leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_r_joint1
+            - arm_r_joint2
+            - arm_r_joint3
+            - arm_r_joint4
+            - arm_r_joint5
+            - arm_r_joint6
+            - arm_r_joint7
+        hand_left:
+          topic: /leader/joint_trajectory_command_broadcaster_left_hand/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - finger_l_joint1
+            - finger_l_joint2
+            - finger_l_joint3
+            - finger_l_joint4
+            - finger_l_joint5
+            - finger_l_joint6
+            - finger_l_joint7
+            - finger_l_joint8
+            - finger_l_joint9
+            - finger_l_joint10
+            - finger_l_joint11
+            - finger_l_joint12
+            - finger_l_joint13
+            - finger_l_joint14
+            - finger_l_joint15
+            - finger_l_joint16
+            - finger_l_joint17
+            - finger_l_joint18
+            - finger_l_joint19
+            - finger_l_joint20
+        hand_right:
+          topic: /leader/joint_trajectory_command_broadcaster_right_hand/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - finger_r_joint1
+            - finger_r_joint2
+            - finger_r_joint3
+            - finger_r_joint4
+            - finger_r_joint5
+            - finger_r_joint6
+            - finger_r_joint7
+            - finger_r_joint8
+            - finger_r_joint9
+            - finger_r_joint10
+            - finger_r_joint11
+            - finger_r_joint12
+            - finger_r_joint13
+            - finger_r_joint14
+            - finger_r_joint15
+            - finger_r_joint16
+            - finger_r_joint17
+            - finger_r_joint18
+            - finger_r_joint19
+            - finger_r_joint20
+        head:
+          topic: /leader/joystick_controller_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - head_joint1
+            - head_joint2
+        lift:
+          topic: /leader/joystick_controller_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - lift_joint
+        mobile:
+          topic: /cmd_vel
+          msg_type: geometry_msgs/msg/Twist
+          joint_names:
+            - linear_x
+            - linear_y
+            - angular_z
+
+      recording:
+        extra_topics:
+          - /tf
+          - /zed/zed_node/left/camera_info
+          - /zed/zed_node/right/camera_info
+          - /camera_left/camera_left/color/camera_info
+          - /camera_right/camera_right/color/camera_info

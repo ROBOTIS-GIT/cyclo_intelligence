@@ -242,6 +242,7 @@ class ControlLoop:
             generation = self._generation
             publish_to_robot = self._publish_to_robot
             action_request_mode = self._action_request_mode
+            had_buffer_at_request = processor.buffer_size > 0
 
             action = processor.pop_action()
             if action is not None:
@@ -265,7 +266,6 @@ class ControlLoop:
                         logger.error("failed to publish idle robot action: %s", e)
 
             should_request = self._should_request_actions(processor)
-            had_buffer_at_request = processor.buffer_size > 0
 
         if should_request:
             self._request_thread = threading.Thread(

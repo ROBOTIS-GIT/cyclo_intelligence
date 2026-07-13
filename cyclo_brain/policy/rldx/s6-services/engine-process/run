@@ -1,5 +1,21 @@
 #!/command/with-contenv bash
 # Engine process — RLDX remote ZMQ calls, RobotClient sensor reads, inference.
 
+set -e
+
+exec bash -ic '
+set -e
+
+export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+export ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-transport/shared_memory/enabled=true}
+export ZENOH_SHM_ENABLED=${ZENOH_SHM_ENABLED:-true}
+export ZENOH_TRANSPORT_SHM_ENABLED=${ZENOH_TRANSPORT_SHM_ENABLED:-true}
+
+echo "[engine-process] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+echo "[engine-process] RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
+echo "[engine-process] ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE}"
+
 export PYTHONPATH="/app:/policy_runtime:${ZENOH_SDK_PATH:-/zenoh_sdk}:${ROBOT_CLIENT_SDK_PATH:-/robot_client_sdk}${PYTHONPATH:+:${PYTHONPATH}}"
 exec python3 -m engine_process
+'

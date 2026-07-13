@@ -53,6 +53,9 @@ def _install_ros_stubs():
 
     class _TaskInfo:
         inference_mode = ''
+        remote_host = ''
+        remote_port = 0
+        remote_timeout_ms = 0
         action_request_mode = ''
         acceleration_mode = ''
         acceleration_engine_path = ''
@@ -168,3 +171,25 @@ def test_load_send_command_sets_action_request_mode():
 
     assert action.action_request_mode == 'sync'
     assert task_info.action_request_mode == 'sync'
+
+
+def test_load_rldx_send_command_sets_remote_endpoint():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadRldxInference',
+        {
+            'command': 'LOAD',
+            'model': 'rldx:rldx1',
+            'remote_host': '192.168.0.10',
+            'remote_port': 6000,
+            'remote_timeout_ms': 120000,
+        },
+    )
+    task_info = action._build_task_info()
+
+    assert task_info.service_type == 'rldx'
+    assert task_info.remote_host == '192.168.0.10'
+    assert task_info.remote_port == 6000
+    assert task_info.remote_timeout_ms == 120000

@@ -22,9 +22,7 @@ uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
 
 uint8 command
 
-# LOAD fields. robot_type is required for LOAD. model_path may be empty for
-# remote policy backends such as RLDX; backend engines validate their own
-# backend-specific fields.
+# LOAD fields — required when command = LOAD, "" otherwise.
 string model_path
 string embodiment_tag
 string robot_type
@@ -35,14 +33,11 @@ string task_instruction
 # Safety gate. false means dry-run / 3D preview only; true permits Main runtime
 # to publish robot command topics. Default false for regenerated clients.
 bool publish_to_robot
-
 # Optional LOAD runtime endpoint. Empty fields fall back to backend/container
-# environment defaults. RLDX uses these to connect to the external ZMQ
-# PolicyServer.
+# defaults. RLDX uses these to connect to the external ZMQ PolicyServer.
 string remote_host
 uint16 remote_port
 uint32 remote_timeout_ms
-
 # Action chunk request scheduling at LOAD time. Empty / "async" preserves the
 # current prefetch behavior. "sync" requests only after the active buffer drains.
 string action_request_mode

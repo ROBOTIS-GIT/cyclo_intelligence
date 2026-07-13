@@ -114,6 +114,7 @@ class RLDXRemoteClient:
             self.socket.send(MsgSerializer.to_bytes(request))
             response = MsgSerializer.from_bytes(self.socket.recv())
         except self._zmq.Again as exc:
+            self.socket.close(0)
             self._init_socket()
             elapsed_ms = (time.monotonic() - started) * 1000.0
             logger.warning(

@@ -28,9 +28,20 @@ from launch_ros.actions import Node
 from shared.robot_configs import schema as robot_schema
 
 
+SUPPORTED_BT_ROBOT_TYPE = 'ffw_sg2_rev1'
+
+
 def launch_setup(context, *args, **kwargs):
 
-    robot_type = LaunchConfiguration('robot_type').perform(context)
+    robot_type = (
+        LaunchConfiguration('robot_type').perform(context)
+        or SUPPORTED_BT_ROBOT_TYPE
+    )
+    if robot_type != SUPPORTED_BT_ROBOT_TYPE:
+        raise RuntimeError(
+            'BT currently supports only '
+            f'{SUPPORTED_BT_ROBOT_TYPE}; got {robot_type}'
+        )
 
     shared_share = get_package_share_directory('shared')
 
@@ -38,9 +49,7 @@ def launch_setup(context, *args, **kwargs):
     robot_config_path = os.path.join(config_dir, f'{robot_type}_config.yaml')
 
     if not os.path.exists(robot_config_path):
-        print(f'Warning: Config file not found: {robot_config_path}')
-        print('Falling back to ffw_sg2_rev1_config.yaml')
-        robot_config_path = os.path.join(config_dir, 'ffw_sg2_rev1_config.yaml')
+        raise FileNotFoundError(f'Config file not found: {robot_config_path}')
 
     # Phase 4 adapter — bt_node + bt_nodes_loader still consume the legacy
     # flat params (`<robot>.joint_list`, `<robot>.joint_topic_list`,
@@ -62,12 +71,20 @@ def launch_setup(context, *args, **kwargs):
         f'leader_{m}:{cfg["topic"]}'
         for m, cfg in action_groups.items()
     ]
+    joint_topic_type_list = [
+        f'follower_{name}:{cfg["msg_type"]}'
+        for name, cfg in state_groups.items()
+    ] + [
+        f'leader_{m}:{cfg["msg_type"]}'
+        for m, cfg in action_groups.items()
+    ]
 
     bt_params = {
         'robot_type': robot_type,
         'tick_rate': 30.0,
         f'{robot_type}.joint_list': joint_list,
         f'{robot_type}.joint_topic_list': joint_topic_list,
+        f'{robot_type}.joint_topic_type_list': joint_topic_type_list,
     }
     for modality, cfg in action_groups.items():
         bt_params[f'{robot_type}.joint_order.leader_{modality}'] = list(
@@ -91,8 +108,10 @@ def generate_launch_description():
 
     robot_type_arg = DeclareLaunchArgument(
         'robot_type',
-        default_value='ffw_sg2_rev1',
-        description='Type of robot (e.g., ffw_sg2_rev1)'
+        default_value=SUPPORTED_BT_ROBOT_TYPE,
+        description=(
+            'BT robot type. Currently only ffw_sg2_rev1 is supported.'
+        )
     )
 
     return LaunchDescription([

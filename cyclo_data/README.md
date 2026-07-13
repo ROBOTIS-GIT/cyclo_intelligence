@@ -28,18 +28,14 @@ cyclo_data/
 ├── reader/                    Low-level bag reading + metadata.
 ├── converter/                 MCAP → MP4 → LeRobot conversion chain.
 │   ├── orchestrator.py        pipeline_worker coordinator.
-│   ├── pipeline_worker.py     Long-running worker (atomic swap
-│   │                          pattern — Step 3 C2e).
+│   ├── pipeline_worker.py     Long-running worker for conversion tasks.
 │   ├── rosbag2mp4.py          MCAP → MP4 stage.
 │   ├── to_lerobot_v21.py      MP4 → LeRobot v2.1 stage.
 │   ├── to_lerobot_v30.py      MP4 → LeRobot v3.0 stage.
 │   ├── video_encoder/         ffmpeg wrapper.
-│   └── scripts/               CLI — convert_rosbag_to_lerobot
-│                              (console_script, Step 7).
+│   └── scripts/               CLI — convert_rosbag_to_lerobot.
 ├── editor/                    Episode edits.
 │   ├── episode_editor.py
-│   └── scripts/               CLI — remove_head_lift_joints
-│                              (console_script, Step 7).
 ├── quality/                   Timestamp gap / drop analysis.
 ├── hub/                       HuggingFace Hub upload / download.
 │   ├── hf_worker.py
@@ -51,27 +47,8 @@ cyclo_data/
     ├── video_file_server.py   HTTP server on port 8082 — serves
     │                          replay-data / rosbag-list / task-markers.
     │                          nginx /data-api/ proxies here.
-    └── scripts/               CLI — visualize_rosbag
-                               (console_script, Step 7).
+    └── scripts/               CLI — visualize_rosbag.
 ```
-
-## 7-way decomposition
-
-The split above follows PLAN §4.2's "what does this file's subject
-do?" rule. The prior `orchestrator/data_processing/` directory
-had 14 files in one folder, each answering a different question
-(recording? conversion? quality? hub upload?). Breaking them out
-per-subsystem makes the orchestrator ↔ cyclo_data srv boundary
-easy to map to code.
-
-## Atomic swaps (Step 3 pattern)
-
-Conversion, HF upload, and recording each migrated from orchestrator
-to cyclo_data via "atomic swap" — one commit adds the srv +
-worker pair to cyclo_data, the next flips orchestrator's handler to
-forward via the new srv, the next removes the orchestrator-side
-remnants. That pattern is traced in REVIEW §9 (recording is the
-most detailed write-up: C2d-plan through C2d-5).
 
 ## srv boundary with orchestrator
 
@@ -86,14 +63,13 @@ Progress on long-running tasks (conversion, HF upload) is published
 on `/data/status` as `DataOperationStatus`; orchestrator relays it
 into `/task/status` so the UI doesn't see two topics.
 
-## Console scripts (Step 7)
+## Console scripts
 
-`setup.py` registers three entry points (D9 resolved in Step 7):
+`setup.py` registers two entry points:
 
 ```
 visualize_rosbag          → cyclo_data.visualization.scripts.visualize_rosbag:main
 convert_rosbag_to_lerobot → cyclo_data.converter.scripts.convert_rosbag_to_lerobot:main
-remove_head_lift_joints   → cyclo_data.editor.scripts.remove_head_lift_joints:main
 ```
 
 After `colcon build`, run any of these by name:

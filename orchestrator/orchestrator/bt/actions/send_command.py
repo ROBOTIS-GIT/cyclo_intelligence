@@ -454,8 +454,7 @@ class SendCommand(BaseAction):
         ti = TaskInfo()
         ti.task_type = 'inference'
         ti.policy_path = self.policy_path
-        service_type = _service_type_from_model(self.model)
-        ti.service_type = service_type
+        ti.service_type = _service_type_from_model(self.model)
         if self.command_str == 'LOAD' and hasattr(ti, 'inference_mode'):
             ti.inference_mode = self.inference_mode
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):
@@ -475,18 +474,19 @@ class SendCommand(BaseAction):
             ti.inference_hz = self.inference_hz
         if self.chunk_align_window_s:
             ti.chunk_align_window_s = self.chunk_align_window_s
-        if self.remote_host:
-            ti.remote_host = self.remote_host
-        elif service_type == 'rldx':
-            ti.remote_host = '127.0.0.1'
-        if self.remote_port:
-            ti.remote_port = self.remote_port
-        elif service_type == 'rldx':
-            ti.remote_port = 5555
-        if self.remote_timeout_ms:
-            ti.remote_timeout_ms = self.remote_timeout_ms
-        elif service_type == 'rldx':
-            ti.remote_timeout_ms = 300000
+        service_type = ti.service_type
+        if hasattr(ti, 'remote_host'):
+            ti.remote_host = self.remote_host or (
+                '127.0.0.1' if service_type == 'rldx' else ''
+            )
+        if hasattr(ti, 'remote_port'):
+            ti.remote_port = self.remote_port or (
+                5555 if service_type == 'rldx' else 0
+            )
+        if hasattr(ti, 'remote_timeout_ms'):
+            ti.remote_timeout_ms = self.remote_timeout_ms or (
+                300000 if service_type == 'rldx' else 0
+            )
         if self.task_instruction:
             if isinstance(self.task_instruction, list):
                 ti.task_instruction = self.task_instruction

@@ -100,10 +100,13 @@ class ActionChunkProcessor:
                 return 0
 
             interpolated = self._interpolate(aligned)
-            if self._alignment_mode == "rtc":
-                blended = interpolated
-            else:
-                blended = self._blend(interpolated, anchor)
+            # RTC already schedules a continuation prefix in policy space.
+            # Blending that result again would distort the guided trajectory.
+            blended = (
+                interpolated
+                if self._alignment_mode == "rtc"
+                else self._blend(interpolated, anchor)
+            )
 
             for action in blended:
                 self._buffer.append(action)

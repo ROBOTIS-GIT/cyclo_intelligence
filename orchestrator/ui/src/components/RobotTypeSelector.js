@@ -24,13 +24,6 @@ import { RecordPhase, InferencePhase } from '../constants/taskPhases';
 import { selectRobotType } from '../features/tasks/taskSlice';
 import { setRobotTypeList, setIsFirstLoadTrue } from '../features/ui/uiSlice';
 
-const showShortSuccessToast = (message, id, duration = 900) => {
-  toast.success(message, { id, duration });
-  window.setTimeout(() => {
-    toast.remove(id);
-  }, duration + 250);
-};
-
 export default function RobotTypeSelector() {
   const dispatch = useDispatch();
 
@@ -51,11 +44,10 @@ export default function RobotTypeSelector() {
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [selectedRobotType, setSelectedRobotType] = useState(robotType || '');
-  const initialFetchStartedRef = useRef(false);
   const previousRobotTypeRef = useRef(robotType);
 
   // Fetch robot type list
-  const fetchRobotTypes = useCallback(async ({ showSuccess = true } = {}) => {
+  const fetchRobotTypes = useCallback(async () => {
     setFetching(true);
     try {
       const result = await getRobotTypeList();
@@ -63,13 +55,7 @@ export default function RobotTypeSelector() {
 
       if (result && result.robot_types) {
         dispatch(setRobotTypeList(result.robot_types));
-        if (showSuccess) {
-          showShortSuccessToast(
-            'Robot types loaded successfully',
-            'robot-types-loaded',
-            900
-          );
-        }
+        toast.success('Robot types loaded successfully');
       } else {
         toast.error('Failed to get robot types: Invalid response');
       }
@@ -110,11 +96,7 @@ export default function RobotTypeSelector() {
           source: 'user',
           selectedAtMs: Date.now(),
         }));
-        showShortSuccessToast(
-          `Robot type set to: ${selectedRobotType}`,
-          'robot-type-set',
-          900
-        );
+        toast.success(`Robot type set to: ${selectedRobotType}`);
 
         dispatch(setIsFirstLoadTrue('record'));
       } else {
@@ -130,12 +112,8 @@ export default function RobotTypeSelector() {
 
   // Fetch robot types when component mounts
   useEffect(() => {
-    if (initialFetchStartedRef.current || robotTypeList.length > 0) {
-      return;
-    }
-    initialFetchStartedRef.current = true;
-    fetchRobotTypes({ showSuccess: false });
-  }, [fetchRobotTypes, robotTypeList.length]);
+    fetchRobotTypes();
+  }, [fetchRobotTypes]);
 
   useEffect(() => {
     if (robotType !== previousRobotTypeRef.current) {
@@ -258,7 +236,7 @@ export default function RobotTypeSelector() {
 
       <button
         className={classRefreshButton}
-        onClick={() => fetchRobotTypes({ showSuccess: true })}
+        onClick={fetchRobotTypes}
         disabled={fetching || loading || taskInProgress}
       >
         <div className="flex items-center justify-center gap-2">

@@ -2,6 +2,45 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.0 (2026-07-10)
+------------------
+* None
+
+1.1.5 (2026-07-07)
+------------------
+* Switched robot installs to an SSD-backed bind mount at ``~/cyclo_intelligence`` with installer-managed ``/etc/fstab`` entries.
+* Moved Cyclo UI, rosbridge, replay data, web video, and supervisor API defaults to ``7080``, ``7090``, ``7082``, ``7085``, and ``7100``.
+* Updated image support to ``robotis/cyclo-intelligence:1.1.5``.
+* Contributors: Taehyeong Kim
+
+1.1.4 (2026-07-07)
+------------------
+* Added installer-managed SSD checkout layout for ROBOTIS robot PCs and simplified container storage to repo-local workspace mounts.
+* Standardized container ``/root/.bashrc`` ROS/Zenoh defaults for Cyclo, LeRobot, and GR00T images.
+* Updated image support to ``robotis/cyclo-intelligence:1.1.4``, ``robotis/lerobot-zenoh:1.3.2``, and ``robotis/groot-zenoh:1.3.4``.
+* Contributors: Taehyeong Kim
+
+1.1.3 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.3.
+* Contributors: Taehyeong Kim
+
+1.1.2 (2026-07-06)
+------------------
+* Moved policy container ROS/Zenoh runtime configuration to ``/root/.bashrc`` and removed redundant Compose environment overrides.
+* Contributors: Taehyeong Kim
+
+1.1.1 (2026-07-03)
+------------------
+* Updated Cyclo release metadata to 1.1.1.
+* Contributors: Taehyeong Kim
+
+1.1.0 (2026-07-01)
+------------------
+* Added shared ROS/Zenoh runtime environment sourcing for policy containers.
+* Updated policy image support to ``robotis/lerobot-zenoh:1.3.1`` and ``robotis/groot-zenoh:1.3.3``.
+* Contributors: Taehyeong Kim
+
 1.0.0 (2026-06-29)
 ------------------
 * Updated Cyclo release metadata to 1.0.0.

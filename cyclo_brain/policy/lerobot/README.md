@@ -64,7 +64,7 @@ docker compose -f docker/docker-compose.yml up lerobot
 ```
 Cyclo Intelligence Web UI (React UI)
         │
-        ▼ WebSocket (9090)
+        ▼ WebSocket (7090)
 Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
         │
         ▼ Zenoh Protocol (7447)
@@ -121,7 +121,15 @@ LeRobot Training/Inference APIs
 |----------|-------|-------------|
 | RMW_IMPLEMENTATION | rmw_zenoh_cpp | ROS2 Zenoh middleware |
 | ROS_DOMAIN_ID | 30 | ROS2 domain |
-| ZENOH_CONFIG_OVERRIDE | (see compose) | Zenoh client configuration |
+| ZENOH_CONFIG_OVERRIDE | local shared-memory default or remote router example in `/root/.bashrc` | Zenoh client configuration |
+
+At runtime, `lerobot_server` sources `/root/.bashrc` before starting
+`main-runtime` and `engine-process`. Enter the container, edit the Cyclo
+ROS/Zenoh block near the top of `/root/.bashrc`, and choose either the local
+`ZENOH_CONFIG_OVERRIDE` line or the commented remote router example. Then restart
+`lerobot_server`. `docker restart` preserves the edit;
+recreating or updating the container resets `/root/.bashrc` to the image
+default.
 
 ## Testing
 
@@ -160,7 +168,7 @@ docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
 ### Zenoh connection failed
 
 ```bash
-# Ensure the externally managed Zenoh router is running on ZENOH_ROUTER_IP:ZENOH_ROUTER_PORT.
+# Ensure the externally managed Zenoh router is running on the endpoint in ZENOH_CONFIG_OVERRIDE.
 ss -ltnp 'sport = :7447'
 ```
 

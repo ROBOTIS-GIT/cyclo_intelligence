@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cyclo_intelligence</name>
+  <version>1.2.0</version>
+  <description>
+    ROS 2 metapackage for the Cyclo Intelligence workspace packages.
+  </description>
+  <maintainer email="pyo@robotis.com">Pyo</maintainer>
+  <license>Apache 2.0</license>
+  <url type="website">https://docs.robotis.com/docs/systems/aiworker/imitation_learning/</url>
+  <author email="kdy@robotis.com">Dongyun Kim</author>
+  <author email="kimsw@robotis.com">Seongwoo Kim</author>
+  <author email="kth@robotis.com">Taehyeong Kim</author>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>interfaces</exec_depend>
+  <exec_depend>shared</exec_depend>
+  <exec_depend>rosbag_recorder</exec_depend>
+  <exec_depend>cyclo_data</exec_depend>
+  <exec_depend>orchestrator</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

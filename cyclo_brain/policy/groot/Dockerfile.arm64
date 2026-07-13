@@ -6,7 +6,7 @@
 #
 # Build context: cyclo_intelligence/cyclo_brain/policy/groot/
 # Usage:
-#   docker build --network host -f Dockerfile.arm64 -t robotis/groot-zenoh:1.3.2-arm64 .
+#   docker build --network host -f Dockerfile.arm64 -t robotis/groot-zenoh:1.3.4-arm64 .
 
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${BASE_IMAGE}
@@ -162,11 +162,7 @@ EOF
 ENV HF_HOME=/root/.cache/huggingface
 ENV TORCH_HOME=/root/.cache/torch
 
-ENV ZENOH_ROUTER_IP=127.0.0.1
-ENV ZENOH_ROUTER_PORT=7447
-ENV ZENOH_SHM_ENABLED=true
 ENV ZENOH_SDK_PATH=/zenoh_sdk
-ENV ZENOH_TRANSPORT_SHM_ENABLED=true
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
@@ -182,6 +178,18 @@ ENV POLICY_ENGINE_MODULE=groot_engine
 # load/action smoke tests pass on the target robot.
 ENV GROOT_TRT_ENABLED=false
 ENV PYTHONPATH=/app:/gr00t
+
+RUN { \
+    echo ""; \
+    echo "# Cyclo ROS/Zenoh runtime environment."; \
+    echo "# For a remote Zenoh router, comment the local line and uncomment the remote example."; \
+    echo "export ROS_DOMAIN_ID=30"; \
+    echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp"; \
+    echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'"; \
+    echo "# export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true;mode=\"client\";connect/endpoints=[\"tcp/192.168.60.139:7447\"]'"; \
+    } > /tmp/cyclo_bashrc && \
+    if [ -f /root/.bashrc ]; then cat /root/.bashrc >> /tmp/cyclo_bashrc; fi && \
+    mv /tmp/cyclo_bashrc /root/.bashrc
 
 WORKDIR /gr00t
 
