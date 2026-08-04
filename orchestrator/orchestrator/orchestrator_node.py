@@ -82,6 +82,13 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class OrchestratorNode(Node):
     # Define operation modes (constants taken from Communicator)
 
@@ -89,7 +96,7 @@ class OrchestratorNode(Node):
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
     TRAINING_STATUS_TIMER_FREQUENCY = 0.5  # seconds
-    VIDEO_SERVER_PORT = 8082  # Port for video file server
+    VIDEO_SERVER_PORT = _env_int('CYCLO_VIDEO_SERVER_PORT', '7082')
 
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
@@ -136,6 +143,9 @@ class OrchestratorNode(Node):
         # UI service callbacks and joystick subscriptions can both forward
         # recording commands; serialize those calls without holding state_lock.
         self._recording_command_lock = threading.Lock()
+        # LOAD/START and STOP/UNLOAD must not cross in flight. The UI can send
+        # Clear then Start faster than the policy container can release CUDA.
+        self._inference_lifecycle_lock = threading.Lock()
 
         self.params = None
         self.robot_section = None
@@ -397,6 +407,51 @@ class OrchestratorNode(Node):
             setattr(copied, field_name, value)
         return copied
 
+    def _infer_conversion_robot_type(self, roots):
+        """Infer a recorded dataset's robot_type from episode_info.json files."""
+        robot_types = {}
+        for root in roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            try:
+                info_paths = (
+                    [root_path]
+                    if root_path.is_file() and root_path.name == 'episode_info.json'
+                    else sorted(root_path.rglob('episode_info.json'))
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warning(
+                    f'Failed to scan {root_path} for episode_info.json: {exc}'
+                )
+                continue
+
+            for info_path in info_paths:
+                try:
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        info = json.load(f) or {}
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warning(
+                        f'Failed to read {info_path}: {exc}'
+                    )
+                    continue
+
+                robot_type = str(info.get('robot_type') or '').strip()
+                if robot_type:
+                    robot_types.setdefault(robot_type, []).append(str(info_path))
+
+        if len(robot_types) > 1:
+            details = ', '.join(
+                f'{robot_type} ({len(paths)} episodes)'
+                for robot_type, paths in sorted(robot_types.items())
+            )
+            return '', f'Mixed robot_type values in source dataset(s): {details}'
+
+        if not robot_types:
+            return '', ''
+
+        return next(iter(robot_types.keys())), ''
+
     def _get_inference_record_task_info(self) -> Optional[TaskInfo]:
         task_info = self._prepared_inference_task_info
         if task_info is None:
@@ -617,20 +672,22 @@ class OrchestratorNode(Node):
             f'Robot control parameters initialized (control_hz={control_hz})')
 
     def clear_parameters(self):
-        if self.communicator is not None:
-            self.communicator.cleanup()
-            self.communicator = None
-
         if self.timer_manager is not None:
+            self.timer_manager.stop_all()
             self.timer_manager = None
 
         if self.heartbeat_timer is not None:
-            self.heartbeat_timer.stop(timer_name='heartbeat')
+            self.heartbeat_timer.stop_all()
             self.heartbeat_timer = None
 
         if self.training_timer is not None:
-            self.training_timer.stop(timer_name='training_status')
+            self.training_timer.stop_all()
             self.training_timer = None
+
+        communicator = self.communicator
+        self.communicator = None
+        if communicator is not None:
+            communicator.cleanup()
 
         self.params = None
         self.robot_section = None
@@ -815,7 +872,11 @@ class OrchestratorNode(Node):
         callback is reduced to a joystick pump and may collapse further
         once Step 4 Brain Migrator finishes inference restructuring.
         """
-        updated, mode = self.communicator.consume_joystick_update()
+        communicator = self.communicator
+        if communicator is None:
+            return
+
+        updated, mode = communicator.consume_joystick_update()
         if updated:
             self.handle_joystick_trigger(joystick_mode=mode)
 
@@ -1397,54 +1458,99 @@ class OrchestratorNode(Node):
 
                     def _load_and_start():
                         try:
-                            load_result = client.inference_command(
-                                ContainerServiceClient.CMD_LOAD,
-                                model_path=model_path,
-                                embodiment_tag='new_embodiment',
-                                robot_type=robot_type,
-                                task_instruction=task_instruction,
-                                publish_to_robot=publish_to_robot,
-                                acceleration_mode=requested_acceleration_mode,
-                                acceleration_engine_path=(
-                                    requested_acceleration_engine_path
-                                ),
-                                action_request_mode=requested_action_request_mode,
-                            )
-                            if not load_result.success:
-                                self.get_logger().error(
-                                    f'Async LOAD failed: {load_result.message}'
+                            def _call_load():
+                                return client.inference_command(
+                                    ContainerServiceClient.CMD_LOAD,
+                                    model_path=model_path,
+                                    embodiment_tag='new_embodiment',
+                                    robot_type=robot_type,
+                                    task_instruction=task_instruction,
+                                    publish_to_robot=publish_to_robot,
+                                    acceleration_mode=requested_acceleration_mode,
+                                    acceleration_engine_path=(
+                                        requested_acceleration_engine_path
+                                    ),
+                                    action_request_mode=requested_action_request_mode,
                                 )
-                                self._teardown_inference_client()
-                                self._publish_inference_phase(
-                                    InferenceStatus.READY, error=load_result.message
-                                )
-                                return
 
-                            action_keys = load_result.data.get('action_keys', [])
-                            self.get_logger().info(
-                                f'LOAD ok action_keys={action_keys}'
-                            )
+                            with self._inference_lifecycle_lock:
+                                with self._state_lock:
+                                    if self.container_service_client is not client:
+                                        return
 
-                            start_result = client.inference_command(
-                                ContainerServiceClient.CMD_START,
-                                publish_to_robot=publish_to_robot,
-                            )
-                            if not start_result.success:
-                                self.get_logger().error(
-                                    f'Async START failed: {start_result.message}'
-                                )
-                                self._teardown_inference_client()
-                                self._publish_inference_phase(
-                                    InferenceStatus.READY, error=start_result.message
-                                )
-                                return
+                                load_result = _call_load()
+                                if (
+                                    not load_result.success
+                                    and self._is_policy_already_loaded_message(
+                                        load_result.message
+                                    )
+                                ):
+                                    self.get_logger().warning(
+                                        'Policy container reports an already '
+                                        'loaded model; issuing STOP/UNLOAD '
+                                        'before retrying LOAD'
+                                    )
+                                    stop_result = client.inference_command(
+                                        ContainerServiceClient.CMD_STOP
+                                    )
+                                    if not stop_result.success:
+                                        self.get_logger().warning(
+                                            'STOP before LOAD retry failed: '
+                                            f'{stop_result.message}'
+                                        )
+                                    unload_result = client.inference_command(
+                                        ContainerServiceClient.CMD_UNLOAD
+                                    )
+                                    if not unload_result.success:
+                                        self.get_logger().warning(
+                                            'UNLOAD before LOAD retry failed: '
+                                            f'{unload_result.message}'
+                                        )
+                                    load_result = _call_load()
 
-                            self._set_session_active(
-                                on_inference=True,
-                                start_time=time.perf_counter(),
-                            )
-                            with self._state_lock:
-                                if self.container_service_client is client:
+                                if not load_result.success:
+                                    self.get_logger().error(
+                                        f'Async LOAD failed: {load_result.message}'
+                                    )
+                                    self._teardown_inference_client(
+                                        expected_client=client
+                                    )
+                                    self._publish_inference_phase(
+                                        InferenceStatus.READY,
+                                        error=load_result.message,
+                                    )
+                                    return
+
+                                with self._state_lock:
+                                    if self.container_service_client is not client:
+                                        return
+
+                                action_keys = load_result.data.get('action_keys', [])
+                                self.get_logger().info(
+                                    f'LOAD ok action_keys={action_keys}'
+                                )
+
+                                start_result = client.inference_command(
+                                    ContainerServiceClient.CMD_START,
+                                    publish_to_robot=publish_to_robot,
+                                )
+                                if not start_result.success:
+                                    self.get_logger().error(
+                                        f'Async START failed: {start_result.message}'
+                                    )
+                                    self._teardown_inference_client(
+                                        expected_client=client
+                                    )
+                                    self._publish_inference_phase(
+                                        InferenceStatus.READY,
+                                        error=start_result.message,
+                                    )
+                                    return
+
+                                with self._state_lock:
+                                    if self.container_service_client is not client:
+                                        return
+
                                     self._loaded_inference_policy_path = (
                                         normalized_model_path
                                     )
@@ -1460,13 +1566,22 @@ class OrchestratorNode(Node):
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
-                            self._publish_inference_phase(InferenceStatus.INFERENCING)
+
+                                self._set_session_active(
+                                    on_inference=True,
+                                    start_time=time.perf_counter(),
+                                )
+                                self._publish_inference_phase(
+                                    InferenceStatus.INFERENCING
+                                )
                         except Exception as e:
                             self.get_logger().error(
                                 f'Async LOAD/START error: {e}', exc_info=True
                             )
                             try:
-                                self._teardown_inference_client()
+                                self._teardown_inference_client(
+                                    expected_client=client
+                                )
                                 self._publish_inference_phase(
                                     InferenceStatus.READY, error=str(e)
                                 )
@@ -1496,10 +1611,6 @@ class OrchestratorNode(Node):
 
                 base_path = Path('/workspace/rosbag2')
                 dataset_path = base_path / task_name
-                robot_config_path = os.path.join(
-                    get_package_share_directory('shared'),
-                    'robot_configs', f'{self.robot_type}_config.yaml'
-                )
 
                 if len(source_folders) >= 2:
                     # Merge-then-convert mode — resolve each source.
@@ -1526,6 +1637,52 @@ class OrchestratorNode(Node):
                         response.message = \
                             f'Dataset path does not exist: {dataset_path}'
                         return response
+
+                conversion_sources = (
+                    [Path(src) for src in source_paths]
+                    if source_paths else [dataset_path]
+                )
+                inferred_robot_type, robot_type_error = (
+                    self._infer_conversion_robot_type(conversion_sources)
+                )
+                if robot_type_error:
+                    response.success = False
+                    response.message = robot_type_error
+                    return response
+
+                conversion_robot_type = inferred_robot_type or self.robot_type
+                if not conversion_robot_type:
+                    response.success = False
+                    response.message = (
+                        'CONVERT_MP4 requires a robot_type. Select a robot '
+                        'type and wait for /set_robot_type to complete before '
+                        'converting, or convert a dataset with episode_info.json '
+                        'containing robot_type.'
+                    )
+                    return response
+
+                if (
+                    inferred_robot_type and self.robot_type
+                    and inferred_robot_type != self.robot_type
+                ):
+                    self.get_logger().warning(
+                        'CONVERT_MP4 robot_type mismatch: '
+                        f'current={self.robot_type}, '
+                        f'dataset={inferred_robot_type}; '
+                        f'using dataset robot_type={inferred_robot_type}'
+                    )
+
+                robot_config_path = os.path.join(
+                    get_package_share_directory('shared'),
+                    'robot_configs', f'{conversion_robot_type}_config.yaml'
+                )
+                if not os.path.exists(robot_config_path):
+                    response.success = False
+                    response.message = (
+                        f'Robot config not found for {conversion_robot_type}: '
+                        f'{robot_config_path}'
+                    )
+                    return response
 
                 # Read conversion-only knobs off SendCommand.srv (defaulting
                 # for old UIs that don't yet send these fields). When neither
@@ -1571,7 +1728,7 @@ class OrchestratorNode(Node):
 
                 result = self._cyclo_data.start_conversion(
                     dataset_path=str(dataset_path),
-                    robot_type=self.robot_type,
+                    robot_type=conversion_robot_type,
                     robot_config_path=robot_config_path,
                     source_folders=source_paths,
                     fps=conversion_fps,
@@ -1956,6 +2113,23 @@ class OrchestratorNode(Node):
         response.robot_type = getattr(self, 'robot_type', '') or ''
         response.robot_name = robot_schema.get_robot_name(self.robot_section)
         response.urdf_path = robot_schema.get_urdf_path(self.robot_section)
+        response.state_joint_topics = robot_schema.get_joint_state_topics(
+            self.robot_section
+        )
+        response.action_topics = robot_schema.get_action_topics(
+            self.robot_section
+        )
+        response.action_topic_types = robot_schema.get_action_topic_types(
+            self.robot_section
+        )
+        response.end_effector_links = (
+            robot_schema.get_visualization_end_effector_links(
+                self.robot_section
+            )
+        )
+        joystick_topics = robot_schema.get_joystick_topics(self.robot_section)
+        response.joystick_trigger_topic = joystick_topics['trigger_topic']
+        response.joystick_mode_topic = joystick_topics['mode_topic']
         response.success = True
         response.message = 'Robot info retrieved successfully'
         return response
@@ -2293,6 +2467,11 @@ class OrchestratorNode(Node):
         return os.path.normpath(value)
 
     @staticmethod
+    def _is_policy_already_loaded_message(message: str) -> bool:
+        value = str(message or '').lower()
+        return 'already loaded' in value and 'unload' in value
+
+    @staticmethod
     def _normalize_acceleration_mode(value: str) -> str:
         mode = str(value or '').strip().lower()
         if mode in {'', 'none', 'off', 'false', 'pytorch', 'eager'}:
@@ -2373,7 +2552,7 @@ class OrchestratorNode(Node):
         # Default to groot for backward compatibility
         return '/groot'
 
-    def _teardown_inference_client(self):
+    def _teardown_inference_client(self, expected_client=None):
         """Tear down the container service client (STOP + UNLOAD + disconnect).
 
         Called on inference session end (FINISH), on LOAD/START failure so
@@ -2387,6 +2566,8 @@ class OrchestratorNode(Node):
         # both grab the same client and double-disconnect.
         with self._state_lock:
             client = self.container_service_client
+            if expected_client is not None and client is not expected_client:
+                return
             self.container_service_client = None
             self._loaded_inference_policy_path = ''
             self._loaded_inference_publish_to_robot = False
@@ -2398,8 +2579,9 @@ class OrchestratorNode(Node):
 
         def _cleanup():
             try:
-                client.inference_command(ContainerServiceClient.CMD_STOP)
-                client.inference_command(ContainerServiceClient.CMD_UNLOAD)
+                with self._inference_lifecycle_lock:
+                    client.inference_command(ContainerServiceClient.CMD_STOP)
+                    client.inference_command(ContainerServiceClient.CMD_UNLOAD)
             except Exception as e:
                 self.get_logger().error(f'Error tearing down inference: {e}')
             finally:

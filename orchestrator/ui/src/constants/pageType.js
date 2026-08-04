@@ -24,6 +24,7 @@ const PageType = {
   TRAINING: 'training',
   EDIT_DATASET: 'edit_dataset',
   BT_MANAGER: 'bt_manager',
+  NAVIGATION: 'navigation',
 };
 
 export default PageType;

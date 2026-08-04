@@ -27,6 +27,7 @@ import {
   selectInferenceTaskInfo,
   selectRecordTaskInfo,
 } from '../features/tasks/taskSlice';
+import { CYCLO_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
 
 const DEFAULT_SERVICE_TIMEOUT_MS = 10000;
 const START_INFERENCE_SERVICE_TIMEOUT_MS = 30000;
@@ -59,6 +60,56 @@ export function getRecordCommandServiceTimeoutMs(command, options = {}) {
   return command === 'start_inference'
     ? START_INFERENCE_SERVICE_TIMEOUT_MS
     : DEFAULT_SERVICE_TIMEOUT_MS;
+}
+
+export function transformReplayDataResult(result = {}, bagPath = '') {
+  return {
+    success: result.success,
+    message: result.message,
+    video_files: result.video_files || [],
+    video_topics: result.video_topics || [],
+    video_names: result.video_names || [],
+    video_fps: result.video_fps || [],
+    video_segments: result.video_segments || [],
+    frame_indices: result.frame_indices || [],
+    frame_timestamps: result.frame_timestamps || [],
+    joint_timestamps: result.joint_timestamps || [],
+    joint_names: result.joint_names || [],
+    joint_positions: result.joint_positions || [],
+    action_timestamps: result.action_timestamps || [],
+    action_names: result.action_names || [],
+    action_values: result.action_values || [],
+    video_server_port: result.video_server_port || CYCLO_VIDEO_SERVER_PORT,
+    start_time: result.start_time || 0,
+    end_time: result.end_time || 0,
+    duration: result.duration || 0,
+    bag_path: bagPath,
+    // Extended metadata
+    robot_type: result.robot_type || '',
+    urdf_path: result.urdf_path || '',
+    end_effector_links: result.end_effector_links || [],
+    recording_date: result.recording_date || null,
+    file_size_bytes: result.file_size_bytes || 0,
+    task_markers: result.task_markers || [],
+    segments: result.segments || [],
+    trim_points: result.trim_points || null,
+    exclude_regions: result.exclude_regions || [],
+    frame_counts: result.frame_counts || {},
+    // Recording format v2 transcode state: the ReplayPage gates
+    // playback on this. pending/running/failed means the MP4
+    // files are still raw MJPEG (or missing) which Chromium can't
+    // decode in <video>. done (or missing defaults to done on
+    // legacy episodes) means it's safe to play.
+    transcoding_status: result.transcoding_status || 'done',
+    transcoding_cameras_failed: result.transcoding_cameras_failed || {},
+    // MCAP-direct-streaming (v1 legacy): backend no longer ships
+    // these fields, so they default to false/empty. The UI keeps
+    // its dead-code branch readers around for binary compatibility
+    // with old episode dumps but they'll never be true in v2.
+    has_raw_images: result.has_raw_images || false,
+    raw_image_topics: result.raw_image_topics || [],
+    mcap_file: result.mcap_file || '',
+  };
 }
 
 export function useRosServiceCaller() {
@@ -920,52 +971,8 @@ export function useRosServiceCaller() {
         const result = await response.json();
         console.log('getReplayData HTTP response:', result);
 
-        // Transform to match the expected format from ROS service
-        return {
-          success: result.success,
-          message: result.message,
-          video_files: result.video_files || [],
-          video_topics: result.video_topics || [],
-          video_names: result.video_names || [],
-          video_fps: result.video_fps || [],
-          video_segments: result.video_segments || [],
-          frame_indices: result.frame_indices || [],
-          frame_timestamps: result.frame_timestamps || [],
-          joint_timestamps: result.joint_timestamps || [],
-          joint_names: result.joint_names || [],
-          joint_positions: result.joint_positions || [],
-          action_timestamps: result.action_timestamps || [],
-          action_names: result.action_names || [],
-          action_values: result.action_values || [],
-          video_server_port: result.video_server_port || 8082,
-          start_time: result.start_time || 0,
-          end_time: result.end_time || 0,
-          duration: result.duration || 0,
-          bag_path: bagPath,
-          // Extended metadata
-          robot_type: result.robot_type || '',
-          recording_date: result.recording_date || null,
-          file_size_bytes: result.file_size_bytes || 0,
-          task_markers: result.task_markers || [],
-          segments: result.segments || [],
-          trim_points: result.trim_points || null,
-          exclude_regions: result.exclude_regions || [],
-          frame_counts: result.frame_counts || {},
-          // Recording format v2 transcode state: the ReplayPage gates
-          // playback on this — pending/running/failed means the MP4
-          // files are still raw MJPEG (or missing) which Chromium can't
-          // decode in <video>. ``done`` (or missing → defaults to done
-          // on legacy episodes) means it's safe to play.
-          transcoding_status: result.transcoding_status || 'done',
-          transcoding_cameras_failed: result.transcoding_cameras_failed || {},
-          // MCAP-direct-streaming (v1 legacy) — backend no longer ships
-          // these fields, so they default to false/empty. The UI keeps
-          // its dead-code branch readers around for binary compatibility
-          // with old episode dumps but they'll never be true in v2.
-          has_raw_images: result.has_raw_images || false,
-          raw_image_topics: result.raw_image_topics || [],
-          mcap_file: result.mcap_file || '',
-        };
+        // Transform to match the expected format from ROS service.
+        return transformReplayDataResult(result, bagPath);
       } catch (error) {
         console.error('Failed to get replay data:', error);
         throw new Error(`${error.message || error}`);

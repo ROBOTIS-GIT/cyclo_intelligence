@@ -233,58 +233,6 @@ recording:
   qos_depth: 100
 ```
 
-## Data Playback
-
-To reconstruct images from recorded data:
-
-1. Read ImageMetadata messages from ROSbag
-2. Use frame_index to extract corresponding frame from MP4 video
-3. Reconstruct sensor_msgs/Image message with original encoding
-
-Example playback script (to be implemented):
-
-```python
-# TODO: Create playback utility
-# python3 scripts/playback_images.py /path/to/bag
-```
-
-## LeRobot Dataset Conversion
-
-The recorded data can be converted to LeRobot format using the conversion tool in the LeRobot container:
-
-```bash
-# In LeRobot container
-python scripts/convert_mcap_to_lerobot.py \
-  --input /path/to/recorded_bag \
-  --output /path/to/lerobot_dataset
-```
-
-## Troubleshooting
-
-### Build Errors
-
-If you encounter `ModuleNotFoundError: No module named 'em'`:
-
-```bash
-pip install empy
-```
-
-### Video Codec Issues
-
-If H.264 codec fails, the recorder automatically falls back to MP4V codec. To check available codecs:
-
-```bash
-python3 -c "import cv2; print(cv2.getBuildInformation())"
-```
-
-### Performance Optimization
-
-For high-frequency image topics (>30 Hz), consider:
-
-1. Adjusting QoS depth in configuration
-2. Using lower resolution cameras
-3. Adjusting MP4 compression quality
-
 ## Code Quality
 
 Lint checking:

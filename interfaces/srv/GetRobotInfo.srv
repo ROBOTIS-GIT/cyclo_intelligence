@@ -2,5 +2,11 @@
 string robot_type
 string robot_name
 string urdf_path
+string[] state_joint_topics
+string[] action_topics
+string[] action_topic_types
+string[] end_effector_links
+string joystick_trigger_topic
+string joystick_mode_topic
 bool success
 string message

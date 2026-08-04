@@ -38,8 +38,8 @@ if TYPE_CHECKING:
 class Rotate(BaseAction):
     """Rotate the mobile base by a target angle around the vertical axis.
 
-    Reads /odom for closed-loop control and stops once the rotation completes
-    within tolerance.
+    Reads the configured mobile Odometry state topic for closed-loop control
+    and stops once the rotation completes within tolerance.
     """
 
     @classmethod
@@ -84,10 +84,17 @@ class Rotate(BaseAction):
         )
 
         self.publishers = {}
+        topic_map = self.topic_config.get('topic_map', {})
+        topic_type_map = self.topic_config.get('topic_type_map', {})
         if self.topic_config and 'topic_map' in self.topic_config:
-            topic_map = self.topic_config['topic_map']
             for joint_group, topic in topic_map.items():
-                if joint_group == 'leader_mobile':
+                if (
+                    joint_group == 'leader_mobile'
+                    and topic_type_map.get(
+                        joint_group,
+                        'geometry_msgs/msg/Twist',
+                    ) == 'geometry_msgs/msg/Twist'
+                ):
                     pub = self.node.create_publisher(
                         Twist,
                         topic,
@@ -95,12 +102,27 @@ class Rotate(BaseAction):
                     )
                     self.publishers[joint_group] = pub
 
-        self.odom_sub = self.node.create_subscription(
-            Odometry,
-            '/odom',
-            self._odom_callback,
-            qos_profile
-        )
+        self.odom_topic = ''
+        for joint_group, topic in topic_map.items():
+            if (
+                joint_group.startswith('follower_')
+                and topic_type_map.get(joint_group) == 'nav_msgs/msg/Odometry'
+            ):
+                self.odom_topic = topic
+                break
+
+        self.odom_sub = None
+        if self.odom_topic:
+            self.odom_sub = self.node.create_subscription(
+                Odometry,
+                self.odom_topic,
+                self._odom_callback,
+                qos_profile
+            )
+        else:
+            self.log_warn(
+                'Rotate: no Odometry state topic configured for this robot'
+            )
         self.odom_start_yaw = None
         self.odom_last_yaw = None
 
@@ -124,6 +146,22 @@ class Rotate(BaseAction):
         """Control loop that publishes velocity and monitors rotation."""
         rate_sleep = RATE_SLEEP_SEC  # noqa: F405
 
+        if 'leader_mobile' not in self.publishers:
+            self.log_error(
+                'Rotate: no mobile Twist action topic configured for this robot'
+            )
+            with self._lock:
+                self._result = False
+            return
+
+        if self.odom_sub is None:
+            self.log_error(
+                'Rotate: no mobile Odometry feedback topic configured for this robot'
+            )
+            with self._lock:
+                self._result = False
+            return
+
         timeout_count = 0
         max_init_timeout = ROTATE_INIT_TIMEOUT_TICKS  # noqa: F405
         while (
@@ -133,7 +171,9 @@ class Rotate(BaseAction):
             timeout_count += 1
 
         if self.odom_start_yaw is None:
-            self.log_error('Timeout waiting for odom data')
+            self.log_error(
+                f'Timeout waiting for odom data on {self.odom_topic}'
+            )
             with self._lock:
                 self._result = False
             return

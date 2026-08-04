@@ -53,6 +53,7 @@ import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { useRosServiceCaller } from './useRosServiceCaller';
 import {
   hasRosTaskInfoPayload,
   rosTaskInfoToUiTaskInfo,
@@ -86,6 +87,8 @@ export function useRosTopicSubscription() {
 
   const dispatch = useDispatch();
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  const robotType = useSelector((state) => state.tasks.robotType);
+  const { getRobotInfo } = useRosServiceCaller();
   const [connected, setConnected] = useState(false);
 
   const preferredVoiceRef = useRef(null);
@@ -750,9 +753,17 @@ export function useRosTopicSubscription() {
       if (!ros) return;
       if (joystickModeTopicRef.current) return;
 
+      const robotInfo = await getRobotInfo();
+      const joystickModeTopic = robotInfo?.joystick_mode_topic || '';
+      if (!joystickModeTopic) {
+        dispatch(setJoystickMode(''));
+        console.log('Joystick mode subscription skipped: no topic configured');
+        return;
+      }
+
       joystickModeTopicRef.current = new ROSLIB.Topic({
         ros,
-        name: '/leader/joystick_controller_right/joystick_mode',
+        name: joystickModeTopic,
         messageType: 'std_msgs/msg/String',
       });
 
@@ -760,11 +771,11 @@ export function useRosTopicSubscription() {
         dispatch(setJoystickMode(msg.data));
       });
 
-      console.log('Joystick mode subscription established');
+      console.log(`Joystick mode subscription established: ${joystickModeTopic}`);
     } catch (error) {
       console.error('Failed to subscribe to joystick mode topic:', error);
     }
-  }, [dispatch, rosbridgeUrl]);
+  }, [dispatch, getRobotInfo, rosbridgeUrl]);
 
   // Manual initialization function
   const initializeSubscriptions = useCallback(async () => {
@@ -815,6 +826,18 @@ export function useRosTopicSubscription() {
     return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosbridgeUrl]); // Only rosbridgeUrl as dependency to prevent unnecessary re-subscriptions
+
+  useEffect(() => {
+    if (!rosbridgeUrl || !connected) return;
+    unsubscribeFromTopic(joystickModeTopicRef, 'Joystick mode');
+    subscribeToJoystickMode();
+  }, [
+    connected,
+    robotType,
+    rosbridgeUrl,
+    subscribeToJoystickMode,
+    unsubscribeFromTopic,
+  ]);
 
   return {
     connected,

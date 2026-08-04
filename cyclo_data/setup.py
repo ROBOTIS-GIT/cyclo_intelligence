@@ -25,7 +25,6 @@ packages = [
     f'{package_name}.converter.scripts',
     f'{package_name}.converter.video_encoder',
     f'{package_name}.editor',
-    f'{package_name}.editor.scripts',
     f'{package_name}.hub',
     f'{package_name}.reader',
     f'{package_name}.recorder',
@@ -36,7 +35,7 @@ packages = [
 
 setup(
     name=package_name,
-    version='1.0.0',
+    version='1.2.0',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory. Avoids colcon-core's _symlinks_in_build veto on
@@ -82,7 +81,6 @@ setup(
                 'convert_rosbag_to_lerobot = '
                 'cyclo_data.converter.scripts.convert_rosbag_to_lerobot:main'
             ),
-            'remove_head_lift_joints = cyclo_data.editor.scripts.remove_head_lift_joints:main',
         ],
     },
 )

@@ -45,6 +45,8 @@ SCHEMA_VERSION = '1.0'
 _INTERNAL_KWARGS = frozenset({
     'node',
     'name',
+    'groups',
+    'positions',
     'topic_config',
     'service_name',
     'head_joint_names',

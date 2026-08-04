@@ -38,7 +38,7 @@ The `executor.py` provides the following capabilities:
 ```
 Cyclo Intelligence Web UI (React UI)
         |
-        v (WebSocket 9090)
+        v (WebSocket 7090)
 Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
         |
         v (Zenoh Protocol 7447)

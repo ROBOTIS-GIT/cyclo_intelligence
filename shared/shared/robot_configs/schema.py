@@ -32,6 +32,10 @@ around what a VLA dataset / training pipeline cares about:
         topic: <ros topic>
         msg_type: <ros msg type string>
         joint_names: [<name>, ...]
+    tactile:
+      <sensor_name>:
+        topic: <ros topic>
+        msg_type: <ros msg type string>
   action:
     <modality>:
       topic: <ros topic>                  # both inference command + record target
@@ -91,6 +95,15 @@ def find_robot_config_path(
 
     here = Path(__file__).resolve()
     for parent in here.parents:
+        cand = (
+            parent / "share" / "shared" / "robot_configs" /
+            f"{robot_type}_config.yaml"
+        )
+        if cand.exists():
+            candidates.append(cand)
+            break
+
+    for parent in here.parents:
         cand = parent / "shared" / "robot_configs" / f"{robot_type}_config.yaml"
         if cand.exists():
             candidates.append(cand)
@@ -147,7 +160,7 @@ def get_image_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     images = (section.get("observation") or {}).get("images") or {}
     result: Dict[str, Dict[str, Any]] = {}
     for name, cfg in images.items():
-        if not isinstance(cfg, dict):
+        if not isinstance(cfg, dict) or "topic" not in cfg:
             continue
         entry: Dict[str, Any] = {
             "topic": cfg["topic"],
@@ -170,12 +183,34 @@ def get_state_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     groups = (section.get("observation") or {}).get("state") or {}
     result: Dict[str, Dict[str, Any]] = {}
     for name, cfg in groups.items():
-        if not isinstance(cfg, dict):
+        if not isinstance(cfg, dict) or "topic" not in cfg:
             continue
         result[name] = {
             "topic": cfg["topic"],
             "msg_type": cfg.get("msg_type", "sensor_msgs/msg/JointState"),
             "joint_names": list(cfg.get("joint_names") or []),
+        }
+    return result
+
+
+def get_tactile_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return ``{sensor_name: {topic, msg_type}}`` for raw tactile streams.
+
+    Tactile messages are robot observations, but they are intentionally
+    separate from ``observation.state`` until the converter has an explicit
+    ``HandPressures`` -> numeric vector parser.
+    """
+    tactile = (section.get("observation") or {}).get("tactile") or {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for name, cfg in tactile.items():
+        if not isinstance(cfg, dict) or "topic" not in cfg:
+            continue
+        result[name] = {
+            "topic": cfg["topic"],
+            "msg_type": cfg.get(
+                "msg_type",
+                "robotis_interfaces/msg/HandPressures",
+            ),
         }
     return result
 
@@ -190,7 +225,7 @@ def get_action_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     actions = section.get("action") or {}
     result: Dict[str, Dict[str, Any]] = {}
     for modality, cfg in actions.items():
-        if not isinstance(cfg, dict):
+        if not isinstance(cfg, dict) or "topic" not in cfg:
             continue
         result[modality] = {
             "topic": cfg["topic"],
@@ -203,6 +238,25 @@ def get_action_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 def get_action_joint_names(section: Dict[str, Any]) -> Dict[str, List[str]]:
     """Convenience: ``{modality: joint_names}`` straight from action groups."""
     return {m: cfg["joint_names"] for m, cfg in get_action_groups(section).items()}
+
+
+def get_joint_state_topics(section: Dict[str, Any]) -> List[str]:
+    """State topics that publish ``sensor_msgs/msg/JointState`` messages."""
+    topics: List[str] = []
+    for cfg in get_state_groups(section).values():
+        if cfg.get("msg_type") == "sensor_msgs/msg/JointState":
+            topics.append(cfg["topic"])
+    return topics
+
+
+def get_action_topics(section: Dict[str, Any]) -> List[str]:
+    """Action command topics in config order."""
+    return [cfg["topic"] for cfg in get_action_groups(section).values()]
+
+
+def get_action_topic_types(section: Dict[str, Any]) -> List[str]:
+    """Action command message types in config order."""
+    return [cfg["msg_type"] for cfg in get_action_groups(section).values()]
 
 
 def get_recording_extra_topics(section: Dict[str, Any]) -> List[str]:
@@ -251,13 +305,15 @@ def get_mcap_record_topics(section: Dict[str, Any]) -> List[str]:
 
     Recording format version 2 routes images to per-camera MP4 files and
     camera_info to one-shot yaml snapshots, so the MCAP only carries the
-    timeseries the policy actually consumes (state + action) plus /tf for
-    debug visualisation. Order is deterministic (state groups → action
-    groups → extras minus camera_info).
+    timeseries the policy consumes or may consume later (state + tactile +
+    action) plus /tf for debug visualisation. Order is deterministic
+    (state groups → tactile groups → action groups → extras minus camera_info).
     """
     info_topics = set(get_camera_info_topics(section).values())
     topics: List[str] = []
     for cfg in get_state_groups(section).values():
+        topics.append(cfg["topic"])
+    for cfg in get_tactile_topics(section).values():
         topics.append(cfg["topic"])
     for cfg in get_action_groups(section).values():
         topics.append(cfg["topic"])
@@ -280,6 +336,8 @@ def get_recording_topics(section: Dict[str, Any]) -> List[str]:
     for cfg in get_image_topics(section).values():
         topics.append(cfg["topic"])
     for cfg in get_state_groups(section).values():
+        topics.append(cfg["topic"])
+    for cfg in get_tactile_topics(section).values():
         topics.append(cfg["topic"])
     for cfg in get_action_groups(section).values():
         topics.append(cfg["topic"])
@@ -310,3 +368,18 @@ def get_urdf_path(section: Dict[str, Any]) -> str:
 
 def get_robot_name(section: Dict[str, Any]) -> str:
     return str(section.get("robot_name") or "")
+
+
+def get_visualization_end_effector_links(section: Dict[str, Any]) -> List[str]:
+    """URDF links used for live trajectory path rendering."""
+    links = (section.get("visualization") or {}).get("end_effector_links") or []
+    return [str(link) for link in links if link]
+
+
+def get_joystick_topics(section: Dict[str, Any]) -> Dict[str, str]:
+    """Optional joystick integration topics for record triggers and UI mode."""
+    joystick = section.get("joystick") or {}
+    return {
+        "trigger_topic": str(joystick.get("trigger_topic") or ""),
+        "mode_topic": str(joystick.get("mode_topic") or ""),
+    }

@@ -16,12 +16,18 @@
 #
 # Author: Seongwoo Kim
 
-"""Rule-based joint-space control for head, arms, and lift.
+"""Rule-based joint-space control backed by the active robot config.
 
-A single node can drive any combination of the three joint groups: just
-toggle the matching enable_* flag and supply its positions. With multiple
-groups on at once their trajectories fire simultaneously and the node
-succeeds once all activated joints land within position_threshold.
+The node supports two XML styles:
+
+* Generic, robot-config driven:
+  ``groups="arm" positions="0.0, 0.0, ..."``
+  where each group maps to ``action.<group>`` in the robot yaml.
+
+* Legacy FFW trees:
+  ``enable_head``, ``enable_arms``, ``enable_lift`` plus the matching
+  positions fields. These group names still resolve through the robot yaml,
+  so no FFW topic or joint-name defaults live in this action anymore.
 """
 
 import threading
@@ -42,114 +48,117 @@ if TYPE_CHECKING:
     from rclpy.node import Node
 
 
-# Per-group static config. Topic + default joint names + group-specific
-# default duration & timeout live here so the channel-builder below stays
-# data-driven.
-GROUP_DEFAULTS = {
-    'head': {
-        'topic': '/leader/joystick_controller_left/joint_trajectory',
-        'joint_names': ['head_joint1', 'head_joint2'],
-        'duration': DEFAULT_MOVE_HEAD_DURATION_SEC,  # noqa: F405
-        'timeout_ticks': MOVE_HEAD_TIMEOUT_TICKS,  # noqa: F405
-    },
-    'arm_left': {
-        'topic': (
-            '/leader/joint_trajectory_command_broadcaster_left/joint_trajectory'
-        ),
-        'joint_names': [
-            'arm_l_joint1', 'arm_l_joint2', 'arm_l_joint3', 'arm_l_joint4',
-            'arm_l_joint5', 'arm_l_joint6', 'arm_l_joint7', 'gripper_l_joint1',
-        ],
-        'duration': DEFAULT_MOVE_ARMS_DURATION_SEC,  # noqa: F405
-        'timeout_ticks': MOVE_ARMS_TIMEOUT_TICKS,  # noqa: F405
-    },
-    'arm_right': {
-        'topic': (
-            '/leader/joint_trajectory_command_broadcaster_right/joint_trajectory'
-        ),
-        'joint_names': [
-            'arm_r_joint1', 'arm_r_joint2', 'arm_r_joint3', 'arm_r_joint4',
-            'arm_r_joint5', 'arm_r_joint6', 'arm_r_joint7', 'gripper_r_joint1',
-        ],
-        'duration': DEFAULT_MOVE_ARMS_DURATION_SEC,  # noqa: F405
-        'timeout_ticks': MOVE_ARMS_TIMEOUT_TICKS,  # noqa: F405
-    },
-    'lift': {
-        'topic': '/leader/joystick_controller_right/joint_trajectory',
-        'joint_names': ['lift_joint'],
-        'duration': DEFAULT_MOVE_LIFT_DURATION_SEC,  # noqa: F405
-        'timeout_ticks': MOVE_LIFT_TIMEOUT_TICKS,  # noqa: F405
-    },
-}
+JOINT_STATE_TYPE = 'sensor_msgs/msg/JointState'
+JOINT_TRAJECTORY_TYPE = 'trajectory_msgs/msg/JointTrajectory'
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
+
+def _has_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return len(value) > 0
+    return True
 
 
 def _coerce_positions(value) -> Optional[list[float]]:
-    """Normalise a positions param into list[float].
-
-    XML attributes arrive as int / float / list (from bt_nodes_loader's
-    _convert_value) or None when omitted. Lift sends a scalar; head/arms
-    send a list. Wrap scalars so the rest of the control loop only sees a
-    sequence.
-    """
+    """Normalise a positions param into ``list[float]``."""
     if value is None:
         return None
     if isinstance(value, str):
         return [float(x.strip()) for x in value.split(',') if x.strip()]
     if isinstance(value, (list, tuple)):
-        return [float(x) for x in value]
+        return [float(x) for x in value if str(x).strip()]
     return [float(value)]
 
 
-class JointControl(BaseAction):
-    """Drive any combination of head / arms / lift to target positions.
+def _parse_groups(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        parts = str(value).split(',')
+    return [str(part).strip() for part in parts if str(part).strip()]
 
-    Each group is independently toggled via enable_head / enable_arms /
-    enable_lift. At least one group must be enabled (the action raises
-    ValueError on construction otherwise) so an empty Joint Control node
-    can't silently succeed at runtime.
-    """
+
+def _parse_position_groups(value) -> list[list[float]]:
+    if not _has_value(value):
+        return []
+    if isinstance(value, str):
+        return [
+            _coerce_positions(group_text) or []
+            for group_text in value.split(';')
+            if group_text.strip()
+        ]
+    if isinstance(value, (list, tuple)):
+        if any(';' in str(item) for item in value):
+            return _parse_position_groups(','.join(str(item) for item in value))
+        return [_coerce_positions(value) or []]
+    return [_coerce_positions(value) or []]
+
+
+def _duration_for_group(group: str) -> float:
+    if group == 'head':
+        return DEFAULT_MOVE_HEAD_DURATION_SEC  # noqa: F405
+    if group == 'lift':
+        return DEFAULT_MOVE_LIFT_DURATION_SEC  # noqa: F405
+    return DEFAULT_MOVE_ARMS_DURATION_SEC  # noqa: F405
+
+
+def _timeout_for_group(group: str) -> int:
+    if group == 'head':
+        return MOVE_HEAD_TIMEOUT_TICKS  # noqa: F405
+    if group == 'lift':
+        return MOVE_LIFT_TIMEOUT_TICKS  # noqa: F405
+    return MOVE_ARMS_TIMEOUT_TICKS  # noqa: F405
+
+
+class JointControl(BaseAction):
+    """Publish JointTrajectory commands and wait for configured state feedback."""
 
     @classmethod
     def from_xml_params(cls, context, name: str, params: dict):
-        enable_head = bool(params.get('enable_head', False))
-        enable_arms = bool(params.get('enable_arms', False))
-        enable_lift = bool(params.get('enable_lift', False))
-
         kwargs = {
             'node': context.node,
-            'enable_head': enable_head,
-            'enable_arms': enable_arms,
-            'enable_lift': enable_lift,
+            'topic_config': context.topic_config,
         }
 
-        if enable_head:
-            kwargs['head_positions'] = params.get(
-                'head_positions', [0.0, 0.0],
-            )
-            head_joints = context.get_joint_names_for_group('leader_head')
-            if head_joints:
-                kwargs['head_joint_names'] = head_joints
+        if _has_value(params.get('groups')):
+            kwargs['groups'] = params.get('groups')
+            kwargs['positions'] = params.get('positions', '')
+        else:
+            enable_head = _as_bool(params.get('enable_head', False))
+            enable_arms = _as_bool(params.get('enable_arms', False))
+            enable_lift = _as_bool(params.get('enable_lift', False))
 
-        if enable_arms:
-            default_positions = [0.0] * 8
-            kwargs['left_positions'] = params.get(
-                'left_positions', default_positions,
-            )
-            kwargs['right_positions'] = params.get(
-                'right_positions', default_positions,
-            )
-            left_joints = context.get_joint_names_for_group('leader_left')
-            right_joints = context.get_joint_names_for_group('leader_right')
-            if left_joints:
-                kwargs['left_joint_names'] = left_joints
-            if right_joints:
-                kwargs['right_joint_names'] = right_joints
+            kwargs.update({
+                'enable_head': enable_head,
+                'enable_arms': enable_arms,
+                'enable_lift': enable_lift,
+            })
 
-        if enable_lift:
-            kwargs['lift_position'] = params.get('lift_position', 0.0)
-            lift_joints = context.get_joint_names_for_group('leader_lift')
-            if lift_joints:
-                kwargs['lift_joint_name'] = lift_joints[0]
+            if enable_head:
+                kwargs['head_positions'] = params.get(
+                    'head_positions', [0.0, 0.0],
+                )
+            if enable_arms:
+                default_positions = [0.0] * 8
+                kwargs['left_positions'] = params.get(
+                    'left_positions', default_positions,
+                )
+                kwargs['right_positions'] = params.get(
+                    'right_positions', default_positions,
+                )
+            if enable_lift:
+                kwargs['lift_position'] = params.get('lift_position', 0.0)
 
         duration = params.get('duration')
         if duration is not None:
@@ -165,6 +174,8 @@ class JointControl(BaseAction):
     def __init__(
         self,
         node: 'Node',
+        groups: str = '',
+        positions: str = '',
         enable_head: bool = True,
         head_positions='0.0, 0.0',
         head_joint_names: Optional[list[str]] = None,
@@ -178,24 +189,133 @@ class JointControl(BaseAction):
         lift_joint_name: Optional[str] = None,
         duration: Optional[float] = 2.0,
         position_threshold: float = POSITION_THRESHOLD_RAD,  # noqa: F405
+        topic_config: Optional[dict] = None,
     ):
         super().__init__(node, name='JointControl')
 
         self.position_threshold = position_threshold
+        self.topic_config = topic_config or {}
+        self._missing_joint_names = set()
 
         qos_profile = QoSProfile(
             depth=QOS_QUEUE_DEPTH,  # noqa: F405
             reliability=ReliabilityPolicy.RELIABLE,
         )
 
-        # Build one channel per enabled sub-group. Each channel owns its
-        # own publisher + joint_names + target positions so the control
-        # loop just iterates over them.
-        self._channels = []  # [{name, pub, joint_names, positions}, ...]
+        self._channels = []
+        group_names = _parse_groups(groups)
+        if group_names:
+            self._build_generic_channels(
+                group_names,
+                _parse_position_groups(positions),
+                qos_profile,
+            )
+        else:
+            self._build_legacy_channels(
+                enable_head=enable_head,
+                head_positions=head_positions,
+                head_joint_names=head_joint_names,
+                enable_arms=enable_arms,
+                left_positions=left_positions,
+                right_positions=right_positions,
+                left_joint_names=left_joint_names,
+                right_joint_names=right_joint_names,
+                enable_lift=enable_lift,
+                lift_position=lift_position,
+                lift_joint_name=lift_joint_name,
+                qos_profile=qos_profile,
+            )
 
+        if not self._channels:
+            raise ValueError(
+                'JointControl: set groups or enable at least one legacy '
+                'group (enable_head, enable_arms, enable_lift).'
+            )
+
+        if duration is not None:
+            self.duration = float(duration)
+        else:
+            self.duration = max(
+                _duration_for_group(ch['group'])
+                for ch in self._channels
+            )
+        self._timeout_ticks = max(
+            _timeout_for_group(ch['group'])
+            for ch in self._channels
+        )
+
+        self._joint_state_topics = self._configured_joint_state_topics()
+        self._joint_states = self._empty_joint_states()
+        self.joint_state_subscriptions = []
+        for topic in self._joint_state_topics:
+            sub = self.node.create_subscription(
+                JointState,
+                topic,
+                lambda msg, topic_name=topic: self._joint_state_callback(
+                    topic_name, msg
+                ),
+                qos_profile,
+            )
+            self.joint_state_subscriptions.append(sub)
+
+        if not self.joint_state_subscriptions:
+            self.log_warn(
+                'JointControl: no JointState feedback topics configured; '
+                'target convergence cannot be verified.'
+            )
+
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._result = None
+        self._control_rate = CONTROL_RATE_HZ  # noqa: F405
+
+    # -- Construction helpers ------------------------------------------------
+
+    def _build_generic_channels(
+        self,
+        group_names: list[str],
+        position_groups: list[list[float]],
+        qos_profile,
+    ) -> None:
+        if len(position_groups) > len(group_names):
+            raise ValueError(
+                'JointControl: positions contains more groups than groups'
+            )
+
+        for index, group in enumerate(group_names):
+            positions = (
+                position_groups[index]
+                if index < len(position_groups)
+                else None
+            )
+            self._channels.append(self._make_channel(
+                group=group,
+                joint_names=None,
+                positions=positions,
+                default_positions=None,
+                qos_profile=qos_profile,
+            ))
+
+    def _build_legacy_channels(
+        self,
+        *,
+        enable_head,
+        head_positions,
+        head_joint_names,
+        enable_arms,
+        left_positions,
+        right_positions,
+        left_joint_names,
+        right_joint_names,
+        enable_lift,
+        lift_position,
+        lift_joint_name,
+        qos_profile,
+    ) -> None:
         if enable_head:
             self._channels.append(self._make_channel(
-                'head',
+                group='head',
                 joint_names=head_joint_names,
                 positions=head_positions,
                 default_positions=[0.0, 0.0],
@@ -204,14 +324,14 @@ class JointControl(BaseAction):
 
         if enable_arms:
             self._channels.append(self._make_channel(
-                'arm_left',
+                group='arm_left',
                 joint_names=left_joint_names,
                 positions=left_positions,
                 default_positions=[0.0] * 8,
                 qos_profile=qos_profile,
             ))
             self._channels.append(self._make_channel(
-                'arm_right',
+                group='arm_right',
                 joint_names=right_joint_names,
                 positions=right_positions,
                 default_positions=[0.0] * 8,
@@ -219,75 +339,125 @@ class JointControl(BaseAction):
             ))
 
         if enable_lift:
-            # lift_position is a scalar at the UI/XML layer — _coerce_positions
-            # wraps it so the channel sees a list.
-            lift_jn = [lift_joint_name] if lift_joint_name else None
+            lift_joints = [lift_joint_name] if lift_joint_name else None
             self._channels.append(self._make_channel(
-                'lift',
-                joint_names=lift_jn,
+                group='lift',
+                joint_names=lift_joints,
                 positions=lift_position,
                 default_positions=[0.0],
                 qos_profile=qos_profile,
             ))
 
-        if not self._channels:
-            raise ValueError(
-                'JointControl: enable at least one of enable_head, '
-                'enable_arms, enable_lift.'
-            )
-
-        # Single duration shared across channels. If the user didn't pass
-        # one, take the slowest enabled group's default — being a hair
-        # too slow is always safer than racing to finish.
-        if duration is not None:
-            self.duration = float(duration)
+    def _resolve_action_group_key(self, group: str) -> str:
+        topic_map = self.topic_config.get('topic_map', {})
+        candidates = []
+        if group.startswith('leader_'):
+            candidates.append(group)
+            logical_group = group[len('leader_'):]
         else:
-            self.duration = max(
-                GROUP_DEFAULTS[ch['group']]['duration']
-                for ch in self._channels
-            )
-        self._timeout_ticks = max(
-            GROUP_DEFAULTS[ch['group']]['timeout_ticks']
-            for ch in self._channels
+            logical_group = group
+            candidates.append(f'leader_{group}')
+        candidates.append(group)
+
+        for candidate in candidates:
+            if candidate in topic_map:
+                return candidate
+
+        configured = sorted(
+            key[len('leader_'):]
+            for key in topic_map
+            if key.startswith('leader_')
+        )
+        raise ValueError(
+            f"JointControl: action group '{logical_group}' is not configured "
+            f'(configured groups: {configured})'
         )
 
-        self.joint_state = None
-        self.joint_state_sub = self.node.create_subscription(
-            JointState,
-            '/joint_states',
-            self._joint_state_callback,
+    def _make_channel(
+        self,
+        group,
+        joint_names,
+        positions,
+        default_positions,
+        qos_profile,
+    ):
+        group_key = self._resolve_action_group_key(group)
+        topic = self.topic_config.get('topic_map', {}).get(group_key)
+        msg_type = self.topic_config.get('topic_type_map', {}).get(
+            group_key,
+            JOINT_TRAJECTORY_TYPE,
+        )
+        if msg_type != JOINT_TRAJECTORY_TYPE:
+            raise ValueError(
+                f"JointControl: group '{group}' uses {msg_type}, "
+                f'expected {JOINT_TRAJECTORY_TYPE}'
+            )
+
+        resolved_joint_names = list(
+            joint_names
+            or self.topic_config.get('joint_order', {}).get(group_key, [])
+        )
+        if not resolved_joint_names:
+            raise ValueError(
+                f"JointControl: no joint names configured for '{group_key}'"
+            )
+
+        if _has_value(positions):
+            target_positions = _coerce_positions(positions) or []
+        elif (
+            default_positions is not None
+            and len(default_positions) == len(resolved_joint_names)
+        ):
+            target_positions = list(default_positions)
+        else:
+            target_positions = [0.0] * len(resolved_joint_names)
+
+        if len(target_positions) != len(resolved_joint_names):
+            raise ValueError(
+                f"JointControl: group '{group}' has "
+                f'{len(resolved_joint_names)} joints but '
+                f'{len(target_positions)} target positions'
+            )
+
+        pub = self.node.create_publisher(
+            JointTrajectory,
+            topic,
             qos_profile,
         )
-
-        self._lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._thread = None
-        self._result = None  # None=running, True=success, False=failure
-        self._control_rate = CONTROL_RATE_HZ  # noqa: F405
-
-    # -- Construction helpers ------------------------------------------------
-
-    def _make_channel(self, group, joint_names, positions, default_positions,
-                      qos_profile):
-        cfg = GROUP_DEFAULTS[group]
-        pub = self.node.create_publisher(
-            JointTrajectory, cfg['topic'], qos_profile,
-        )
         return {
-            'group': group,
-            'pub': pub,
-            'joint_names': joint_names or cfg['joint_names'],
-            'positions': (
-                _coerce_positions(positions)
-                if positions is not None
-                else list(default_positions)
+            'group': (
+                group_key[len('leader_'):]
+                if group_key.startswith('leader_')
+                else group
             ),
+            'group_key': group_key,
+            'topic': topic,
+            'pub': pub,
+            'joint_names': resolved_joint_names,
+            'positions': target_positions,
         }
+
+    def _configured_joint_state_topics(self) -> list[str]:
+        topic_map = self.topic_config.get('topic_map', {})
+        topic_type_map = self.topic_config.get('topic_type_map', {})
+        topics = []
+        for group, topic in topic_map.items():
+            if (
+                group.startswith('follower_')
+                and topic_type_map.get(group) == JOINT_STATE_TYPE
+                and topic not in topics
+            ):
+                topics.append(topic)
+        return topics
+
+    def _empty_joint_states(self) -> dict[str, Optional[JointState]]:
+        return {topic: None for topic in self._joint_state_topics}
 
     # -- ROS callbacks --------------------------------------------------------
 
-    def _joint_state_callback(self, msg):
-        self.joint_state = msg
+    def _joint_state_callback(self, topic_name, msg):
+        if topic_name in self._joint_states:
+            self._joint_states[topic_name] = msg
 
     # -- Control loop ---------------------------------------------------------
 
@@ -300,21 +470,33 @@ class JointControl(BaseAction):
         traj.points.append(point)
         channel['pub'].publish(traj)
 
-    def _channel_reached(self, channel, name_to_idx) -> bool:
+    def _name_to_position(self) -> dict[str, float]:
+        result = {}
+        for msg in self._joint_states.values():
+            if msg is None:
+                continue
+            for idx, name in enumerate(msg.name):
+                if idx < len(msg.position):
+                    result[name] = msg.position[idx]
+        return result
+
+    def _channel_reached(self, channel, name_to_position) -> bool:
         for jname, target in zip(channel['joint_names'], channel['positions']):
-            idx = name_to_idx.get(jname)
-            if idx is None:
-                self.log_warn(f"Joint '{jname}' not found in /joint_states")
+            if jname not in name_to_position:
+                if jname not in self._missing_joint_names:
+                    self._missing_joint_names.add(jname)
+                    self.log_warn(
+                        f"Joint '{jname}' not found in configured "
+                        'JointState feedback topics'
+                    )
                 return False
-            if abs(self.joint_state.position[idx] - target) > self.position_threshold:
+            if abs(name_to_position[jname] - target) > self.position_threshold:
                 return False
         return True
 
     def _control_loop(self):
         rate_sleep = RATE_SLEEP_SEC  # noqa: F405
 
-        # Fire every active group's trajectory once up front, then watch
-        # /joint_states until they all converge (or we time out).
         for ch in self._channels:
             self._publish_channel(ch)
         groups = ', '.join(ch['group'] for ch in self._channels)
@@ -325,16 +507,14 @@ class JointControl(BaseAction):
             not self._stop_event.is_set()
             and timeout_count < self._timeout_ticks
         ):
-            if self.joint_state is None:
+            if not any(msg is not None for msg in self._joint_states.values()):
                 time.sleep(rate_sleep)
                 timeout_count += 1
                 continue
 
-            name_to_idx = {
-                n: i for i, n in enumerate(self.joint_state.name)
-            }
+            name_to_position = self._name_to_position()
             if all(
-                self._channel_reached(ch, name_to_idx)
+                self._channel_reached(ch, name_to_position)
                 for ch in self._channels
             ):
                 self.log_info(
@@ -357,7 +537,8 @@ class JointControl(BaseAction):
 
     def tick(self) -> NodeStatus:
         if self._thread is None:
-            self.joint_state = None
+            self._joint_states = self._empty_joint_states()
+            self._missing_joint_names = set()
             self._stop_event.clear()
             with self._lock:
                 self._result = None
@@ -383,4 +564,4 @@ class JointControl(BaseAction):
         self._thread = None
         with self._lock:
             self._result = None
-        self.joint_state = None
+        self._joint_states = self._empty_joint_states()

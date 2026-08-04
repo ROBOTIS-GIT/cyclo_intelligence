@@ -19,7 +19,6 @@ orchestrator/
 ├── config/                    Robot-specific YAML
 │                              (ffw_sg2_rev1_config.yaml, etc.).
 │                              Top-level key is 'orchestrator'
-│                              (Step 2 Import Fixer).
 │
 ├── bt/                        Behaviour Tree subsystem.
 │     ├── bt_core.py           NodeStatus, BTNode base classes.
@@ -46,11 +45,10 @@ orchestrator/
 │
 ├── internal/                  Node-local utilities — not part of
 │     │                        the inter-package import surface
-│     │                        (drift D4, Step 2).
 │     ├── communication/       ROS2 client wrappers.
 │     │   ├── communicator.py              Pub/sub for sensor topics.
 │     │   ├── container_service_client.py  InferenceCommand.srv
-│     │   │                                 dispatcher (Step 4-F).
+│     │   │                                 dispatcher.
 │     │   │                                 + stop_training /
 │     │   │                                 get_training_status.
 │     │   └── cyclo_data_client.py         cyclo_data srv wrapper.
@@ -73,8 +71,7 @@ orchestrator/
 └── scripts/                   Orchestrator-specific dev helpers.
     └── test_rosbridge_connection.py
                                Manual rosbridge smoke test.
-                               (Data-side CLIs moved to cyclo_data
-                               in Step 7.)
+                               Data-side CLIs live in cyclo_data.
 ```
 
 ## Responsibilities — what stays here vs moves to cyclo_data
@@ -86,7 +83,7 @@ orchestrator/
 | Robot control plane publishers | orchestrator | synchronous `JointTrajectory` / `Twist` commands from tree nodes |
 | Policy container lifecycle | orchestrator | `InferenceCommand` dispatch, client ownership |
 | Behaviour tree catalog + execution | orchestrator | `bt_node` owns `/bt/nodes/catalog`, `/bt/load_and_run`, `/bt/set_running`, `/bt/status`, `/bt/active_nodes` |
-| Recording / conversion / HF / editing | cyclo_data | data-plane workers (Step 3 atomic swaps) |
+| Recording / conversion / HF / editing | cyclo_data | data-plane workers |
 | Dataset visualisation | cyclo_data | `video_file_server`, replay handlers |
 
 ## Key srv / topic surface
@@ -171,7 +168,7 @@ explicit **Overwrite** action only after the server reports a name conflict.
 
 After `colcon build`:
 
-- `orchestrator_node` — main orchestrator node (Step 5-B rename).
-- `bt_node` — behaviour tree runner (Step 5-A).
+- `orchestrator_node` — main orchestrator node.
+- `bt_node` — behaviour tree runner.
 
 Both dropped into `install/orchestrator/lib/orchestrator/`.

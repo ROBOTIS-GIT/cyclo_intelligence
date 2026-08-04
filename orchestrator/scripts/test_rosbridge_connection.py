@@ -7,7 +7,7 @@ Usage:
     python3 test_rosbridge_connection.py
 
     # Or with specific host:
-    python3 test_rosbridge_connection.py --host localhost --port 9090
+    python3 test_rosbridge_connection.py --host localhost --port 7090
 """
 
 import argparse
@@ -264,7 +264,7 @@ def run_tests(host: str, port: int, bag_path: str = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test rosbridge connection")
     parser.add_argument("--host", default="localhost", help="Rosbridge host")
-    parser.add_argument("--port", type=int, default=9090, help="Rosbridge port")
+    parser.add_argument("--port", type=int, default=7090, help="Rosbridge port")
     parser.add_argument("--bag", help="Path to rosbag for replay test")
 
     args = parser.parse_args()

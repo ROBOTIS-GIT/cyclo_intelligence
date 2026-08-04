@@ -9,6 +9,8 @@ function Viewer3DPanel({
   actionTimestamps,
   actionNames,
   actionValues,
+  urdfPath,
+  endEffectorLinks,
   currentTime,
   isPlaying,
   playbackSpeed,
@@ -35,6 +37,8 @@ function Viewer3DPanel({
         robotTypeOverride={robotType}
         jointData={jointData}
         actionData={actionData}
+        urdfPathOverride={urdfPath}
+        endEffectorLinksOverride={endEffectorLinks}
         currentTime={currentTime}
         isPlaying={isPlaying}
         playbackSpeed={playbackSpeed}

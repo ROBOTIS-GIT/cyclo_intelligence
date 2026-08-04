@@ -1,15 +1,30 @@
 #!/command/with-contenv bash
 # supervisor_api — FastAPI control plane (PLAN §4.7).
 # Listens on ${CYCLO_SUPERVISOR_API_HOST}:${CYCLO_SUPERVISOR_API_PORT}
-# (defaults 127.0.0.1:8100); nginx reverse-proxies /api/ to it.
+# (defaults 127.0.0.1:7100); nginx reverse-proxies /api/ to it.
 
 set -e
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/opt/supervisor_api:${PYTHONPATH}
 
+# The Navigation grid WebSocket uses an in-process rclpy subscriber, and
+# navigation API one-shot ROS CLI commands inherit this process environment.
+# Keep these defaults here instead of Compose so runtime ROS/Zenoh settings
+# stay local to the supervised service.
+export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+export ROS_AUTOMATIC_DISCOVERY_RANGE=${ROS_AUTOMATIC_DISCOVERY_RANGE:-SUBNET}
+export ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-transport/shared_memory/enabled=true}
+export ZENOH_SHM_ENABLED=${ZENOH_SHM_ENABLED:-true}
+export ZENOH_TRANSPORT_SHM_ENABLED=${ZENOH_TRANSPORT_SHM_ENABLED:-true}
+
+# s6 does not read /root/.bashrc, so make the ROS Python packages visible.
+ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+source "/opt/ros/${ROS_DISTRO}/setup.bash"
+
 HOST="${CYCLO_SUPERVISOR_API_HOST:-127.0.0.1}"
-PORT="${CYCLO_SUPERVISOR_API_PORT:-8100}"
+PORT="${CYCLO_SUPERVISOR_API_PORT:-7100}"
 
 echo "[supervisor_api] starting uvicorn on ${HOST}:${PORT} ..."
 

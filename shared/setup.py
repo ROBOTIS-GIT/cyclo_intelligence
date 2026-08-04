@@ -57,6 +57,8 @@ def _walk_share_dir(src_subdir):
 #                                          by policy main_runtime containers)
 # shared/robot_configs/urdf/*.urdf        (per-robot URDF XML)
 # shared/robot_configs/ffw_description/** (mesh tree, recursive)
+# shared/robot_configs/open_manipulator_description/**
+#                                         (mesh tree, recursive)
 # These live in shared/ rather than orchestrator/config/ or
 # rosbag_recorder/config/ because they describe the robot, not any
 # single consumer package.
@@ -69,12 +71,16 @@ robot_assets = [
         f'share/{package_name}/robot_configs/urdf',
         glob(f'{package_name}/robot_configs/urdf/*.urdf'),
     ),
-] + _walk_share_dir(f'{package_name}/robot_configs/ffw_description')
+] + _walk_share_dir(
+    f'{package_name}/robot_configs/ffw_description'
+) + _walk_share_dir(
+    f'{package_name}/robot_configs/open_manipulator_description'
+)
 
 
 setup(
     name=package_name,
-    version='1.0.0',
+    version='1.2.0',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory, so 'shared' resolves to ./shared/ and subpackages

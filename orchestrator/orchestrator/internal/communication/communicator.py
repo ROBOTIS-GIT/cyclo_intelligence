@@ -121,10 +121,6 @@ class Communicator:
             'mode': None
         }
 
-        self.init_subscribers()
-        self.init_publishers()
-        self.init_services()
-
         # Protects joystick_state — orchestrator_node's timer callback
         # and joystick_trigger_callback both run under
         # MultiThreadedExecutor and would otherwise race on the dict.
@@ -132,6 +128,11 @@ class Communicator:
 
         # Joystick handler callback for immediate processing
         self._joystick_handler: Optional[Callable[[str], None]] = None
+        self._closed = False
+
+        self.init_subscribers()
+        self.init_publishers()
+        self.init_services()
 
     def get_mcap_topics(self):
         """Topics to record in the per-episode MCAP (no images / camera_info)."""
@@ -147,14 +148,25 @@ class Communicator:
 
     def init_subscribers(self):
         """Initialize only joystick trigger subscriber."""
-        # Joystick trigger for control (keep this)
+        joystick_topics = robot_schema.get_joystick_topics(self.robot_section)
+        trigger_topic = joystick_topics.get('trigger_topic', '')
+        self.joystick_trigger_subscriber = None
+        if not trigger_topic:
+            self.node.get_logger().info(
+                'Joystick trigger subscriber skipped: no trigger topic '
+                'configured for this robot'
+            )
+            return
+
         self.joystick_trigger_subscriber = self.node.create_subscription(
             String,
-            '/leader/joystick_controller/tact_trigger',
+            trigger_topic,
             self.joystick_trigger_callback,
             10
         )
-        self.node.get_logger().info('Joystick trigger subscriber initialized')
+        self.node.get_logger().info(
+            f'Joystick trigger subscriber initialized: {trigger_topic}'
+        )
 
     def init_publishers(self):
         """Initialize publishers."""
@@ -259,6 +271,9 @@ class Communicator:
         re-dispatching the same event if the handler raises before the
         clear-flag step ran.
         """
+        if self._closed:
+            return
+
         self.node.get_logger().info(f'Received joystick trigger: {msg.data}')
         handler = self._joystick_handler
         if handler is not None:
@@ -285,8 +300,21 @@ class Communicator:
 
     def heartbeat_timer_callback(self):
         """Publish heartbeat."""
+        if self._closed:
+            return
+
+        heartbeat_publisher = getattr(self, 'heartbeat_publisher', None)
+        if heartbeat_publisher is None:
+            return
+
         heartbeat_msg = Empty()
-        self.heartbeat_publisher.publish(heartbeat_msg)
+        try:
+            heartbeat_publisher.publish(heartbeat_msg)
+        except Exception as e:
+            if not self._closed:
+                self.node.get_logger().warn(
+                    f'Failed to publish heartbeat: {str(e)}'
+                )
 
     # ========== Service Callbacks ==========
 
@@ -488,6 +516,7 @@ class Communicator:
 
     def cleanup(self):
         self.node.get_logger().info('Cleaning up Communicator resources...')
+        self._closed = True
 
         self._cleanup_publishers()
         self._cleanup_subscribers()

@@ -17,6 +17,7 @@
  */
 
 import { createSlice } from '@reduxjs/toolkit';
+import { CYCLO_ROSBRIDGE_PORT } from '../../config/runtimeConfig';
 
 // Resolved at module load so the very first render already has a valid
 // rosbridge URL — child components mount with a working connection target
@@ -27,10 +28,11 @@ const initialState = {
   connected: false,
   connecting: false,
   rosHost: defaultRosHost,
-  rosbridgeUrl: defaultRosHost ? `ws://${defaultRosHost}:9090` : '',
+  rosbridgeUrl: defaultRosHost ? `ws://${defaultRosHost}:${CYCLO_ROSBRIDGE_PORT}` : '',
   imageTopicList: [],
   /** Persisted camera topic assignment [left, center, right] so it survives ImageGrid remounts */
   assignedImageTopics: [],
+  assignedImageTopicsRobotType: '',
   connectionError: null,
 };
 
@@ -46,7 +48,7 @@ const rosSlice = createSlice({
     },
     setRosHost: (state, action) => {
       state.rosHost = action.payload;
-      state.rosbridgeUrl = `ws://${action.payload}:9090`;
+      state.rosbridgeUrl = `ws://${action.payload}:${CYCLO_ROSBRIDGE_PORT}`;
     },
     setRosbridgeUrl: (state, action) => {
       state.rosbridgeUrl = action.payload;
@@ -55,7 +57,13 @@ const rosSlice = createSlice({
       state.imageTopicList = action.payload;
     },
     setAssignedImageTopics: (state, action) => {
-      state.assignedImageTopics = action.payload;
+      if (Array.isArray(action.payload)) {
+        state.assignedImageTopics = action.payload;
+        state.assignedImageTopicsRobotType = '';
+        return;
+      }
+      state.assignedImageTopics = action.payload?.topics || [];
+      state.assignedImageTopicsRobotType = action.payload?.robotType || '';
     },
     setConnectionError: (state, action) => {
       state.connectionError = action.payload;

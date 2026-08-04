@@ -2,6 +2,40 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.0 (2026-07-10)
+------------------
+* None
+
+1.1.5 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.5.
+* Contributors: Taehyeong Kim
+
+1.1.4 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.4.
+* Contributors: Taehyeong Kim
+
+1.1.3 (2026-07-07)
+------------------
+* Updated Cyclo release metadata to 1.1.3.
+* Contributors: Taehyeong Kim
+
+1.1.2 (2026-07-06)
+------------------
+* Updated Cyclo release metadata to 1.1.2.
+* Contributors: Taehyeong Kim
+
+1.1.1 (2026-07-03)
+------------------
+* Updated Cyclo release metadata to 1.1.1.
+* Contributors: Taehyeong Kim
+
+1.1.0 (2026-07-01)
+------------------
+* Updated Cyclo release metadata to 1.1.0.
+* Contributors: Taehyeong Kim
+
 1.0.0 (2026-06-29)
 ------------------
 * Updated Cyclo release metadata to 1.0.0.

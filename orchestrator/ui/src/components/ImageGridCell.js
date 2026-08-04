@@ -18,6 +18,27 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
 import { MdClose, MdScreenRotation } from 'react-icons/md';
 import { useSelector } from 'react-redux';
+import { CYCLO_WEB_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
+
+const normalizeRotationDegrees = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return ((Math.round(numeric) % 360) + 360) % 360;
+};
+
+const parseAspectRatio = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  const [width, height] = String(value || '').split('/').map(Number);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return width / height;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 1;
+};
+
+const formatPercent = (value) => `${Number(value.toFixed(4))}%`;
 
 const classCell = (topic) =>
   clsx(
@@ -64,7 +85,10 @@ export default function ImageGridCell({
   isActive = true,
   style = {},
 }) {
-  const rotate = rotationDegrees !== 0;
+  const normalizedRotationDegrees = normalizeRotationDegrees(rotationDegrees);
+  const rotate = normalizedRotationDegrees !== 0;
+  const swapsDimensions = normalizedRotationDegrees === 90 || normalizedRotationDegrees === 270;
+  const aspectRatio = parseAspectRatio(aspect);
   const rosHost = useSelector((state) => state.ros.rosHost);
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
@@ -118,7 +142,7 @@ export default function ImageGridCell({
       // web_video_server expects base topic (e.g. .../image_raw); use default_transport=compressed to subscribe to CompressedImage
       // Do not encode slashes: server rejects %2F and expects literal /
       const streamTopic = topic.endsWith('/compressed') ? topic.slice(0, -11) : topic;
-      img.src = `http://${rosHost}:8085/stream?quality=50&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
+      img.src = `http://${rosHost}:${CYCLO_WEB_VIDEO_SERVER_PORT}/stream?quality=50&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
       img.alt = topic;
 
       img.onclick = (e) => e.stopPropagation();
@@ -147,17 +171,13 @@ export default function ImageGridCell({
       };
 
       if (rotate) {
-        // Wrapper div handles rotation; img inside handles fitting.
-        // For 3:4 container (W x H where H=4W/3):
-        //   wrapper pre-rotation: width=H, height=W (landscape box)
-        //   after rotate(-90deg): visual bounding box = W x H (matches container)
         const wrapper = document.createElement('div');
         wrapper.style.position = 'absolute';
-        wrapper.style.width = '133.33%';   // container height = 4W/3 = 133.33% of W
-        wrapper.style.height = '75%';      // container width  = 3H/4 = 75% of H
+        wrapper.style.width = swapsDimensions ? formatPercent(100 / aspectRatio) : '100%';
+        wrapper.style.height = swapsDimensions ? formatPercent(100 * aspectRatio) : '100%';
         wrapper.style.top = '50%';
         wrapper.style.left = '50%';
-        wrapper.style.transform = `translate(-50%, -50%) rotate(${rotationDegrees}deg)`;
+        wrapper.style.transform = `translate(-50%, -50%) rotate(${normalizedRotationDegrees}deg)`;
         wrapper.style.transformOrigin = 'center center';
         wrapper.style.overflow = 'hidden';
 
@@ -183,7 +203,17 @@ export default function ImageGridCell({
     } finally {
       isCreatingRef.current = false;
     }
-  }, [topic, isActive, rosHost, idx, rotate, rotationDegrees, destroyImage]);
+  }, [
+    topic,
+    isActive,
+    rosHost,
+    idx,
+    rotate,
+    swapsDimensions,
+    aspectRatio,
+    normalizedRotationDegrees,
+    destroyImage,
+  ]);
 
   useEffect(() => {
     retryCountRef.current = 0;

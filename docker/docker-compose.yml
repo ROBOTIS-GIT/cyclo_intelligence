@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:${VERSION:-1.0.0}-${ARCH:-arm64}
+    image: robotis/cyclo-intelligence:1.2.0
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -70,13 +70,11 @@ services:
     environment:
       - DISPLAY=${DISPLAY}
       - QT_X11_NO_MITSHM=1
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
-      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
-      # Cyclo does not start rmw_zenohd. This points at the external router.
-      - ZENOH_ROUTER_IP=127.0.0.1
-      - ZENOH_ROUTER_PORT=7447
-      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
-      - CYCLO_UI_PORT=${CYCLO_UI_PORT:-80}
+      - CYCLO_UI_PORT=${CYCLO_UI_PORT:-7080}
+      - CYCLO_ROSBRIDGE_PORT=${CYCLO_ROSBRIDGE_PORT:-7090}
+      - CYCLO_VIDEO_SERVER_PORT=${CYCLO_VIDEO_SERVER_PORT:-7082}
+      - CYCLO_WEB_VIDEO_SERVER_PORT=${CYCLO_WEB_VIDEO_SERVER_PORT:-7085}
+      - CYCLO_SUPERVISOR_API_PORT=${CYCLO_SUPERVISOR_API_PORT:-7100}
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
@@ -87,6 +85,8 @@ services:
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
+      # Keep s6 ROS/Zenoh env sourcing in sync even when using pre-built images.
+      - ./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro
       - ./huggingface:/root/.cache/huggingface
       # Model dropboxes live under /workspace/model/{lerobot,groot}.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
@@ -103,6 +103,7 @@ services:
       # bind-mounted at request time (not baked).
       - ../shared/shared/robot_configs/urdf:/usr/share/nginx/html/urdf/urdf:ro
       - ../shared/shared/robot_configs/ffw_description:/usr/share/nginx/html/urdf/ffw_description:ro
+      - ../shared/shared/robot_configs/open_manipulator_description:/usr/share/nginx/html/urdf/open_manipulator_description:ro
       # supervisor_api manages lerobot / groot lifecycle via Docker SDK
       # (PLAN §4.8). Socket mount makes that possible without DinD.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -144,7 +145,7 @@ services:
   # ============================================================
   lerobot:
     container_name: lerobot_server
-    image: robotis/lerobot-zenoh:1.3.0-${ARCH:-arm64}
+    image: robotis/lerobot-zenoh:1.3.2-${ARCH:-arm64}
     build:
       # Build context bumped one level up so the Dockerfile can
       # COPY common/s6-services/ (shared across all policy backends)
@@ -174,18 +175,6 @@ services:
     # robot_type is *not* baked here. Main receives it on
     # InferenceCommand.LOAD, then configures its local RobotClient command path.
     environment:
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
-      - ZENOH_ROUTER_IP=127.0.0.1
-      - ZENOH_ROUTER_PORT=7447
-      - ZENOH_SDK_PATH=/zenoh_sdk
-      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
-      - ZENOH_TRANSPORT_SHM_ENABLED=true
-      - ZENOH_SHM_ENABLED=true
-      - ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-      - ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
-      # Drives Zenoh service prefixes and the default engine module name.
-      - POLICY_BACKEND=lerobot
-      - POLICY_ENGINE_MODULE=lerobot_engine
       # Main-runtime waits on the local engine process while weights and
       # first-time gated backbones download/load.
       - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
@@ -264,7 +253,7 @@ services:
   # ============================================================
   groot:
     container_name: groot_server
-    image: robotis/groot-zenoh:1.3.2-${ARCH:-arm64}
+    image: robotis/groot-zenoh:1.3.4-${ARCH:-arm64}
     build:
       context: ../cyclo_brain/policy/groot
       dockerfile: Dockerfile.${ARCH:-arm64}
@@ -291,34 +280,11 @@ services:
     ipc: host
 
     environment:
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
-      - ZENOH_ROUTER_IP=127.0.0.1
-      - ZENOH_ROUTER_PORT=7447
-      - ZENOH_SDK_PATH=/zenoh_sdk
-      - ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=true
-      - ZENOH_TRANSPORT_SHM_ENABLED=true
-      - ZENOH_SHM_ENABLED=true
-      - ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-      - ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
-      - POLICY_BACKEND=groot
-      - POLICY_ENGINE_MODULE=groot_engine
-      # Start N1.7 in PyTorch eager mode. Enable after model-load/action
-      # smoke tests pass on the target robot.
-      - GROOT_TRT_ENABLED=false
       # Main-runtime waits on the local engine process while weights and
       # first-time gated backbones download/load.
       - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
-      - CONTROL_HZ=100
-      - INFERENCE_HZ=15
-      - TARGET_CHUNK_SIZE=none
-      - REFILL_MARGIN_S=0.2
-      - REFILL_LATENCY_WARMUP_SAMPLES=1
-      - REFILL_LATENCY_SAMPLE_MAX_S=2.0
       - CMD_VEL_LINEAR_DEADBAND=0.02
       - CMD_VEL_ANGULAR_DEADBAND=0.02
-      - HF_HOME=/root/.cache/huggingface
-      - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface/hub
-      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1

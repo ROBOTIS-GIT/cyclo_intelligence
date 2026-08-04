@@ -412,6 +412,8 @@ class EpisodeData:
     # sync step can map per-camera MP4 frames onto the same grid.
     grid_log_times_sec: List[float] = field(default_factory=list)
     frame_reuse_reports: List[Dict[str, Any]] = field(default_factory=list)
+    observation_state_names: List[str] = field(default_factory=list)
+    action_names: List[str] = field(default_factory=list)
 
 
 class RosbagToLerobotConverterBase:
@@ -1382,6 +1384,8 @@ class RosbagToLerobotConverterBase:
             pass
         self._state_joint_names = list(payload.get("state_joint_names") or [])
         self._action_joint_names = list(payload.get("action_joint_names") or [])
+        episode.observation_state_names = list(self._state_joint_names or [])
+        episode.action_names = list(self._action_joint_names or [])
         staleness = payload.get("staleness_metrics")
         if isinstance(staleness, dict):
             self._staleness_reports[int(episode_index)] = staleness
@@ -1425,8 +1429,8 @@ class RosbagToLerobotConverterBase:
             "version": _PREPARED_EPISODE_CACHE_VERSION,
             "episode_index": int(episode.episode_index),
             "episode": episode,
-            "state_joint_names": list(self._state_joint_names),
-            "action_joint_names": list(self._action_joint_names),
+            "state_joint_names": list(self._state_joint_names or []),
+            "action_joint_names": list(self._action_joint_names or []),
             "staleness_metrics": self._staleness_reports.get(episode.episode_index, {}),
             "video_file_stats": video_file_stats,
         }
@@ -1680,6 +1684,12 @@ class RosbagToLerobotConverterBase:
             if length <= 0:
                 continue
             start_frame = frame_cursor
+            if not stitched.observation_state_names:
+                stitched.observation_state_names = list(
+                    segment_episode.observation_state_names or []
+                )
+            if not stitched.action_names:
+                stitched.action_names = list(segment_episode.action_names or [])
             stitched.observation_state.extend(segment_episode.observation_state)
             stitched.action.extend(segment_episode.action)
             stitched.timestamps.extend(
@@ -2071,6 +2081,12 @@ class RosbagToLerobotConverterBase:
             if not ep.timestamps:
                 continue
             base_ts = float(ep.timestamps[0])
+            if not stitched.observation_state_names:
+                stitched.observation_state_names = list(
+                    ep.observation_state_names or []
+                )
+            if not stitched.action_names:
+                stitched.action_names = list(ep.action_names or [])
             remapped = [float(ts) - base_ts + offset for ts in ep.timestamps]
             stitched.timestamps.extend(remapped)
             stitched.observation_state.extend(ep.observation_state)
@@ -2946,6 +2962,8 @@ class RosbagToLerobotConverterBase:
         episode, staleness_metrics = self._resample_to_fps(
             episode, state_messages, action_messages, trim_start
         )
+        episode.observation_state_names = list(self._state_joint_names or [])
+        episode.action_names = list(self._action_joint_names or [])
 
         self._staleness_reports[episode_index] = staleness_metrics
         self._log_staleness_summary(staleness_metrics)
@@ -3067,6 +3085,8 @@ class RosbagToLerobotConverterBase:
         episode.source_path = None
         self._state_joint_names = list(payload.get("state_joint_names") or [])
         self._action_joint_names = list(payload.get("action_joint_names") or [])
+        episode.observation_state_names = list(self._state_joint_names or [])
+        episode.action_names = list(self._action_joint_names or [])
         staleness = payload.get("staleness_metrics")
         if isinstance(staleness, dict):
             self._staleness_reports[int(episode_index)] = staleness
@@ -3082,8 +3102,8 @@ class RosbagToLerobotConverterBase:
         payload = {
             "version": _EXTRACT_CACHE_VERSION,
             "episode": episode,
-            "state_joint_names": list(self._state_joint_names),
-            "action_joint_names": list(self._action_joint_names),
+            "state_joint_names": list(self._state_joint_names or []),
+            "action_joint_names": list(self._action_joint_names or []),
             "staleness_metrics": staleness_metrics,
         }
         tmp_path: Optional[Path] = None
@@ -5000,14 +5020,39 @@ class RosbagToLerobotConverterBase:
         state_names_from_config = self._joint_names_from_config('follower_')
         action_names_from_config = self._joint_names_from_config('leader_')
 
+        def _names_for_dim(
+            candidates: List[Optional[List[str]]],
+            dim: int,
+        ) -> Optional[List[str]]:
+            for names in candidates:
+                if names is not None and len(names) == dim:
+                    return list(names)
+            return None
+
+        def _episode_names_for_dim(attr: str, dim: int) -> List[str]:
+            for episode in episodes_data:
+                names = list(getattr(episode, attr, []) or [])
+                if len(names) == dim:
+                    return names
+            return []
+
         if state_dim > 0:
             self._features["observation.state"] = {
                 "dtype": "float32",
                 "shape": (state_dim,),
                 "names": (
-                    self._state_joint_names
-                    or (state_names_from_config if len(state_names_from_config) == state_dim else None)
-                    or (action_names_from_config if len(action_names_from_config) == state_dim else None)
+                    _names_for_dim(
+                        [
+                            _episode_names_for_dim(
+                                "observation_state_names",
+                                state_dim,
+                            ),
+                            self._state_joint_names,
+                            state_names_from_config,
+                            action_names_from_config,
+                        ],
+                        state_dim,
+                    )
                     or [f"joint_{i}" for i in range(state_dim)]
                 ),
             }
@@ -5017,8 +5062,14 @@ class RosbagToLerobotConverterBase:
                 "dtype": "float32",
                 "shape": (action_dim,),
                 "names": (
-                    self._action_joint_names
-                    or (action_names_from_config if len(action_names_from_config) == action_dim else None)
+                    _names_for_dim(
+                        [
+                            _episode_names_for_dim("action_names", action_dim),
+                            self._action_joint_names,
+                            action_names_from_config,
+                        ],
+                        action_dim,
+                    )
                     or [f"joint_{i}" for i in range(action_dim)]
                 ),
             }

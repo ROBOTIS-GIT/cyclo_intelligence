@@ -2,6 +2,7 @@ orchestrator:
   ros__parameters:
     omx_f:
       robot_name: "OMX F"
+      urdf_path: urdf/omx_f.urdf
 
       # ────────────────────────────────────────────────────────────────
       # Observation — every signal the policy reads from the robot.
@@ -10,6 +11,10 @@ orchestrator:
       # ────────────────────────────────────────────────────────────────
       observation:
         images:
+          # Initial live camera grid placement follows YAML insertion order.
+          # UI cell indexes: 0=left, 1=center, 2=right.
+          # The first three image entries map to UI cells [1, 0, 2].
+          # rotation_deg, when set, must be one of: 0, 90, 180, 270.
           camera1:
             topic: /camera1/image_raw/compressed
             msg_type: sensor_msgs/msg/CompressedImage

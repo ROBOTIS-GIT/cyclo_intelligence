@@ -165,6 +165,29 @@ class ConversionService:
             response.message = 'dataset_path is required.'
             return response
 
+        robot_type = (getattr(request, 'robot_type', '') or '').strip()
+        robot_config_path = (
+            getattr(request, 'robot_config_path', '') or ''
+        ).strip()
+        if not robot_type and not robot_config_path:
+            response.success = False
+            response.job_id = ''
+            response.message = (
+                'robot_type or robot_config_path is required for conversion.'
+            )
+            return response
+
+        if robot_config_path:
+            robot_config_file = Path(robot_config_path).expanduser()
+            if not robot_config_file.exists():
+                response.success = False
+                response.job_id = ''
+                response.message = (
+                    f'robot_config_path does not exist: {robot_config_file}'
+                )
+                return response
+            robot_config_path = str(robot_config_file)
+
         with self._state_lock:
             worker = self._worker
         if worker is None or not worker.is_alive():
@@ -235,8 +258,8 @@ class ConversionService:
 
         request_data = {
             'dataset_path': request.dataset_path,
-            'robot_type': request.robot_type,
-            'robot_config_path': request.robot_config_path,
+            'robot_type': robot_type,
+            'robot_config_path': robot_config_path,
             'source_folders': list(request.source_folders),
             # Conversion-time fps. 0 = caller wants the worker-side
             # default (recording is rate-agnostic; fps is purely a
