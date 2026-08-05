@@ -2,6 +2,10 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.1 (2026-08-05)
+------------------
+* None
+
 1.2.0 (2026-07-10)
 ------------------
 * Added the Navigation page with map viewing, map editing, status, toolbar, log, and ROS topic integration.

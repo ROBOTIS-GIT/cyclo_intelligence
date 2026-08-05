@@ -2,6 +2,11 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.1 (2026-08-05)
+------------------
+* Updated the F2 head camera compressed image topic to ``/camera_head/camera_head/color/image_raw/compressed``.
+* Contributors: Taehyeong Kim
+
 1.2.0 (2026-07-10)
 ------------------
 * None

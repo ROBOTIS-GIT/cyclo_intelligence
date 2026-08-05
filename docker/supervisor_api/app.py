@@ -1073,7 +1073,7 @@ def _parse_svstat(raw: str) -> dict:
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.2.0",
+    version="1.2.1",
 )
 
 _include_router_with_eager_routes(app, navigation_router)

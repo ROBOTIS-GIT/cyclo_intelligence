@@ -16,7 +16,7 @@ orchestrator:
           # The first three image entries map to UI cells [1, 0, 2].
           # rotation_deg, when set, must be one of: 0, 90, 180, 270.
           cam_head:
-            topic: /camera_head/camera_head/color/image_rect_raw/compressed
+            topic: /camera_head/camera_head/color/image_raw/compressed
             msg_type: sensor_msgs/msg/CompressedImage
           cam_left_wrist:
             topic: /camera_left/camera_left/color/image_rect_raw/compressed

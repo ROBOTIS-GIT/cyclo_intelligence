@@ -102,10 +102,12 @@ RUN apt-get update && \
         ros-jazzy-rosidl-dynamic-typesupport-fastrtps && \
     rm -rf /var/lib/apt/lists/*
 
+# Keep pyarrow pinned with the ARM64 image. PyArrow 25.0.0 has crashed in
+# the aarch64 dataset-backed Parquet reader while serving replay sidecars.
 RUN pip install --no-cache-dir --break-system-packages \
         setuptools==68.1.2 'numpy<2' \
         psutil matplotlib pandas huggingface_hub \
-        mcap mcap-ros2-support pyarrow
+        mcap mcap-ros2-support pyarrow==24.0.0
 
 # Same nested-package caveat as the rosdep step (see Dockerfile.arm64).
 # --symlink-install re-enabled (D17) — see Dockerfile.arm64 for the

@@ -234,7 +234,7 @@ Environment:
   FLASH_ATTN_CUDA_ARCHS
                    CUDA archs for GR00T Blackwell flash-attn builds
                    (default 120)
-  VERSION          image tag version (default: 1.2.0 for cyclo)
+  VERSION          image tag version (default: 1.2.1 for cyclo)
   ROS/Zenoh        Edit /root/.bashrc inside each container, then restart that
                    container. docker restart preserves edits; recreating the
                    container resets /root/.bashrc to the image default.

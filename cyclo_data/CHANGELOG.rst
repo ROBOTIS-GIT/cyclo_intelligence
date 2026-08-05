@@ -2,6 +2,12 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.1 (2026-08-05)
+------------------
+* Avoided PyArrow's dataset-backed Parquet reader when loading replay frame timestamp sidecars to prevent arm64 crashes.
+* Pinned the Cyclo Docker image PyArrow runtime to 24.0.0 for replay sidecar compatibility.
+* Contributors: Taehyeong Kim
+
 1.2.0 (2026-07-10)
 ------------------
 * None

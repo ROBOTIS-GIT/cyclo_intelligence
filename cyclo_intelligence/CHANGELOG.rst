@@ -2,6 +2,13 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.1 (2026-08-05)
+------------------
+* Fixed arm64 replay sidecar Parquet loading by avoiding PyArrow's dataset-backed reader and pinning Docker PyArrow to 24.0.0.
+* Updated the F2 head camera compressed image topic to ``/camera_head/camera_head/color/image_raw/compressed``.
+* Updated image support to ``robotis/cyclo-intelligence:1.2.1``.
+* Contributors: Taehyeong Kim
+
 1.2.0 (2026-07-10)
 ------------------
 * Added the Cyclo Intelligence ROS 2 metapackage.

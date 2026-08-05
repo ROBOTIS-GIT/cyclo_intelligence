@@ -99,7 +99,7 @@ def test_f2_config_uses_realsense_head_camera_layout():
 
     assert robot_schema.get_image_topics(section) == {
         "cam_head": {
-            "topic": "/camera_head/camera_head/color/image_rect_raw/compressed",
+            "topic": "/camera_head/camera_head/color/image_raw/compressed",
             "msg_type": "sensor_msgs/msg/CompressedImage",
         },
         "cam_left_wrist": {

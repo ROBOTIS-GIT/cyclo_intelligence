@@ -8,7 +8,7 @@
 #                                         orchestrator / cyclo_data nodes
 #
 # Build context: cyclo_intelligence/ (repo root)
-#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:1.2.0-arm64 .
+#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:1.2.1-arm64 .
 #
 # lerobot / groot are separate containers (PLAN §4.8 on-demand pull);
 # this image intentionally does NOT bundle PyTorch / CUDA / LeRobot.
@@ -144,11 +144,13 @@ RUN apt-get update && \
 # Python deps — cyclo_data needs mcap / hf_hub / pyarrow for the
 # MCAP→LeRobot conversion worker and HF Hub service. psutil for
 # device monitoring. numpy<2 because OpenCV in the base image is
-# compiled against 1.x.
+# compiled against 1.x. Keep pyarrow below 25.0.0: that release has
+# crashed in the aarch64 dataset-backed Parquet reader while serving
+# replay sidecars.
 RUN pip install --no-cache-dir --break-system-packages \
         setuptools==68.1.2 'numpy<2' \
         psutil matplotlib pandas huggingface_hub \
-        mcap mcap-ros2-support pyarrow
+        mcap mcap-ros2-support pyarrow==24.0.0
 
 # colcon build the full workspace.
 # Use --paths (explicit package list) instead of --base-paths
