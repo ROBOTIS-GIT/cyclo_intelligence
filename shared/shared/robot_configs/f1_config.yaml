@@ -1,0 +1,108 @@
+orchestrator:
+  ros__parameters:
+    f1:
+      robot_name: "FFW F1"
+      urdf_path: urdf/ffw_f1_follower.urdf
+
+      # ────────────────────────────────────────────────────────────────
+      # Observation — every signal the policy reads from the robot.
+      # Recording subscribes to all topics referenced here. Inference
+      # Process A subscribes to these same topics for live obs.
+      # ────────────────────────────────────────────────────────────────
+      observation:
+        images:
+          # Initial live camera grid placement follows YAML insertion order.
+          # UI cell indexes: 0=left, 1=center, 2=right.
+          # The first three image entries map to UI cells [1, 0, 2].
+          # rotation_deg, when set, must be one of: 0, 90, 180, 270.
+          cam_head:
+            topic: /camera_head/camera_head/color/image_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          cam_left_wrist:
+            topic: /camera_left/camera_left/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+          cam_right_wrist:
+            topic: /camera_right/camera_right/color/image_rect_raw/compressed
+            msg_type: sensor_msgs/msg/CompressedImage
+
+        state:
+          # Each entry contributes one slice of observation.state. Order
+          # of slices is keyed insertion order (yaml = ordered).
+          upper_body:
+            topic: /joint_states
+            msg_type: sensor_msgs/msg/JointState
+            joint_names:
+              - arm_l_joint1
+              - arm_l_joint2
+              - arm_l_joint3
+              - arm_l_joint4
+              - arm_l_joint5
+              - arm_l_joint6
+              - arm_l_joint7
+              - gripper_l_joint1
+              - arm_r_joint1
+              - arm_r_joint2
+              - arm_r_joint3
+              - arm_r_joint4
+              - arm_r_joint5
+              - arm_r_joint6
+              - arm_r_joint7
+              - gripper_r_joint1
+              - head_joint1
+              - head_joint2
+              - lift_joint
+
+      # ────────────────────────────────────────────────────────────────
+      # Action — every modality the policy commands. Each entry's topic
+      # is BOTH the inference command target (Process B publishes here)
+      # AND the rosbag record target. joint_names is the dimension
+      # layout for that slice of the action vector.
+      # ────────────────────────────────────────────────────────────────
+      action:
+        arm_left:
+          topic: /leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_l_joint1
+            - arm_l_joint2
+            - arm_l_joint3
+            - arm_l_joint4
+            - arm_l_joint5
+            - arm_l_joint6
+            - arm_l_joint7
+            - gripper_l_joint1
+        arm_right:
+          topic: /leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - arm_r_joint1
+            - arm_r_joint2
+            - arm_r_joint3
+            - arm_r_joint4
+            - arm_r_joint5
+            - arm_r_joint6
+            - arm_r_joint7
+            - gripper_r_joint1
+        head:
+          topic: /leader/joystick_controller_left/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - head_joint1
+            - head_joint2
+        lift:
+          topic: /leader/joystick_controller_right/joint_trajectory
+          msg_type: trajectory_msgs/msg/JointTrajectory
+          joint_names:
+            - lift_joint
+
+      # ────────────────────────────────────────────────────────────────
+      # Recording — auxiliary topics that need to be in the bag but are
+      # NOT VLA training data. /tf for visualisation; camera_info per
+      # camera so MP4 conversion can pair frames with intrinsics.
+      # ────────────────────────────────────────────────────────────────
+      recording:
+        extra_topics:
+          - /tf
+          - /camera_head/camera_head/color/camera_info
+          - /camera_left/camera_left/color/camera_info
+          - /camera_right/camera_right/color/camera_info

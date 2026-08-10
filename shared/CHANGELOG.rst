@@ -2,6 +2,12 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.2 (2026-08-10)
+------------------
+* Added F1 robot configuration, URDF, and mesh assets, including base and wrist camera meshes.
+* Added regression coverage for F1 state/action dimensions and URDF mesh resolution.
+* Contributors: Taehyeong Kim
+
 1.2.1 (2026-08-05)
 ------------------
 * Updated the F2 head camera compressed image topic to ``/camera_head/camera_head/color/image_raw/compressed``.

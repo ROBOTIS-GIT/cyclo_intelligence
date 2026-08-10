@@ -2,6 +2,12 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.2.2 (2026-08-10)
+------------------
+* Added F1 robot configuration, URDF, and mesh assets for Cyclo robot workflows.
+* Updated image support to ``robotis/cyclo-intelligence:1.2.2``.
+* Contributors: Taehyeong Kim
+
 1.2.1 (2026-08-05)
 ------------------
 * Fixed arm64 replay sidecar Parquet loading by avoiding PyArrow's dataset-backed reader and pinning Docker PyArrow to 24.0.0.

@@ -144,6 +144,29 @@ def test_f2_urdf_path_and_mesh_assets_resolve():
     )
 
 
+def test_f1_state_and_action_dimensions_match_layout():
+    section = robot_schema.load_robot_section("f1")
+
+    state_dim = sum(
+        len(cfg["joint_names"])
+        for cfg in robot_schema.get_state_groups(section).values()
+    )
+    action_dim = sum(
+        len(cfg["joint_names"])
+        for cfg in robot_schema.get_action_groups(section).values()
+    )
+
+    assert state_dim == 19
+    assert action_dim == 19
+
+
+def test_f1_urdf_path_and_mesh_assets_resolve():
+    _assert_urdf_path_and_mesh_assets_resolve(
+        "f1",
+        "ffw_f1_follower.urdf",
+    )
+
+
 def test_tactile_is_optional_for_existing_sg2_config():
     section = robot_schema.load_robot_section("ffw_sg2_rev1")
 
