@@ -29,11 +29,14 @@ import {
 } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import Tooltip from './Tooltip';
+import InferenceRecordingControls from './InferenceRecordingControls';
 import { InferencePhase } from '../constants/taskPhases';
 import {
   markLocalTaskInfoEdited,
+  selectInferenceRecordingControl,
   selectInferenceTaskInfo,
   setInferenceMode,
+  setRecordInferenceMode,
   setInferenceStatus,
 } from '../features/tasks/taskSlice';
 import { requiresInstruction } from '../constants/policyCapabilities';
@@ -80,6 +83,7 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const recordingControl = useSelector(selectInferenceRecordingControl);
   const rosHost = useSelector((state) => state.ros.rosHost);
 
   const [hovered, setHovered] = useState(null);
@@ -213,12 +217,16 @@ export default function InferenceControlPanel() {
           // Backend may have left phase in LOADING/INFERENCING after a failed
           // setup; force the local phase back to READY so the panel becomes
           // editable and the user can retry.
-          dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+          if (commandString === 'start_inference') {
+            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+          }
         } else if (result && result.success === true) {
           toast.success(`${commandName} executed successfully`);
         } else {
           toast.error(`${commandName} completed with uncertain status`);
-          dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+          if (commandString === 'start_inference') {
+            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+          }
         }
         return result;
       } catch (error) {
@@ -240,7 +248,9 @@ export default function InferenceControlPanel() {
           toast.error(`Command failed [${commandName}]: ${errorMessage}`);
         }
         // Same reasoning as the success===false branch above.
-        dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+        if (commandString === 'start_inference') {
+          dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
+        }
         return null;
       }
     },
@@ -328,6 +338,7 @@ export default function InferenceControlPanel() {
   const handleUseSimDeploy = useCallback(async () => {
     const intent = pendingRobotDeployIntent;
     setPendingRobotDeployIntent(null);
+    dispatch(setRecordInferenceMode(false));
     dispatch(setInferenceMode('simulation'));
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     await executeStartIntent(intent, 'simulation');
@@ -342,13 +353,15 @@ export default function InferenceControlPanel() {
   }, [executeCommand]);
 
   const handleClear = useCallback(async () => {
-    await executeCommand('Clear', 'finish');
-    setLastPolicyPath('');
+    const result = await executeCommand('Clear', 'finish');
+    if (result?.success) {
+      setLastPolicyPath('');
+    }
   }, [executeCommand]);
 
   const startEnabled = shouldCheckBackend && backendReadiness.ready;
   const stopEnabled = isInferencing;
-  const clearEnabled = isModelLoaded;
+  const clearEnabled = isModelLoaded && !recordingControl.lifecycleLocked;
   const startDescription = isBackendStartBlocked
     ? backendReadiness.message
     : isPaused
@@ -485,63 +498,71 @@ export default function InferenceControlPanel() {
 
   return (
     <>
-      <div className={classBody}>
-        <span className="text-lg font-semibold text-gray-500 whitespace-nowrap px-1 shrink-0">Inference</span>
-        <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
-        {controlButtons.map(({ label, icon: Icon, color, enabled, handler, description, shortcut }) => {
-          const isDisabled = !enabled;
-          return (
-            <Tooltip
-              key={label}
-              position="bottom"
-              content={
-                <div className="text-center">
-                  <div className="font-semibold">{description}</div>
-                  {!isDisabled && (
-                    <div className="text-sm mt-1 text-gray-300">
-                      <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
-                    </div>
-                  )}
-                </div>
-              }
-              disabled={false}
-              className="relative h-full shrink-0"
-            >
-              <button
-                className={classBtn(label, isDisabled)}
-                onClick={() => !isDisabled && handler()}
-                onMouseEnter={() => !isDisabled && setHovered(label)}
-                onMouseLeave={() => { setHovered(null); setPressed(null); }}
-                onMouseDown={() => !isDisabled && setPressed(label)}
-                onMouseUp={() => setPressed(null)}
-                disabled={isDisabled}
-                aria-label={description}
+      <div className="flex shrink-0 flex-col items-end gap-2">
+        <div
+          className={classBody}
+          role="group"
+          aria-label="Inference controls"
+        >
+          <span className="text-lg font-semibold text-gray-500 whitespace-nowrap px-1 shrink-0">Inference</span>
+          <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
+          {controlButtons.map(({ label, icon: Icon, color, enabled, handler, description, shortcut }) => {
+            const isDisabled = !enabled;
+            return (
+              <Tooltip
+                key={label}
+                position="bottom"
+                content={
+                  <div className="text-center">
+                    <div className="font-semibold">{description}</div>
+                    {!isDisabled && (
+                      <div className="text-sm mt-1 text-gray-300">
+                        <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
+                      </div>
+                    )}
+                  </div>
+                }
+                disabled={false}
+                className="relative h-full shrink-0"
               >
-                <Icon
-                  style={{ fontSize: '1.1rem' }}
-                  color={isDisabled ? '#9ca3af' : color}
-                />
-                {label}
-              </button>
-            </Tooltip>
-          );
-        })}
+                <button
+                  className={classBtn(label, isDisabled)}
+                  onClick={() => !isDisabled && handler()}
+                  onMouseEnter={() => !isDisabled && setHovered(label)}
+                  onMouseLeave={() => { setHovered(null); setPressed(null); }}
+                  onMouseDown={() => !isDisabled && setPressed(label)}
+                  onMouseUp={() => setPressed(null)}
+                  disabled={isDisabled}
+                  aria-label={description}
+                >
+                  <Icon
+                    style={{ fontSize: '1.1rem' }}
+                    color={isDisabled ? '#9ca3af' : color}
+                  />
+                  {label}
+                </button>
+              </Tooltip>
+            );
+          })}
 
-        {(guideMessage || showGuideSpinner) && (
-          <>
-            <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
-            <div className="flex items-center gap-1 shrink-0">
-              <span className="text-gray-600 font-semibold text-lg whitespace-nowrap">
-                {guideMessage}
-              </span>
-              {showGuideSpinner && (
-                <span className="font-mono text-blue-500 text-sm">
-                  {spinnerFrames[spinnerIndex]}
+          {(guideMessage || showGuideSpinner) && (
+            <>
+              <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
+              <div className="flex items-center gap-1 shrink-0">
+                <span className="text-gray-600 font-semibold text-lg whitespace-nowrap">
+                  {guideMessage}
                 </span>
-              )}
-            </div>
-          </>
-        )}
+                {showGuideSpinner && (
+                  <span className="font-mono text-blue-500 text-sm">
+                    {spinnerFrames[spinnerIndex]}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <InferenceRecordingControls />
       </div>
 
       {pendingRobotDeployIntent && (

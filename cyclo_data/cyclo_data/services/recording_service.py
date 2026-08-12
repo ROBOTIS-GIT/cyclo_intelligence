@@ -264,8 +264,24 @@ class RecordingService:
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:
-            self._robot_type = robot_type
             existing = self._data_manager
+            if existing is not None:
+                existing_task_type = str(
+                    getattr(
+                        getattr(existing, '_task_info', None),
+                        'task_type',
+                        '',
+                    ) or ''
+                )
+                if (
+                    existing_task_type == 'inference'
+                    and getattr(existing, '_robot_type', '') != robot_type
+                ):
+                    raise ValueError(
+                        'Robot type change blocked for active inference '
+                        'session; Clear the session first'
+                    )
+            self._robot_type = robot_type
             if existing is not None and existing.is_recording():
                 return existing
         save_repo_name = DataManager._make_save_repo_name(
@@ -337,6 +353,11 @@ class RecordingService:
             total_storage, used_storage = StorageChecker.get_storage_gb('/')
             status.used_storage_size = float(used_storage)
             status.total_storage_size = float(total_storage)
+        if (
+            hasattr(self, '_finish_episode_lock')
+            and self._finish_episode_in_progress()
+        ):
+            status.record_phase = RecordingStatus.SAVING
         if robot_type:
             status.robot_type = robot_type
         if self._video_recorder is not None and hasattr(status, 'recording_warnings'):
@@ -395,6 +416,32 @@ class RecordingService:
 
         cmd = request.command
         Req = RecordingCommand.Request
+        episode_outcome = int(
+            getattr(request, 'episode_outcome', getattr(Req, 'UNSPECIFIED', 0))
+            or 0
+        )
+        valid_outcomes = {
+            int(getattr(Req, 'UNSPECIFIED', 0)),
+            int(getattr(Req, 'SUCCESS', 1)),
+            int(getattr(Req, 'FAILURE', 2)),
+        }
+        if episode_outcome not in valid_outcomes:
+            response.success = False
+            response.message = f'Invalid episode_outcome: {episode_outcome}'
+            return response
+        if cmd != Req.STOP and episode_outcome != getattr(Req, 'UNSPECIFIED', 0):
+            response.success = False
+            response.message = 'episode_outcome is only valid for STOP'
+            return response
+        if (
+            episode_outcome != getattr(Req, 'UNSPECIFIED', 0)
+            and request.task_info.task_type != 'inference'
+        ):
+            response.success = False
+            response.message = (
+                'Labeled episode_outcome is only valid for inference recording'
+            )
+            return response
 
         try:
             if cmd == Req.REFRESH_TOPICS:
@@ -452,6 +499,23 @@ class RecordingService:
         if not self._rosbag.is_available():
             response.success = False
             response.message = 'rosbag_recorder service unavailable'
+            return response
+        with self._session_lock:
+            existing = self._data_manager
+        if (
+            existing is not None
+            and getattr(
+                getattr(existing, '_task_info', None),
+                'task_type',
+                '',
+            ) == 'inference'
+            and request.robot_type
+            and request.robot_type != existing._robot_type
+        ):
+            response.success = False
+            response.message = (
+                'REFRESH_TOPICS blocked: robot type cannot change before Clear'
+            )
             return response
         self._prepare_rosbag_topics(topics)
 
@@ -712,6 +776,12 @@ class RecordingService:
                     f'Failed-start DataManager cleanup raised: {exc!r}')
 
     def _do_set_task_info(self, request, response):
+        if getattr(request.task_info, 'task_type', '') == 'inference':
+            response.success = True
+            response.message = (
+                'inference task_info acknowledged; DataManager starts on Record'
+            )
+            return response
         if not request.robot_type:
             response.success = True
             response.message = 'task_info cached upstream; robot_type not set yet'
@@ -818,6 +888,17 @@ class RecordingService:
         ACTION_VOICE_MAP would play "Recording finished" — confusing in
         an inference-only context.
         """
+        is_inference_request = (
+            getattr(request.task_info, 'task_type', '') == 'inference'
+        )
+        if (
+            command_name == 'FINISH'
+            and is_inference_request
+            and self._finish_episode_in_progress()
+        ):
+            response.success = False
+            response.message = 'FINISH blocked: episode archive still running'
+            return response
         if self._data_manager is None:
             response.success = command_name != 'STOP_SEGMENT'
             response.message = (
@@ -827,6 +908,23 @@ class RecordingService:
             )
             return response
         if not self._data_manager.is_recording():
+            manager_is_inference = (
+                getattr(
+                    getattr(self._data_manager, '_task_info', None),
+                    'task_type',
+                    '',
+                )
+                == 'inference'
+            )
+            if (
+                command_name == 'FINISH'
+                and is_inference_request
+                and manager_is_inference
+            ):
+                self._clear_data_manager()
+                response.success = True
+                response.message = 'Inference recording session cleared'
+                return response
             response.success = command_name != 'STOP_SEGMENT'
             response.message = (
                 f'{command_name}: no active recording — no-op'
@@ -838,6 +936,32 @@ class RecordingService:
                 request, response, command_name):
             return response
 
+        manager_is_inference = (
+            getattr(
+                getattr(self._data_manager, '_task_info', None),
+                'task_type',
+                '',
+            )
+            == 'inference'
+        )
+        episode_success = None
+        if manager_is_inference:
+            outcome = int(getattr(request, 'episode_outcome', 0) or 0)
+            success_value = int(
+                getattr(RecordingCommand.Request, 'SUCCESS', 1)
+            )
+            failure_value = int(
+                getattr(RecordingCommand.Request, 'FAILURE', 2)
+            )
+            if outcome not in (success_value, failure_value):
+                response.success = False
+                response.message = (
+                    f'{command_name}: inference recording requires '
+                    'SUCCESS or FAILURE before saving'
+                )
+                return response
+            episode_success = outcome == success_value
+
         self._node.get_logger().info(
             f'{command_name}: episode={self._data_manager._record_episode_count} '
             f'status={self._data_manager.get_status()}')
@@ -846,13 +970,14 @@ class RecordingService:
         self._rosbag.stop_rosbag()
         self._stop_episode_writers()
 
-        self._data_manager.save_robotis_metadata(
+        metadata_saved = self._data_manager.save_robotis_metadata(
             urdf_path=getattr(request, 'urdf_path', '') or '',
             video_stats=self._last_video_stats,
             camera_info_files=self._last_camera_info_files,
             camera_rotations=self._last_camera_rotations,
             image_topics=self._last_image_topics,
             camera_info_topics=self._last_camera_info_topics,
+            episode_success=episode_success,
         )
 
         is_segmented_storage = bool(
@@ -876,6 +1001,18 @@ class RecordingService:
                 finishes_full_episode and not is_segmented_storage
             )
         )
+        if metadata_saved is False:
+            response.success = False
+            response.message = (
+                f'{command_name}: recording stopped but episode metadata '
+                'could not be saved'
+            )
+            self._publish_umbrella_status(
+                DataOperationStatus.FAILED,
+                command_name,
+                response.message,
+            )
+            return response
         if is_segmented_storage and finishes_full_episode:
             self._start_finish_episode_thread(self._data_manager)
         self._rosbag.publish_action_event(event)
@@ -1035,6 +1172,20 @@ class RecordingService:
         if self._data_manager is None:
             response.success = False
             response.message = 'RERECORD: no active recording session'
+            return response
+        if (
+            getattr(
+                getattr(self._data_manager, '_task_info', None),
+                'task_type',
+                '',
+            )
+            == 'inference'
+        ):
+            response.success = False
+            response.message = (
+                'RERECORD cannot save an unlabeled inference recording; '
+                'use Success or Failed'
+            )
             return response
 
         self._rosbag.stop_rosbag()

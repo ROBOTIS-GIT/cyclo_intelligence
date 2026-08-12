@@ -45,4 +45,10 @@ const TaskCommand = {
   CANCEL_SEGMENT: 24,
 };
 
+export const EpisodeOutcome = Object.freeze({
+  UNSPECIFIED: 0,
+  SUCCESS: 1,
+  FAILURE: 2,
+});
+
 export default TaskCommand;

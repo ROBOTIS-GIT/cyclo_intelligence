@@ -21,6 +21,7 @@ import errno
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import socket
 import subprocess
@@ -236,7 +237,18 @@ class DataManager:
         """Return the task folder name and normalise inference metadata."""
         task_type = getattr(task_info, 'task_type', '') or ''
         if task_type == 'inference':
-            record_id = cls._make_unique_inference_record_id(save_root_path)
+            record_id = str(getattr(task_info, 'task_num', '') or '').strip()
+            if record_id:
+                if not re.fullmatch(
+                    r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', record_id
+                ) or '..' in record_id:
+                    raise ValueError(
+                        f'Invalid inference task_num: {record_id!r}'
+                    )
+            else:
+                # Compatibility for callers predating orchestrator-owned
+                # inference session IDs.
+                record_id = cls._make_unique_inference_record_id(save_root_path)
             task_info.task_num = record_id
             task_info.task_name = 'inference'
             return f'Task_{record_id}_inference_MCAP'
@@ -247,7 +259,7 @@ class DataManager:
 
     @staticmethod
     def _make_unique_inference_record_id(save_root_path) -> str:
-        timestamp = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
+        timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
         root = Path(save_root_path)
         record_id = timestamp
         suffix = 1
@@ -921,9 +933,18 @@ class DataManager:
         ros_distro = 'jazzy'
         segments_meta = []
         segment_start_s = 0.0
+        episode_success_values: set[bool] = set()
 
         for subtask_idx, seg_dir in enumerate(ordered):
             seg_info = self._read_episode_info(seg_dir)
+            if 'episode_success' in seg_info:
+                episode_success = seg_info['episode_success']
+                if not isinstance(episode_success, bool):
+                    raise ValueError(
+                        f'Invalid episode_success in {seg_dir}: '
+                        f'{episode_success!r}'
+                    )
+                episode_success_values.add(episode_success)
             src_mcaps = sorted(seg_dir.glob('*.mcap'))
             dst_prefix = f'{full_idx}_{subtask_idx}'
             archived_mcaps = (
@@ -1082,6 +1103,12 @@ class DataManager:
                 else ('done' if has_transcodable_videos else 'not_required')
             ),
         }
+        if len(episode_success_values) > 1:
+            raise ValueError(
+                f'Conflicting episode_success values for episode {full_idx}'
+            )
+        if episode_success_values:
+            summary['episode_success'] = next(iter(episode_success_values))
         if video_warnings:
             summary['video_warnings'] = video_warnings
         try:
@@ -1415,7 +1442,8 @@ class DataManager:
         camera_rotations: dict | None = None,
         image_topics: dict | None = None,
         camera_info_topics: dict | None = None,
-    ):
+        episode_success: bool | None = None,
+    ) -> bool:
         """
         Save URDF and metadata for ROBOTIS format.
 
@@ -1430,7 +1458,7 @@ class DataManager:
         """
         rosbag_path = self.get_save_rosbag_path()
         if rosbag_path is None:
-            return
+            return False
 
         # Create rosbag directory if not exists
         os.makedirs(rosbag_path, exist_ok=True)
@@ -1516,6 +1544,8 @@ class DataManager:
                 else ('done' if has_mp4 else 'not_required')
             ),
         }
+        if episode_success is not None:
+            meta_data['episode_success'] = bool(episode_success)
 
         meta_data_path = os.path.join(rosbag_path, 'episode_info.json')
         try:
@@ -1528,8 +1558,10 @@ class DataManager:
                     set(),
                 ).add(int(subtask_index))
                 self._saved_subtasks_cache = cache
+            return True
         except Exception as e:
             print(f'[ROBOTIS] Failed to save metadata: {e}')
+            return False
 
     def should_record_rosbag2(self):
         """In simplified mode, always record rosbag2."""

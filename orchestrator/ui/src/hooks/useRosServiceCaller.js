@@ -18,7 +18,7 @@ import { useCallback, useRef, useEffect } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import PageType from '../constants/pageType';
-import TaskCommand from '../constants/taskCommand';
+import TaskCommand, { EpisodeOutcome } from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
@@ -60,6 +60,19 @@ export function getRecordCommandServiceTimeoutMs(command, options = {}) {
   return command === 'start_inference'
     ? START_INFERENCE_SERVICE_TIMEOUT_MS
     : DEFAULT_SERVICE_TIMEOUT_MS;
+}
+
+export function normalizeEpisodeOutcome(value) {
+  const outcome = Number(value ?? EpisodeOutcome.UNSPECIFIED);
+  return [EpisodeOutcome.SUCCESS, EpisodeOutcome.FAILURE].includes(outcome)
+    ? outcome
+    : EpisodeOutcome.UNSPECIFIED;
+}
+
+export function getEpisodeOutcomeForCommand(command, value) {
+  return command === 'stop_inference_record'
+    ? normalizeEpisodeOutcome(value)
+    : EpisodeOutcome.UNSPECIFIED;
 }
 
 export function transformReplayDataResult(result = {}, bagPath = '') {
@@ -380,7 +393,8 @@ export function useRosServiceCaller() {
             task_instruction: taskInstruction,
             subtask_instruction: subtaskInstruction,
             policy_path: policyPath,
-            record_inference_mode: Boolean(taskInfo.recordInferenceMode),
+            record_inference_mode:
+              inferenceMode === 'robot' && Boolean(taskInfo.recordInferenceMode),
             tags: [`inference_mode:${inferenceMode}`],
             control_hz: Number(taskInfo.controlHz || 100),
             inference_hz: Number(taskInfo.inferenceHz || 15),
@@ -397,6 +411,10 @@ export function useRosServiceCaller() {
             acceleration_engine_path: accelerationEnginePath,
           },
           command: Number(command_enum),
+          episode_outcome: getEpisodeOutcomeForCommand(
+            command,
+            options.episodeOutcome
+          ),
           segment_index: Number(options.segmentIndex || 0),
           // Conversion-only knobs (ignored by the orchestrator unless
           // command == CONVERT_MP4). Default to 0 / false so the wire

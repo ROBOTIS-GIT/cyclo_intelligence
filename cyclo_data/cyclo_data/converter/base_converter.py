@@ -79,7 +79,7 @@ _EXTRACT_CACHE_DISABLE_ENV = "CYCLO_EXTRACT_CACHE_DISABLE"
 _EXTRACT_CACHE_VERSION = 2
 _RAW_CDR_EXTRACT_DISABLE_ENV = "CYCLO_EXTRACT_DISABLE_RAW_CDR"
 _PREPARED_EPISODE_CACHE_DISABLE_ENV = "CYCLO_PREPARED_EPISODE_CACHE_DISABLE"
-_PREPARED_EPISODE_CACHE_VERSION = 3
+_PREPARED_EPISODE_CACHE_VERSION = 4
 _VIDEO_COPY_MODE_ENV = "CYCLO_VIDEO_COPY_MODE"
 _VIDEO_STATS_SAMPLES_ENV = "CYCLO_VIDEO_STATS_SAMPLES"
 _CONVERTER_INFO_LOGS_ENV = "CYCLO_CONVERTER_INFO_LOGS"
@@ -407,6 +407,7 @@ class EpisodeData:
     subtask_segments: List[Dict[str, Any]] = field(default_factory=list)
     subtask_indices: List[int] = field(default_factory=list)
     task_name: str = ""
+    episode_success: Optional[bool] = None
     # Absolute MCAP log_time (seconds since epoch) for each row of
     # ``timestamps``. Populated by ``_resample_to_fps`` so the video
     # sync step can map per-camera MP4 frames onto the same grid.
@@ -1173,6 +1174,13 @@ class RosbagToLerobotConverterBase:
     def _apply_episode_info(self, episode_data: EpisodeData, info: Dict[str, Any]) -> None:
         if not info:
             return
+        if "episode_success" in info:
+            episode_success = info["episode_success"]
+            if not isinstance(episode_success, bool):
+                raise ValueError(
+                    "episode_info.json field 'episode_success' must be a boolean"
+                )
+            episode_data.episode_success = episode_success
         episode_data.task_name = str(info.get("task_name", "") or "")
         episode_data.recording_mode = str(info.get("recording_mode", "single") or "single")
         try:
@@ -4994,6 +5002,12 @@ class RosbagToLerobotConverterBase:
             "index": {"dtype": "int64", "shape": (1,), "names": None},
             "task_index": {"dtype": "int64", "shape": (1,), "names": None},
         }
+        if self._has_episode_success_feature(episodes_data):
+            self._features["episode_success"] = {
+                "dtype": "bool",
+                "shape": (1,),
+                "names": None,
+            }
         if any(ep.subtask_indices for ep in episodes_data):
             self._features["subtask_index"] = {
                 "dtype": "int64",
@@ -5273,7 +5287,45 @@ class RosbagToLerobotConverterBase:
             ti_arr = np.full(num_frames, ti, dtype=np.int64)
             stats["task_index"] = self._scalar_stats(ti_arr, num_frames)
 
+            if episode.episode_success is not None:
+                success = np.full(
+                    num_frames,
+                    episode.episode_success,
+                    dtype=np.bool_,
+                )
+                stats["episode_success"] = self._scalar_stats(
+                    success,
+                    num_frames,
+                )
+
         return stats
+
+    @staticmethod
+    def _has_episode_success_feature(
+        episodes_data: List[EpisodeData],
+    ) -> bool:
+        labeled = [
+            episode.episode_success is not None
+            for episode in episodes_data
+        ]
+        if not any(labeled):
+            return False
+        if not all(labeled):
+            labeled_indices = [
+                episode.episode_index
+                for episode in episodes_data
+                if episode.episode_success is not None
+            ]
+            unlabeled_indices = [
+                episode.episode_index
+                for episode in episodes_data
+                if episode.episode_success is None
+            ]
+            raise ValueError(
+                "Mixed episode_success labels are not supported: "
+                f"labeled={labeled_indices}, unlabeled={unlabeled_indices}"
+            )
+        return True
 
     @staticmethod
     def _scalar_stats(arr: np.ndarray, num_frames: int) -> Dict[str, Any]:

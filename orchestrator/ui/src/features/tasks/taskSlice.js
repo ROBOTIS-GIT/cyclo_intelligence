@@ -29,6 +29,13 @@ const FAILED_MESSAGE = 'Task info not synced; robot button may use old task.';
 export const ROBOT_TYPE_STORAGE_KEY = 'cyclo_intelligence.robot_type';
 export const ROBOT_TYPE_STATUS_GUARD_MS = 30000;
 
+export const InferenceRecordingUiPhase = Object.freeze({
+  IDLE: 'idle',
+  STARTING: 'starting',
+  RECORDING: 'recording',
+  SAVING: 'saving',
+});
+
 const getSessionStorage = () => {
   if (typeof window === 'undefined') {
     return null;
@@ -327,6 +334,8 @@ const initialState = {
   // record-session state.
   recordStatus: {
     taskName: 'idle',
+    taskType: '',
+    recordInferenceMode: false,
     running: false,
     recordPhase: RecordPhase.READY,
     progress: 0,
@@ -351,6 +360,10 @@ const initialState = {
     recordingOperationStage: '',
     recordingOperationMessage: '',
     topicReceived: false,
+  },
+
+  inferenceRecordingUi: {
+    phase: InferenceRecordingUiPhase.IDLE,
   },
 
   // Inference-side snapshot from /task/inference_status (orchestrator
@@ -416,10 +429,57 @@ const taskSlice = createSlice({
       syncLegacyTaskInfo(state);
     },
     setRecordStatus: (state, action) => {
-      state.recordStatus = { ...state.recordStatus, ...action.payload };
+      const previousStatus = state.recordStatus;
+      const nextStatus = { ...previousStatus, ...action.payload };
+      state.recordStatus = nextStatus;
+
+      const previousOwned =
+        previousStatus.taskType === 'inference' ||
+        Boolean(previousStatus.recordInferenceMode);
+      const nextOwned =
+        nextStatus.taskType === 'inference' ||
+        Boolean(nextStatus.recordInferenceMode);
+      const previousBusy =
+        previousOwned && previousStatus.recordPhase !== RecordPhase.READY;
+      const uiPhase = state.inferenceRecordingUi.phase;
+
+      if (
+        nextOwned &&
+        nextStatus.recordPhase === RecordPhase.RECORDING
+      ) {
+        if (uiPhase !== InferenceRecordingUiPhase.SAVING) {
+          state.inferenceRecordingUi.phase =
+            InferenceRecordingUiPhase.RECORDING;
+        }
+      } else if (
+        nextOwned &&
+        nextStatus.recordPhase === RecordPhase.SAVING
+      ) {
+        state.inferenceRecordingUi.phase =
+          InferenceRecordingUiPhase.SAVING;
+      } else if (
+        nextStatus.recordPhase === RecordPhase.READY &&
+        (
+          uiPhase === InferenceRecordingUiPhase.SAVING ||
+          previousBusy ||
+          (previousOwned && uiPhase === InferenceRecordingUiPhase.RECORDING)
+        )
+      ) {
+        state.inferenceRecordingUi.phase = InferenceRecordingUiPhase.IDLE;
+      }
     },
     resetRecordStatus: (state) => {
       state.recordStatus = initialState.recordStatus;
+      state.inferenceRecordingUi = { ...initialState.inferenceRecordingUi };
+    },
+    setInferenceRecordingUiPhase: (state, action) => {
+      const phase = String(action.payload || '');
+      if (Object.values(InferenceRecordingUiPhase).includes(phase)) {
+        state.inferenceRecordingUi.phase = phase;
+      }
+    },
+    resetInferenceRecordingUi: (state) => {
+      state.inferenceRecordingUi = { ...initialState.inferenceRecordingUi };
     },
     setInferenceStatus: (state, action) => {
       state.inferenceStatus = { ...state.inferenceStatus, ...action.payload };
@@ -768,6 +828,38 @@ export const selectInferenceTaskInfo = createSelector(
   (tasks) => buildInferenceTaskInfo(tasks)
 );
 
+export const selectInferenceRecordingControl = createSelector(
+  [selectTasksState],
+  (tasks) => {
+    const recordStatus = tasks.recordStatus || {};
+    const uiPhase = tasks.inferenceRecordingUi?.phase ||
+      InferenceRecordingUiPhase.IDLE;
+    const serverOwned =
+      recordStatus.taskType === 'inference' ||
+      Boolean(recordStatus.recordInferenceMode);
+    const serverRecording =
+      serverOwned && recordStatus.recordPhase === RecordPhase.RECORDING;
+    const serverSaving =
+      serverOwned && recordStatus.recordPhase === RecordPhase.SAVING;
+    const serverBusy =
+      serverOwned && recordStatus.recordPhase !== RecordPhase.READY;
+
+    return {
+      uiPhase,
+      active:
+        uiPhase === InferenceRecordingUiPhase.RECORDING || serverRecording,
+      pending: [
+        InferenceRecordingUiPhase.STARTING,
+        InferenceRecordingUiPhase.SAVING,
+      ].includes(uiPhase),
+      serverRecording,
+      serverSaving,
+      lifecycleLocked:
+        uiPhase !== InferenceRecordingUiPhase.IDLE || serverBusy,
+    };
+  }
+);
+
 export const {
   setTaskInfo,
   setRecordTaskInfo,
@@ -776,6 +868,8 @@ export const {
   resetTaskInfo,
   setRecordStatus,
   resetRecordStatus,
+  setInferenceRecordingUiPhase,
+  resetInferenceRecordingUi,
   setInferenceStatus,
   resetInferenceStatus,
   selectRobotType,

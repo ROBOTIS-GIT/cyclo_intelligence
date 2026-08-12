@@ -40,8 +40,10 @@ import {
   markInferenceTaskInfoSyncing,
   markInferenceTaskInfoSyncPending,
   markInferenceTaskInfoSyncSuccess,
+  selectInferenceRecordingControl,
   selectInferenceTaskInfo,
   setInferenceMode,
+  setRecordInferenceMode,
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -57,6 +59,7 @@ const InferencePanel = () => {
   const taskInfoSync = useSelector((state) => state.tasks.inferenceTaskInfoSync);
   const robotType = useSelector((state) => state.tasks.robotType);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const recordingControl = useSelector(selectInferenceRecordingControl);
   const showInstruction = requiresInstruction(info.serviceType, info.policyType);
 
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
@@ -78,7 +81,8 @@ const InferencePanel = () => {
   const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
   const trtTaskInstruction = (info.taskInstruction?.[0] || '').trim();
   const isModeSwitchLocked =
-    inferenceStatus.inferencePhase === InferencePhase.LOADING;
+    inferenceStatus.inferencePhase === InferencePhase.LOADING ||
+    recordingControl.lifecycleLocked;
   const isModelActive = [
     InferencePhase.INFERENCING,
     InferencePhase.PAUSED,
@@ -90,6 +94,13 @@ const InferencePanel = () => {
   const syncTimerRef = useRef(null);
 
   const { sendRecordCommand } = useRosServiceCaller();
+
+  useEffect(() => {
+    if (!isRobotMode && info.recordInferenceMode) {
+      dispatch(setRecordInferenceMode(false));
+      dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+    }
+  }, [dispatch, info.recordInferenceMode, isRobotMode]);
 
   const handleChange = useCallback(
     (field, value) => {
@@ -188,6 +199,9 @@ const InferencePanel = () => {
         toast('Inference reset before deploy target switch');
       }
 
+      if (mode === 'simulation') {
+        dispatch(setRecordInferenceMode(false));
+      }
       dispatch(setInferenceMode(mode));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
@@ -632,6 +646,35 @@ const InferencePanel = () => {
           }}
           disabled={!isEditable}
         />
+      </div>
+
+      <div
+        role="separator"
+        aria-label="RL Recording settings"
+        className="w-full h-1 my-2 border-t border-gray-300"
+      />
+
+      <div className="flex h-9 items-center justify-between gap-3 rounded-md border border-gray-200 px-2.5">
+        <span className="text-sm font-medium text-gray-600">RL Recording</span>
+        <label className="relative inline-flex cursor-pointer items-center">
+          <input
+            type="checkbox"
+            className="peer sr-only"
+            checked={isRobotMode && Boolean(info.recordInferenceMode)}
+            onChange={(event) => {
+              if (!isRobotMode || !isEditable || recordingControl.lifecycleLocked) {
+                return;
+              }
+              dispatch(setRecordInferenceMode(event.target.checked));
+              dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+            }}
+            disabled={
+              !isRobotMode || !isEditable || recordingControl.lifecycleLocked
+            }
+            aria-label="Enable RL Recording"
+          />
+          <span className="h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-red-500 peer-disabled:cursor-not-allowed peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-4" />
+        </label>
       </div>
 
       <FileBrowserModal

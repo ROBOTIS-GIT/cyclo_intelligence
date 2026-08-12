@@ -38,7 +38,14 @@ uint8 DISCARD_EPISODE = 22
 uint8 SET_TASK_INFO = 23
 uint8 CANCEL_SEGMENT = 24
 
+# Episode outcome for STOP_INFERENCE_RECORD. General recording commands use
+# UNSPECIFIED so their existing save behavior remains unchanged.
+uint8 UNSPECIFIED = 0
+uint8 SUCCESS = 1
+uint8 FAILURE = 2
+
 uint8 command
+uint8 episode_outcome
 TaskInfo task_info
 # Planned subtask/segment index. For DISCARD_EPISODE only, 0 keeps legacy
 # behavior (delete current cursor) and N > 0 targets full_episode_index N - 1.

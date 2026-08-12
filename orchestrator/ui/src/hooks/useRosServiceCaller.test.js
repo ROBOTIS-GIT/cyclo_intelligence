@@ -1,7 +1,10 @@
 import {
+  getEpisodeOutcomeForCommand,
   getRecordCommandServiceTimeoutMs,
+  normalizeEpisodeOutcome,
   transformReplayDataResult,
 } from './useRosServiceCaller';
+import { EpisodeOutcome } from '../constants/taskCommand';
 
 describe('getRecordCommandServiceTimeoutMs', () => {
   test('does not time out recording save commands', () => {
@@ -19,6 +22,25 @@ describe('getRecordCommandServiceTimeoutMs', () => {
     expect(getRecordCommandServiceTimeoutMs('stop_segment', {
       serviceTimeoutMs: 45000,
     })).toBe(45000);
+  });
+});
+
+describe('inference recording outcome', () => {
+  test('accepts only Success and Failure values', () => {
+    expect(normalizeEpisodeOutcome(EpisodeOutcome.SUCCESS))
+      .toBe(EpisodeOutcome.SUCCESS);
+    expect(normalizeEpisodeOutcome(EpisodeOutcome.FAILURE))
+      .toBe(EpisodeOutcome.FAILURE);
+    expect(normalizeEpisodeOutcome(99)).toBe(EpisodeOutcome.UNSPECIFIED);
+  });
+
+  test('forces general recording commands to UNSPECIFIED', () => {
+    expect(getEpisodeOutcomeForCommand('stop', EpisodeOutcome.SUCCESS))
+      .toBe(EpisodeOutcome.UNSPECIFIED);
+    expect(getEpisodeOutcomeForCommand(
+      'stop_inference_record',
+      EpisodeOutcome.FAILURE
+    )).toBe(EpisodeOutcome.FAILURE);
   });
 });
 

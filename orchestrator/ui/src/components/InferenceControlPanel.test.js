@@ -3,9 +3,14 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
-import taskReducer, { setInferenceStatus } from '../features/tasks/taskSlice';
+import taskReducer, {
+  InferenceRecordingUiPhase,
+  setInferenceRecordingUiPhase,
+  setInferenceStatus,
+  setRecordStatus,
+} from '../features/tasks/taskSlice';
 import rosReducer from '../features/ros/rosSlice';
-import { InferencePhase } from '../constants/taskPhases';
+import { InferencePhase, RecordPhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 jest.mock('react-hot-toast', () => {
@@ -191,6 +196,59 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(sendRecordCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  test('places RL recording actions in a separate block below inference controls', () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: { recordInferenceMode: true },
+    });
+
+    const inferenceControls = screen.getByRole('group', {
+      name: /^inference controls$/i,
+    });
+    const recordingControls = screen.getByRole('group', {
+      name: /^rl recording controls$/i,
+    });
+
+    expect(inferenceControls).not.toContainElement(screen.getByRole('button', {
+      name: /record inference rollout/i,
+    }));
+    expect(inferenceControls.compareDocumentPosition(recordingControls))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  test('blocks Clear but keeps Pause available during RL recording', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: { recordInferenceMode: true },
+    });
+
+    act(() => {
+      store.dispatch(setInferenceRecordingUiPhase(
+        InferenceRecordingUiPhase.RECORDING
+      ));
+      store.dispatch(setRecordStatus({
+        taskType: 'inference',
+        recordInferenceMode: true,
+        recordPhase: RecordPhase.RECORDING,
+      }));
+    });
+
+    expect(screen.getByRole('button', {
+      name: /stop inference and unload model/i,
+    })).toBeDisabled();
+    const pause = screen.getByRole('button', {
+      name: /pause inference/i,
+    });
+    expect(pause).toBeEnabled();
+    fireEvent.click(pause);
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {});
     });
   });
 

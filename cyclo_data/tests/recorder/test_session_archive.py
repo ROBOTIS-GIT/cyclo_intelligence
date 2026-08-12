@@ -102,6 +102,20 @@ def test_inference_save_repo_name_avoids_existing_timestamp(monkeypatch, tmp_pat
     assert task_info.task_name == "inference"
 
 
+def test_inference_save_repo_name_reuses_orchestrator_session_id(tmp_path):
+    task_info = SimpleNamespace(
+        task_num="20260811_120000",
+        task_name="ignored",
+        task_type="inference",
+    )
+
+    first = DataManager._make_save_repo_name(tmp_path, task_info)
+    second = DataManager._make_save_repo_name(tmp_path, task_info)
+
+    assert first == "Task_20260811_120000_inference_MCAP"
+    assert second == first
+
+
 def _write_segment(
     root: Path,
     *,
@@ -110,6 +124,7 @@ def _write_segment(
     subtask_total: int,
     with_video: bool = True,
     subtask_instruction: str | None = None,
+    episode_success: bool | None = None,
 ) -> Path:
     segment = root / str(full_idx) / "segments" / str(subtask_idx)
     segment.mkdir(parents=True, exist_ok=True)
@@ -163,6 +178,8 @@ def _write_segment(
         "episode_index": subtask_idx,
         "subtask_instruction": subtask_instruction or f"subtask {subtask_idx}",
     }
+    if episode_success is not None:
+        info["episode_success"] = episode_success
     if with_video:
         videos = segment / "videos"
         videos.mkdir()
@@ -217,6 +234,79 @@ def test_archive_marks_episode_without_videos_not_required(tmp_path):
     assert not (out / "segments").exists()
     info = json.loads((out / "episode_info.json").read_text())
     assert info["transcoding_status"] == "not_required"
+
+
+def test_archive_preserves_episode_success(tmp_path):
+    root = tmp_path / "Task_session_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+
+    out = manager._archive_full_episode(0)
+
+    info = json.loads((out / "episode_info.json").read_text())
+    assert info["episode_success"] is False
+
+
+def test_inference_rollouts_share_session_folder_until_session_id_changes(tmp_path):
+    root = tmp_path / "Task_session_a_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=True,
+    )
+    _write_segment(
+        root,
+        full_idx=1,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+
+    manager._archive_full_episode(0)
+    manager._archive_full_episode(1)
+
+    assert json.loads((root / "0" / "episode_info.json").read_text())[
+        "episode_success"
+    ] is True
+    assert json.loads((root / "1" / "episode_info.json").read_text())[
+        "episode_success"
+    ] is False
+    next_session = SimpleNamespace(
+        task_num="session_b",
+        task_name="inference",
+        task_type="inference",
+    )
+    assert DataManager._make_save_repo_name(tmp_path, next_session) == (
+        "Task_session_b_inference_MCAP"
+    )
+
+
+def test_raw_metadata_writer_persists_episode_success(tmp_path):
+    manager = _make_manager(tmp_path, subtask_total=1)
+    raw_dir = tmp_path / "0" / "segments" / "0"
+    manager._record_episode_count = 0
+    manager._current_full_episode_index = 0
+    manager._current_subtask_index = 0
+    manager.get_save_rosbag_path = lambda: str(raw_dir)
+    manager._ensure_task_readme = lambda: None
+    manager._write_camera_metadata = lambda *_args, **_kwargs: None
+
+    assert manager.save_robotis_metadata(episode_success=True) is True
+
+    info = json.loads((raw_dir / "episode_info.json").read_text())
+    assert info["episode_success"] is True
 
 
 def test_archive_preserves_pending_raw_spool(tmp_path):
