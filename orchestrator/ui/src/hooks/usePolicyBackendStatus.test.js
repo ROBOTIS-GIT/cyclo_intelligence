@@ -32,7 +32,7 @@ describe('getPolicyBackendReadiness', () => {
     });
   });
 
-  it('treats the common main and engine runtime services as ready', () => {
+  it('does not impose a fixed uptime delay once the runtime services are up', () => {
     const readiness = getPolicyBackendReadiness({
       image_pulled: true,
       image_status: 'current',
@@ -41,12 +41,12 @@ describe('getPolicyBackendReadiness', () => {
         {
           name: 'main-runtime',
           state: 'up',
-          uptime_s: 60,
+          uptime_s: 0,
         },
         {
           name: 'engine-process',
           state: 'up',
-          uptime_s: 60,
+          uptime_s: 0,
         },
       ],
     });
@@ -55,6 +55,32 @@ describe('getPolicyBackendReadiness', () => {
       ready: true,
       state: 'ready',
       message: 'Backend ready',
+    });
+  });
+
+  it('waits until every runtime service is up', () => {
+    const readiness = getPolicyBackendReadiness({
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'running',
+      services: [
+        {
+          name: 'main-runtime',
+          state: 'up',
+          uptime_s: 1,
+        },
+        {
+          name: 'engine-process',
+          state: 'down',
+          uptime_s: 0,
+        },
+      ],
+    });
+
+    expect(readiness).toEqual({
+      ready: false,
+      state: 'warming',
+      message: 'Backend processes are starting...',
     });
   });
 });
