@@ -551,6 +551,40 @@ def test_cancel_segment_rejects_when_no_active_recording():
     assert response.message == "CANCEL_SEGMENT: no active recording"
 
 
+def test_cancel_active_inference_rollout_deletes_files_without_incrementing_count(
+    tmp_path,
+):
+    service, _ = _service_with_logger()
+    episode_dir = tmp_path / "5" / "segments" / "0"
+    (episode_dir / "videos").mkdir(parents=True)
+    (episode_dir / "episode.mcap").write_bytes(b"active")
+    (episode_dir / "videos" / "cam.mjpeg.tmp").write_bytes(b"active")
+    manager = SimpleNamespace(
+        _record_episode_count=5,
+        is_recording=lambda: True,
+        get_save_rosbag_path=lambda: str(episode_dir),
+        discard_recording=lambda **_kwargs: None,
+    )
+    events = []
+    service._data_manager = manager
+    service._stop_episode_writers = lambda: None
+    service._rosbag = SimpleNamespace(
+        stop_and_delete_rosbag=lambda: None,
+        publish_action_event=lambda event: events.append(event),
+    )
+    service._publish_umbrella_status = lambda *_args, **_kwargs: None
+    response = SimpleNamespace(success=False, message="")
+    request = _request(command=_RecordingCommand.Request.CANCEL)
+    request.task_info.task_type = "inference"
+
+    result = service._do_cancel(request, response)
+
+    assert result.success is True
+    assert not episode_dir.exists()
+    assert manager._record_episode_count == 5
+    assert events == ["cancel"]
+
+
 def _inference_stop_fixture(tmp_path):
     service, _ = _service_with_logger()
     metadata_calls = []

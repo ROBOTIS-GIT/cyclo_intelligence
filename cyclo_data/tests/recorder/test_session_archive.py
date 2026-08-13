@@ -293,6 +293,35 @@ def test_inference_rollouts_share_session_folder_until_session_id_changes(tmp_pa
     )
 
 
+def test_reopened_inference_folder_continues_after_existing_episode_count(tmp_path):
+    root = tmp_path / "Task_existing_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=True,
+    )
+    _write_segment(
+        root,
+        full_idx=1,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+    manager._archive_full_episode(0)
+    manager._archive_full_episode(1)
+
+    reopened = _make_manager(root, subtask_total=1)
+    reopened._record_episode_count = reopened._find_next_episode_number()
+
+    assert reopened._record_episode_count == 2
+    assert reopened._find_next_subtask_position() == (2, 0)
+
+
 def test_raw_metadata_writer_persists_episode_success(tmp_path):
     manager = _make_manager(tmp_path, subtask_total=1)
     raw_dir = tmp_path / "0" / "segments" / "0"

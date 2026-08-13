@@ -22,6 +22,7 @@ import TaskCommand, { EpisodeOutcome } from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { getInferenceRecordingSessionId } from '../utils/inferenceRecordingFolder';
 import { DEFAULT_PATHS } from '../constants/paths';
 import {
   selectInferenceTaskInfo,
@@ -385,9 +386,20 @@ export function useRosServiceCaller() {
             ? 'sync'
             : 'async'
         );
+        const recordingFolder = String(taskInfo.recordingFolder || '').trim();
+        const inferenceRecordingSessionId = recordingFolder
+          ? getInferenceRecordingSessionId(recordingFolder)
+          : '';
+        if (recordingFolder && !inferenceRecordingSessionId) {
+          throw new Error(
+            'RL Recording folder must be an inference dataset directly under /workspace/rosbag2'
+          );
+        }
         const request = {
           task_info: {
-            task_num: String(taskInfo.taskNum ?? ''),
+            task_num: page === PageType.INFERENCE
+              ? inferenceRecordingSessionId
+              : String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
             task_type: String(taskType),
             task_instruction: taskInstruction,

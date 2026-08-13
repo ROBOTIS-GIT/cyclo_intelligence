@@ -8,6 +8,7 @@ import { shallowEqual, useDispatch, useSelector, useStore } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
+  MdCancel,
   MdCheckCircle,
   MdFiberManualRecord,
   MdHighlightOff,
@@ -114,12 +115,31 @@ export default function InferenceRecordingControls() {
     }
   }, [canLabel, dispatch, recoverFromServer, sendRecordCommand]);
 
+  const handleCancel = useCallback(async () => {
+    if (!canLabel || commandPendingRef.current) return;
+    commandPendingRef.current = true;
+    dispatch(setInferenceRecordingUiPhase(
+      InferenceRecordingUiPhase.CANCELLING
+    ));
+    try {
+      const result = await sendRecordCommand('cancel_inference_record');
+      if (!result?.success) {
+        throw new Error(result?.message || 'Recording cancel failed');
+      }
+      toast.success('Episode discarded');
+    } catch (error) {
+      recoverFromServer();
+      toast.error(error?.message || 'Recording cancel failed');
+    }
+  }, [canLabel, dispatch, recoverFromServer, sendRecordCommand]);
+
   if (!visible) return null;
 
   const recordLabel = {
     [InferenceRecordingUiPhase.STARTING]: 'Starting',
     [InferenceRecordingUiPhase.RECORDING]: 'Recording',
     [InferenceRecordingUiPhase.SAVING]: 'Saving',
+    [InferenceRecordingUiPhase.CANCELLING]: 'Cancelling',
   }[control.uiPhase] || 'Record';
 
   const buttonClass = (enabled, activeClass) => clsx(
@@ -139,6 +159,16 @@ export default function InferenceRecordingControls() {
       <span className="shrink-0 whitespace-nowrap px-1 text-base font-semibold text-gray-500">
         RL Recording
       </span>
+      <div className="h-6 w-px shrink-0 bg-gray-300" />
+      <div className="flex shrink-0 items-center gap-1 px-1 text-sm font-medium text-gray-500">
+        <span>EP</span>
+        <span
+          className="min-w-7 rounded bg-gray-100 px-1.5 py-0.5 text-center font-bold text-gray-700"
+          aria-label="Saved RL episodes"
+        >
+          {control.episodeCount}
+        </span>
+      </div>
       <div className="h-6 w-px shrink-0 bg-gray-300" />
       <button
         type="button"
@@ -175,6 +205,19 @@ export default function InferenceRecordingControls() {
       >
         <MdHighlightOff size={17} />
         Failed
+      </button>
+      <button
+        type="button"
+        onClick={handleCancel}
+        disabled={!canLabel}
+        className={buttonClass(
+          canLabel,
+          'bg-gray-100 text-gray-700 hover:bg-gray-200'
+        )}
+        aria-label="Cancel and discard inference rollout"
+      >
+        <MdCancel size={17} />
+        Cancel
       </button>
     </div>
   );

@@ -24,6 +24,7 @@ jest.mock('../hooks/useRosServiceCaller', () => ({
 const renderControls = ({
   inferenceMode = 'robot',
   recordInferenceMode = true,
+  currentEpisodeNumber = 0,
   sendRecordCommand = jest.fn().mockResolvedValue({ success: true }),
 } = {}) => {
   useRosServiceCaller.mockReturnValue({ sendRecordCommand });
@@ -41,6 +42,12 @@ const renderControls = ({
         inferenceStatus: {
           ...initialTasks.inferenceStatus,
           inferencePhase: InferencePhase.INFERENCING,
+        },
+        recordStatus: {
+          ...initialTasks.recordStatus,
+          taskType: 'inference',
+          recordInferenceMode: true,
+          currentEpisodeNumber,
         },
       },
     },
@@ -87,6 +94,39 @@ describe('InferenceRecordingControls', () => {
         { episodeOutcome: EpisodeOutcome.SUCCESS }
       );
     });
+  });
+
+  test('shows the saved episode count from recording status', () => {
+    renderControls({ currentEpisodeNumber: 7 });
+
+    expect(screen.getByLabelText(/saved rl episodes/i)).toHaveTextContent('7');
+  });
+
+  test('cancels the active rollout without applying an outcome', async () => {
+    const sendRecordCommand = jest.fn().mockResolvedValue({ success: true });
+    const { store } = renderControls({
+      currentEpisodeNumber: 4,
+      sendRecordCommand,
+    });
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /record inference rollout/i,
+    }));
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference_record');
+    });
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /cancel and discard inference rollout/i,
+    }));
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenLastCalledWith(
+        'cancel_inference_record'
+      );
+    });
+    expect(screen.getByLabelText(/saved rl episodes/i)).toHaveTextContent('4');
+    expect(store.getState().tasks.inferenceRecordingUi.phase)
+      .toBe(InferenceRecordingUiPhase.CANCELLING);
   });
 
   test('blocks duplicate Record clicks while the RPC is pending', () => {

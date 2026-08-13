@@ -34,6 +34,7 @@ export const InferenceRecordingUiPhase = Object.freeze({
   STARTING: 'starting',
   RECORDING: 'recording',
   SAVING: 'saving',
+  CANCELLING: 'cancelling',
 });
 
 const getSessionStorage = () => {
@@ -118,6 +119,7 @@ const inferenceTaskInfoInitialState = {
   taskType: 'inference',
   policyPath: '',
   recordInferenceMode: false,
+  recordingFolder: '',
   controlHz: 100,
   inferenceHz: 15,
   chunkAlignWindowS: 0.3,
@@ -291,6 +293,9 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     recordInferenceMode: Object.prototype.hasOwnProperty.call(taskInfo, 'recordInferenceMode')
       ? Boolean(taskInfo.recordInferenceMode)
       : Boolean(state.inferenceTaskInfo.recordInferenceMode),
+    recordingFolder: String(
+      taskInfo.recordingFolder ?? state.inferenceTaskInfo.recordingFolder ?? ''
+    ),
     controlHz: taskInfo.controlHz ?? state.inferenceTaskInfo.controlHz ?? 100,
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
     chunkAlignWindowS:
@@ -447,7 +452,10 @@ const taskSlice = createSlice({
         nextOwned &&
         nextStatus.recordPhase === RecordPhase.RECORDING
       ) {
-        if (uiPhase !== InferenceRecordingUiPhase.SAVING) {
+        if (![
+          InferenceRecordingUiPhase.SAVING,
+          InferenceRecordingUiPhase.CANCELLING,
+        ].includes(uiPhase)) {
           state.inferenceRecordingUi.phase =
             InferenceRecordingUiPhase.RECORDING;
         }
@@ -461,6 +469,7 @@ const taskSlice = createSlice({
         nextStatus.recordPhase === RecordPhase.READY &&
         (
           uiPhase === InferenceRecordingUiPhase.SAVING ||
+          uiPhase === InferenceRecordingUiPhase.CANCELLING ||
           previousBusy ||
           (previousOwned && uiPhase === InferenceRecordingUiPhase.RECORDING)
         )
@@ -851,7 +860,11 @@ export const selectInferenceRecordingControl = createSelector(
       pending: [
         InferenceRecordingUiPhase.STARTING,
         InferenceRecordingUiPhase.SAVING,
+        InferenceRecordingUiPhase.CANCELLING,
       ].includes(uiPhase),
+      episodeCount: serverOwned
+        ? Number(recordStatus.currentEpisodeNumber || 0)
+        : 0,
       serverRecording,
       serverSaving,
       lifecycleLocked:

@@ -16,8 +16,20 @@ jest.mock('react-hot-toast', () => {
 jest.mock('../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: jest.fn(),
 }));
-jest.mock('./FileBrowserModal', () => function MockFileBrowserModal() {
-  return null;
+jest.mock('./FileBrowserModal', () => function MockFileBrowserModal(props) {
+  if (!props.isOpen) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => props.onFileSelect({
+        is_directory: true,
+        name: 'Task_existing_inference_MCAP',
+        full_path: '/workspace/rosbag2/Task_existing_inference_MCAP',
+      })}
+    >
+      Choose {props.title}
+    </button>
+  );
 });
 jest.mock('./InferenceModelSelector', () => function MockModelSelector() {
   return <div data-testid="model-selector" />;
@@ -101,6 +113,31 @@ describe('InferencePanel RL Recording', () => {
     fireEvent.click(toggle);
     expect(store.getState().tasks.inferenceTaskInfo.recordInferenceMode)
       .toBe(true);
+  });
+
+  test('selects and clears an existing RL Recording folder', () => {
+    const { store } = renderPanel({
+      inferenceMode: 'robot',
+      recordInferenceMode: true,
+    });
+
+    expect(screen.getByText('Automatic new folder')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {
+      name: /select rl recording folder/i,
+    }));
+    fireEvent.click(screen.getByRole('button', {
+      name: /choose select rl recording folder/i,
+    }));
+
+    expect(store.getState().tasks.inferenceTaskInfo.recordingFolder).toBe(
+      '/workspace/rosbag2/Task_existing_inference_MCAP'
+    );
+    expect(screen.getByText('Task_existing_inference_MCAP')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /clear rl recording folder/i,
+    }));
+    expect(store.getState().tasks.inferenceTaskInfo.recordingFolder).toBe('');
   });
 
   test('places RL Recording last with a settings divider', () => {

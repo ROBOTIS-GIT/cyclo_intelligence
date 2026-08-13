@@ -1,5 +1,6 @@
-import threading
+import json
 import sys
+import threading
 import types
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -59,6 +60,56 @@ def test_inference_session_id_uses_local_timestamp_and_collision_suffix(
     (tmp_path / 'Task_20260812_173000_inference_MCAP').mkdir()
     assert OrchestratorNode._new_inference_record_session_id(tmp_path) == (
         '20260812_173000_01'
+    )
+
+
+def test_selected_inference_folder_is_reused(monkeypatch, tmp_path):
+    folder = tmp_path / 'Task_existing_session_inference_MCAP'
+    episode = folder / '0'
+    episode.mkdir(parents=True)
+    (episode / 'episode_info.json').write_text(json.dumps({
+        'robot_type': 'ffw_sg2_rev1',
+        'episode_success': True,
+    }))
+    node = _node()
+    monkeypatch.setattr(node, 'INFERENCE_RECORD_ROOT', tmp_path)
+    task_info = _task_info()
+    task_info.task_num = 'existing_session'
+
+    assert node._inference_record_folder_error(task_info) is None
+    node._begin_inference_record_session(task_info)
+
+    assert node._inference_record_session_id == 'existing_session'
+    assert node._get_inference_record_task_info().task_num == 'existing_session'
+
+
+def test_selected_inference_folder_rejects_missing_and_wrong_robot(
+    monkeypatch,
+    tmp_path,
+):
+    node = _node()
+    monkeypatch.setattr(node, 'INFERENCE_RECORD_ROOT', tmp_path)
+    task_info = _task_info()
+    task_info.task_num = 'missing'
+
+    assert 'does not exist' in node._inference_record_folder_error(task_info)
+
+    folder = tmp_path / 'Task_wrong_robot_inference_MCAP' / '0'
+    folder.mkdir(parents=True)
+    (folder / 'episode_info.json').write_text(json.dumps({
+        'robot_type': 'omy_f3m',
+    }))
+    task_info.task_num = 'wrong_robot'
+
+    assert 'current robot_type' in node._inference_record_folder_error(task_info)
+
+    unknown_folder = tmp_path / 'Task_unknown_robot_inference_MCAP' / '0'
+    unknown_folder.mkdir(parents=True)
+    (unknown_folder / 'episode_info.json').write_text('{}')
+    task_info.task_num = 'unknown_robot'
+
+    assert 'do not identify robot_type' in (
+        node._inference_record_folder_error(task_info)
     )
 
 

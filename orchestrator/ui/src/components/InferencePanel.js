@@ -19,6 +19,7 @@ import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
+  MdClose,
   MdFolderOpen,
   MdHourglassEmpty,
   MdInfoOutline,
@@ -49,6 +50,10 @@ import {
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { requiresInstruction } from '../constants/policyCapabilities';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
+import {
+  getInferenceRecordingFolderName,
+  getInferenceRecordingSessionId,
+} from '../utils/inferenceRecordingFolder';
 
 const AUTO_SYNC_DELAY_MS = 700;
 
@@ -65,6 +70,7 @@ const InferencePanel = () => {
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
   const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
   const [showPolicyBrowser, setShowPolicyBrowser] = useState(false);
+  const [showRecordingFolderBrowser, setShowRecordingFolderBrowser] = useState(false);
 
   // InferencePage's lock — only the inference-side phase matters here.
   // Record phase is the InfoPanel's concern (D18, plan record-zippy-sunrise).
@@ -249,10 +255,32 @@ const InferencePanel = () => {
     setShowPolicyBrowser(false);
   }, [isEditable, dispatch]);
 
+  const handleRecordingFolderSelect = useCallback((item) => {
+    const fullPath = String(item?.full_path || '').trim();
+    if (!getInferenceRecordingSessionId(fullPath)) {
+      toast.error(
+        'Select a Task_*_inference_MCAP folder directly under /workspace/rosbag2'
+      );
+      return;
+    }
+    dispatch(setInferenceTaskInfo({ recordingFolder: fullPath }));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+    setShowRecordingFolderBrowser(false);
+  }, [dispatch]);
+
+  const clearRecordingFolder = useCallback(() => {
+    dispatch(setInferenceTaskInfo({ recordingFolder: '' }));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+  }, [dispatch]);
+
   const policyBrowserPath =
     info.serviceType === 'groot'
       ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
       : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
+  const recordingFolderName = getInferenceRecordingFolderName(
+    info.recordingFolder
+  );
+  const recordingFolderLocked = !isEditable || recordingControl.lifecycleLocked;
 
   // Update isEditable state when the disabled prop changes
   useEffect(() => {
@@ -654,27 +682,65 @@ const InferencePanel = () => {
         className="w-full h-1 my-2 border-t border-gray-300"
       />
 
-      <div className="flex h-9 items-center justify-between gap-3 rounded-md border border-gray-200 px-2.5">
-        <span className="text-sm font-medium text-gray-600">RL Recording</span>
-        <label className="relative inline-flex cursor-pointer items-center">
-          <input
-            type="checkbox"
-            className="peer sr-only"
-            checked={isRobotMode && Boolean(info.recordInferenceMode)}
-            onChange={(event) => {
-              if (!isRobotMode || !isEditable || recordingControl.lifecycleLocked) {
-                return;
+      <div className="rounded-md border border-gray-200">
+        <div className="flex h-9 items-center justify-between gap-3 px-2.5">
+          <span className="text-sm font-medium text-gray-600">RL Recording</span>
+          <label className="relative inline-flex cursor-pointer items-center">
+            <input
+              type="checkbox"
+              className="peer sr-only"
+              checked={isRobotMode && Boolean(info.recordInferenceMode)}
+              onChange={(event) => {
+                if (!isRobotMode || !isEditable || recordingControl.lifecycleLocked) {
+                  return;
+                }
+                dispatch(setRecordInferenceMode(event.target.checked));
+                dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+              }}
+              disabled={
+                !isRobotMode || !isEditable || recordingControl.lifecycleLocked
               }
-              dispatch(setRecordInferenceMode(event.target.checked));
-              dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
-            }}
-            disabled={
-              !isRobotMode || !isEditable || recordingControl.lifecycleLocked
-            }
-            aria-label="Enable RL Recording"
-          />
-          <span className="h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-red-500 peer-disabled:cursor-not-allowed peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-4" />
-        </label>
+              aria-label="Enable RL Recording"
+            />
+            <span className="h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-red-500 peer-disabled:cursor-not-allowed peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-4" />
+          </label>
+        </div>
+
+        {isRobotMode && info.recordInferenceMode && (
+          <div className="border-t border-gray-200 px-2.5 py-2">
+            <div className="mb-1 text-xs font-medium text-gray-500">Save Folder</div>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span
+                className="min-w-0 flex-1 truncate text-xs text-gray-700"
+                title={info.recordingFolder || 'Automatic new folder'}
+              >
+                {recordingFolderName || 'Automatic new folder'}
+              </span>
+              {recordingFolderName && (
+                <button
+                  type="button"
+                  onClick={clearRecordingFolder}
+                  disabled={recordingFolderLocked}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Clear RL Recording folder"
+                  title="Use automatic new folder"
+                >
+                  <MdClose size={17} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowRecordingFolderBrowser(true)}
+                disabled={recordingFolderLocked}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gray-100 text-blue-600 hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Select RL Recording folder"
+                title="Select existing RL Recording folder"
+              >
+                <MdFolderOpen size={18} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <FileBrowserModal
@@ -688,6 +754,18 @@ const InferencePanel = () => {
         initialPath={policyBrowserPath}
         defaultPath={policyBrowserPath}
         homePath={DEFAULT_PATHS.POLICY_CHECKPOINTS_PATH}
+      />
+      <FileBrowserModal
+        isOpen={showRecordingFolderBrowser}
+        onClose={() => setShowRecordingFolderBrowser(false)}
+        onFileSelect={handleRecordingFolderSelect}
+        title="Select RL Recording folder"
+        selectButtonText="Use Folder"
+        allowDirectorySelect={true}
+        allowFileSelect={false}
+        initialPath={DEFAULT_PATHS.ROSBAG2_PATH}
+        defaultPath={DEFAULT_PATHS.ROSBAG2_PATH}
+        homePath={DEFAULT_PATHS.ROSBAG2_PATH}
       />
     </div>
   );

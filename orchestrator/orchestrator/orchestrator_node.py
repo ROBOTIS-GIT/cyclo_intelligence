@@ -21,6 +21,7 @@ import glob
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import traceback
@@ -93,6 +94,7 @@ class OrchestratorNode(Node):
     # Define operation modes (constants taken from Communicator)
 
     DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
+    INFERENCE_RECORD_ROOT = Path('/workspace/rosbag2')
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
     TRAINING_STATUS_TIMER_FREQUENCY = 0.5  # seconds
@@ -461,7 +463,7 @@ class OrchestratorNode(Node):
         recording_root: Optional[Path] = None,
     ) -> str:
         timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-        root = recording_root or Path('/workspace/rosbag2')
+        root = recording_root or OrchestratorNode.INFERENCE_RECORD_ROOT
         record_id = timestamp
         suffix = 1
         while (root / f'Task_{record_id}_inference_MCAP').exists():
@@ -473,15 +475,75 @@ class OrchestratorNode(Node):
         self,
         task_info: Optional[TaskInfo] = None,
     ) -> None:
+        selected_session_id = ''
+        if task_info is not None and bool(
+            getattr(task_info, 'record_inference_mode', False)
+        ):
+            selected_session_id = str(
+                getattr(task_info, 'task_num', '') or ''
+            ).strip()
+        if selected_session_id:
+            selection_error = self._inference_record_folder_error(task_info)
+            if selection_error:
+                raise ValueError(selection_error)
         with self._state_lock:
             self._inference_record_session_id = (
-                self._new_inference_record_session_id()
+                selected_session_id
+                or self._new_inference_record_session_id(
+                    self.INFERENCE_RECORD_ROOT
+                )
             )
             self._inference_record_robot_type = self.robot_type or None
             if task_info is not None:
                 self._prepared_inference_task_info = self._copy_task_info(
                     task_info
                 )
+
+    def _inference_record_folder_error(
+        self,
+        task_info: Optional[TaskInfo],
+    ) -> Optional[str]:
+        session_id = str(
+            getattr(task_info, 'task_num', '') or ''
+        ).strip()
+        if not session_id:
+            return None
+        if (
+            not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', session_id)
+            or '..' in session_id
+        ):
+            return f'Invalid RL Recording folder session ID: {session_id!r}'
+
+        folder = self.INFERENCE_RECORD_ROOT / (
+            f'Task_{session_id}_inference_MCAP'
+        )
+        if not folder.is_dir():
+            return f'Selected RL Recording folder does not exist: {folder}'
+
+        recorded_robot_type, infer_error = self._infer_conversion_robot_type(
+            [folder]
+        )
+        if infer_error:
+            return infer_error
+        if (
+            not recorded_robot_type
+            and next(folder.rglob('episode_info.json'), None) is not None
+        ):
+            return (
+                'Cannot continue selected RL Recording folder because its '
+                'existing episodes do not identify robot_type'
+            )
+        if (
+            recorded_robot_type
+            and self.robot_type
+            and recorded_robot_type != self.robot_type
+        ):
+            return (
+                'Selected RL Recording folder uses robot_type '
+                f'{recorded_robot_type!r}, current robot_type is '
+                f'{self.robot_type!r}'
+            )
+        return None
 
     def _get_inference_record_task_info(self) -> Optional[TaskInfo]:
         with self._state_lock:
@@ -546,7 +608,7 @@ class OrchestratorNode(Node):
         if recording_active:
             return (
                 'Clear blocked while inference recording is active; save it '
-                'as Success or Failed first'
+                'as Success or Failed, or Cancel it first'
             )
         return None
 
@@ -1400,6 +1462,14 @@ class OrchestratorNode(Node):
                         'Inference deploy change blocked while recording is active'
                     )
                     return response
+                if bool(task_info.record_inference_mode):
+                    folder_error = self._inference_record_folder_error(
+                        task_info
+                    )
+                    if folder_error:
+                        response.success = False
+                        response.message = folder_error
+                        return response
                 self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 task_instruction = (

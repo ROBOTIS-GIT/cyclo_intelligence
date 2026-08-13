@@ -3343,6 +3343,7 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
             cache_key = self.converter._data_aggregate_cache_key(
                 [episode],
                 has_subtask_feature=False,
+                has_episode_success_feature=False,
             )
 
         self.assertEqual(

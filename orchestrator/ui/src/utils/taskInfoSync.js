@@ -38,6 +38,7 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   taskInstruction: stringArray(taskInfo.taskInstruction),
   policyPath: String(taskInfo.policyPath ?? '').trim(),
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
+  recordingFolder: String(taskInfo.recordingFolder ?? '').trim(),
   controlHz: numberOrDefault(taskInfo.controlHz ?? 100, 100),
   inferenceHz: numberOrDefault(taskInfo.inferenceHz ?? 15, 15),
   chunkAlignWindowS: numberOrDefault(taskInfo.chunkAlignWindowS ?? 0.3, 0.3),
