@@ -182,6 +182,8 @@ class IoMappingMixin:
         semantic_names = {suffix}
         if suffix == "cam_left_head":
             semantic_names.add("cam_head")
+            # AI Worker datasets record the left head camera as the scene view.
+            semantic_names.add("scene")
 
         match = _CAMERA_SEMANTIC_RE.match(suffix)
         if match:
@@ -192,6 +194,9 @@ class IoMappingMixin:
             if side in {"left", "right"} and part in {"head", "wrist"}:
                 semantic_names.add(f"cam_{side}_{part}")
                 semantic_names.add(f"cam_{part}_{side}")
+                # Datasets often drop the cam_ prefix, e.g. wrist_left.
+                semantic_names.add(f"{part}_{side}")
+                semantic_names.add(f"{side}_{part}")
 
         for name in semantic_names:
             aliases.add(name)

@@ -7,7 +7,7 @@
 #
 # Build context: cyclo_brain/policy/
 # Usage:         docker build -f lerobot/Dockerfile.arm64 \
-#                  -t robotis/lerobot-zenoh:1.3.2-arm64 .
+#                  -t robotis/lerobot-zenoh:1.4.0-arm64 .
 
 # Jetson LeRobot base image. This already carries Python 3.12 plus
 # CUDA-enabled PyTorch wheels built for JetPack 6.x. Do not install
@@ -49,7 +49,7 @@ COPY lerobot/lerobot/src/ ./src/
 
 # Install training/inference + VLA extras. The base image's CUDA PyTorch
 # already satisfies LeRobot's torch constraints.
-RUN pip install --no-cache-dir ".[training,smolvla,xvla,hilserl,async,peft]"
+RUN pip install --no-cache-dir ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,hilserl,async,peft]"
 
 COPY lerobot/lerobot/ ./
 

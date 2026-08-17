@@ -31,6 +31,7 @@ import torch
 
 from .image_preprocessing import infer_image_resize_targets
 
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 
@@ -75,12 +76,29 @@ class LoadingMixin:
         logger.info("Policy type: %s", policy_type)
         PolicyClass = get_policy_class(policy_type)
 
-        # ``from_pretrained`` reads config.json, instantiates the policy
-        # config, then loads safetensors. We don't pass ``config=`` — the
-        # saved config is already what we want.
-        policy = PolicyClass.from_pretrained(model_path)
-        policy = policy.to(device).eval()
-        logger.info("Policy weights loaded on %s", device)
+        # FastWAM's text encoder must stay on the CPU. Its default config can
+        # auto-select CUDA inside ``from_pretrained`` and exhaust VRAM before
+        # the offload hook runs, so pin only this policy's initial load to CPU.
+        if policy_type == "fastwam":
+            policy_config = PreTrainedConfig.from_pretrained(model_path)
+            policy_config.device = "cpu"
+            policy = PolicyClass.from_pretrained(model_path, config=policy_config)
+        else:
+            policy = PolicyClass.from_pretrained(model_path)
+
+        # MolmoAct2 errors out unless the action mode is set. We run the
+        # continuous (flow matching) head; a checkpoint that names one keeps it.
+        if policy_type == "molmoact2" and not getattr(
+            policy.config, "inference_action_mode", None
+        ):
+            policy.config.inference_action_mode = "continuous"
+
+        if policy_type == "fastwam":
+            policy = policy.eval()
+            logger.info("FastWAM weights loaded on CPU for selective offload")
+        else:
+            policy = policy.to(device).eval()
+            logger.info("Policy weights loaded on %s", device)
 
         # Stored processor pipelines include the dataset-time normalizer
         # stats and image transforms so we don't re-derive (and de-sync)

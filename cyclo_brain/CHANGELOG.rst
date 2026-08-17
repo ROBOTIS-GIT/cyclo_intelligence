@@ -2,6 +2,17 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.0 (2026-08-14)
+------------------
+* Updated the LeRobot fork to 0.6.1 and added MolmoAct2, VLA-JEPA, and FastWAM inference dependencies on AMD64 and ARM64.
+* Added AI Worker scene and wrist camera aliases for LeRobot policy input mapping.
+* Added the default continuous MolmoAct2 inference action mode.
+* Added FastWAM CPU-first loading, selective GPU offload, proprioception adaptation, and instruction-aware prompt-context refresh.
+* Updated LeRobot training integration for ``env_eval_freq`` and ``gaussian_actor``.
+* Included VLA-JEPA mixed-camera-size preprocessing and ``qwen_lr`` configuration support from the LeRobot fork.
+* Updated LeRobot image support to ``robotis/lerobot-zenoh:1.4.0``; GR00T remains at ``robotis/groot-zenoh:1.3.4``.
+* Contributors: Dawit Chun, Taehyeong Kim
+
 1.2.2 (2026-08-10)
 ------------------
 * None

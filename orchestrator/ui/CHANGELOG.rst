@@ -2,6 +2,12 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.0 (2026-08-14)
+------------------
+* Added MolmoAct2, VLA-JEPA, and FastWAM to inference and behavior-tree policy selection.
+* Added task-instruction requirements for the new vision-language policies.
+* Contributors: Dawit Chun, Taehyeong Kim
+
 1.2.2 (2026-08-10)
 ------------------
 * None

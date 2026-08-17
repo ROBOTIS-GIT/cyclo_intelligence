@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:1.2.2
+    image: robotis/cyclo-intelligence:1.3.0
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -145,7 +145,7 @@ services:
   # ============================================================
   lerobot:
     container_name: lerobot_server
-    image: robotis/lerobot-zenoh:1.3.2-${ARCH:-arm64}
+    image: robotis/lerobot-zenoh:1.4.0-${ARCH:-arm64}
     build:
       # Build context bumped one level up so the Dockerfile can
       # COPY common/s6-services/ (shared across all policy backends)

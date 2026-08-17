@@ -17,11 +17,14 @@
 export const POLICY_REQUIRES_INSTRUCTION = {
   'groot:n17': true,
   'lerobot:act': false,
+  'lerobot:diffusion': false,
   'lerobot:smolvla': true,
   'lerobot:xvla': true,
   'lerobot:pi0': true,
   'lerobot:pi05': true,
-  'lerobot:diffusion': false,
+  'lerobot:molmoact2': true,
+  'lerobot:vla_jepa': true,
+  'lerobot:fastwam': true,
 };
 
 export const DEFAULT_REQUIRES_INSTRUCTION = false;

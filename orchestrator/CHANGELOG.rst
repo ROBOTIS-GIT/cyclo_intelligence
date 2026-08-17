@@ -2,6 +2,12 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.0 (2026-08-14)
+------------------
+* Added MolmoAct2, VLA-JEPA, and FastWAM routing for inference commands, behavior trees, and training requests.
+* Replaced the removed LeRobot SAC policy identifier with ``gaussian_actor``.
+* Contributors: Dawit Chun, Taehyeong Kim
+
 1.2.2 (2026-08-10)
 ------------------
 * None

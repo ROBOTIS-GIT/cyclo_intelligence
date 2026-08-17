@@ -48,7 +48,8 @@ class ZenohTrainingManager:
 
     SUPPORTED_POLICIES = [
         'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
-        'smolvla', 'groot', 'xvla', 'sac'
+        'smolvla', 'groot', 'xvla', 'gaussian_actor',
+        'molmoact2', 'vla_jepa', 'fastwam'
     ]
 
     SUPPORTED_DEVICES = ['cuda', 'cpu']

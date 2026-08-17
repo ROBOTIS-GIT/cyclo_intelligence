@@ -2,6 +2,10 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.0 (2026-08-14)
+------------------
+* None
+
 1.2.2 (2026-08-10)
 ------------------
 * Added F1 robot configuration, URDF, and mesh assets, including base and wrist camera meshes.

@@ -2,6 +2,15 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.0 (2026-08-14)
+------------------
+* Updated the LeRobot integration to 0.6.1 with MolmoAct2, VLA-JEPA, and FastWAM inference support.
+* Added policy routing, UI selection, camera aliases, and LeRobot 0.6.1 training compatibility.
+* Added FastWAM memory optimization and prompt refresh support for instruction changes.
+* Updated image support to ``robotis/cyclo-intelligence:1.3.0`` and ``robotis/lerobot-zenoh:1.4.0``; GR00T remains at ``robotis/groot-zenoh:1.3.4``.
+* Validated imports, synthetic policy paths, existing ACT checkpoint inference, and AMD64/ARM64 container startup; full production checkpoints for the new policies were not part of this release validation.
+* Contributors: Dawit Chun, Taehyeong Kim
+
 1.2.2 (2026-08-10)
 ------------------
 * Added F1 robot configuration, URDF, and mesh assets for Cyclo robot workflows.

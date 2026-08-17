@@ -31,11 +31,14 @@ const MODEL_GROUPS = [
     label: 'LeRobot',
     options: [
       { value: 'lerobot:act', label: 'ACT', serviceType: 'lerobot', policyType: 'act' },
+      { value: 'lerobot:diffusion', label: 'Diffusion', serviceType: 'lerobot', policyType: 'diffusion' },
       { value: 'lerobot:smolvla', label: 'SmolVLA', serviceType: 'lerobot', policyType: 'smolvla' },
       { value: 'lerobot:xvla', label: 'XVLA', serviceType: 'lerobot', policyType: 'xvla' },
       { value: 'lerobot:pi0', label: 'Pi0', serviceType: 'lerobot', policyType: 'pi0' },
       { value: 'lerobot:pi05', label: 'Pi0.5', serviceType: 'lerobot', policyType: 'pi05' },
-      { value: 'lerobot:diffusion', label: 'Diffusion', serviceType: 'lerobot', policyType: 'diffusion' },
+      { value: 'lerobot:molmoact2', label: 'MolmoAct2', serviceType: 'lerobot', policyType: 'molmoact2' },
+      { value: 'lerobot:vla_jepa', label: 'VLA-JEPA', serviceType: 'lerobot', policyType: 'vla_jepa' },
+      { value: 'lerobot:fastwam', label: 'FastWAM', serviceType: 'lerobot', policyType: 'fastwam' },
     ],
   },
   {

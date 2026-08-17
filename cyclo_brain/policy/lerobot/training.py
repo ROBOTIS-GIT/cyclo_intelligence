@@ -99,7 +99,8 @@ def _build_training_args(server, request: Any) -> list[str]:
 
     eval_freq = getattr(request, "eval_freq", 0)
     if eval_freq and int(eval_freq) > 0:
-        args.append(f"--eval_freq={eval_freq}")
+        # LeRobot 0.6.1 renamed this to env_eval_freq (simulation-env eval).
+        args.append(f"--env_eval_freq={eval_freq}")
 
     log_freq = getattr(request, "log_freq", 0)
     if log_freq and int(log_freq) > 0:

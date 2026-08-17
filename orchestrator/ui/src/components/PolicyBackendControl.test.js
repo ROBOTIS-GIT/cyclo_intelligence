@@ -127,7 +127,7 @@ describe('PolicyBackendControl', () => {
   it('shows an explicit update action when the backend workspace mount is stale', async () => {
     global.fetch.mockResolvedValueOnce(mockResponse({
       name: 'lerobot',
-      image: 'robotis/lerobot-zenoh:1.3.2-arm64',
+      image: 'robotis/lerobot-zenoh:1.4.0-arm64',
       image_pulled: true,
       image_status: 'stale',
       container_state: 'exited',

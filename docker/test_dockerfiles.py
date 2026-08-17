@@ -276,3 +276,21 @@ def test_policy_compose_keeps_image_defaults_in_images():
         assert "ENV ZENOH_SDK_PATH=/zenoh_sdk" in contents
         assert "ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk" in contents
         assert "ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk" in contents
+
+
+def test_lerobot_images_install_new_policy_inference_extras():
+    dockerfiles = (
+        REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.arm64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.amd64",
+    )
+
+    for dockerfile in dockerfiles:
+        install_lines = [
+            line
+            for line in dockerfile.read_text().splitlines()
+            if "pip install" in line and '".[' in line
+        ]
+        assert len(install_lines) == 1, f"Could not identify LeRobot extras in {dockerfile}"
+        install_line = install_lines[0]
+        for extra in ("molmoact2", "vla_jepa", "fastwam"):
+            assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
