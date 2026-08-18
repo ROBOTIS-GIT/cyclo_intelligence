@@ -833,8 +833,11 @@ export function useRosServiceCaller() {
   );
 
   const sendEditDatasetCommand = useCallback(
-    async (command) => {
-      const editDatasetInfo = editDatasetInfoRef.current;
+    async (command, overrides = {}) => {
+      const editDatasetInfo = {
+        ...editDatasetInfoRef.current,
+        ...overrides,
+      };
       try {
         console.log('Calling service /data/edit with request:', {
           command: command,
@@ -848,6 +851,9 @@ export function useRosServiceCaller() {
             break;
           case 'delete':
             command_enum = EditDatasetCommand.DELETE;
+            break;
+          case 'prune_oldest':
+            command_enum = EditDatasetCommand.PRUNE_OLDEST;
             break;
           default:
             throw new Error(`Unknown command: ${command}`);
@@ -879,6 +885,12 @@ export function useRosServiceCaller() {
               editDatasetInfo.deleteCompact === undefined
                 ? true
                 : Boolean(editDatasetInfo.deleteCompact),
+            prune_oldest_success_count: Number(
+              editDatasetInfo.pruneOldestSuccessCount || 0
+            ),
+            prune_oldest_failure_count: Number(
+              editDatasetInfo.pruneOldestFailureCount || 0
+            ),
           }
         );
 

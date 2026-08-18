@@ -22,6 +22,7 @@ const PageType = {
   RECORD: 'record',
   INFERENCE: 'inference',
   TRAINING: 'training',
+  OFFLINE_RL: 'offline_rl',
   EDIT_DATASET: 'edit_dataset',
   BT_MANAGER: 'bt_manager',
   NAVIGATION: 'navigation',

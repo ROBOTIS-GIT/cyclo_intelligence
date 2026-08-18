@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree, MdNavigation } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree, MdModelTraining, MdNavigation } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
 import toast from 'react-hot-toast';
@@ -26,6 +26,7 @@ import HomePage from './pages/HomePage';
 import RecordPage from './pages/RecordPage';
 import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
+import OfflineRLPage from './pages/OfflineRLPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import BTManagerPage from './pages/BTManagerPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
@@ -262,6 +263,11 @@ function App() {
     dispatch(moveToPage(PageType.EDIT_DATASET));
   };
 
+  const handleOfflineRLPageNavigation = () => {
+    isFirstLoad.current = false;
+    dispatch(moveToPage(PageType.OFFLINE_RL));
+  };
+
   const handleBTManagerPageNavigation = () => {
     if (!isBtRobotSupported(robotType)) {
       toast.error(BT_UNSUPPORTED_ROBOT_MESSAGE, {
@@ -427,6 +433,18 @@ function App() {
           {/* Divider line */}
           <div className="w-24 h-1 border-t-2 rounded-full border-gray-200 dark:border-slate-800 mt-3"></div>
 
+          {/* Offline RL page button */}
+          <button
+            className={clsx(classPageButton, {
+              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.OFFLINE_RL,
+              'bg-gray-300 dark:bg-slate-700': page === PageType.OFFLINE_RL,
+            })}
+            onClick={handleOfflineRLPageNavigation}
+          >
+            <MdModelTraining size={30} className="mb-2" />
+            <span className="mt-1 text-sm whitespace-nowrap">Offline RL</span>
+          </button>
+
           {/* Edit dataset page button */}
           <button
             className={clsx(classPageButton, {
@@ -462,6 +480,8 @@ function App() {
           <InferencePage isActive={page === PageType.INFERENCE} />
         ) : page === PageType.TRAINING ? (
           <TrainingPage isActive={page === PageType.TRAINING} />
+        ) : page === PageType.OFFLINE_RL ? (
+          <OfflineRLPage isActive={page === PageType.OFFLINE_RL} />
         ) : page === PageType.EDIT_DATASET ? (
           <EditDatasetPage isActive={page === PageType.EDIT_DATASET} />
         ) : page === PageType.BT_MANAGER ? (

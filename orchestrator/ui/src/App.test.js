@@ -49,6 +49,13 @@ jest.mock('./pages/EditDatasetPage', () => {
   };
 });
 
+jest.mock('./pages/OfflineRLPage', () => {
+  const React = require('react');
+  return function MockOfflineRLPage() {
+    return React.createElement('div', null, 'Offline RL Page');
+  };
+});
+
 jest.mock('./pages/ReplayPage', () => {
   const React = require('react');
   return function MockReplayPage() {
@@ -100,6 +107,8 @@ test('renders the Cyclo Intelligence shell navigation', () => {
   expect(screen.getByRole('button', { name: 'Cyclo Intelligence' }))
     .toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Inference/i }))
+    .toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Offline RL/i }))
     .toBeInTheDocument();
   expect(screen.getByText('Home Page')).toBeInTheDocument();
 });
