@@ -54,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
@@ -267,6 +268,47 @@ class TrtEngineStatus(BaseModel):
     log_tail: List[str] = Field(default_factory=list)
 
 
+class OfflineRLStartRequest(BaseModel):
+    dataset_path: str
+    act_checkpoint: str
+    parent_checkpoint: str = ""
+    algorithm: str = "td3"
+    robot_type: str
+    critic_epochs: int = Field(default=10, ge=1, le=1000)
+    actor_equivalent_epochs: int = Field(default=5, ge=1, le=500)
+
+
+class OfflineRLStatus(BaseModel):
+    status: Literal["idle", "running", "completed", "failed"]
+    percentage: float = 0.0
+    episode_count: int = 0
+    round_index: int = 0
+    round_episode_count: int = 0
+    critic_epochs: int = 10
+    actor_equivalent_epochs: int = 5
+    success_count: int = 0
+    failure_count: int = 0
+    completed_epochs: int = 0
+    total_epochs: int = 10
+    completed_critic_updates: int = 0
+    total_critic_updates: int = 0
+    completed_actor_updates: int = 0
+    total_actor_updates: int = 0
+    critic_loss: Optional[float] = None
+    actor_loss: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    model_path: str = ""
+    checkpoint_path: str = ""
+    message: str = ""
+    job_id: str = ""
+    dataset_path: str = ""
+    act_checkpoint: str = ""
+    parent_checkpoint: str = ""
+    output_dir: str = ""
+    returncode: Optional[int] = None
+    log_tail: List[str] = Field(default_factory=list)
+
+
 # -- Backend (policy container) wiring -----------------------------------------
 
 
@@ -353,6 +395,57 @@ class _TrtBuildJob:
 
 _TRT_BUILD_JOBS: Dict[str, _TrtBuildJob] = {}
 _TRT_BUILD_LOCK = threading.Lock()
+
+
+_OFFLINE_RL_DATASET_ROOT = Path("/workspace/lerobot")
+_OFFLINE_RL_MODEL_ROOT = Path("/workspace/model/lerobot")
+_OFFLINE_RL_OUTPUT_ROOT = _OFFLINE_RL_MODEL_ROOT / "offline_rl"
+_OFFLINE_RL_LOG_ROOT = Path("/tmp/cyclo_offline_rl")
+_OFFLINE_RL_MAX_EPISODES = 200
+_OFFLINE_RL_MAX_NEW_EPISODES = 50
+_OFFLINE_RL_LOG_LINES = 100
+
+
+@dataclass
+class _OfflineRLJob:
+    job_id: str
+    dataset_path: str
+    act_checkpoint: str
+    parent_checkpoint: str
+    output_dir: str
+    episode_count: int
+    log_path: str
+    round_index: int = 1
+    round_episode_count: int = 0
+    critic_epochs: int = 10
+    actor_equivalent_epochs: int = 5
+    status: str = "running"
+    percentage: float = 0.0
+    success_count: int = 0
+    failure_count: int = 0
+    completed_epochs: int = 0
+    total_epochs: int = 10
+    completed_critic_updates: int = 0
+    total_critic_updates: int = 0
+    completed_actor_updates: int = 0
+    total_actor_updates: int = 0
+    critic_loss: Optional[float] = None
+    actor_loss: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    model_path: str = ""
+    checkpoint_path: str = ""
+    message: str = "Starting ACT-TD3 offline training"
+    process: Optional[subprocess.Popen] = None
+    returncode: Optional[int] = None
+    log_tail: Optional[List[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.log_tail is None:
+            self.log_tail = []
+
+
+_OFFLINE_RL_JOB: Optional[_OfflineRLJob] = None
+_OFFLINE_RL_LOCK = threading.Lock()
 
 
 def _docker_client() -> docker.DockerClient:
@@ -550,6 +643,552 @@ def _compose_base_cmd() -> List[str]:
     if os.path.exists(_COMPOSE_OVERRIDE_IN_CONTAINER):
         cmd += ["-f", _COMPOSE_OVERRIDE_IN_CONTAINER]
     return cmd
+
+
+# -- ACT-TD3 offline training -------------------------------------------------
+
+
+def _offline_rl_input_path(
+    raw_path: str,
+    *,
+    root: Path,
+    label: str,
+    expect_directory: bool,
+) -> Path:
+    """Resolve one UI path without permitting workspace or symlink escape."""
+    value = (raw_path or "").strip()
+    candidate = Path(value)
+    if not value or not candidate.is_absolute():
+        raise HTTPException(400, f"{label} must be an absolute path")
+
+    try:
+        root_resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(503, f"{label} root is unavailable: {root}") from exc
+    if root.is_symlink():
+        raise HTTPException(500, f"{label} root must not be a symbolic link")
+
+    lexical = Path(os.path.abspath(value))
+    try:
+        relative = lexical.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(400, f"{label} must be under {root}") from exc
+
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise HTTPException(400, f"{label} must not traverse symbolic links")
+
+    try:
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, f"{label} does not exist: {lexical}") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, f"{label} escapes {root}") from exc
+
+    if expect_directory and not resolved.is_dir():
+        raise HTTPException(400, f"{label} must be a directory")
+    if not expect_directory and not resolved.is_file():
+        raise HTTPException(400, f"{label} must be a file")
+    return resolved
+
+
+def _offline_rl_json_file(path: Path, *, label: str) -> dict:
+    try:
+        if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("unsafe metadata file")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, f"Invalid {label}: {path}") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(400, f"Invalid {label}: expected a JSON object")
+    return value
+
+
+def _offline_rl_dataset(raw_path: str) -> tuple[Path, int]:
+    dataset = _offline_rl_input_path(
+        raw_path,
+        root=_OFFLINE_RL_DATASET_ROOT,
+        label="dataset_path",
+        expect_directory=True,
+    )
+    try:
+        info_path = _offline_rl_input_path(
+            str(dataset / "meta" / "info.json"),
+            root=dataset,
+            label="LeRobot meta/info.json",
+            expect_directory=False,
+        )
+    except HTTPException as exc:
+        raise HTTPException(400, "dataset_path is missing a safe meta/info.json") from exc
+    info = _offline_rl_json_file(info_path, label="LeRobot dataset metadata")
+    if info.get("codebase_version") != "v3.0":
+        raise HTTPException(400, "Offline RL requires a LeRobot v3.0 dataset")
+    episodes = info.get("total_episodes")
+    if isinstance(episodes, bool) or not isinstance(episodes, int) or episodes < 1:
+        raise HTTPException(400, "LeRobot total_episodes must be a positive integer")
+    if episodes > _OFFLINE_RL_MAX_EPISODES:
+        raise HTTPException(
+            400,
+            f"Offline RL supports at most {_OFFLINE_RL_MAX_EPISODES} episodes",
+        )
+    features = info.get("features")
+    if not isinstance(features, dict) or "episode_success" not in features:
+        raise HTTPException(400, "LeRobot dataset is missing episode_success labels")
+    return dataset, episodes
+
+
+def _offline_rl_act_checkpoint(raw_path: str) -> Path:
+    checkpoint = _offline_rl_input_path(
+        raw_path,
+        root=_OFFLINE_RL_MODEL_ROOT,
+        label="act_checkpoint",
+        expect_directory=True,
+    )
+    nested = checkpoint / "pretrained_model"
+    if not (checkpoint / "config.json").is_file() and nested.is_dir():
+        checkpoint = _offline_rl_input_path(
+            str(nested),
+            root=_OFFLINE_RL_MODEL_ROOT,
+            label="act_checkpoint",
+            expect_directory=True,
+        )
+    required = (
+        "config.json",
+        "model.safetensors",
+        "policy_preprocessor.json",
+        "policy_postprocessor.json",
+    )
+    missing = [name for name in required if not (checkpoint / name).is_file()]
+    if missing:
+        raise HTTPException(
+            400,
+            "act_checkpoint is incomplete; missing " + ", ".join(missing),
+        )
+    for name in required:
+        _offline_rl_input_path(
+            str(checkpoint / name),
+            root=checkpoint,
+            label=f"act_checkpoint/{name}",
+            expect_directory=False,
+        )
+    config = _offline_rl_json_file(
+        checkpoint / "config.json",
+        label="ACT policy config",
+    )
+    if config.get("type") != "act":
+        raise HTTPException(400, "act_checkpoint config type must be 'act'")
+    return checkpoint
+
+
+def _offline_rl_schedule(
+    critic_epochs: int,
+    actor_equivalent_epochs: int,
+) -> tuple[int, int]:
+    for label, value in (
+        ("critic_epochs", critic_epochs),
+        ("actor_equivalent_epochs", actor_equivalent_epochs),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise HTTPException(400, f"{label} must be a positive integer")
+    if critic_epochs != 2 * actor_equivalent_epochs:
+        raise HTTPException(
+            400,
+            "TD3 requires critic_epochs = 2 * actor_equivalent_epochs "
+            "because policy_update_period is fixed at 2",
+        )
+    return critic_epochs, actor_equivalent_epochs
+
+
+def _offline_rl_parent_checkpoint(
+    raw_path: str,
+    episode_count: int,
+) -> tuple[Path | None, int, int]:
+    value = (raw_path or "").strip()
+    if not value:
+        if episode_count > _OFFLINE_RL_MAX_NEW_EPISODES:
+            raise HTTPException(
+                400,
+                "The first ACT-TD3 round may contain 1..50 episodes",
+            )
+        return None, 0, 0
+
+    parent = _offline_rl_input_path(
+        value,
+        root=_OFFLINE_RL_MODEL_ROOT,
+        label="parent_checkpoint",
+        expect_directory=False,
+    )
+    if parent.name != "act_td3.pt" or parent.parent.name != "training_state":
+        raise HTTPException(
+            400,
+            "parent_checkpoint must be a training_state/act_td3.pt file",
+        )
+    try:
+        manifest_path = _offline_rl_input_path(
+            str(parent.parent.parent / "training_manifest.json"),
+            root=parent.parent.parent,
+            label="parent training_manifest.json",
+            expect_directory=False,
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            400,
+            "parent_checkpoint is missing a safe training_manifest.json",
+        ) from exc
+    manifest = _offline_rl_json_file(
+        manifest_path,
+        label="parent training manifest",
+    )
+    previous_episodes = manifest.get("episode_count")
+    if (
+        manifest.get("event") != "result"
+        or manifest.get("status") != "complete"
+        or isinstance(previous_episodes, bool)
+        or not isinstance(previous_episodes, int)
+        or not 1 <= previous_episodes < _OFFLINE_RL_MAX_EPISODES
+    ):
+        raise HTTPException(400, "parent_checkpoint is not a completed ACT-TD3 round")
+    added = episode_count - previous_episodes
+    if not 1 <= added <= _OFFLINE_RL_MAX_NEW_EPISODES:
+        raise HTTPException(400, "Each ACT-TD3 round must add 1..50 episodes")
+
+    parent_schedule = manifest.get("schedule")
+    if parent_schedule is None:
+        pass
+    elif isinstance(parent_schedule, dict):
+        try:
+            _offline_rl_schedule(
+                parent_schedule.get("critic_epochs"),
+                parent_schedule.get("actor_equivalent_epochs"),
+            )
+        except HTTPException as exc:
+            raise HTTPException(400, "parent training schedule is invalid") from exc
+    else:
+        raise HTTPException(400, "parent training schedule is invalid")
+    recorded_checkpoint = manifest.get("checkpoint_path")
+    if recorded_checkpoint and os.path.normpath(str(recorded_checkpoint)) != str(parent):
+        raise HTTPException(400, "parent training manifest checkpoint does not match")
+    parent_round_index = manifest.get("round_index", 1)
+    if (
+        isinstance(parent_round_index, bool)
+        or not isinstance(parent_round_index, int)
+        or parent_round_index < 1
+    ):
+        raise HTTPException(400, "parent training round index is invalid")
+    return parent, previous_episodes, parent_round_index
+
+
+def _offline_rl_robot_config(robot_type: str) -> str:
+    robot = _validate_robot_type(robot_type)
+    source_root = Path(_CYCLO_REPO_MOUNT) / "shared" / "shared" / "robot_configs"
+    source = source_root / f"{robot}_config.yaml"
+    try:
+        source.resolve(strict=True).relative_to(source_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, f"Unknown robot_type for offline RL: {robot}") from exc
+    if source.is_symlink() or not source.is_file():
+        raise HTTPException(400, f"Unknown robot_type for offline RL: {robot}")
+    return f"/orchestrator_config/{robot}_config.yaml"
+
+
+def _offline_rl_output_path(job_id: str, episode_count: int) -> Path:
+    model_root = _OFFLINE_RL_MODEL_ROOT.resolve(strict=True)
+    if _OFFLINE_RL_OUTPUT_ROOT.exists():
+        if _OFFLINE_RL_OUTPUT_ROOT.is_symlink():
+            raise HTTPException(500, "Offline RL output root must not be a symbolic link")
+        try:
+            _OFFLINE_RL_OUTPUT_ROOT.resolve(strict=True).relative_to(model_root)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "Offline RL output root escapes the model root") from exc
+    output = _OFFLINE_RL_OUTPUT_ROOT / (
+        f"td3_episodes_{episode_count:04d}_{job_id[:12]}"
+    )
+    if output.exists():
+        raise HTTPException(409, f"Offline RL output already exists: {output}")
+    return output
+
+
+def _offline_rl_command(
+    *,
+    job: _OfflineRLJob,
+    robot_type: str,
+    robot_config: str,
+) -> List[str]:
+    command = _compose_base_cmd() + [
+        "run",
+        "--rm",
+        "--no-deps",
+        "--pull",
+        "never",
+        "--name",
+        f"cyclo_offline_rl_{job.job_id[:12]}",
+        "--user",
+        "1000:1000",
+        "--workdir",
+        "/workspace",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        "HF_HUB_OFFLINE=1",
+        "--env",
+        "TRANSFORMERS_OFFLINE=1",
+        "--env",
+        "HF_DATASETS_OFFLINE=1",
+        "--entrypoint",
+        "/lerobot/.venv/bin/python",
+        "lerobot",
+        "-m",
+        "cyclo_brain.algorithm.rl.act_td3.offline_training_cli",
+        "--dataset-root",
+        job.dataset_path,
+        "--act-checkpoint",
+        job.act_checkpoint,
+        "--robot-config",
+        robot_config,
+        "--robot-type",
+        robot_type,
+        "--device",
+        "cuda:0",
+        "--seed",
+        "17",
+        "--sampling-seed",
+        "19",
+        "--batch-size",
+        "4",
+        "--critic-epochs",
+        str(job.critic_epochs),
+        "--actor-equivalent-epochs",
+        str(job.actor_equivalent_epochs),
+        "--output-dir",
+        job.output_dir,
+        "--checkpoint-interval",
+        "100",
+        "--progress-interval",
+        "1",
+    ]
+    if job.parent_checkpoint:
+        command.extend(["--parent-checkpoint", job.parent_checkpoint])
+    return command
+
+
+def _offline_rl_append_log(job: _OfflineRLJob, line: str) -> None:
+    if not line:
+        return
+    job.log_tail.append(line)
+    del job.log_tail[:-_OFFLINE_RL_LOG_LINES]
+
+
+def _offline_rl_update_number(job: _OfflineRLJob, payload: dict, name: str) -> None:
+    value = payload.get(name)
+    current = getattr(job, name)
+    if value is None:
+        return
+    if isinstance(current, int) and not isinstance(current, bool):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            setattr(job, name, value)
+        return
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        setattr(job, name, float(value))
+
+
+def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
+    """Apply one trusted CLI JSON event; return True for a complete result."""
+    event = payload.get("event")
+    if event == "manifest":
+        dataset = payload.get("dataset") or {}
+        round_info = payload.get("round") or {}
+        schedule = payload.get("schedule") or {}
+        if isinstance(dataset, dict):
+            for source, target in (
+                ("episodes", "episode_count"),
+                ("successes", "success_count"),
+                ("failures", "failure_count"),
+            ):
+                value = dataset.get(source)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    setattr(job, target, value)
+        if isinstance(round_info, dict):
+            value = round_info.get("index")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                job.round_index = value
+            value = round_info.get("new_episodes")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                job.round_episode_count = value
+            for source, target in (
+                ("critic_updates", "total_critic_updates"),
+                ("actor_updates", "total_actor_updates"),
+            ):
+                value = round_info.get(source)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    setattr(job, target, value)
+        if isinstance(schedule, dict):
+            for source, target in (
+                ("critic_epochs", "critic_epochs"),
+                ("actor_equivalent_epochs", "actor_equivalent_epochs"),
+            ):
+                value = schedule.get(source)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                    setattr(job, target, value)
+        checkpoint = payload.get("checkpoint")
+        if isinstance(checkpoint, str):
+            job.checkpoint_path = checkpoint
+        job.message = "ACT-TD3 training is running"
+        return False
+
+    if event == "progress":
+        for name in (
+            "episode_count",
+            "completed_epochs",
+            "total_epochs",
+            "completed_critic_updates",
+            "total_critic_updates",
+            "completed_actor_updates",
+            "total_actor_updates",
+            "critic_loss",
+            "actor_loss",
+            "eta_seconds",
+        ):
+            _offline_rl_update_number(job, payload, name)
+        percentage = payload.get("percentage")
+        if isinstance(percentage, (int, float)) and not isinstance(percentage, bool):
+            job.percentage = max(0.0, min(100.0, float(percentage)))
+        checkpoint = payload.get("checkpoint_path")
+        if isinstance(checkpoint, str):
+            job.checkpoint_path = checkpoint
+        job.message = (
+            "Exporting the trained ACT model"
+            if payload.get("status") == "complete"
+            else "ACT-TD3 training is running"
+        )
+        return False
+
+    if event == "result":
+        _offline_rl_consume_event(job, {**payload, "event": "progress"})
+        model_path = payload.get("model_path")
+        if isinstance(model_path, str):
+            job.model_path = model_path
+        return payload.get("status") == "complete" and bool(job.model_path)
+
+    if event == "error":
+        error_type = payload.get("error_type") or "OfflineRLError"
+        message = payload.get("message") or "ACT-TD3 training failed"
+        job.message = f"{error_type}: {message}"
+    return False
+
+
+def _offline_rl_verified_model(job: _OfflineRLJob) -> bool:
+    expected = Path(job.output_dir) / "pretrained_model"
+    if os.path.normpath(job.model_path) != str(expected):
+        return False
+    try:
+        model = _offline_rl_input_path(
+            job.model_path,
+            root=_OFFLINE_RL_MODEL_ROOT,
+            label="model_path",
+            expect_directory=True,
+        )
+    except HTTPException:
+        return False
+    for name in ("config.json", "model.safetensors"):
+        try:
+            _offline_rl_input_path(
+                str(model / name),
+                root=model,
+                label=f"exported model {name}",
+                expect_directory=False,
+            )
+        except HTTPException:
+            return False
+    return True
+
+
+def _monitor_offline_rl_job(job: _OfflineRLJob) -> None:
+    result_complete = False
+    try:
+        _OFFLINE_RL_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(job.log_path, "a", encoding="utf-8") as log:
+            stdout = job.process.stdout if job.process is not None else None
+            if stdout is not None:
+                for raw_line in stdout:
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode(errors="replace")
+                    line = raw_line.rstrip("\r\n")
+                    log.write(line + "\n")
+                    log.flush()
+                    with _OFFLINE_RL_LOCK:
+                        _offline_rl_append_log(job, line)
+                        try:
+                            payload = json.loads(line)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(payload, dict):
+                            result_complete = (
+                                _offline_rl_consume_event(job, payload)
+                                or result_complete
+                            )
+            returncode = job.process.wait() if job.process is not None else -1
+    except Exception as exc:  # pragma: no cover - defensive worker boundary
+        logger.error("Offline RL monitor failed: %s", exc, exc_info=True)
+        returncode = -1
+        with _OFFLINE_RL_LOCK:
+            job.message = f"Offline RL monitor failed: {exc}"
+
+    with _OFFLINE_RL_LOCK:
+        job.returncode = returncode
+        if returncode == 0 and result_complete and _offline_rl_verified_model(job):
+            job.status = "completed"
+            job.percentage = 100.0
+            job.message = "ACT-TD3 training completed"
+        else:
+            job.status = "failed"
+            if not job.message or job.message in (
+                "Starting ACT-TD3 offline training",
+                "ACT-TD3 training is running",
+                "Exporting the trained ACT model",
+            ):
+                job.message = (
+                    f"ACT-TD3 training exited with code {returncode}"
+                    if returncode != 0
+                    else "ACT-TD3 result or exported model verification is missing"
+                )
+
+
+def _offline_rl_status(job: Optional[_OfflineRLJob]) -> OfflineRLStatus:
+    if job is None:
+        return OfflineRLStatus(status="idle", message="No offline RL job has been started")
+    return OfflineRLStatus(
+        status=job.status,
+        percentage=job.percentage,
+        episode_count=job.episode_count,
+        round_index=job.round_index,
+        round_episode_count=job.round_episode_count,
+        critic_epochs=job.critic_epochs,
+        actor_equivalent_epochs=job.actor_equivalent_epochs,
+        success_count=job.success_count,
+        failure_count=job.failure_count,
+        completed_epochs=job.completed_epochs,
+        total_epochs=job.total_epochs,
+        completed_critic_updates=job.completed_critic_updates,
+        total_critic_updates=job.total_critic_updates,
+        completed_actor_updates=job.completed_actor_updates,
+        total_actor_updates=job.total_actor_updates,
+        critic_loss=job.critic_loss,
+        actor_loss=job.actor_loss,
+        eta_seconds=job.eta_seconds,
+        model_path=job.model_path if job.status == "completed" else "",
+        checkpoint_path=job.checkpoint_path,
+        message=job.message,
+        job_id=job.job_id,
+        dataset_path=job.dataset_path,
+        act_checkpoint=job.act_checkpoint,
+        parent_checkpoint=job.parent_checkpoint,
+        output_dir=job.output_dir,
+        returncode=job.returncode,
+        log_tail=list(job.log_tail),
+    )
 
 
 def _backend_image_candidates(spec: Dict[str, str]) -> List[str]:
@@ -1103,6 +1742,99 @@ async def workspace_mount() -> WorkspaceMountResponse:
         host_available=False,
         message="Host mount for /workspace could not be resolved",
     )
+
+
+@app.post("/offline-rl/start", response_model=OfflineRLStatus)
+async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
+    """Start one immutable ACT-TD3 cumulative-replay round."""
+    global _OFFLINE_RL_JOB
+
+    algorithm = request.algorithm.strip().lower()
+    if algorithm != "td3":
+        raise HTTPException(
+            400,
+            f"Offline RL algorithm '{request.algorithm}' is not implemented; "
+            "only TD3 is currently available",
+        )
+    critic_epochs, actor_equivalent_epochs = _offline_rl_schedule(
+        request.critic_epochs,
+        request.actor_equivalent_epochs,
+    )
+
+    with _OFFLINE_RL_LOCK:
+        if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+            raise HTTPException(409, "An offline RL job is already running")
+
+    dataset, episode_count = _offline_rl_dataset(request.dataset_path)
+    act_checkpoint = _offline_rl_act_checkpoint(request.act_checkpoint)
+    parent_checkpoint, previous_episode_count, parent_round_index = (
+        _offline_rl_parent_checkpoint(
+            request.parent_checkpoint,
+            episode_count,
+        )
+    )
+    robot_type = _validate_robot_type(request.robot_type)
+    robot_config = _offline_rl_robot_config(robot_type)
+    job_id = uuid.uuid4().hex
+    output_dir = _offline_rl_output_path(job_id, episode_count)
+    log_path = _OFFLINE_RL_LOG_ROOT / f"{job_id}.log"
+    job = _OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        act_checkpoint=str(act_checkpoint),
+        parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else "",
+        output_dir=str(output_dir),
+        episode_count=episode_count,
+        log_path=str(log_path),
+        round_index=parent_round_index + 1,
+        round_episode_count=episode_count - previous_episode_count,
+        critic_epochs=critic_epochs,
+        actor_equivalent_epochs=actor_equivalent_epochs,
+        total_epochs=critic_epochs,
+        checkpoint_path=str(output_dir / "training_state" / "act_td3.pt"),
+    )
+    command = _offline_rl_command(
+        job=job,
+        robot_type=robot_type,
+        robot_config=robot_config,
+    )
+    try:
+        environment = _compose_env()
+    except Exception as exc:  # noqa: BLE001 - Docker mount discovery boundary
+        raise HTTPException(503, f"Could not resolve Docker workspace: {exc}") from exc
+
+    with _OFFLINE_RL_LOCK:
+        if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+            raise HTTPException(409, "An offline RL job is already running")
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=environment,
+            )
+        except OSError as exc:
+            raise HTTPException(503, f"Could not launch offline RL: {exc}") from exc
+        job.process = process
+        _OFFLINE_RL_JOB = job
+
+    thread = threading.Thread(
+        target=_monitor_offline_rl_job,
+        args=(job,),
+        daemon=True,
+        name=f"offline-rl-{job_id[:12]}",
+    )
+    thread.start()
+    with _OFFLINE_RL_LOCK:
+        return _offline_rl_status(job)
+
+
+@app.get("/offline-rl/status", response_model=OfflineRLStatus)
+async def offline_rl_status() -> OfflineRLStatus:
+    with _OFFLINE_RL_LOCK:
+        return _offline_rl_status(_OFFLINE_RL_JOB)
 
 
 @app.get("/services", response_model=ServiceList)

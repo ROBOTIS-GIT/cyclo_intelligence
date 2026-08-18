@@ -674,3 +674,372 @@ def test_compose_env_uses_current_container_mounts(monkeypatch):
     finally:
         app._HOST_WORKSPACE_DIR_CACHE = None
         app._HOST_HUGGINGFACE_DIR_CACHE = None
+
+
+def _offline_rl_test_layout(monkeypatch, tmp_path, episodes=50):
+    dataset_root = tmp_path / "workspace" / "lerobot"
+    model_root = tmp_path / "workspace" / "model" / "lerobot"
+    dataset = dataset_root / "recording_v30"
+    act = model_root / "base_act" / "pretrained_model"
+    (dataset / "meta").mkdir(parents=True)
+    act.mkdir(parents=True)
+    (dataset / "meta" / "info.json").write_text(json.dumps({
+        "codebase_version": "v3.0",
+        "total_episodes": episodes,
+        "features": {"episode_success": {"dtype": "bool"}},
+    }))
+    (act / "config.json").write_text('{"type":"act"}')
+    (act / "model.safetensors").write_bytes(b"weights")
+    (act / "policy_preprocessor.json").write_text("{}")
+    (act / "policy_postprocessor.json").write_text("{}")
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_ROOT", dataset_root)
+    monkeypatch.setattr(app, "_OFFLINE_RL_MODEL_ROOT", model_root)
+    monkeypatch.setattr(app, "_OFFLINE_RL_OUTPUT_ROOT", model_root / "offline_rl")
+    monkeypatch.setattr(app, "_OFFLINE_RL_LOG_ROOT", tmp_path / "logs")
+    return dataset, act, model_root
+
+
+def test_offline_rl_rejects_dataset_symlink_escape(monkeypatch, tmp_path):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaped = app._OFFLINE_RL_DATASET_ROOT / "escaped"
+    escaped.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_dataset(str(escaped))
+
+    assert error.value.status_code == 400
+    assert "symbolic links" in error.value.detail
+    assert app._offline_rl_dataset(str(dataset))[1] == 50
+
+
+def test_offline_rl_enforces_v30_max_and_first_round_cap(monkeypatch, tmp_path):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=201,
+    )
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_dataset(str(dataset))
+    assert error.value.status_code == 400
+    assert "at most 200" in error.value.detail
+
+    (dataset / "meta" / "info.json").write_text(json.dumps({
+        "codebase_version": "v3.0",
+        "total_episodes": 100,
+        "features": {"episode_success": {"dtype": "bool"}},
+    }))
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint("", 100)
+    assert "1..50" in error.value.detail
+    assert app._offline_rl_parent_checkpoint("", 30) == (None, 0, 0)
+
+
+def test_offline_rl_parent_accepts_inferred_next_1_to_50(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=100,
+    )
+    round_root = model_root / "offline_rl" / "round_0050"
+    parent = round_root / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"checkpoint")
+    (round_root / "training_manifest.json").write_text(json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 50,
+        "checkpoint_path": str(parent),
+    }))
+
+    assert app._offline_rl_parent_checkpoint(str(parent), 100) == (parent, 50, 1)
+    assert app._offline_rl_parent_checkpoint(str(parent), 51) == (parent, 50, 1)
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(str(parent), 101)
+    assert "1..50" in error.value.detail
+
+
+def test_offline_rl_parent_validates_its_recorded_td3_schedule(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    round_root = model_root / "offline_rl" / "round_custom"
+    parent = round_root / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"checkpoint")
+    (round_root / "training_manifest.json").write_text(json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 30,
+        "round_index": 1,
+        "checkpoint_path": str(parent),
+        "schedule": {
+            "critic_epochs": 6,
+            "actor_equivalent_epochs": 3,
+        },
+    }))
+
+    assert app._offline_rl_parent_checkpoint(str(parent), 60) == (parent, 30, 1)
+
+    manifest_path = round_root / "training_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schedule"]["actor_equivalent_epochs"] = 2
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(str(parent), 60)
+    assert "schedule is invalid" in error.value.detail
+
+
+def test_offline_rl_command_is_pinned_and_offline(monkeypatch):
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    job = app._OfflineRLJob(
+        job_id="1234567890abcdef",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base/pretrained_model",
+        parent_checkpoint="/workspace/model/lerobot/round/training_state/act_td3.pt",
+        output_dir="/workspace/model/lerobot/offline_rl/round",
+        episode_count=100,
+        log_path="/tmp/job.log",
+    )
+
+    command = app._offline_rl_command(
+        job=job,
+        robot_type="ffw_sg2_rev1",
+        robot_config="/orchestrator_config/ffw_sg2_rev1_config.yaml",
+    )
+
+    assert command[:4] == ["docker", "compose", "run", "--rm"]
+    assert command[command.index("--pull") + 1] == "never"
+    assert command[command.index("--user") + 1] == "1000:1000"
+    assert command[command.index("--entrypoint") + 1] == "/lerobot/.venv/bin/python"
+    assert "HOME=/tmp" in command
+    assert "HF_HUB_OFFLINE=1" in command
+    assert "--allow-partial-round" not in command
+    assert command[command.index("--critic-epochs") + 1] == "10"
+    assert command[command.index("--actor-equivalent-epochs") + 1] == "5"
+    assert command[-2:] == ["--parent-checkpoint", job.parent_checkpoint]
+
+
+def test_offline_rl_result_event_does_not_recurse_and_updates_progress():
+    job = app._OfflineRLJob(
+        job_id="job",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/round",
+        episode_count=50,
+        log_path="/tmp/job.log",
+    )
+    model_path = f"{job.output_dir}/pretrained_model"
+
+    complete = app._offline_rl_consume_event(job, {
+        "event": "result",
+        "status": "complete",
+        "percentage": 100.0,
+        "completed_epochs": 10,
+        "total_epochs": 10,
+        "completed_critic_updates": 320,
+        "total_critic_updates": 320,
+        "completed_actor_updates": 160,
+        "total_actor_updates": 160,
+        "critic_loss": 0.01,
+        "actor_loss": 0.02,
+        "eta_seconds": 0.0,
+        "checkpoint_path": f"{job.output_dir}/training_state/act_td3.pt",
+        "model_path": model_path,
+    })
+
+    assert complete is True
+    assert job.percentage == 100.0
+    assert job.completed_epochs == 10
+    assert job.completed_critic_updates == 320
+    assert job.completed_actor_updates == 160
+    assert job.model_path == model_path
+
+
+def test_offline_rl_monitor_accepts_only_verified_export(monkeypatch, tmp_path):
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    output = model_root / "offline_rl" / "round"
+    model = output / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text('{"type":"act"}')
+    (model / "model.safetensors").write_bytes(b"weights")
+    checkpoint = output / "training_state" / "act_td3.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"state")
+    result = json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 50,
+        "completed_epochs": 10,
+        "total_epochs": 10,
+        "completed_critic_updates": 20,
+        "total_critic_updates": 20,
+        "completed_actor_updates": 10,
+        "total_actor_updates": 10,
+        "percentage": 100.0,
+        "critic_loss": 0.1,
+        "actor_loss": 0.2,
+        "eta_seconds": 0.0,
+        "checkpoint_path": str(checkpoint),
+        "model_path": str(model),
+    })
+
+    class FakeProcess:
+        stdout = [result + "\n"]
+
+        @staticmethod
+        def wait():
+            return 0
+
+    job = app._OfflineRLJob(
+        job_id="job",
+        dataset_path=str(app._OFFLINE_RL_DATASET_ROOT / "recording_v30"),
+        act_checkpoint=str(_act),
+        parent_checkpoint="",
+        output_dir=str(output),
+        episode_count=50,
+        log_path=str(tmp_path / "logs" / "job.log"),
+        process=FakeProcess(),
+    )
+
+    app._monitor_offline_rl_job(job)
+
+    assert job.status == "completed"
+    assert job.returncode == 0
+    assert app._offline_rl_status(job).model_path == str(model)
+
+
+def test_offline_rl_start_launches_single_pinned_compose_job(monkeypatch, tmp_path):
+    dataset, act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    launched = {}
+
+    class FakeProcess:
+        stdout = []
+
+        @staticmethod
+        def wait():
+            return 0
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return FakeProcess()
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            launched["thread"] = kwargs
+
+        def start(self):
+            launched["thread_started"] = True
+
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    monkeypatch.setattr(app, "_compose_env", lambda: {"ARCH": "amd64"})
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_robot_config",
+        lambda _robot: "/orchestrator_config/ffw_sg2_rev1_config.yaml",
+    )
+    monkeypatch.setattr(app.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        app.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="1234567890abcdef1234567890abcdef"),
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+
+    response = asyncio.run(app.offline_rl_start(app.OfflineRLStartRequest(
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        algorithm="td3",
+        robot_type="ffw_sg2_rev1",
+    )))
+
+    assert response.status == "running"
+    assert response.episode_count == 50
+    assert response.round_index == 1
+    assert response.round_episode_count == 50
+    assert response.critic_epochs == 10
+    assert response.actor_equivalent_epochs == 5
+    assert response.model_path == ""
+    assert launched["thread_started"] is True
+    assert launched["kwargs"]["text"] is True
+    assert launched["command"][launched["command"].index("--pull") + 1] == "never"
+    assert "/lerobot/.venv/bin/python" in launched["command"]
+
+
+def test_offline_rl_start_rejects_concurrent_job(monkeypatch, tmp_path):
+    dataset, act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    running = app._OfflineRLJob(
+        job_id="running",
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        output_dir=str(app._OFFLINE_RL_OUTPUT_ROOT / "running"),
+        episode_count=50,
+        log_path=str(tmp_path / "running.log"),
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", running)
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    monkeypatch.setattr(app, "_compose_env", lambda: {"ARCH": "amd64"})
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_robot_config",
+        lambda _robot: "/orchestrator_config/ffw_sg2_rev1_config.yaml",
+    )
+
+    import pytest
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_start(app.OfflineRLStartRequest(
+            dataset_path=str(dataset),
+            act_checkpoint=str(act),
+            parent_checkpoint="",
+            algorithm="td3",
+            robot_type="ffw_sg2_rev1",
+        )))
+
+    assert error.value.status_code == 409
+
+
+def test_offline_rl_start_rejects_unimplemented_algorithms():
+    import pytest
+
+    request = app.OfflineRLStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        algorithm="sac",
+        robot_type="ffw_sg2_rev1",
+    )
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_start(request))
+
+    assert error.value.status_code == 400
+    assert "only TD3" in error.value.detail
+
+
+def test_offline_rl_start_rejects_invalid_td3_epoch_ratio():
+    import pytest
+
+    request = app.OfflineRLStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        algorithm="td3",
+        robot_type="ffw_sg2_rev1",
+        critic_epochs=10,
+        actor_equivalent_epochs=4,
+    )
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_start(request))
+
+    assert error.value.status_code == 400
+    assert "policy_update_period" in error.value.detail

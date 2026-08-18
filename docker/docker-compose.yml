@@ -181,6 +181,9 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
+      # Keep the image's tested LeRobot installation and expose only Cyclo's
+      # model/algorithm packages for offline RL entry points.
+      - PYTHONPATH=/cyclo_brain_src
 
     volumes:
       - /dev:/dev
@@ -193,6 +196,9 @@ services:
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
+      - ../cyclo_brain/algorithm:/cyclo_brain_src/cyclo_brain/algorithm:ro
+      - ../cyclo_brain/model:/cyclo_brain_src/cyclo_brain/model:ro
+      - ../shared/shared:/cyclo_brain_src/shared:ro
       # Common policy runtime (main-runtime + engine-process + Engine ABC).
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # Live-edit app-level s6 services while keeping s6-overlay's built-in
