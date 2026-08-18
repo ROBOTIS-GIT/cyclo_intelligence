@@ -3,3 +3,9 @@ string task_instruction
 uint32 episode_count
 float32 total_duration_s
 uint16 fps
+uint32 success_count
+uint32 failure_count
+uint32 unlabeled_count
+uint32[] success_episode_indices
+uint32[] failure_episode_indices
+uint32[] unlabeled_episode_indices

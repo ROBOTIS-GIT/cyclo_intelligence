@@ -22,16 +22,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
     BrowserItem,
-    DatasetInfo,
     InferenceStatus
 )
 from interfaces.srv import (
     BrowseFile,
-    GetDatasetInfo,
     GetImageTopicList,
     GetTreeList,
 )
-from cyclo_data.editor.episode_editor import DataEditor
 from orchestrator.internal.file_browser.file_browse_utils import FileBrowseUtils
 from shared.robot_configs import schema as robot_schema
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -97,9 +94,6 @@ class Communicator:
             robot_schema.get_camera_info_topics(robot_section)
         )
         self._mcap_topics = robot_schema.get_mcap_record_topics(robot_section)
-
-        # Initialize DataEditor for dataset editing
-        self.data_editor = DataEditor()
 
         # Log topic information
         node.get_logger().info(f'Camera topics: {self.camera_topics}')
@@ -209,12 +203,6 @@ class Communicator:
             BrowseFile,
             '/browse_file',
             self.browse_file_callback
-        )
-
-        self.get_dataset_info_service = self.node.create_service(
-            GetDatasetInfo,
-            '/dataset/get_info',
-            self.get_dataset_info_callback
         )
 
         self.list_trees_service = self.node.create_service(
@@ -466,31 +454,6 @@ class Communicator:
             response.message = f'Error: {str(e)}'
         return response
 
-    def get_dataset_info_callback(self, request, response):
-        from pathlib import Path
-        try:
-            task_dir = Path(request.dataset_path)
-            task_info = self.data_editor.get_rosbag_task_info(task_dir)
-
-            info = DatasetInfo()
-            info.robot_type = task_info.robot_type
-            info.task_instruction = task_info.task_instruction
-            info.episode_count = int(task_info.episode_count)
-            info.total_duration_s = float(task_info.total_duration_s)
-            info.fps = int(task_info.fps)
-
-            response.dataset_info = info
-            response.success = True
-            response.message = 'Task info retrieved successfully'
-            return response
-
-        except Exception as e:
-            self.node.get_logger().error(f'Error in get_dataset_info_callback: {str(e)}')
-            response.success = False
-            response.message = f'Error: {str(e)}'
-            response.dataset_info = DatasetInfo()
-            return response
-
     # ========== Cleanup ==========
 
     def _destroy_service_if_exists(self, service_attr_name: str):
@@ -542,7 +505,6 @@ class Communicator:
         service_names = [
             'image_topic_list_service',
             'file_browser_service',
-            'get_dataset_info_service',
             'list_trees_service'
         ]
         for service_name in service_names:

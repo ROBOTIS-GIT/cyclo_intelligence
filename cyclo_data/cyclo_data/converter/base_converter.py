@@ -76,10 +76,10 @@ _CONVERSION_WORKER_NICE_ENV = "CYCLO_CONVERSION_WORKER_NICE"
 _DEFAULT_VIDEO_SYNC_TOTAL_WORKERS = 6
 _VIDEO_SYNC_CLEAN_CACHE_ENV = "CYCLO_VIDEO_SYNC_CLEAN_CACHE"
 _EXTRACT_CACHE_DISABLE_ENV = "CYCLO_EXTRACT_CACHE_DISABLE"
-_EXTRACT_CACHE_VERSION = 2
+_EXTRACT_CACHE_VERSION = 3
 _RAW_CDR_EXTRACT_DISABLE_ENV = "CYCLO_EXTRACT_DISABLE_RAW_CDR"
 _PREPARED_EPISODE_CACHE_DISABLE_ENV = "CYCLO_PREPARED_EPISODE_CACHE_DISABLE"
-_PREPARED_EPISODE_CACHE_VERSION = 4
+_PREPARED_EPISODE_CACHE_VERSION = 5
 _VIDEO_COPY_MODE_ENV = "CYCLO_VIDEO_COPY_MODE"
 _VIDEO_STATS_SAMPLES_ENV = "CYCLO_VIDEO_STATS_SAMPLES"
 _CONVERTER_INFO_LOGS_ENV = "CYCLO_CONVERTER_INFO_LOGS"
@@ -3279,9 +3279,25 @@ class RosbagToLerobotConverterBase:
         action_messages_by_topic: Dict[str, List[Tuple[float, np.ndarray]]],
         action_joint_names_by_topic: Dict[str, List[str]],
     ) -> List[Tuple[float, np.ndarray]]:
-        """Merge action messages from multiple topics into a single action vector."""
+        """Merge sequentially published action topics into atomic vectors.
+
+        RobotClient publishes groups in sorted key order, so the last group is
+        the commit clock for a complete policy action.  On FFW that group is
+        ``leader_mobile``; its standalone idle command is also valid and holds
+        the last arm/head/lift targets while replacing the mobile velocity.
+        """
         if not action_messages_by_topic:
             return []
+        missing_topics = [
+            topic
+            for topic in self.config.action_topics
+            if not action_messages_by_topic.get(topic)
+        ]
+        if missing_topics:
+            raise ValueError(
+                "configured action topic(s) produced no data: "
+                + ", ".join(sorted(missing_topics))
+            )
 
         # Determine topic ordering using group keys
         topic_to_group: Dict[str, str] = {}
@@ -3324,22 +3340,28 @@ class RosbagToLerobotConverterBase:
                 filter_failed_topics.add(topic)
             filter_indices_by_topic[topic] = indices
 
-        # Use timestamps from the first topic as reference
-        reference_topic = sorted_topics[0]
-        reference_timestamps = [t for t, _ in action_messages_by_topic[reference_topic]]
         message_times_by_topic = {
             topic: [t for t, _ in action_messages_by_topic[topic]]
             for topic in sorted_topics
         }
         cursor_by_topic = {topic: -1 for topic in sorted_topics}
+        reference_topic = sorted_topics[-1]
+        reference_group = topic_to_group[reference_topic]
+        reference_is_mobile = (
+            reference_group == "leader_mobile"
+            or "cmd_vel" in reference_topic.lower()
+        )
 
-        # For each reference timestamp, concatenate actions from all topics
-        # Only include timestamps where ALL topics have valid previous values
+        # Emit only when the final group in the sequential publish has arrived.
+        # This prevents a state timestamp inside the micro-burst from observing
+        # a mixture of current and previous policy actions.
         merged_messages: List[Tuple[float, np.ndarray]] = []
+        previous_reference_timestamp = float("-inf")
 
-        for timestamp in reference_timestamps:
+        for timestamp, _ in action_messages_by_topic[reference_topic]:
             combined_parts: List[np.ndarray] = []
             all_topics_have_data = True
+            non_reference_updates: List[bool] = []
 
             for topic in sorted_topics:
                 if topic in filter_failed_topics:
@@ -3354,24 +3376,44 @@ class RosbagToLerobotConverterBase:
                 if idx < 0:
                     all_topics_have_data = False
                     break
-                if (timestamp - times[idx]) > 0.05:
-                    all_topics_have_data = False
-                    break
                 prev_value = msgs[idx][1]
                 indices = filter_indices_by_topic.get(topic)
                 if indices is not None:
                     prev_value = prev_value[indices]
                 combined_parts.append(prev_value)
+                if topic != reference_topic:
+                    non_reference_updates.append(
+                        times[idx] > previous_reference_timestamp
+                    )
 
             if all_topics_have_data and combined_parts:
-                merged_messages.append(
-                    (
-                        timestamp,
-                        np.concatenate(combined_parts).astype(
-                            np.float32, copy=False
-                        ),
-                    )
+                complete_publish = all(non_reference_updates)
+                mobile_idle_publish = (
+                    reference_is_mobile
+                    and bool(merged_messages)
+                    and not any(non_reference_updates)
                 )
+                if complete_publish or mobile_idle_publish:
+                    merged_messages.append(
+                        (
+                            timestamp,
+                            np.concatenate(combined_parts).astype(
+                                np.float32, copy=False
+                            ),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        "incomplete action publish would mix action ticks at "
+                        f"timestamp {timestamp:.9f}"
+                    )
+
+            previous_reference_timestamp = timestamp
+
+        self._log_info(
+            f"Merged action from {len(sorted_topics)} topics: "
+            f"{len(merged_messages)} merged samples, {len(combined_names)} dimensions"
+        )
 
         return merged_messages
 
@@ -3581,6 +3623,10 @@ class RosbagToLerobotConverterBase:
 
         if not state_messages:
             return episode, staleness_metrics
+        if self.config.action_topics and not action_messages:
+            raise ValueError(
+                "configured action topics produced no data; refusing zero-action fallback"
+            )
 
         state_times = [t for t, _ in state_messages]
         min_time = min(state_times)

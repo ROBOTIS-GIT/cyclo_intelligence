@@ -4,6 +4,7 @@
 # mode
 uint8 MERGE = 0
 uint8 DELETE = 1
+uint8 PRUNE_OLDEST = 2
 
 uint8 mode
 
@@ -26,6 +27,12 @@ uint16[] delete_episode_num
 # When true, the surviving episodes are renumbered to a contiguous 0..N-1
 # range after deletion (folder rename + episode_info.json patch).
 bool delete_compact
+
+# --- PRUNE_OLDEST ----------------------------------------------------------
+# Delete the lowest numeric episode indices for each recorded outcome.
+# Selection happens server-side while the dataset write lock is held.
+uint16 prune_oldest_success_count
+uint16 prune_oldest_failure_count
 
 ---
 bool success

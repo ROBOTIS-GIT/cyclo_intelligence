@@ -41,6 +41,7 @@ from cyclo_data.converter.pipeline_worker import (
 
 from interfaces.msg import DataOperationStatus
 from interfaces.srv import GetConversionStatus, StartConversion
+from shared.io.dataset_lock import DatasetLockBusyError, DatasetOperationLock
 
 
 _WORKER_STATUS_TO_SRV = {
@@ -72,6 +73,7 @@ class ConversionService:
         self._status_timer = None
         self._idle_count = 0
         self._last_status = None
+        self._dataset_operation_lock: Optional[DatasetOperationLock] = None
         # Protects the worker handle + idle bookkeeping + last-status
         # snapshot. _start_callback / _status_callback / _status_timer_callback
         # all run on io_callback_group (Reentrant) — without this lock the
@@ -142,17 +144,37 @@ class ConversionService:
         with self._state_lock:
             timer = self._status_timer
             worker = self._worker
+            dataset_operation_lock = self._dataset_operation_lock
             self._status_timer = None
             self._worker = None
+            self._dataset_operation_lock = None
         try:
             if timer is not None:
                 timer.cancel()
             if worker is not None:
                 worker.stop()
+            if dataset_operation_lock is not None:
+                dataset_operation_lock.release()
             self._node.get_logger().info('MP4 Conversion Worker cleaned up successfully')
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().error(
                 f'Error cleaning up MP4 Conversion Worker: {exc}')
+
+    def _acquire_dataset_operation_lock(self) -> None:
+        lock = DatasetOperationLock(exclusive=True)
+        lock.acquire()
+        with self._state_lock:
+            if self._dataset_operation_lock is not None:
+                lock.release()
+                raise DatasetLockBusyError('Dataset conversion lock is already held')
+            self._dataset_operation_lock = lock
+
+    def _release_dataset_operation_lock(self) -> None:
+        with self._state_lock:
+            lock = self._dataset_operation_lock
+            self._dataset_operation_lock = None
+        if lock is not None:
+            lock.release()
 
     # ------------------------------------------------------------------
     # Service callbacks
@@ -224,18 +246,6 @@ class ConversionService:
         # source name silently mixes the new conversion's metadata into
         # the old dataset. User has to delete or rename the existing
         # output dir to retry.
-        existing = self._existing_lerobot_outputs(
-            request.dataset_path, convert_v21, convert_v30)
-        if existing:
-            paths = ', '.join(str(p) for p in existing)
-            response.success = False
-            response.job_id = ''
-            response.message = (
-                f'Output already exists for this dataset. Delete or rename '
-                f'before retrying: {paths}'
-            )
-            return response
-
         # Unpack the selection knobs from parallel arrays into Python
         # dicts. Empty / 0 means "use everything from robot_config" —
         # same as the legacy behaviour when these fields didn't exist.
@@ -275,7 +285,38 @@ class ConversionService:
             'selected_joints': list(getattr(request, 'selected_joints', []) or []),
         }
 
-        if not worker.send_request(request_data):
+        try:
+            self._acquire_dataset_operation_lock()
+        except DatasetLockBusyError as exc:
+            response.success = False
+            response.job_id = ''
+            response.message = str(exc)
+            return response
+
+        try:
+            existing = self._existing_lerobot_outputs(
+                request.dataset_path, convert_v21, convert_v30)
+        except Exception:
+            self._release_dataset_operation_lock()
+            raise
+        if existing:
+            self._release_dataset_operation_lock()
+            paths = ', '.join(str(p) for p in existing)
+            response.success = False
+            response.job_id = ''
+            response.message = (
+                f'Output already exists for this dataset. Delete or rename '
+                f'before retrying: {paths}'
+            )
+            return response
+
+        try:
+            request_sent = worker.send_request(request_data)
+        except Exception:
+            self._release_dataset_operation_lock()
+            raise
+        if not request_sent:
+            self._release_dataset_operation_lock()
             response.success = False
             response.job_id = ''
             response.message = 'Failed to send request to MP4 Conversion Worker'
@@ -337,6 +378,8 @@ class ConversionService:
 
         worker_status = worker.check_task_status()
         status_str = worker_status.get('status', 'Unknown')
+        if status_str in ('Success', 'Failed'):
+            self._release_dataset_operation_lock()
         progress = worker_status.get('progress', {})
 
         response.success = True
@@ -412,6 +455,9 @@ class ConversionService:
                     message=status.get('message', ''),
                 )
 
+            if current in ('Success', 'Failed'):
+                self._release_dataset_operation_lock()
+
             if current == 'Idle' and idle_count >= self.IDLE_TICKS_BEFORE_SHUTDOWN:
                 self._node.get_logger().info(
                     f'MP4 Conversion Worker idle for {self.IDLE_TICKS_BEFORE_SHUTDOWN} '
@@ -446,9 +492,10 @@ class ConversionService:
     ) -> List[Path]:
         """Return target LeRobot output dirs that already hold a prior conversion.
 
-        Existence is signalled by a non-empty meta/episodes.jsonl —
-        empty/half-baked dirs (mid-crash leftovers) don't trigger the
-        guard so the user can re-run without manual cleanup.
+        v2.1 uses ``meta/episodes.jsonl`` while v3 stores episode metadata in
+        parquet shards under ``meta/episodes``. Any published metadata marker
+        blocks an in-place retry so an existing derived dataset is never
+        appended to or overwritten silently.
         """
         name = Path(dataset_path).name
         candidates: List[Path] = []
@@ -456,8 +503,14 @@ class ConversionService:
             candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v21')
         if convert_v30:
             candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v30')
-        return [
-            p for p in candidates
-            if (p / 'meta' / 'episodes.jsonl').exists()
-            and (p / 'meta' / 'episodes.jsonl').stat().st_size > 0
-        ]
+        existing: List[Path] = []
+        for candidate in candidates:
+            metadata = candidate / 'meta'
+            jsonl = metadata / 'episodes.jsonl'
+            if (
+                (jsonl.is_file() and jsonl.stat().st_size > 0)
+                or (metadata / 'episodes').is_dir()
+                or (metadata / 'info.json').is_file()
+            ):
+                existing.append(candidate)
+        return existing
