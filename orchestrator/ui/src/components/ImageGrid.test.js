@@ -1,4 +1,9 @@
-import { buildTopicRotationMap, normalizeRotationDeg } from './ImageGrid';
+import {
+  buildTopicRotationMap,
+  normalizeColumnWeights,
+  normalizeRotationDeg,
+} from './ImageGrid';
+import { getQuarterTurnCoverSize } from './ImageGridCell';
 
 describe('ImageGrid rotation helpers', () => {
   test('normalizes camera rotations to css-friendly degrees', () => {
@@ -27,5 +32,16 @@ describe('ImageGrid rotation helpers', () => {
       '/zed/image/compressed': 270,
       '/camera_left/image/compressed': 0,
     });
+  });
+
+  test('accepts complete positive camera weights and rejects unsafe partial layouts', () => {
+    expect(normalizeColumnWeights([4, 5, 4])).toEqual([4, 5, 4]);
+    expect(normalizeColumnWeights([4, 5])).toBeNull();
+    expect(normalizeColumnWeights([4, 0, 4])).toBeNull();
+  });
+
+  test('sizes a quarter-turn wrapper from the real camera cell dimensions', () => {
+    expect(getQuarterTurnCoverSize(480, 320)).toEqual({ width: 320, height: 480 });
+    expect(getQuarterTurnCoverSize(0, 320)).toBeNull();
   });
 });

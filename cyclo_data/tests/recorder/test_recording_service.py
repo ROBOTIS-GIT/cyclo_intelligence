@@ -595,6 +595,7 @@ def _inference_stop_fixture(tmp_path):
         _segmented_storage_mode=True,
         is_recording=lambda: True,
         get_status=lambda: "recording",
+        get_current_subtask_index=lambda: 0,
         get_save_rosbag_path=lambda: str(tmp_path / "0" / "segments" / "0"),
         save_robotis_metadata=lambda **kwargs: metadata_calls.append(kwargs),
         stop_recording=lambda **_kwargs: None,
@@ -612,6 +613,30 @@ def _inference_stop_fixture(tmp_path):
     service._publish_umbrella_status = lambda *_args, **_kwargs: None
     service._start_finish_episode_thread = lambda _manager: True
     return service, metadata_calls, rosbag_stops
+
+
+def test_inference_stop_segment_allows_unspecified_outcome(tmp_path):
+    service, metadata_calls, rosbag_stops = _inference_stop_fixture(tmp_path)
+    request = _request(
+        command=_RecordingCommand.Request.STOP_SEGMENT,
+        episode_outcome=_RecordingCommand.Request.UNSPECIFIED,
+        segment_index=0,
+        urdf_path="",
+    )
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_stop_and_save(
+        request,
+        response,
+        "STOP_SEGMENT",
+        "finish",
+    )
+
+    assert result.success is True
+    assert result.message == "Subtask saved"
+    assert rosbag_stops == [True]
+    assert metadata_calls[0]["episode_success"] is None
 
 
 def test_inference_stop_requires_outcome_before_rosbag_stop(tmp_path):

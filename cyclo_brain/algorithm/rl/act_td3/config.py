@@ -5,6 +5,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from cyclo_brain.model.act import (
+    ACT_TRAINABLE_GROUPS,
+    canonicalize_act_trainable_groups,
+)
+
 
 def _finite_real(value: float, name: str, *, minimum: float, inclusive: bool) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -43,8 +48,14 @@ class ACTTD3Config:
     deterministic_bc_weight: float = 1.0
     q_weight_max: float = 0.25
     q_weight_ramp_actor_updates: int = 1_000
+    actor_trainable_groups: tuple[str, ...] = ACT_TRAINABLE_GROUPS
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "actor_trainable_groups",
+            canonicalize_act_trainable_groups(self.actor_trainable_groups),
+        )
         _finite_real(self.discount, "discount", minimum=0.0, inclusive=False)
         if self.discount > 1.0:
             raise ValueError("ACT-TD3 discount must be at most 1")

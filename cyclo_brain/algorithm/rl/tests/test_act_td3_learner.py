@@ -18,6 +18,7 @@ from cyclo_brain.algorithm.rl.act_td3 import ACTTD3Batch, ACTTD3Config
 from cyclo_brain.algorithm.rl.act_td3.learner import ACTTD3Learner
 from cyclo_brain.model.act import (
     ACTTwinChunkCritic,
+    act_parameter_group,
     create_act_model,
 )
 
@@ -69,6 +70,7 @@ def _learner(
     *,
     n_action_steps: int = 3,
     action_dim: int = 2,
+    actor_trainable_groups: tuple[str, ...] | None = None,
 ) -> ACTTD3Learner:
     torch.manual_seed(101)
     actor = create_act_model(
@@ -80,10 +82,16 @@ def _learner(
         action_feature_dim=8,
         hidden_dims=(16, 8),
     )
+    algorithm_config = _algorithm_config()
+    if actor_trainable_groups is not None:
+        algorithm_config = replace(
+            algorithm_config,
+            actor_trainable_groups=actor_trainable_groups,
+        )
     return ACTTD3Learner(
         actor,
         critic,
-        _algorithm_config(),
+        algorithm_config,
         random_seed=seed,
     )
 
@@ -165,6 +173,14 @@ def _changed(before: dict[str, torch.Tensor], module: torch.nn.Module) -> bool:
         not torch.equal(before[name], value)
         for name, value in module.state_dict().items()
     )
+
+
+def _legacy_v3_state(learner: ACTTD3Learner) -> dict[str, object]:
+    state = learner.state_dict()
+    state["format"] = learner.LEGACY_ALL_TRAINABLE_STATE_FORMAT
+    del state["contract"]["actor_trainable_groups"]
+    del state["config"]["actor_trainable_groups"]
+    return state
 
 
 class ACTTD3LearnerTest(unittest.TestCase):
@@ -261,7 +277,7 @@ class ACTTD3LearnerTest(unittest.TestCase):
     def test_checkpoint_declares_normalized_unbounded_action_contract(self) -> None:
         state = _learner(action_dim=22).state_dict()
 
-        self.assertEqual(state["format"], "cyclo_brain.act_td3_learner/v3")
+        self.assertEqual(state["format"], "cyclo_brain.act_td3_learner/v4")
         self.assertNotIn("action_projector", state)
         self.assertEqual(
             state["contract"]["action_domain"],
@@ -276,6 +292,123 @@ class ACTTD3LearnerTest(unittest.TestCase):
             "all_action_dimensions",
         )
         self.assertIs(state["contract"]["action_clamp"], False)
+        self.assertEqual(
+            state["contract"]["actor_trainable_groups"],
+            (
+                "visual_backbone",
+                "cvae_encoder",
+                "transformer_encoder",
+                "action_decoder",
+            ),
+        )
+
+    def test_actor_optimizer_and_resume_preserve_selected_freeze_mask(self) -> None:
+        groups = ("action_decoder",)
+        learner = _learner(actor_trainable_groups=groups)
+        expected_names = {
+            name
+            for name, _parameter in learner.actor.named_parameters()
+            if act_parameter_group(name) == "action_decoder"
+        }
+        actual_names = {
+            name
+            for name, parameter in learner.actor.named_parameters()
+            if parameter.requires_grad
+        }
+        optimizer_ids = {
+            id(parameter)
+            for group in learner.actor_optimizer.param_groups
+            for parameter in group["params"]
+        }
+
+        self.assertEqual(actual_names, expected_names)
+        self.assertEqual(
+            optimizer_ids,
+            {
+                id(parameter)
+                for parameter in learner.actor.parameters()
+                if parameter.requires_grad
+            },
+        )
+        state = learner.state_dict()
+        learner.actor.requires_grad_(True)
+        learner.load_state_dict(state)
+        self.assertEqual(
+            {
+                name
+                for name, parameter in learner.actor.named_parameters()
+                if parameter.requires_grad
+            },
+            expected_names,
+        )
+
+    def test_config_rejects_empty_cvae_only_duplicate_and_unknown_groups(self) -> None:
+        for groups, message in (
+            ((), "cannot be empty"),
+            (("cvae_encoder",), "deterministic inference-path"),
+            (("action_decoder", "action_decoder"), "duplicates"),
+            (("not_an_act_group",), "Unknown"),
+        ):
+            with self.subTest(groups=groups), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                replace(_algorithm_config(), actor_trainable_groups=groups)
+
+    def test_checkpoint_rejects_different_trainable_group_contract(self) -> None:
+        state = _learner(actor_trainable_groups=("action_decoder",)).state_dict()
+        restored = _learner(actor_trainable_groups=("transformer_encoder",))
+
+        with self.assertRaisesRegex(ValueError, "tensor contract"):
+            restored.load_state_dict(state)
+
+    def test_legacy_v3_checkpoint_resumes_with_default_all_groups(self) -> None:
+        source = _learner(seed=29, n_action_steps=2)
+        batch = _short_execution_batch()
+        for _ in range(4):
+            source.update(batch)
+        legacy = _legacy_v3_state(source)
+        restored = _learner(seed=29, n_action_steps=2)
+
+        restored.load_state_dict(legacy)
+
+        self.assertEqual(
+            legacy["format"],
+            source.LEGACY_ALL_TRAINABLE_STATE_FORMAT,
+        )
+        self.assertNotIn("actor_trainable_groups", legacy["contract"])
+        self.assertNotIn("actor_trainable_groups", legacy["config"])
+        self.assertEqual(source.update(batch), restored.update(batch))
+        for expected, actual in (
+            (source.actor, restored.actor),
+            (source.actor_target, restored.actor_target),
+            (source.critic, restored.critic),
+            (source.critic_target, restored.critic_target),
+        ):
+            for name, value in expected.state_dict().items():
+                torch.testing.assert_close(
+                    value,
+                    actual.state_dict()[name],
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+    def test_legacy_v3_checkpoint_rejects_partial_freeze_request(self) -> None:
+        legacy = _legacy_v3_state(_learner())
+        restored = _learner(actor_trainable_groups=("action_decoder",))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "only with all ACT actor trainable groups",
+        ):
+            restored.load_state_dict(legacy)
+
+    def test_v4_checkpoint_does_not_normalize_missing_group_contract(self) -> None:
+        state = _learner().state_dict()
+        del state["contract"]["actor_trainable_groups"]
+
+        with self.assertRaisesRegex(ValueError, "tensor contract"):
+            _learner().load_state_dict(state)
 
     def test_prediction_horizon_can_exceed_execution_horizon(self) -> None:
         learner = _learner(n_action_steps=2)

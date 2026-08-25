@@ -256,7 +256,9 @@ main_ui_dir() {
 
 main_container_has_npm() {
     container_running "$MAIN_CONTAINER" \
-        && docker exec "$MAIN_CONTAINER" sh -lc 'command -v npm >/dev/null 2>&1'
+        && docker exec "$MAIN_CONTAINER" sh -lc 'command -v npm >/dev/null 2>&1' \
+        && docker exec -u "$(id -u):$(id -g)" "$MAIN_CONTAINER" \
+            test -r "$(main_ui_dir)/package.json"
 }
 
 enter_bash() {

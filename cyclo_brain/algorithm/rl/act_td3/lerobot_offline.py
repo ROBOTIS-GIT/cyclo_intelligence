@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
 from typing import Any
 
@@ -90,6 +90,26 @@ def _stack_actions(values: Sequence[Any]) -> Tensor:
     if not actions:
         raise ValueError("LeRobot dataset must contain at least one action")
     return torch.stack(actions, dim=0)
+
+
+def _freeze_feature_contract(value: Any, *, source: str) -> Any:
+    """Convert LeRobot feature metadata into a deterministic comparable value."""
+
+    if isinstance(value, Mapping):
+        return tuple(
+            (str(key), _freeze_feature_contract(item, source=source))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return tuple(_freeze_feature_contract(item, source=source) for item in value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    # LeRobot occasionally exposes enum-like dtype/feature objects.  Their
+    # string form is the public schema representation used in info.json.
+    rendered = str(value)
+    if not rendered or rendered.startswith("<"):
+        raise TypeError(f"{source} contains unsupported feature metadata")
+    return rendered
 
 
 @dataclass(frozen=True)
@@ -264,6 +284,22 @@ class FixedHorizonLeRobotACTTD3Dataset(torch.utils.data.Dataset):
             feature = features[key]
             shape = feature.get("shape") if isinstance(feature, Mapping) else None
             self._feature_shapes[key] = tuple(shape) if shape is not None else None
+        contract_keys = (_ACTION_KEY, *self._observation_keys)
+        self._schema_contract = tuple(
+            (
+                key,
+                _freeze_feature_contract(
+                    features[key], source=f"LeRobot feature {key!r}"
+                ),
+            )
+            for key in contract_keys
+        )
+        self._camera_keys = tuple(
+            key
+            for key in self._observation_keys
+            if key.startswith("observation.images.")
+            or key.startswith("observation.image.")
+        )
 
         episode_rows: dict[int, list[tuple[int, int]]] = {}
         episode_outcomes: dict[int, bool] = {}
@@ -348,6 +384,18 @@ class FixedHorizonLeRobotACTTD3Dataset(torch.utils.data.Dataset):
 
         return self._episode_records
 
+    @property
+    def observation_keys(self) -> tuple[str, ...]:
+        return self._observation_keys
+
+    @property
+    def camera_keys(self) -> tuple[str, ...]:
+        return self._camera_keys
+
+    @property
+    def schema_contract(self) -> tuple[tuple[str, Any], ...]:
+        return self._schema_contract
+
     def __len__(self) -> int:
         return len(self._blocks)
 
@@ -410,6 +458,139 @@ class FixedHorizonLeRobotACTTD3Dataset(torch.utils.data.Dataset):
             episode_index=block.episode_index,
             start_frame_index=block.start_frame_index,
         )
+
+
+class VirtualCumulativeLeRobotACTTD3Dataset(torch.utils.data.Dataset):
+    """Expose ordered immutable LeRobot roots as one logical replay dataset.
+
+    No parquet, video, or metadata file is copied or rewritten.  Transition
+    indices are mapped to their root-local adapter and local episode identifiers
+    are remapped to a deterministic global sequence in root order.  This keeps
+    training/checkpoint contracts independent from colliding local episode 0s.
+    """
+
+    def __init__(
+        self,
+        datasets: Sequence[FixedHorizonLeRobotACTTD3Dataset],
+    ) -> None:
+        if isinstance(datasets, (str, bytes)) or not isinstance(datasets, Sequence):
+            raise TypeError("virtual replay datasets must be a sequence")
+        self._datasets = tuple(datasets)
+        if not self._datasets:
+            raise ValueError("virtual replay requires at least one LeRobot root")
+        if any(
+            not isinstance(dataset, FixedHorizonLeRobotACTTD3Dataset)
+            for dataset in self._datasets
+        ):
+            raise TypeError(
+                "virtual replay roots must be FixedHorizonLeRobotACTTD3Dataset objects"
+            )
+
+        reference = self._datasets[0]
+        for root_index, dataset in enumerate(self._datasets[1:], start=1):
+            mismatches: list[str] = []
+            if dataset.execution_horizon != reference.execution_horizon:
+                mismatches.append("execution horizon")
+            if dataset.action_dim != reference.action_dim:
+                mismatches.append("action dimension")
+            if float(dataset.fps) != float(reference.fps):
+                mismatches.append("fps")
+            if dataset.observation_keys != reference.observation_keys:
+                mismatches.append("observation keys")
+            if dataset.camera_keys != reference.camera_keys:
+                mismatches.append("camera keys")
+            if dataset.schema_contract != reference.schema_contract:
+                mismatches.append("feature schema")
+            if mismatches:
+                raise ValueError(
+                    f"LeRobot data root {root_index} disagrees with root 0: "
+                    + ", ".join(mismatches)
+                )
+
+        transition_map: list[tuple[int, int]] = []
+        episode_records: list[tuple[int, int, bool]] = []
+        episode_maps: list[dict[int, int]] = []
+        root_episode_ranges: list[tuple[int, int]] = []
+        global_episode = 0
+        for root_index, dataset in enumerate(self._datasets):
+            local_to_global: dict[int, int] = {}
+            range_start = global_episode
+            for local_episode, frame_count, successful in dataset.episode_records:
+                local_to_global[local_episode] = global_episode
+                episode_records.append((global_episode, frame_count, successful))
+                global_episode += 1
+            episode_maps.append(local_to_global)
+            root_episode_ranges.append((range_start, global_episode))
+            transition_map.extend(
+                (root_index, local_index) for local_index in range(len(dataset))
+            )
+
+        self._transition_map = tuple(transition_map)
+        self._episode_maps = tuple(episode_maps)
+        self._episode_records = tuple(episode_records)
+        self._root_episode_ranges = tuple(root_episode_ranges)
+
+    @property
+    def execution_horizon(self) -> int:
+        return self._datasets[0].execution_horizon
+
+    @property
+    def action_dim(self) -> int:
+        return self._datasets[0].action_dim
+
+    @property
+    def fps(self) -> float:
+        return self._datasets[0].fps
+
+    @property
+    def observation_keys(self) -> tuple[str, ...]:
+        return self._datasets[0].observation_keys
+
+    @property
+    def camera_keys(self) -> tuple[str, ...]:
+        return self._datasets[0].camera_keys
+
+    @property
+    def schema_contract(self) -> tuple[tuple[str, Any], ...]:
+        return self._datasets[0].schema_contract
+
+    @property
+    def num_roots(self) -> int:
+        return len(self._datasets)
+
+    @property
+    def num_episodes(self) -> int:
+        return len(self._episode_records)
+
+    @property
+    def num_successes(self) -> int:
+        return sum(record[2] for record in self._episode_records)
+
+    @property
+    def num_failures(self) -> int:
+        return self.num_episodes - self.num_successes
+
+    @property
+    def episode_records(self) -> tuple[tuple[int, int, bool], ...]:
+        return self._episode_records
+
+    @property
+    def root_episode_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Return half-open global episode ranges for the ordered roots."""
+
+        return self._root_episode_ranges
+
+    def __len__(self) -> int:
+        return len(self._transition_map)
+
+    def __getitem__(self, index: int) -> LeRobotACTTD3Transition:
+        root_index, local_index = self._transition_map[index]
+        transition = self._datasets[root_index][local_index]
+        try:
+            global_episode = self._episode_maps[root_index][transition.episode_index]
+        except KeyError as error:
+            raise RuntimeError("virtual replay local episode mapping is inconsistent") from error
+        return replace(transition, episode_index=global_episode)
 
 
 class ACTTD3LeRobotCollator:
@@ -531,4 +712,5 @@ __all__ = [
     "ACTTD3LeRobotCollator",
     "FixedHorizonLeRobotACTTD3Dataset",
     "LeRobotACTTD3Transition",
+    "VirtualCumulativeLeRobotACTTD3Dataset",
 ]

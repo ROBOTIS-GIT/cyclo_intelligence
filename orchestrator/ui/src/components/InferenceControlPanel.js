@@ -79,7 +79,11 @@ function buildTrtStatusUrl(modelPath, enginePath) {
   return `${API_BASE}/backends/groot/trt/status?${params.toString()}`;
 }
 
-export default function InferenceControlPanel() {
+export default function InferenceControlPanel({
+  showRecordingControls = true,
+  variant = 'default',
+  policyEpoch = null,
+}) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
@@ -207,7 +211,10 @@ export default function InferenceControlPanel() {
       );
 
       try {
-        const result = await sendRecordCommand(commandString, options);
+        const result = await sendRecordCommand(commandString, {
+          ...options,
+          taskSource: 'inference',
+        });
         if (result && result.success === false) {
           if (isStartTimeoutDuringLoading(result.message)) {
             toast('Model loading is still running. Large downloads can take several minutes.');
@@ -427,24 +434,19 @@ export default function InferenceControlPanel() {
     };
   }, [handleKeyAction, handleStart, handleStop, handleClear]);
 
+  const isOfflineRL = variant === 'offlineRL';
+  const isOfflineRLCombined = isOfflineRL && showRecordingControls;
+
   const classBody = clsx(
-    'bg-white/90',
-    'backdrop-blur-sm',
-    'rounded-full',
-    'px-3',
-    'py-1',
-    'flex',
-    'flex-row',
-    'items-center',
-    'gap-1.5',
-    'shadow-md',
-    'border',
-    'border-gray-100'
+    'flex flex-row items-center border',
+    isOfflineRL
+      ? 'gap-1.5 rounded-xl border-[#d9d2c5] bg-[#f6f3ec] px-2 py-1.5 shadow-[0_2px_8px_rgba(69,61,47,0.045)]'
+      : 'gap-1.5 rounded-full border-gray-100 bg-white/90 px-3 py-1 shadow-md backdrop-blur-sm'
   );
 
   const classBtn = (label, isDisabled) =>
     clsx(
-      'h-full',
+      isOfflineRLCombined ? 'h-9 w-full' : (isOfflineRL ? 'h-8' : 'h-full'),
       'rounded-lg',
       'border-none',
       'cursor-pointer',
@@ -453,16 +455,21 @@ export default function InferenceControlPanel() {
       'items-center',
       'justify-center',
       'gap-1',
-      'bg-gray-100',
+      isOfflineRL ? 'bg-[#ebe6dc] text-[#49443c]' : 'bg-gray-100',
       'transition-all',
       'duration-150',
       'font-semibold',
-      'text-lg',
-      'shrink-0',
+      isOfflineRL ? 'text-[11px]' : 'text-lg',
+      isOfflineRLCombined ? 'min-w-0' : 'shrink-0',
       {
-        'bg-gray-400': pressed === label && !isDisabled,
-        'bg-gray-200': hovered === label && pressed !== label && !isDisabled,
-        'opacity-30 cursor-not-allowed bg-gray-50': isDisabled,
+        [isOfflineRL ? 'bg-[#d5cdc0]' : 'bg-gray-400']:
+          pressed === label && !isDisabled,
+        [isOfflineRL ? 'bg-[#e0d9cd]' : 'bg-gray-200']:
+          hovered === label && pressed !== label && !isDisabled,
+        [isOfflineRL
+          ? 'cursor-not-allowed bg-[#f0ece4] text-[#aaa295] opacity-55'
+          : 'opacity-30 cursor-not-allowed bg-gray-50']:
+          isDisabled,
       }
     );
 
@@ -470,7 +477,7 @@ export default function InferenceControlPanel() {
     {
       label: 'Start',
       icon: MdPlayArrow,
-      color: '#1976d2',
+      color: isOfflineRL ? '#667b69' : '#1976d2',
       enabled: startEnabled,
       handler: handleStart,
       description: startDescription,
@@ -479,7 +486,7 @@ export default function InferenceControlPanel() {
     {
       label: 'Stop',
       icon: MdStop,
-      color: '#f57c00',
+      color: isOfflineRL ? '#a8795b' : '#f57c00',
       enabled: stopEnabled,
       handler: handleStop,
       description: 'Pause inference (model stays loaded)',
@@ -488,7 +495,7 @@ export default function InferenceControlPanel() {
     {
       label: 'Clear',
       icon: MdDeleteOutline,
-      color: '#d32f2f',
+      color: isOfflineRL ? '#a86b68' : '#d32f2f',
       enabled: clearEnabled,
       handler: handleClear,
       description: 'Stop inference and unload model',
@@ -496,74 +503,124 @@ export default function InferenceControlPanel() {
     },
   ];
 
+  const renderControlButton = ({
+    label,
+    icon: Icon,
+    color,
+    enabled,
+    handler,
+    description,
+    shortcut,
+  }) => {
+    const isDisabled = !enabled;
+    return (
+      <Tooltip
+        key={label}
+        position="bottom"
+        content={
+          <div className="text-center">
+            <div className="font-semibold">{description}</div>
+            {!isDisabled && (
+              <div className="text-sm mt-1 text-gray-300">
+                <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
+              </div>
+            )}
+          </div>
+        }
+        disabled={false}
+        className={clsx(
+          'relative h-full',
+          isOfflineRLCombined ? 'min-w-0' : 'shrink-0'
+        )}
+      >
+        <button
+          className={classBtn(label, isDisabled)}
+          onClick={() => !isDisabled && handler()}
+          onMouseEnter={() => !isDisabled && setHovered(label)}
+          onMouseLeave={() => { setHovered(null); setPressed(null); }}
+          onMouseDown={() => !isDisabled && setPressed(label)}
+          onMouseUp={() => setPressed(null)}
+          disabled={isDisabled}
+          aria-label={description}
+        >
+          <Icon
+            style={{ fontSize: isOfflineRL ? '0.95rem' : '1.1rem' }}
+            color={isDisabled ? '#9ca3af' : color}
+          />
+          {label}
+        </button>
+      </Tooltip>
+    );
+  };
+
   return (
     <>
-      <div className="flex shrink-0 flex-col items-end gap-2">
+      {isOfflineRLCombined ? (
+        <InferenceRecordingControls
+          variant="workspace"
+          inferenceActions={controlButtons.map(renderControlButton)}
+          guideMessage={guideMessage}
+          guideSpinner={showGuideSpinner ? spinnerFrames[spinnerIndex] : ''}
+          policyEpoch={policyEpoch}
+        />
+      ) : (
         <div
-          className={classBody}
-          role="group"
-          aria-label="Inference controls"
+          className="flex shrink-0 flex-col items-end gap-2"
+          data-appearance={isOfflineRL ? 'offline-rl' : 'default'}
         >
-          <span className="text-lg font-semibold text-gray-500 whitespace-nowrap px-1 shrink-0">Inference</span>
-          <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
-          {controlButtons.map(({ label, icon: Icon, color, enabled, handler, description, shortcut }) => {
-            const isDisabled = !enabled;
-            return (
-              <Tooltip
-                key={label}
-                position="bottom"
-                content={
-                  <div className="text-center">
-                    <div className="font-semibold">{description}</div>
-                    {!isDisabled && (
-                      <div className="text-sm mt-1 text-gray-300">
-                        <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
-                      </div>
-                    )}
-                  </div>
-                }
-                disabled={false}
-                className="relative h-full shrink-0"
-              >
-                <button
-                  className={classBtn(label, isDisabled)}
-                  onClick={() => !isDisabled && handler()}
-                  onMouseEnter={() => !isDisabled && setHovered(label)}
-                  onMouseLeave={() => { setHovered(null); setPressed(null); }}
-                  onMouseDown={() => !isDisabled && setPressed(label)}
-                  onMouseUp={() => setPressed(null)}
-                  disabled={isDisabled}
-                  aria-label={description}
-                >
-                  <Icon
-                    style={{ fontSize: '1.1rem' }}
-                    color={isDisabled ? '#9ca3af' : color}
-                  />
-                  {label}
-                </button>
-              </Tooltip>
-            );
-          })}
+          <div
+            className={classBody}
+            role="group"
+            aria-label="Inference controls"
+          >
+            <span className={clsx(
+              'shrink-0 whitespace-nowrap px-1 font-semibold',
+              isOfflineRL
+                ? 'text-[10px] uppercase tracking-[0.12em] text-[#81796d]'
+                : 'text-lg text-gray-500'
+            )}
+            >
+              Inference
+            </span>
+            <div className={clsx(
+              'h-5 w-px shrink-0',
+              isOfflineRL ? 'bg-[#d7d0c4]' : 'bg-gray-300'
+            )}
+            />
+            {controlButtons.map(renderControlButton)}
 
-          {(guideMessage || showGuideSpinner) && (
-            <>
-              <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
-              <div className="flex items-center gap-1 shrink-0">
-                <span className="text-gray-600 font-semibold text-lg whitespace-nowrap">
-                  {guideMessage}
-                </span>
-                {showGuideSpinner && (
-                  <span className="font-mono text-blue-500 text-sm">
-                    {spinnerFrames[spinnerIndex]}
-                  </span>
+            {(guideMessage || showGuideSpinner) && (
+              <>
+                <div className={clsx(
+                  'h-5 w-px shrink-0',
+                  isOfflineRL ? 'bg-[#cbc3b6]' : 'bg-gray-400'
                 )}
-              </div>
-            </>
-          )}
-        </div>
+                />
+                <div className="flex items-center gap-1 shrink-0">
+                  <span className={clsx(
+                    'whitespace-nowrap font-semibold',
+                    isOfflineRL ? 'text-[10px] text-[#665f54]' : 'text-lg text-gray-600'
+                  )}
+                  >
+                    {guideMessage}
+                  </span>
+                  {showGuideSpinner && (
+                    <span className={clsx(
+                      'font-mono text-sm',
+                      isOfflineRL ? 'text-[#69866f]' : 'text-blue-500'
+                    )}
+                    >
+                      {spinnerFrames[spinnerIndex]}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
 
-        <InferenceRecordingControls />
-      </div>
+          {showRecordingControls && <InferenceRecordingControls />}
+        </div>
+      )}
 
       {pendingRobotDeployIntent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">

@@ -10,6 +10,7 @@ from cyclo_brain.algorithm.rl.act_td3.batch import ACTTD3Batch
 from cyclo_brain.algorithm.rl.act_td3.lerobot_offline import (
     ACTTD3LeRobotCollator,
     FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 
 
@@ -264,6 +265,81 @@ class FixedHorizonLeRobotACTTD3DatasetTest(unittest.TestCase):
                 execution_horizon=3,
                 observation_keys=("observation.state",),
             )
+
+
+class VirtualCumulativeLeRobotACTTD3DatasetTest(unittest.TestCase):
+    @staticmethod
+    def _root(
+        episodes: tuple[tuple[int, bool], ...],
+    ) -> FixedHorizonLeRobotACTTD3Dataset:
+        return FixedHorizonLeRobotACTTD3Dataset(
+            _FakeLeRobotDataset(episodes),
+            execution_horizon=3,
+            observation_keys=("observation.state",),
+        )
+
+    def test_maps_ordered_roots_without_copying_and_remaps_episode_indices(self) -> None:
+        first = self._root(((5, True), (3, False)))
+        second = self._root(((4, False), (2, True)))
+        replay = VirtualCumulativeLeRobotACTTD3Dataset((first, second))
+
+        self.assertEqual(replay.num_roots, 2)
+        self.assertEqual(replay.num_episodes, 4)
+        self.assertEqual(replay.num_successes, 2)
+        self.assertEqual(replay.num_failures, 2)
+        self.assertEqual(replay.root_episode_ranges, ((0, 2), (2, 4)))
+        self.assertEqual(
+            replay.episode_records,
+            ((0, 5, True), (1, 3, False), (2, 4, False), (3, 2, True)),
+        )
+        self.assertEqual(len(replay), len(first) + len(second))
+        self.assertEqual(
+            [replay[index].episode_index for index in range(len(replay))],
+            [0, 0, 1, 2, 2, 3],
+        )
+        # Root-local reads remain intact: root 1 episode 0 still exposes its
+        # root-local action values even though its logical identity is now 2.
+        torch.testing.assert_close(
+            replay[len(first)].behavior_action_chunk[0], torch.tensor([1.0, 2.0])
+        )
+
+    def test_rejects_incompatible_fps_action_camera_and_feature_schema(self) -> None:
+        reference = self._root(((2, True),))
+
+        different_fps_source = _FakeLeRobotDataset(((2, False),))
+        different_fps_source.fps = 15
+        different_fps = FixedHorizonLeRobotACTTD3Dataset(
+            different_fps_source,
+            execution_horizon=3,
+            observation_keys=("observation.state",),
+        )
+        with self.assertRaisesRegex(ValueError, "fps"):
+            VirtualCumulativeLeRobotACTTD3Dataset((reference, different_fps))
+
+        different_action_source = _FakeLeRobotDataset(((2, False),))
+        different_action_source.features["action"] = {
+            "dtype": "float32",
+            "shape": [3],
+        }
+        for row in different_action_source._rows:
+            row["action"] = torch.tensor([1.0, 2.0, 3.0])
+        different_action = FixedHorizonLeRobotACTTD3Dataset(
+            different_action_source,
+            execution_horizon=3,
+            observation_keys=("observation.state",),
+        )
+        with self.assertRaisesRegex(ValueError, "action dimension"):
+            VirtualCumulativeLeRobotACTTD3Dataset((reference, different_action))
+
+        different_schema_source = _FakeLeRobotDataset(((2, False),))
+        different_schema_source.features["observation.state"]["names"] = ["x", "y"]
+        different_schema = FixedHorizonLeRobotACTTD3Dataset(
+            different_schema_source,
+            execution_horizon=3,
+            observation_keys=("observation.state",),
+        )
+        with self.assertRaisesRegex(ValueError, "feature schema"):
+            VirtualCumulativeLeRobotACTTD3Dataset((reference, different_schema))
 
 
 if __name__ == "__main__":

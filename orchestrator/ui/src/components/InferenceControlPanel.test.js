@@ -1,5 +1,12 @@
 import { configureStore } from '@reduxjs/toolkit';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
@@ -47,6 +54,9 @@ const renderPanel = ({
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
   sendRecordCommand: sendOverride = null,
+  showRecordingControls = true,
+  variant = 'default',
+  policyEpoch = null,
 } = {}) => {
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
     success: true,
@@ -97,7 +107,11 @@ const renderPanel = ({
 
   render(
     <Provider store={store}>
-      <InferenceControlPanel />
+      <InferenceControlPanel
+        showRecordingControls={showRecordingControls}
+        variant={variant}
+        policyEpoch={policyEpoch}
+      />
     </Provider>
   );
 
@@ -128,6 +142,7 @@ describe('InferenceControlPanel deploy safety', () => {
     await waitFor(() => {
       expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
         inferenceMode: 'robot',
+        taskSource: 'inference',
       });
     });
   });
@@ -142,6 +157,7 @@ describe('InferenceControlPanel deploy safety', () => {
       expect(store.getState().tasks.taskInfo.inferenceMode).toBe('simulation');
       expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
         inferenceMode: 'simulation',
+        taskSource: 'inference',
       });
     });
   });
@@ -161,6 +177,7 @@ describe('InferenceControlPanel deploy safety', () => {
     await waitFor(() => {
       expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
         inferenceMode: 'simulation',
+        taskSource: 'inference',
       });
     });
 
@@ -220,6 +237,48 @@ describe('InferenceControlPanel deploy safety', () => {
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  test('can hide recording controls when they are rendered by the workspace', () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: { recordInferenceMode: true },
+      showRecordingControls: false,
+    });
+
+    expect(screen.getByRole('group', {
+      name: /^inference controls$/i,
+    })).toBeInTheDocument();
+    expect(screen.queryByRole('group', {
+      name: /^rl recording controls$/i,
+    })).not.toBeInTheDocument();
+  });
+
+  test('combines Offline RL inference and recording controls at the bottom', () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.READY,
+      taskOverrides: { recordInferenceMode: true },
+      variant: 'offlineRL',
+      policyEpoch: 2,
+    });
+
+    const combined = screen.getByRole('group', {
+      name: /^inference recording controls$/i,
+    });
+    expect(within(combined).getByText('Inference Recording')).toBeInTheDocument();
+    expect(within(combined).getByLabelText('Current policy RL Epoch 2'))
+      .toHaveTextContent('RL Epoch E0002');
+    expect(within(combined).getByRole('status')).toHaveTextContent('Ready to start');
+
+    const buttons = within(combined).getAllByRole('button');
+    expect(buttons.slice(0, 4).map((button) => button.textContent.trim()))
+      .toEqual(['Record', 'Start', 'Stop', 'Clear']);
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeEnabled();
+    expect(buttons[2]).toBeDisabled();
+    expect(buttons[3]).toBeDisabled();
+  });
+
   test('blocks Clear but keeps Pause available during RL recording', async () => {
     const { store, sendRecordCommand } = renderPanel({
       inferenceMode: 'robot',
@@ -248,7 +307,9 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(pause);
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {});
+      expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {
+        taskSource: 'inference',
+      });
     });
   });
 
@@ -285,6 +346,7 @@ describe('InferenceControlPanel deploy safety', () => {
     await waitFor(() => {
       expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
         inferenceMode: 'simulation',
+        taskSource: 'inference',
       });
     });
   });

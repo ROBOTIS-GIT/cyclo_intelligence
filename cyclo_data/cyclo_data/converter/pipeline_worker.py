@@ -46,14 +46,17 @@ The LeRobot output root (``/workspace/lerobot/``) is created on demand if
 missing — keeps converted datasets out of the rosbag2 source tree.
 """
 
+from collections import Counter
 import json
 import logging
 import multiprocessing
 import os
 from pathlib import Path
 import queue
+import shutil
 import time
 from typing import Dict, List, Optional
+import uuid
 
 
 # Where converted LeRobot datasets land. Kept separate from the rosbag2 source
@@ -62,6 +65,465 @@ from typing import Dict, List, Optional
 # (mkdir parents=True, exist_ok=True), so a fresh deploy doesn't need any
 # manual setup.
 LEROBOT_OUTPUT_ROOT = Path('/workspace/lerobot')
+
+
+def resolve_lerobot_output_root(value: Optional[str] = None) -> Path:
+    """Return a safe LeRobot output parent below ``/workspace/lerobot``.
+
+    An empty value preserves the legacy Data Tools destination. Resolving the
+    candidate before the containment check also prevents ``..`` and existing
+    symlink components from escaping the shared LeRobot workspace.
+    """
+    raw = str(value or '').strip()
+    if not raw:
+        return LEROBOT_OUTPUT_ROOT
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError('lerobot_output_root must be an absolute path')
+
+    allowed_root = LEROBOT_OUTPUT_ROOT.resolve(strict=False)
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ValueError(
+            f'lerobot_output_root must remain within {LEROBOT_OUTPUT_ROOT}'
+        ) from exc
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError(f'lerobot_output_root is not a directory: {resolved}')
+    return resolved
+
+
+def _load_conversion_info(info_path: Path) -> dict:
+    """Load a non-empty LeRobot ``meta/info.json`` file."""
+    if not info_path.is_file() or info_path.stat().st_size <= 0:
+        raise RuntimeError(f'Missing conversion metadata: {info_path}')
+    try:
+        info = json.loads(info_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'Invalid conversion metadata: {info_path}: {exc}') from exc
+    if not isinstance(info, dict):
+        raise RuntimeError(f'Invalid conversion metadata object: {info_path}')
+    return info
+
+
+def _validate_lerobot_outputs(
+    dataset_path: Path,
+    *,
+    convert_v21: bool,
+    convert_v30: bool,
+    output_root: Optional[Path] = None,
+) -> int:
+    """Validate every requested LeRobot output before raw data is removed.
+
+    The conversion functions already return a success boolean, but source
+    deletion needs a stronger durability boundary. This check requires the
+    published metadata, episode metadata, and data parquet artifacts to exist,
+    and verifies that ``total_episodes`` still matches the raw source.
+
+    Returns the validated raw episode count.
+    """
+    from cyclo_data.editor.episode_editor import DataEditor
+
+    dataset_path = Path(dataset_path)
+    source_info = DataEditor().get_rosbag_task_info(dataset_path)
+    expected_episodes = len(source_info.episode_indices)
+    if expected_episodes <= 0:
+        raise RuntimeError(
+            f'Cannot validate conversion without raw episodes: {dataset_path}'
+        )
+
+    root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
+    name = dataset_path.name
+    expected_indices = set(range(expected_episodes))
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            'PyArrow is required to validate LeRobot outputs before source deletion'
+        ) from exc
+
+    def _video_features(info: dict) -> List[str]:
+        features = info.get('features', {})
+        if not isinstance(features, dict):
+            return []
+        return sorted(
+            key for key, value in features.items()
+            if isinstance(value, dict) and value.get('dtype') == 'video'
+        )
+
+    def _required_file(output: Path, relative_path: str, label: str) -> Path:
+        candidate = output / relative_path
+        if not candidate.is_file() or candidate.stat().st_size <= 0:
+            raise RuntimeError(f'{label} is missing or empty: {candidate}')
+        return candidate
+
+    def _read_parquet_column(path: Path, column: str) -> List[int]:
+        _required_file(path.parent, path.name, 'LeRobot parquet')
+        try:
+            table = pq.read_table(path, columns=[column])
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f'Invalid LeRobot parquet column {column}: {path}: {exc}'
+            ) from exc
+        return [int(value) for value in table.column(column).to_pylist()]
+
+    if convert_v21:
+        output = root / f'{name}_lerobot_v21'
+        info = _load_conversion_info(output / 'meta' / 'info.json')
+        actual = int(info.get('total_episodes', -1))
+        if actual != expected_episodes:
+            raise RuntimeError(
+                f'LeRobot v2.1 episode count mismatch: '
+                f'expected={expected_episodes}, actual={actual}'
+            )
+        episodes_jsonl = output / 'meta' / 'episodes.jsonl'
+        try:
+            entries = [
+                json.loads(line)
+                for line in episodes_jsonl.read_text(encoding='utf-8').splitlines()
+                if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f'Invalid LeRobot v2.1 episode metadata: {episodes_jsonl}: {exc}'
+            ) from exc
+        if len(entries) != expected_episodes:
+            raise RuntimeError(
+                f'LeRobot v2.1 episode metadata count mismatch: '
+                f'expected={expected_episodes}, actual={len(entries)}'
+            )
+        metadata_indices = [int(entry.get('episode_index', -1)) for entry in entries]
+        if len(set(metadata_indices)) != expected_episodes or (
+            set(metadata_indices) != expected_indices
+        ):
+            raise RuntimeError(
+                'LeRobot v2.1 episode metadata indices are incomplete or duplicated'
+            )
+
+        chunks_size = int(info.get('chunks_size', 1000) or 1000)
+        data_template = info.get('data_path') or (
+            'data/chunk-{episode_chunk:03d}/'
+            'episode_{episode_index:06d}.parquet'
+        )
+        video_template = info.get('video_path')
+        video_features = _video_features(info)
+        if video_features and not video_template:
+            raise RuntimeError(
+                'LeRobot v2.1 declares video features without a video_path'
+            )
+
+        total_data_rows = 0
+        for episode_index in sorted(expected_indices):
+            episode_chunk = episode_index // chunks_size
+            try:
+                relative_data = data_template.format(
+                    episode_chunk=episode_chunk,
+                    episode_index=episode_index,
+                )
+            except (KeyError, ValueError) as exc:
+                raise RuntimeError(
+                    f'Invalid LeRobot v2.1 data_path template: {data_template}'
+                ) from exc
+            data_path = _required_file(
+                output,
+                relative_data,
+                'LeRobot v2.1 episode data parquet',
+            )
+            row_indices = _read_parquet_column(data_path, 'episode_index')
+            if not row_indices or set(row_indices) != {episode_index}:
+                raise RuntimeError(
+                    f'LeRobot v2.1 episode parquet has invalid coverage: {data_path}'
+                )
+            total_data_rows += len(row_indices)
+
+            for video_key in video_features:
+                try:
+                    relative_video = video_template.format(
+                        episode_chunk=episode_chunk,
+                        episode_index=episode_index,
+                        video_key=video_key,
+                    )
+                except (KeyError, ValueError) as exc:
+                    raise RuntimeError(
+                        f'Invalid LeRobot v2.1 video_path template: {video_template}'
+                    ) from exc
+                _required_file(
+                    output,
+                    relative_video,
+                    'LeRobot v2.1 episode video',
+                )
+
+        declared_frames = int(info.get('total_frames', total_data_rows))
+        if total_data_rows != declared_frames:
+            raise RuntimeError(
+                f'LeRobot v2.1 frame count mismatch: '
+                f'expected={declared_frames}, actual={total_data_rows}'
+            )
+
+    if convert_v30:
+        output = root / f'{name}_lerobot_v30'
+        info = _load_conversion_info(output / 'meta' / 'info.json')
+        actual = int(info.get('total_episodes', -1))
+        if actual != expected_episodes:
+            raise RuntimeError(
+                f'LeRobot v3.0 episode count mismatch: '
+                f'expected={expected_episodes}, actual={actual}'
+            )
+        metadata_files = sorted(
+            (output / 'meta' / 'episodes').rglob('*.parquet')
+        )
+        if not metadata_files:
+            raise RuntimeError(
+                f'LeRobot v3.0 episode metadata parquet is missing: {output}'
+            )
+        data_files = sorted((output / 'data').rglob('*.parquet'))
+        if not data_files:
+            raise RuntimeError(f'LeRobot v3.0 data parquet is missing: {output}')
+
+        video_features = _video_features(info)
+        video_template = info.get('video_path')
+        if video_features and not video_template:
+            raise RuntimeError(
+                'LeRobot v3.0 declares video features without a video_path'
+            )
+        metadata_columns = [
+            'episode_index',
+            'length',
+            'data/chunk_index',
+            'data/file_index',
+        ]
+        for video_key in video_features:
+            metadata_columns.extend([
+                f'videos/{video_key}/chunk_index',
+                f'videos/{video_key}/file_index',
+            ])
+
+        metadata_rows = []
+        for metadata_file in metadata_files:
+            _required_file(
+                metadata_file.parent,
+                metadata_file.name,
+                'LeRobot v3.0 episode metadata parquet',
+            )
+            try:
+                metadata_rows.extend(
+                    pq.read_table(
+                        metadata_file,
+                        columns=metadata_columns,
+                    ).to_pylist()
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f'Invalid LeRobot v3.0 episode metadata: '
+                    f'{metadata_file}: {exc}'
+                ) from exc
+
+        metadata_indices = [int(row['episode_index']) for row in metadata_rows]
+        if len(metadata_rows) != expected_episodes or (
+            len(set(metadata_indices)) != expected_episodes
+        ) or set(metadata_indices) != expected_indices:
+            raise RuntimeError(
+                'LeRobot v3.0 episode metadata indices are incomplete or duplicated'
+            )
+        metadata_frame_counts = {
+            int(row['episode_index']): int(row['length'])
+            for row in metadata_rows
+        }
+        if any(length <= 0 for length in metadata_frame_counts.values()):
+            raise RuntimeError('LeRobot v3.0 episode metadata contains empty episodes')
+
+        data_frame_counts = Counter()
+        total_data_rows = 0
+        for data_file in data_files:
+            values = _read_parquet_column(data_file, 'episode_index')
+            if not values:
+                raise RuntimeError(f'LeRobot v3.0 data parquet is empty: {data_file}')
+            data_frame_counts.update(values)
+            total_data_rows += len(values)
+        if set(data_frame_counts) != expected_indices:
+            raise RuntimeError(
+                'LeRobot v3.0 data episode coverage is incomplete or unexpected'
+            )
+        if data_frame_counts != Counter(metadata_frame_counts):
+            raise RuntimeError(
+                'LeRobot v3.0 data frame counts do not match episode metadata'
+            )
+        declared_frames = int(info.get('total_frames', -1))
+        if declared_frames < 0 or total_data_rows != declared_frames:
+            raise RuntimeError(
+                f'LeRobot v3.0 total_frames mismatch: '
+                f'expected={declared_frames}, actual={total_data_rows}'
+            )
+
+        required_videos = set()
+        for row in metadata_rows:
+            for video_key in video_features:
+                chunk_index = int(row[f'videos/{video_key}/chunk_index'])
+                file_index = int(row[f'videos/{video_key}/file_index'])
+                try:
+                    relative_video = video_template.format(
+                        video_key=video_key,
+                        chunk_index=chunk_index,
+                        file_index=file_index,
+                    )
+                except (KeyError, ValueError) as exc:
+                    raise RuntimeError(
+                        f'Invalid LeRobot v3.0 video_path template: {video_template}'
+                    ) from exc
+                required_videos.add(relative_video)
+        for relative_video in required_videos:
+            _required_file(
+                output,
+                relative_video,
+                'LeRobot v3.0 aggregate video',
+            )
+
+    return expected_episodes
+
+
+def _delete_raw_source_episodes(
+    dataset_path: Path,
+    *,
+    source_folders: Optional[List[str]],
+    logger: logging.Logger,
+) -> int:
+    """Atomically stage valid raw episodes, then remove the staging trees.
+
+    Every episode is renamed into a hidden directory under its own task root,
+    so each move stays on the same filesystem. If any staging rename fails,
+    all prior moves (including merge-view symlinks) are rolled back before the
+    error is returned. Irreversible removal begins only after every target has
+    been staged successfully.
+    """
+    from cyclo_data.editor.episode_editor import DataEditor
+
+    editor = DataEditor()
+    raw_sources = list(source_folders or []) or [str(dataset_path)]
+    plans = []
+    seen = set()
+    for raw_source in raw_sources:
+        task_dir = Path(raw_source).expanduser().resolve()
+        if task_dir in seen:
+            continue
+        seen.add(task_dir)
+        info = editor.get_rosbag_task_info(task_dir)
+        indices = list(info.episode_indices)
+        if not indices:
+            raise RuntimeError(f'No raw episodes available to delete: {task_dir}')
+        # DataEditor deliberately operates only on valid rosbag episode dirs.
+        # Preflight every target before the first destructive call.
+        for index in indices:
+            episode_dir = task_dir / str(index)
+            if not episode_dir.is_dir() or episode_dir.is_symlink():
+                raise RuntimeError(f'Unsafe raw episode target: {episode_dir}')
+        plans.append((task_dir, indices))
+
+    transaction_id = uuid.uuid4().hex
+    stage_roots = []
+    staged_moves = []
+
+    def _stage_root(task_root: Path) -> Path:
+        stage_root = task_root / f'.cyclo_delete_{transaction_id}'
+        if stage_root.exists() or stage_root.is_symlink():
+            raise RuntimeError(f'Deletion staging path already exists: {stage_root}')
+        stage_root.mkdir()
+        stage_roots.append(stage_root)
+        return stage_root
+
+    try:
+        for task_dir, indices in plans:
+            stage_root = _stage_root(task_dir)
+            for index in indices:
+                source = task_dir / str(index)
+                staged = stage_root / source.name
+                source.rename(staged)
+                staged_moves.append((source, staged))
+
+        # Merge mode contains a numeric symlink view into the real sources.
+        # Stage those links in the same transaction so a failure can restore
+        # the complete pre-cleanup layout.
+        if source_folders:
+            merge_root = Path(dataset_path)
+            merge_links = sorted(
+                (
+                    child for child in merge_root.iterdir()
+                    if child.name.isdigit() and child.is_symlink()
+                ),
+                key=lambda path: int(path.name),
+            )
+            if merge_links:
+                merge_stage_root = _stage_root(merge_root)
+                for source in merge_links:
+                    staged = merge_stage_root / source.name
+                    source.rename(staged)
+                    staged_moves.append((source, staged))
+    except Exception as staging_error:
+        rollback_errors = []
+        for source, staged in reversed(staged_moves):
+            try:
+                if staged.exists() or staged.is_symlink():
+                    staged.rename(source)
+            except Exception as rollback_error:  # noqa: BLE001
+                rollback_errors.append(f'{staged} -> {source}: {rollback_error}')
+        for stage_root in reversed(stage_roots):
+            try:
+                stage_root.rmdir()
+            except OSError:
+                # Never recursively remove a non-empty rollback directory;
+                # it may be the only remaining copy of an episode.
+                pass
+        detail = f'Raw episode staging failed and was rolled back: {staging_error}'
+        if rollback_errors:
+            detail += '; rollback errors: ' + '; '.join(rollback_errors)
+        raise RuntimeError(detail) from staging_error
+
+    cleanup_errors = []
+    for stage_root in stage_roots:
+        try:
+            shutil.rmtree(stage_root)
+        except Exception as cleanup_error:  # noqa: BLE001
+            cleanup_errors.append(f'{stage_root}: {cleanup_error}')
+
+    deleted = sum(len(indices) for _, indices in plans)
+    if cleanup_errors:
+        raise RuntimeError(
+            'All raw episodes were staged, but one or more staging trees '
+            'could not be removed (remaining trees retain recoverable data): '
+            + '; '.join(cleanup_errors)
+        )
+
+    for task_dir, indices in plans:
+        logger.info(
+            f'Deleted {len(indices)} raw episode(s) from {task_dir}; '
+            'task root metadata preserved'
+        )
+    return deleted
+
+
+def _delete_sources_after_validated_conversion(
+    dataset_path: Path,
+    *,
+    source_folders: Optional[List[str]],
+    convert_v21: bool,
+    convert_v30: bool,
+    logger: logging.Logger,
+    output_root: Optional[Path] = None,
+) -> int:
+    """Validation-first destructive boundary for opt-in source cleanup."""
+    _validate_lerobot_outputs(
+        Path(dataset_path),
+        convert_v21=convert_v21,
+        convert_v30=convert_v30,
+        output_root=output_root,
+    )
+    return _delete_raw_source_episodes(
+        Path(dataset_path),
+        source_folders=source_folders,
+        logger=logger,
+    )
 
 
 def _copy_dataset_readme(src_dir: Path, dst_dir: Path, logger: logging.Logger) -> None:
@@ -428,6 +890,13 @@ class Mp4ConversionWorker:
                         robot_type = data.get('robot_type', '')
                         robot_config_path = data.get('robot_config_path', '')
                         source_folders = data.get('source_folders', [])
+                        try:
+                            lerobot_output_root = resolve_lerobot_output_root(
+                                data.get('lerobot_output_root', '')
+                            )
+                        except ValueError as output_root_error:
+                            output_queue.put(('error', str(output_root_error)))
+                            continue
 
                         # fps is a conversion-time knob carried on the
                         # StartConversion srv. 0 means 'use the default'
@@ -448,6 +917,9 @@ class Mp4ConversionWorker:
                         if not convert_v21 and not convert_v30:
                             convert_v21 = True
                             convert_v30 = True
+                        delete_source_after_success = bool(
+                            data.get('delete_source_after_success', False)
+                        )
 
                         # Selection knobs. Empty / None = use defaults
                         # from robot_config (legacy behaviour preserved).
@@ -561,6 +1033,7 @@ class Mp4ConversionWorker:
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
+                                output_root=lerobot_output_root,
                             )
                             if not success:
                                 logger.error(f'Shared LeRobot conversion failed: {message}')
@@ -590,6 +1063,7 @@ class Mp4ConversionWorker:
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
+                                output_root=lerobot_output_root,
                             )
                             if not success:
                                 logger.error(f'Stage {stage_idx} failed: {message}')
@@ -621,6 +1095,7 @@ class Mp4ConversionWorker:
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
+                                output_root=lerobot_output_root,
                             )
                             if not success:
                                 logger.error(f'Stage {stage_idx} failed: {message}')
@@ -655,7 +1130,8 @@ class Mp4ConversionWorker:
                         # video work during this conversion run.
                         try:
                             removed = Mp4ConversionWorker._cleanup_lerobot_temp_dirs(
-                                Path(dataset_path)
+                                Path(dataset_path),
+                                output_root=lerobot_output_root,
                             )
                             if removed:
                                 logger.info(
@@ -673,8 +1149,12 @@ class Mp4ConversionWorker:
                         # unreadable from the host filesystem (e.g. VSCode).
                         try:
                             import os as _os
-                            v21_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}_lerobot_v21'
-                            v30_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}_lerobot_v30'
+                            v21_dir = lerobot_output_root / (
+                                f'{Path(dataset_path).name}_lerobot_v21'
+                            )
+                            v30_dir = lerobot_output_root / (
+                                f'{Path(dataset_path).name}_lerobot_v30'
+                            )
                             for root_dir in (v21_dir, v30_dir):
                                 if not root_dir.exists():
                                     continue
@@ -692,8 +1172,40 @@ class Mp4ConversionWorker:
                                 f'Failed to relax permissions on outputs: {chmod_err}'
                             )
 
+                        deleted_source_episodes = 0
+                        if delete_source_after_success:
+                            logger.info(
+                                'Validating requested LeRobot outputs before '
+                                'deleting raw source episodes'
+                            )
+                            try:
+                                deleted_source_episodes = (
+                                    _delete_sources_after_validated_conversion(
+                                        Path(dataset_path),
+                                        source_folders=source_folders,
+                                        convert_v21=convert_v21,
+                                        convert_v30=convert_v30,
+                                        logger=logger,
+                                        output_root=lerobot_output_root,
+                                    )
+                                )
+                            except Exception as cleanup_err:
+                                error_message = (
+                                    '[Source cleanup] Converted outputs were retained, '
+                                    f'but raw source cleanup did not complete: {cleanup_err}'
+                                )
+                                logger.error(error_message)
+                                output_queue.put(('error', error_message))
+                                continue
+
                         logger.info(f'All stages completed for: {dataset_path}')
-                        output_queue.put(('success', 'All stages completed successfully'))
+                        success_message = 'All stages completed successfully'
+                        if delete_source_after_success:
+                            success_message += (
+                                f'; deleted {deleted_source_episodes} validated '
+                                'raw source episode(s)'
+                            )
+                        output_queue.put(('success', success_message))
 
                     except queue.Empty:
                         continue
@@ -968,12 +1480,16 @@ class Mp4ConversionWorker:
         )
 
     @staticmethod
-    def _cleanup_lerobot_temp_dirs(dataset_path: Path) -> int:
+    def _cleanup_lerobot_temp_dirs(
+        dataset_path: Path,
+        output_root: Optional[Path] = None,
+    ) -> int:
         import shutil
 
+        root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
         removed = 0
         for suffix in ('_lerobot_v21', '_lerobot_v30'):
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}{suffix}'
+            output_dir = root / f'{Path(dataset_path).name}{suffix}'
             for dirname in ('_subtask_video_concat', '_stitched_subtasks'):
                 path = output_dir / dirname
                 if path.exists():
@@ -1231,6 +1747,7 @@ class Mp4ConversionWorker:
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
         source_rosbags: Optional[List[str]] = None,
+        output_root: Optional[Path] = None,
     ) -> tuple:
         """Shared parse path for v2.1 + v3.0 conversion."""
         try:
@@ -1247,10 +1764,11 @@ class Mp4ConversionWorker:
 
         try:
             dataset_path = Path(dataset_path)
-            LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+            root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
+            root.mkdir(parents=True, exist_ok=True)
             repo_id = dataset_path.name
-            v21_output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v21'
-            v30_output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v30'
+            v21_output_dir = root / f'{dataset_path.name}_lerobot_v21'
+            v30_output_dir = root / f'{dataset_path.name}_lerobot_v30'
 
             bag_paths = Mp4ConversionWorker._collect_converted_bag_paths(dataset_path)
             if not bag_paths:
@@ -1363,6 +1881,7 @@ class Mp4ConversionWorker:
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
         source_rosbags: Optional[List[str]] = None,
+        output_root: Optional[Path] = None,
     ) -> tuple:
         """
         Stage 2: Convert _converted folders to LeRobot v2.1 format.
@@ -1384,8 +1903,9 @@ class Mp4ConversionWorker:
 
         try:
             dataset_path = Path(dataset_path)
-            LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v21'
+            root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
+            root.mkdir(parents=True, exist_ok=True)
+            output_dir = root / f'{dataset_path.name}_lerobot_v21'
             repo_id = dataset_path.name
 
             bag_paths = Mp4ConversionWorker._collect_converted_bag_paths(dataset_path)
@@ -1461,6 +1981,7 @@ class Mp4ConversionWorker:
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
         source_rosbags: Optional[List[str]] = None,
+        output_root: Optional[Path] = None,
     ) -> tuple:
         """
         Stage 3: Convert rosbag _converted/ folders to LeRobot v3.0 in-process.
@@ -1501,8 +2022,9 @@ class Mp4ConversionWorker:
 
         try:
             dataset_path = Path(dataset_path)
-            LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v30'
+            root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
+            root.mkdir(parents=True, exist_ok=True)
+            output_dir = root / f'{dataset_path.name}_lerobot_v30'
             repo_id = dataset_path.name
 
             # Same input as Stage 2 — _converted/ folders from Stage 1.

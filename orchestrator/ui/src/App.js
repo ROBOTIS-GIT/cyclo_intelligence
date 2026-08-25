@@ -433,7 +433,7 @@ function App() {
           {/* Divider line */}
           <div className="w-24 h-1 border-t-2 rounded-full border-gray-200 dark:border-slate-800 mt-3"></div>
 
-          {/* Offline RL page button */}
+          {/* RL Framework page button */}
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.OFFLINE_RL,
@@ -442,7 +442,7 @@ function App() {
             onClick={handleOfflineRLPageNavigation}
           >
             <MdModelTraining size={30} className="mb-2" />
-            <span className="mt-1 text-sm whitespace-nowrap">Offline RL</span>
+            <span className="mt-1 text-sm whitespace-nowrap">RL Framework</span>
           </button>
 
           {/* Edit dataset page button */}

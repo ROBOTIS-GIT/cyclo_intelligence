@@ -84,7 +84,10 @@ def _install_ros_stubs():
 _install_ros_stubs()
 
 from orchestrator.bt.actions.joint_control import _coerce_positions  # noqa: E402
-from orchestrator.bt.actions.send_command import SendCommand  # noqa: E402
+from orchestrator.bt.actions.send_command import (  # noqa: E402
+    SendCommand,
+    _service_type_from_model,
+)
 from orchestrator.bt.node_registry import _annotation_to_port_type  # noqa: E402
 
 
@@ -168,3 +171,8 @@ def test_load_send_command_sets_action_request_mode():
 
     assert action.action_request_mode == 'sync'
     assert task_info.action_request_mode == 'sync'
+
+
+def test_multi_task_dit_routes_to_lerobot_backend():
+    assert _service_type_from_model('lerobot:multi_task_dit') == 'lerobot'
+    assert _service_type_from_model('multi_task_dit') == 'lerobot'

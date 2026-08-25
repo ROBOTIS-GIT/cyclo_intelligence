@@ -76,6 +76,34 @@ export function getEpisodeOutcomeForCommand(command, value) {
     : EpisodeOutcome.UNSPECIFIED;
 }
 
+export function getConversionCommandFields(options = {}) {
+  return {
+    conversion_fps: Number(options.conversionFps || 0),
+    convert_v21: Boolean(options.convertV21),
+    convert_v30: Boolean(options.convertV30),
+    lerobot_output_root: String(options.lerobotOutputRoot || '').trim(),
+    delete_source_after_success: Boolean(options.deleteSourceAfterSuccess),
+  };
+}
+
+export function isInferenceCommandRequest(page, taskSource = '') {
+  const requestedTaskSource = String(taskSource || '').trim().toLowerCase();
+  return (
+    requestedTaskSource === 'inference' ||
+    (requestedTaskSource !== 'record' && page === PageType.INFERENCE)
+  );
+}
+
+export function getCommandRecordingFolder(taskInfo = {}, options = {}) {
+  const hasOverride = Object.prototype.hasOwnProperty.call(
+    options,
+    'recordingFolder'
+  );
+  return String(
+    hasOverride ? options.recordingFolder : (taskInfo.recordingFolder || '')
+  ).trim();
+}
+
 export function transformReplayDataResult(result = {}, bagPath = '') {
   return {
     success: result.success,
@@ -238,7 +266,17 @@ export function useRosServiceCaller() {
       // Read latest values from refs at call time so this callback's
       // identity stays stable across taskInfo / page mutations.
       const page = pageRef.current;
-      const taskInfo = page === PageType.INFERENCE
+      const inferenceRequest = isInferenceCommandRequest(
+        page,
+        options.taskSource
+      );
+      const requestedTaskSource = String(options.taskSource || '')
+        .trim()
+        .toLowerCase();
+      const recordRequest =
+        requestedTaskSource === 'record' ||
+        (requestedTaskSource === '' && page === PageType.RECORD);
+      const taskInfo = inferenceRequest
         ? inferenceTaskInfoRef.current
         : recordTaskInfoRef.current;
       try {
@@ -325,9 +363,9 @@ export function useRosServiceCaller() {
 
         let taskType = '';
 
-        if (page === PageType.RECORD) {
+        if (recordRequest) {
           taskType = 'record';
-        } else if (page === PageType.INFERENCE) {
+        } else if (inferenceRequest) {
           taskType = 'inference';
         }
 
@@ -336,7 +374,17 @@ export function useRosServiceCaller() {
         // empty instead of being replaced by a generated task name.
         const autofillEmptyTaskFields = options.autofillEmptyTaskFields !== false;
         let taskName = taskInfo.taskName || '';
-        let taskInstruction = (taskInfo.taskInstruction || []).filter(
+        const taskInstructionSource = Object.prototype.hasOwnProperty.call(
+          options,
+          'taskInstruction'
+        )
+          ? options.taskInstruction
+          : taskInfo.taskInstruction;
+        let taskInstruction = (
+          Array.isArray(taskInstructionSource)
+            ? taskInstructionSource
+            : [taskInstructionSource]
+        ).map((instruction) => String(instruction ?? '')).filter(
           (instruction) => instruction.trim() !== ''
         );
         const subtaskInstructionSource =
@@ -386,7 +434,7 @@ export function useRosServiceCaller() {
             ? 'sync'
             : 'async'
         );
-        const recordingFolder = String(taskInfo.recordingFolder || '').trim();
+        const recordingFolder = getCommandRecordingFolder(taskInfo, options);
         const inferenceRecordingSessionId = recordingFolder
           ? getInferenceRecordingSessionId(recordingFolder)
           : '';
@@ -397,7 +445,7 @@ export function useRosServiceCaller() {
         }
         const request = {
           task_info: {
-            task_num: page === PageType.INFERENCE
+            task_num: inferenceRequest
               ? inferenceRecordingSessionId
               : String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
@@ -415,7 +463,11 @@ export function useRosServiceCaller() {
                 ? taskInfo.chunkAlignWindowS
                 : 0.3
             ),
-            include_robotis_license: Boolean(taskInfo.includeRobotisLicense),
+            include_robotis_license: Boolean(
+              Object.prototype.hasOwnProperty.call(options, 'includeRobotisLicense')
+                ? options.includeRobotisLicense
+                : taskInfo.includeRobotisLicense
+            ),
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             action_request_mode: actionRequestMode,
@@ -431,9 +483,7 @@ export function useRosServiceCaller() {
           // Conversion-only knobs (ignored by the orchestrator unless
           // command == CONVERT_MP4). Default to 0 / false so the wire
           // representation is stable for non-conversion commands.
-          conversion_fps: Number(options.conversionFps || 0),
-          convert_v21: Boolean(options.convertV21),
-          convert_v30: Boolean(options.convertV30),
+          ...getConversionCommandFields(options),
           selected_cameras: [],
           camera_rotation_keys: cameraRotationKeys,
           camera_rotation_values: cameraRotationValues,

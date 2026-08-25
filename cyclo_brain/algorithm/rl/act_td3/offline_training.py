@@ -12,8 +12,14 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from cyclo_brain.model.act import ACT_TRAINABLE_GROUPS
+
 from .learner import ACTTD3Learner, ACTTD3UpdateResult
-from .lerobot_offline import ACTTD3LeRobotCollator, FixedHorizonLeRobotACTTD3Dataset
+from .lerobot_offline import (
+    ACTTD3LeRobotCollator,
+    FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
+)
 from .offline_warmup import _atomic_torch_save, _positive_integer
 from .training_identity import ACTTD3TrainingDataIdentity
 
@@ -56,6 +62,118 @@ def _checked_episode_indices(identity: ACTTD3TrainingDataIdentity) -> tuple[int,
     return tuple(raw)
 
 
+def _checked_data_roots(
+    identity: ACTTD3TrainingDataIdentity | Mapping[str, Any],
+) -> tuple[dict[str, Any], ...] | None:
+    """Validate and return the ordered immutable-root contract when present."""
+
+    if isinstance(identity, ACTTD3TrainingDataIdentity):
+        virtual = identity.virtual_contract
+    elif isinstance(identity, Mapping):
+        virtual = identity.get("virtual_contract")
+        if not isinstance(virtual, Mapping):
+            raise ValueError("ACT-TD3 training identity virtual contract is invalid")
+    else:
+        raise TypeError("ACT-TD3 training identity is invalid")
+    raw = virtual.get("data_roots")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("ACT-TD3 ordered data root contract is invalid")
+    roots: list[dict[str, Any]] = []
+    expected_global = 0
+    seen_paths: set[str] = set()
+    for ordinal, value in enumerate(raw):
+        if not isinstance(value, Mapping):
+            raise ValueError("ACT-TD3 ordered data root entry is invalid")
+        required = {
+            "ordinal",
+            "root",
+            "name",
+            "identity",
+            "dataset_sha256",
+            "episode_indices",
+            "global_episode_indices",
+            "file_count",
+            "byte_count",
+        }
+        if set(value) != required or value.get("ordinal") != ordinal:
+            raise ValueError("ACT-TD3 ordered data root entry fields disagree")
+        root = value.get("root")
+        name = value.get("name")
+        identity_value = value.get("identity")
+        dataset_sha256 = value.get("dataset_sha256")
+        local_indices = value.get("episode_indices")
+        global_indices = value.get("global_episode_indices")
+        file_count = value.get("file_count")
+        byte_count = value.get("byte_count")
+        if (
+            not isinstance(root, str)
+            or not root
+            or root in seen_paths
+            or not isinstance(name, str)
+            or not name
+            or not isinstance(identity_value, str)
+            or not identity_value.startswith("sha256:")
+            or not isinstance(dataset_sha256, str)
+            or not dataset_sha256.startswith("sha256:")
+            or not isinstance(local_indices, list)
+            or not local_indices
+            or any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                for index in local_indices
+            )
+            or len(set(local_indices)) != len(local_indices)
+            or not isinstance(global_indices, list)
+            or global_indices
+            != list(range(expected_global, expected_global + len(local_indices)))
+            or isinstance(file_count, bool)
+            or not isinstance(file_count, int)
+            or file_count < 1
+            or isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 0
+        ):
+            raise ValueError("ACT-TD3 ordered data root entry is invalid")
+        roots.append(dict(value))
+        seen_paths.add(root)
+        expected_global += len(local_indices)
+    episode_indices = virtual.get("episode_indices")
+    if episode_indices != list(range(expected_global)):
+        raise ValueError("ACT-TD3 data roots and global episode indices disagree")
+    return tuple(roots)
+
+
+def _single_identity_matches_root(
+    single: Mapping[str, Any],
+    root: Mapping[str, Any],
+) -> bool:
+    component_sha256 = single.get("component_sha256")
+    return (
+        isinstance(component_sha256, Mapping)
+        and single.get("identity") == root.get("identity")
+        and component_sha256.get("dataset") == root.get("dataset_sha256")
+    )
+
+
+def _training_identity_same_or_single_root_upgrade(
+    previous: Any,
+    current: ACTTD3TrainingDataIdentity,
+) -> bool:
+    if previous == current.to_dict():
+        return True
+    if not isinstance(previous, Mapping):
+        return False
+    previous_roots = _checked_data_roots(previous)
+    current_roots = _checked_data_roots(current)
+    return (
+        previous_roots is None
+        and current_roots is not None
+        and len(current_roots) == 1
+        and _single_identity_matches_root(previous, current_roots[0])
+    )
+
+
 class ACTTD3OfflineTrainingRunner:
     """Train one versioned round over the entire current cumulative replay.
 
@@ -65,11 +183,11 @@ class ACTTD3OfflineTrainingRunner:
     two critic updates. ``actor_equivalent_epochs`` is therefore not an
     independent actor-only phase and must be exactly half ``critic_epochs``.
 
-    A completed round may seed a new checkpoint for a larger cumulative
-    dataset. The identity chain, episode indices, frame counts, and outcomes
-    are retained. LeRobot v3 can rewrite shared parquet/video containers as it
-    grows, so byte-level append-only verification is not possible; the exact
-    semantic identity of every round is nevertheless recorded.
+    A completed round may seed a new checkpoint after one or more immutable
+    LeRobot data-epoch roots are appended. The ordered root identity must retain
+    the exact prior prefix; parquet/video files are never physically merged.
+    Legacy one-root checkpoints remain readable and can be upgraded at the
+    resume boundary when the first virtual root has the same content identity.
     """
 
     STATE_FORMAT = "cyclo_brain.act_td3_offline_training/v2"
@@ -83,7 +201,10 @@ class ACTTD3OfflineTrainingRunner:
     def __init__(
         self,
         learner: ACTTD3Learner,
-        dataset: FixedHorizonLeRobotACTTD3Dataset,
+        dataset: (
+            FixedHorizonLeRobotACTTD3Dataset
+            | VirtualCumulativeLeRobotACTTD3Dataset
+        ),
         collator: ACTTD3LeRobotCollator,
         *,
         batch_size: int,
@@ -98,9 +219,15 @@ class ACTTD3OfflineTrainingRunner:
     ) -> None:
         if not isinstance(learner, ACTTD3Learner):
             raise TypeError("ACT-TD3 offline training requires ACTTD3Learner")
-        if not isinstance(dataset, FixedHorizonLeRobotACTTD3Dataset):
+        if not isinstance(
+            dataset,
+            (
+                FixedHorizonLeRobotACTTD3Dataset,
+                VirtualCumulativeLeRobotACTTD3Dataset,
+            ),
+        ):
             raise TypeError(
-                "ACT-TD3 offline training requires FixedHorizonLeRobotACTTD3Dataset"
+                "ACT-TD3 offline training requires a fixed-horizon LeRobot replay"
             )
         if not isinstance(collator, ACTTD3LeRobotCollator):
             raise TypeError("ACT-TD3 offline training requires ACTTD3LeRobotCollator")
@@ -161,6 +288,7 @@ class ACTTD3OfflineTrainingRunner:
                 f"ACT-TD3 cumulative replay must contain 1..{self.MAX_EPISODES} episodes"
             )
         identity_indices = _checked_episode_indices(training_data_identity)
+        _checked_data_roots(training_data_identity)
         dataset_indices = tuple(record[0] for record in dataset.episode_records)
         if identity_indices != dataset_indices:
             raise ValueError(
@@ -397,10 +525,51 @@ class ACTTD3OfflineTrainingRunner:
         self._cursor = cursor
         self._permutation = permutation.clone()
 
+    def _normalize_legacy_base_contract(
+        self,
+        stored_base: Any,
+        stored_learner: Any,
+    ) -> Any:
+        """Add the implicit v3 all-trainable group to the outer resume contract."""
+
+        if (
+            not isinstance(stored_learner, Mapping)
+            or stored_learner.get("format")
+            != self.learner.LEGACY_ALL_TRAINABLE_STATE_FORMAT
+        ):
+            return stored_base
+        if self.learner.config.actor_trainable_groups != ACT_TRAINABLE_GROUPS:
+            raise ValueError(
+                "Legacy ACT-TD3 v3 checkpoints can resume only with all ACT "
+                "actor trainable groups"
+            )
+        if not isinstance(stored_base, Mapping):
+            raise ValueError("ACT-TD3 round checkpoint base contract disagrees")
+        legacy_learner_contract = stored_base.get("learner")
+        if not isinstance(legacy_learner_contract, Mapping):
+            raise ValueError("ACT-TD3 round checkpoint learner contract disagrees")
+        legacy_config = legacy_learner_contract.get("config")
+        if (
+            not isinstance(legacy_config, Mapping)
+            or "actor_trainable_groups" in legacy_config
+        ):
+            raise ValueError("ACT-TD3 legacy round learner contract is invalid")
+
+        normalized_config = dict(legacy_config)
+        normalized_config["actor_trainable_groups"] = ACT_TRAINABLE_GROUPS
+        normalized_learner_contract = dict(legacy_learner_contract)
+        normalized_learner_contract["config"] = normalized_config
+        normalized_base = dict(stored_base)
+        normalized_base["learner"] = normalized_learner_contract
+        return normalized_base
+
     def _load_checkpoint(self) -> None:
         assert self.resume_from is not None
         state = self._checkpoint_mapping(self.resume_from)
-        stored_base = state["base_contract"]
+        stored_base = self._normalize_legacy_base_contract(
+            state["base_contract"],
+            state["learner"],
+        )
         current_base = self._base_contract()
         if not isinstance(stored_base, Mapping):
             raise ValueError("ACT-TD3 round checkpoint base contract disagrees")
@@ -439,13 +608,21 @@ class ACTTD3OfflineTrainingRunner:
             "total_critic_updates",
             "total_actor_updates",
         }
-        same_dataset = {
+        previous_dataset_without_identity = {
             key: value for key, value in previous_dataset.items()
-            if key not in schedule_derived_fields
-        } == {
-            key: value for key, value in current_dataset.items()
-            if key not in schedule_derived_fields
+            if key not in (*schedule_derived_fields, "training_data")
         }
+        current_dataset_without_identity = {
+            key: value for key, value in current_dataset.items()
+            if key not in (*schedule_derived_fields, "training_data")
+        }
+        same_dataset = (
+            previous_dataset_without_identity == current_dataset_without_identity
+            and _training_identity_same_or_single_root_upgrade(
+                previous_dataset.get("training_data"),
+                self.training_data_identity,
+            )
+        )
         recorded_schedule = previous_round.get("schedule")
         stored_schedule = {
             "critic_epochs": stored_critic_epochs,
@@ -598,7 +775,7 @@ class ACTTD3OfflineTrainingRunner:
                 raise ValueError(
                     "ACT-TD3 interrupted round must resume with the same schedule"
                 )
-            if previous_dataset != current_dataset:
+            if previous_dataset_without_identity != current_dataset_without_identity:
                 raise ValueError("ACT-TD3 checkpoint dataset contract disagrees")
             if self.checkpoint_path != self.resume_from:
                 raise ValueError(
@@ -642,9 +819,13 @@ class ACTTD3OfflineTrainingRunner:
         if not isinstance(old_virtual, Mapping):
             raise ValueError("ACT-TD3 previous virtual contract is invalid")
         if {
-            key: value for key, value in old_virtual.items() if key != "episode_indices"
+            key: value
+            for key, value in old_virtual.items()
+            if key not in {"episode_indices", "data_roots"}
         } != {
-            key: value for key, value in new_virtual.items() if key != "episode_indices"
+            key: value
+            for key, value in new_virtual.items()
+            if key not in {"episode_indices", "data_roots"}
         }:
             raise ValueError("ACT-TD3 cumulative replay virtual contract changed")
         for component in ("act_checkpoint", "robot"):
@@ -654,6 +835,40 @@ class ACTTD3OfflineTrainingRunner:
                 raise ValueError(
                     f"ACT-TD3 cumulative replay {component} identity changed"
                 )
+
+        old_roots = _checked_data_roots(old_training)
+        new_roots = _checked_data_roots(self.training_data_identity)
+        if new_roots is not None:
+            if old_roots is not None:
+                if (
+                    len(new_roots) <= len(old_roots)
+                    or new_roots[: len(old_roots)] != old_roots
+                ):
+                    raise ValueError(
+                        "ACT-TD3 cumulative replay must preserve the ordered data-root prefix"
+                    )
+                root_added_episodes = sum(
+                    len(root["episode_indices"])
+                    for root in new_roots[len(old_roots) :]
+                )
+            else:
+                if not new_roots or not _single_identity_matches_root(
+                    old_training, new_roots[0]
+                ):
+                    raise ValueError(
+                        "ACT-TD3 cumulative replay does not preserve the legacy data root"
+                    )
+                root_added_episodes = sum(
+                    len(root["episode_indices"]) for root in new_roots[1:]
+                )
+            if root_added_episodes != added or not 1 <= root_added_episodes <= self.ROUND_EPISODES:
+                raise ValueError(
+                    "ACT-TD3 cumulative replay must append data roots containing 1..50 episodes"
+                )
+        elif old_roots is not None:
+            raise ValueError(
+                "ACT-TD3 cumulative replay cannot discard its ordered data-root contract"
+            )
 
         completed_round = dict(previous_round)
         completed_round.setdefault("schedule", stored_schedule)

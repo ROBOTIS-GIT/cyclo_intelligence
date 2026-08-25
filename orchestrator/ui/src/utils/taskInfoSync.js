@@ -1,4 +1,4 @@
-import PageType from '../constants/pageType';
+import PageType, { isInferenceWorkspacePage } from '../constants/pageType';
 
 const stringArray = (items) => (
   Array.isArray(items) ? items.map((item) => String(item ?? '')) : []
@@ -103,7 +103,7 @@ export const shouldApplyServerTaskInfoToPage = ({
   currentPage,
   initialTaskInfoSynced = false,
 } = {}) => {
-  if (currentPage === PageType.INFERENCE || currentPage === PageType.RECORD) {
+  if (isInferenceWorkspacePage(currentPage) || currentPage === PageType.RECORD) {
     return true;
   }
 

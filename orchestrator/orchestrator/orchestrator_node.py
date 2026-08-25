@@ -1858,6 +1858,12 @@ class OrchestratorNode(Node):
                 conversion_fps = int(getattr(request, 'conversion_fps', 0) or 0)
                 convert_v21 = bool(getattr(request, 'convert_v21', False))
                 convert_v30 = bool(getattr(request, 'convert_v30', False))
+                lerobot_output_root = str(
+                    getattr(request, 'lerobot_output_root', '') or ''
+                ).strip()
+                delete_source_after_success = bool(
+                    getattr(request, 'delete_source_after_success', False)
+                )
                 if not convert_v21 and not convert_v30:
                     convert_v21 = True
                     convert_v30 = True
@@ -1901,6 +1907,8 @@ class OrchestratorNode(Node):
                     fps=conversion_fps,
                     convert_v21=convert_v21,
                     convert_v30=convert_v30,
+                    lerobot_output_root=lerobot_output_root,
+                    delete_source_after_success=delete_source_after_success,
                     selected_cameras=list(
                         getattr(request, 'selected_cameras', []) or []
                     ),
@@ -2671,7 +2679,7 @@ class OrchestratorNode(Node):
     # LeRobot policy types (used for service_prefix detection)
     LEROBOT_POLICIES = {
         'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
-        'smolvla', 'xvla', 'sac',
+        'smolvla', 'xvla', 'sac', 'multi_task_dit',
     }
 
     @staticmethod

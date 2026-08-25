@@ -945,7 +945,7 @@ class RecordingService:
             == 'inference'
         )
         episode_success = None
-        if manager_is_inference:
+        if manager_is_inference and command_name != 'STOP_SEGMENT':
             outcome = int(getattr(request, 'episode_outcome', 0) or 0)
             success_value = int(
                 getattr(RecordingCommand.Request, 'SUCCESS', 1)

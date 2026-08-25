@@ -16,6 +16,7 @@ from cyclo_brain.algorithm.rl.act_td3 import (
     ACTTD3TrainingDataIdentity,
     ACTTD3UpdateResult,
     FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 from cyclo_brain.algorithm.rl.tests.test_act_td3_lerobot_offline import (
     _FakeLeRobotDataset,
@@ -28,9 +29,16 @@ from cyclo_brain.algorithm.rl.tests.test_act_td3_offline_warmup import (
 from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE
 
 
-def _learner() -> ACTTD3Learner:
+def _learner(
+    actor_trainable_groups: tuple[str, ...] | None = None,
+) -> ACTTD3Learner:
     source = _warmup_learner()
     config = replace(source.config, critic_warmup_updates=0)
+    if actor_trainable_groups is not None:
+        config = replace(
+            config,
+            actor_trainable_groups=actor_trainable_groups,
+        )
     return ACTTD3Learner(
         source.actor,
         source.critic,
@@ -76,6 +84,70 @@ def _identity(dataset: FixedHorizonLeRobotACTTD3Dataset) -> ACTTD3TrainingDataId
     )
 
 
+def _virtual_dataset(
+    roots: tuple[tuple[tuple[int, bool], ...], ...],
+) -> VirtualCumulativeLeRobotACTTD3Dataset:
+    return VirtualCumulativeLeRobotACTTD3Dataset(tuple(_dataset(root) for root in roots))
+
+
+def _multi_identity(
+    dataset: VirtualCumulativeLeRobotACTTD3Dataset,
+    *,
+    root_names: tuple[str, ...],
+    first_legacy_identity: ACTTD3TrainingDataIdentity | None = None,
+) -> ACTTD3TrainingDataIdentity:
+    if len(root_names) != dataset.num_roots:
+        raise AssertionError("root_names disagree")
+    data_roots = []
+    for ordinal, (name, episode_range) in enumerate(
+        zip(root_names, dataset.root_episode_ranges, strict=True)
+    ):
+        start, stop = episode_range
+        if ordinal == 0 and first_legacy_identity is not None:
+            root_identity = first_legacy_identity.identity
+            dataset_sha256 = first_legacy_identity.component_sha256["dataset"]
+        else:
+            root_identity = f"sha256:identity-{name}"
+            dataset_sha256 = f"sha256:dataset-{name}"
+        data_roots.append(
+            {
+                "ordinal": ordinal,
+                "root": f"/dataset/{name}",
+                "name": name,
+                "identity": root_identity,
+                "dataset_sha256": dataset_sha256,
+                "episode_indices": list(range(stop - start)),
+                "global_episode_indices": list(range(start, stop)),
+                "file_count": 3,
+                "byte_count": stop - start,
+            }
+        )
+    suffix = "-".join(root_names)
+    return ACTTD3TrainingDataIdentity(
+        identity=f"sha256:multi-{suffix}",
+        file_count=3 * len(data_roots),
+        byte_count=len(dataset),
+        component_sha256={
+            "dataset": f"sha256:multi-dataset-{suffix}",
+            "act_checkpoint": "sha256:fixed-actor",
+            "robot": "sha256:fixed-robot",
+            "virtual_contract": f"sha256:multi-virtual-{suffix}",
+            **{
+                f"data_root_{index:04d}": root["dataset_sha256"]
+                for index, root in enumerate(data_roots)
+            },
+        },
+        manifest=(),
+        virtual_contract={
+            "episode_indices": list(range(dataset.num_episodes)),
+            "robot_type": "ffw_sg2_rev1",
+            "video_backend": "pyav",
+            "video_keys": ["observation.images.camera"],
+            "data_roots": data_roots,
+        },
+    )
+
+
 def _install_fast_update(learner: ACTTD3Learner) -> None:
     def update(_batch) -> ACTTD3UpdateResult:
         learner.completed_critic_updates += 1
@@ -103,13 +175,19 @@ def _install_fast_update(learner: ACTTD3Learner) -> None:
 def _runner(
     checkpoint: Path,
     *,
-    dataset: FixedHorizonLeRobotACTTD3Dataset | None = None,
+    dataset: (
+        FixedHorizonLeRobotACTTD3Dataset
+        | VirtualCumulativeLeRobotACTTD3Dataset
+        | None
+    ) = None,
+    identity: ACTTD3TrainingDataIdentity | None = None,
     resume_from: Path | None = None,
     critic_epochs: int = 10,
     actor_equivalent_epochs: int = 5,
+    actor_trainable_groups: tuple[str, ...] | None = None,
 ) -> ACTTD3OfflineTrainingRunner:
     replay = dataset or _dataset()
-    learner = _learner()
+    learner = _learner(actor_trainable_groups)
     _install_fast_update(learner)
     return ACTTD3OfflineTrainingRunner(
         learner,
@@ -117,7 +195,7 @@ def _runner(
         ACTTD3LeRobotCollator(_OffsetPreprocessor()),
         batch_size=2,
         sampling_seed=19,
-        training_data_identity=_identity(replay),
+        training_data_identity=identity or _identity(replay),
         checkpoint_path=checkpoint,
         resume_from=resume_from,
         critic_epochs=critic_epochs,
@@ -125,6 +203,21 @@ def _runner(
         checkpoint_interval=3,
         progress_interval=1,
     )
+
+
+def _downgrade_round_checkpoint_to_legacy_v3(
+    checkpoint: Path,
+) -> dict[str, object]:
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    learner_state = state["learner"]
+    learner_state["format"] = ACTTD3Learner.LEGACY_ALL_TRAINABLE_STATE_FORMAT
+    del learner_state["contract"]["actor_trainable_groups"]
+    del learner_state["config"]["actor_trainable_groups"]
+    del state["base_contract"]["learner"]["config"][
+        "actor_trainable_groups"
+    ]
+    torch.save(state, checkpoint)
+    return state
 
 
 class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
@@ -206,6 +299,73 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
                 continuous_state["last_sampled_indices"],
                 resumed_state["last_sampled_indices"],
             )
+
+    def test_legacy_v3_round_resumes_with_default_all_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy.pt"
+            first = _runner(checkpoint)
+            first.run(max_round_critic_updates=7)
+            legacy = _downgrade_round_checkpoint_to_legacy_v3(checkpoint)
+
+            resumed = _runner(checkpoint, resume_from=checkpoint)
+
+            self.assertEqual(resumed.learner.completed_critic_updates, 7)
+            self.assertEqual(resumed.learner.completed_actor_updates, 3)
+            self.assertEqual(resumed._completed_epochs, 3)  # noqa: SLF001
+            self.assertNotIn(
+                "actor_trainable_groups",
+                legacy["base_contract"]["learner"]["config"],
+            )
+            result = resumed.run(max_round_critic_updates=8)
+            self.assertEqual(result.completed_critic_updates, 8)
+
+    def test_legacy_v3_round_rejects_partial_freeze_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy.pt"
+            _runner(checkpoint).run(max_round_critic_updates=1)
+            _downgrade_round_checkpoint_to_legacy_v3(checkpoint)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "only with all ACT actor trainable groups",
+            ):
+                _runner(
+                    checkpoint,
+                    resume_from=checkpoint,
+                    actor_trainable_groups=("action_decoder",),
+                )
+
+    def test_legacy_v3_completed_parent_seeds_grown_replay_round(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "legacy_parent.pt"
+            _runner(parent).run()
+            _downgrade_round_checkpoint_to_legacy_v3(parent)
+            grown = _dataset(((5, True), (3, False), (4, True)))
+
+            child = _runner(
+                root / "round_002.pt",
+                dataset=grown,
+                resume_from=parent,
+            )
+
+            self.assertEqual(child.round_index, 2)
+            self.assertEqual(child.new_episode_count, 1)
+            self.assertEqual(child.learner.completed_critic_updates, 20)
+            self.assertEqual(child.learner.completed_actor_updates, 10)
+
+    def test_v4_round_does_not_normalize_missing_group_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "v4.pt"
+            _runner(checkpoint).run(max_round_critic_updates=1)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            del state["base_contract"]["learner"]["config"][
+                "actor_trainable_groups"
+            ]
+            torch.save(state, checkpoint)
+
+            with self.assertRaisesRegex(ValueError, "base contract disagrees"):
+                _runner(checkpoint, resume_from=checkpoint)
 
     def test_completed_checkpoint_starts_new_version_on_grown_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -334,6 +494,111 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "before a round completes"):
                 _runner(root / "round_002.pt", dataset=grown, resume_from=first_path)
+
+    def test_multi_root_child_preserves_ordered_prefix_and_adds_new_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_replay = _virtual_dataset((((5, True), (3, False)),))
+            first_identity = _multi_identity(first_replay, root_names=("epoch_0000",))
+            first_path = root / "round_001.pt"
+            _runner(
+                first_path,
+                dataset=first_replay,
+                identity=first_identity,
+            ).run()
+
+            grown = _virtual_dataset(
+                (((5, True), (3, False)), ((4, True), (2, False)))
+            )
+            grown_identity = _multi_identity(
+                grown, root_names=("epoch_0000", "epoch_0001")
+            )
+            child = _runner(
+                root / "round_002.pt",
+                dataset=grown,
+                identity=grown_identity,
+                resume_from=first_path,
+            )
+            self.assertEqual(child.round_index, 2)
+            self.assertEqual(child.new_episode_count, 2)
+            state = child._checkpoint_state(0.0)  # noqa: SLF001
+            recorded_roots = state["current_round"]["dataset"]["training_data"][
+                "virtual_contract"
+            ]["data_roots"]
+            self.assertEqual(
+                [entry["name"] for entry in recorded_roots],
+                ["epoch_0000", "epoch_0001"],
+            )
+
+    def test_multi_root_growth_rejects_reordered_or_modified_prior_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_replay = _virtual_dataset((((5, True), (3, False)),))
+            first_identity = _multi_identity(first_replay, root_names=("epoch_0000",))
+            first_path = root / "round_001.pt"
+            _runner(
+                first_path,
+                dataset=first_replay,
+                identity=first_identity,
+            ).run()
+
+            grown = _virtual_dataset(
+                (((5, True), (3, False)), ((4, True),))
+            )
+            changed_prefix = _multi_identity(
+                grown, root_names=("epoch_0000_changed", "epoch_0001")
+            )
+            with self.assertRaisesRegex(ValueError, "ordered data-root prefix"):
+                _runner(
+                    root / "changed.pt",
+                    dataset=grown,
+                    identity=changed_prefix,
+                    resume_from=first_path,
+                )
+
+    def test_legacy_single_root_checkpoint_resumes_with_multi_root_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_replay = _dataset()
+            legacy_identity = _identity(legacy_replay)
+            checkpoint = root / "legacy_interrupted.pt"
+            _runner(
+                checkpoint,
+                dataset=legacy_replay,
+                identity=legacy_identity,
+            ).run(max_round_critic_updates=3)
+
+            upgraded_replay = _virtual_dataset((((5, True), (3, False)),))
+            upgraded_identity = _multi_identity(
+                upgraded_replay,
+                root_names=("epoch_0000",),
+                first_legacy_identity=legacy_identity,
+            )
+            resumed = _runner(
+                checkpoint,
+                dataset=upgraded_replay,
+                identity=upgraded_identity,
+                resume_from=checkpoint,
+            )
+            self.assertEqual(resumed.round_index, 1)
+            self.assertEqual(resumed._completed_critic_updates(), 3)  # noqa: SLF001
+
+            resumed.run()
+            grown = _virtual_dataset(
+                (((5, True), (3, False)), ((4, True),))
+            )
+            grown_identity = _multi_identity(
+                grown,
+                root_names=("epoch_0000", "epoch_0001"),
+                first_legacy_identity=legacy_identity,
+            )
+            child = _runner(
+                root / "round_002.pt",
+                dataset=grown,
+                identity=grown_identity,
+                resume_from=checkpoint,
+            )
+            self.assertEqual(child.new_episode_count, 1)
 
     def test_resume_rejects_corrupt_cursor_and_round_counters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -108,12 +108,14 @@ MODEL_SERVICE_TYPES = {
     'lerobot:pi0': 'lerobot',
     'lerobot:pi05': 'lerobot',
     'lerobot:diffusion': 'lerobot',
+    'lerobot:multi_task_dit': 'lerobot',
     'act': 'lerobot',
     'smolvla': 'lerobot',
     'xvla': 'lerobot',
     'pi0': 'lerobot',
     'pi05': 'lerobot',
     'diffusion': 'lerobot',
+    'multi_task_dit': 'lerobot',
 }
 
 

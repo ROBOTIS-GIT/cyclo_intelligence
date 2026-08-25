@@ -1,0 +1,4 @@
+# The Docker build context is ``cyclo_brain/policy``.  Backend-local
+# .dockerignore files are not consulted from this parent context, so never
+# copy the host LeRobot virtual environment over /lerobot/.venv in the image.
+lerobot/lerobot/.venv/

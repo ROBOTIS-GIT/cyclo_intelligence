@@ -191,6 +191,9 @@ services:
       - ./workspace:/workspace
       # User-visible LeRobot models live under /workspace/model/lerobot.
       - ./huggingface:/root/.cache/huggingface
+      # UID 1000 training jobs run with HOME=/tmp. Expose only the public Hub
+      # object store at a neutral, read-only path (not token/config files).
+      - ./huggingface/hub:/huggingface_hub:ro
       # Live-edit SDKs (mounted read-only so the container can't mutate
       # the host tree accidentally).
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
@@ -220,6 +223,10 @@ services:
       # and so docker-cp ownership games go away. Two containers share
       # one cache.
       - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      # Dedicated training jobs run as uid 1000 and cannot traverse /root.
+      # Expose the same immutable definitions at a neutral path so live
+      # Flow-SDE PPO can publish/subscribe without any network fallback.
+      - ./zenoh_cache:/zenoh_cache:ro
       # orchestrator keeps the canonical command_topic_list / joint_order
       # YAML. Main runtime's RobotClient reads it on LOAD.
       # Per-robot YAMLs moved to shared/robot_configs/ (consolidated with

@@ -28,4 +28,11 @@ const PageType = {
   NAVIGATION: 'navigation',
 };
 
+// Inference controls are shared by the dedicated Inference page and the
+// Offline RL rollout workspace. Keep this routing decision in one place so
+// service requests from either page use the same inference task contract.
+export const isInferenceWorkspacePage = (page) => (
+  page === PageType.INFERENCE || page === PageType.OFFLINE_RL
+);
+
 export default PageType;

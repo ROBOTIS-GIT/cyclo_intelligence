@@ -15,6 +15,7 @@ from .lerobot_offline import (
     ACTTD3LeRobotCollator,
     FixedHorizonLeRobotACTTD3Dataset,
     LeRobotACTTD3Transition,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 from .offline_warmup import (
     ACTTD3CriticWarmupProgress,
@@ -27,6 +28,7 @@ from .offline_training import (
 from .training_identity import (
     ACTTD3TrainingDataIdentity,
     ACTTD3TrainingIdentityFile,
+    build_act_td3_multi_root_training_data_identity,
     build_act_td3_training_data_identity,
 )
 
@@ -45,7 +47,9 @@ __all__ = [
     "ACTTD3UpdateResult",
     "FixedHorizonLeRobotACTTD3Dataset",
     "LeRobotACTTD3Transition",
+    "VirtualCumulativeLeRobotACTTD3Dataset",
     "actor_update_is_due",
+    "build_act_td3_multi_root_training_data_identity",
     "build_act_td3_training_data_identity",
     "build_smdp_returns",
     "masked_deterministic_bc_l1",

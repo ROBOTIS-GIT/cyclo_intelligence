@@ -14,14 +14,28 @@ from .operations import (
     differentiable_act_action_chunk,
     predict_act_action_chunk,
 )
+from .trainability import (
+    ACT_DETERMINISTIC_INFERENCE_GROUPS,
+    ACT_TRAINABLE_GROUPS,
+    act_parameter_group,
+    apply_act_trainable_groups,
+    canonicalize_act_trainable_groups,
+    classify_act_parameters,
+)
 
 __all__ = [
     "ACTChunkQFunction",
+    "ACT_DETERMINISTIC_INFERENCE_GROUPS",
     "ACTExecutionProjector",
     "ACTPhysicalActionDomain",
     "ACTPolicyAssets",
+    "ACT_TRAINABLE_GROUPS",
     "ACTTwinChunkCritic",
+    "act_parameter_group",
+    "apply_act_trainable_groups",
     "build_act_execution_projector",
+    "canonicalize_act_trainable_groups",
+    "classify_act_parameters",
     "compute_act_bc_loss",
     "create_act_model",
     "differentiable_act_action_chunk",

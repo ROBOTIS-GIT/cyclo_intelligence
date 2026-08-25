@@ -31,6 +31,14 @@ const DEFAULT_LAYOUT = [
 ];
 const MANUAL_ROTATION_DEG = 270;
 
+export const normalizeColumnWeights = (weights, columnCount = DEFAULT_LAYOUT.length) => {
+  if (!Array.isArray(weights) || weights.length !== columnCount) return null;
+  const normalized = weights.map(Number);
+  return normalized.every((weight) => Number.isFinite(weight) && weight > 0)
+    ? normalized
+    : null;
+};
+
 const emptyAssignment = () => Array(DEFAULT_LAYOUT.length).fill(null);
 
 const normalizeAssignment = (topics) => {
@@ -93,7 +101,17 @@ const getSavedAssignmentForRobot = (state, robotType) => {
   return hasAssignedTopic(saved) ? saved : null;
 };
 
-export default function ImageGrid({ isActive = true }) {
+export default function ImageGrid({
+  isActive = true,
+  labels = null,
+  preferConfiguredOrder = false,
+  persistAssignment = true,
+  readOnly = false,
+  fillHeight = false,
+  columnWeights = null,
+  edgeToEdge = false,
+  coverCell = false,
+}) {
   const dispatch = useDispatch();
   const store = useStore();
   const imageTopicList = useSelector((state) => state.ros.imageTopicList);
@@ -113,6 +131,7 @@ export default function ImageGrid({ isActive = true }) {
   // state used to ping-pong with the persist effect below (React error #185,
   // blank screen on page transition).
   const [asignedImageTopicList, setAsignedImageTopicList] = useState(() => {
+    if (preferConfiguredOrder) return emptyAssignment();
     const saved = getSavedAssignmentForRobot(store.getState(), robotType);
     return saved || emptyAssignment();
   });
@@ -123,6 +142,11 @@ export default function ImageGrid({ isActive = true }) {
   const { getImageTopicList } = useRosServiceCaller();
 
   const layout = DEFAULT_LAYOUT;
+
+  const normalizedColumnWeights = useMemo(
+    () => normalizeColumnWeights(columnWeights, layout.length),
+    [columnWeights, layout.length]
+  );
 
   const rotationDegrees = useMemo(
     () => Array.from({ length: layout.length }, (_, idx) => (
@@ -146,6 +170,7 @@ export default function ImageGrid({ isActive = true }) {
     const saved = getSavedAssignmentForRobot(store.getState(), robotType);
     if (
       !force &&
+      !preferConfiguredOrder &&
       saved &&
       savedTopicsMatchAvailableTopics(saved, imageTopics)
     ) {
@@ -154,14 +179,16 @@ export default function ImageGrid({ isActive = true }) {
     console.log(`Applied camera topics for ${robotType || 'current robot'}:`, nextAssignment);
     setAsignedImageTopicList(nextAssignment);
     setRotationOverrides({});
-  }, [robotType, store]);
+  }, [preferConfiguredOrder, robotType, store]);
 
   useEffect(() => {
-    const saved = getSavedAssignmentForRobot(store.getState(), robotType);
+    const saved = preferConfiguredOrder
+      ? null
+      : getSavedAssignmentForRobot(store.getState(), robotType);
     setAsignedImageTopicList(saved || emptyAssignment());
     setTopicRotationMap({});
     setRotationOverrides({});
-  }, [robotType, store]);
+  }, [preferConfiguredOrder, robotType, store]);
 
   // Sync list length when layout length changes (extend or trim)
   useEffect(() => {
@@ -177,7 +204,7 @@ export default function ImageGrid({ isActive = true }) {
   // Compare against the latest store value via getState() so we never
   // re-trigger this effect from our own dispatch.
   useEffect(() => {
-    if (asignedImageTopicList.length === 0) return;
+    if (!persistAssignment || asignedImageTopicList.length === 0) return;
     const current = store.getState().ros.assignedImageTopics;
     const currentRobotType = store.getState().ros.assignedImageTopicsRobotType || '';
     const normalizedRobotType = String(robotType || '').trim();
@@ -191,7 +218,13 @@ export default function ImageGrid({ isActive = true }) {
         topics: asignedImageTopicList,
       }));
     }
-  }, [asignedImageTopicList, dispatch, robotType, store]);
+  }, [
+    asignedImageTopicList,
+    dispatch,
+    persistAssignment,
+    robotType,
+    store,
+  ]);
 
   useEffect(() => {
     const fetchTopicList = async () => {
@@ -206,7 +239,9 @@ export default function ImageGrid({ isActive = true }) {
             result.rotation_deg_list || []
           ));
           dispatch(setImageTopicList(imageTopics));
-          applyImageTopicsFromConfig(imageTopics);
+          applyImageTopicsFromConfig(imageTopics, {
+            force: preferConfiguredOrder,
+          });
           setTopicListError(null);
           toast.success(`Loaded ${imageTopics.length} image topics`);
         } else {
@@ -227,7 +262,12 @@ export default function ImageGrid({ isActive = true }) {
     };
 
     fetchTopicList();
-  }, [getImageTopicList, applyImageTopicsFromConfig, dispatch]);
+  }, [
+    getImageTopicList,
+    applyImageTopicsFromConfig,
+    dispatch,
+    preferConfiguredOrder,
+  ]);
 
   const handlePlusClick = (idx) => {
     setSelectedIdx(idx);
@@ -288,14 +328,22 @@ export default function ImageGrid({ isActive = true }) {
 
   const classImageGridArea = clsx(
     'flex', 'flex-row', 'justify-center', 'items-center',
-    'gap-[0.5vw]', 'w-full', 'h-full', 'max-w-full', 'max-h-full', 'overflow-hidden'
+    'w-full', 'h-full', 'max-w-full', 'max-h-full', 'overflow-hidden',
+    edgeToEdge ? 'gap-0' : 'gap-[0.5vw]'
   );
 
   const classImageGridCell = (idx) =>
     clsx('min-w-0', 'min-h-0', 'flex', 'items-center', 'justify-center', 'relative', {
-      'flex-[7_1_0]': idx === 1,
-      'flex-[3_1_0]': idx !== 1,
+      'h-full': fillHeight,
+      'flex-[7_1_0]': !normalizedColumnWeights && idx === 1,
+      'flex-[3_1_0]': !normalizedColumnWeights && idx !== 1,
     });
+
+  const getImageGridCellStyle = (idx) => {
+    if (!normalizedColumnWeights) return undefined;
+    const weight = normalizedColumnWeights[idx];
+    return { flex: `${weight} 1 0%` };
+  };
 
   const classTopicLabel = clsx(
     'absolute', 'bottom-2', 'left-2', 'text-xs', 'text-white',
@@ -306,7 +354,12 @@ export default function ImageGrid({ isActive = true }) {
     <div className="w-full h-full overflow-hidden">
       <div className={classImageGridArea}>
         {layout.map((cell, idx) => (
-          <div key={idx} className={classImageGridCell(idx)} data-cell-idx={idx}>
+          <div
+            key={idx}
+            className={classImageGridCell(idx)}
+            data-cell-idx={idx}
+            style={getImageGridCellStyle(idx)}
+          >
             <ImageGridCell
               topic={asignedImageTopicList[idx]}
               aspect={cell.aspect}
@@ -316,8 +369,14 @@ export default function ImageGrid({ isActive = true }) {
               onClose={handleCellClose}
               onPlusClick={handlePlusClick}
               isActive={isActive}
+              readOnly={readOnly}
+              edgeToEdge={edgeToEdge}
+              coverCell={coverCell}
+              style={fillHeight ? { height: '100%', aspectRatio: 'auto' } : undefined}
             />
-            <div className={classTopicLabel}>{asignedImageTopicList[idx] || ''}</div>
+            <div className={classTopicLabel}>
+              {labels?.[idx] || asignedImageTopicList[idx] || ''}
+            </div>
           </div>
         ))}
         {modalOpen && (

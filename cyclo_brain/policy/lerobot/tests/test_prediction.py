@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -72,6 +73,36 @@ class _BrokenChunkPolicy:
 
     def select_action(self, _batch):
         raise AssertionError("internal AttributeError must not fall back")
+
+
+class _MultiTaskDiTPolicy:
+    camera_keys = (
+        "observation.images.rgb.cam_left_wrist",
+        "observation.images.rgb.cam_left_head",
+        "observation.images.rgb.cam_right_wrist",
+    )
+
+    def __init__(self, *, n_obs_steps: int = 1) -> None:
+        self.config = SimpleNamespace(
+            type="multi_task_dit",
+            n_obs_steps=n_obs_steps,
+            image_features={key: object() for key in self.camera_keys},
+        )
+        self.prepared_batch = None
+
+    def predict_action_chunk(self, _batch):
+        raise AssertionError("the queue-backed public API must not be called")
+
+    def _prepare_batch(self, batch):
+        prepared = dict(batch)
+        prepared["observation.images"] = torch.stack(
+            [prepared[key] for key in self.camera_keys], dim=-4
+        )
+        return prepared
+
+    def _generate_actions(self, batch):
+        self.prepared_batch = batch
+        return torch.zeros(batch["observation.state"].shape[0], 16, 22)
 
 
 class _Predictor(PredictionMixin):
@@ -147,6 +178,88 @@ class PredictionTest(unittest.TestCase):
     def test_internal_attribute_error_is_not_hidden_by_fallback(self) -> None:
         with self.assertRaisesRegex(AttributeError, "internal policy defect"):
             _Predictor(_BrokenChunkPolicy())._predict_chunk({})
+
+    def test_multi_task_dit_adds_history_and_stacks_three_cameras(self) -> None:
+        policy = _MultiTaskDiTPolicy()
+        batch = {
+            "observation.state": torch.zeros(2, 22),
+            **{
+                key: torch.zeros(2, 3, 32, 48)
+                for key in policy.camera_keys
+            },
+            "observation.language.tokens": torch.zeros(2, 77, dtype=torch.long),
+            "observation.language.attention_mask": torch.ones(
+                2, 77, dtype=torch.long
+            ),
+        }
+
+        actual = _Predictor(policy)._predict_chunk(batch)
+
+        self.assertEqual(actual.shape, (2, 16, 22))
+        self.assertEqual(
+            policy.prepared_batch["observation.state"].shape,
+            (2, 1, 22),
+        )
+        self.assertEqual(
+            policy.prepared_batch["observation.images"].shape,
+            (2, 1, 3, 3, 32, 48),
+        )
+        for key in policy.camera_keys:
+            self.assertEqual(policy.prepared_batch[key].shape, (2, 1, 3, 32, 48))
+            self.assertEqual(batch[key].shape, (2, 3, 32, 48))
+        self.assertEqual(batch["observation.state"].shape, (2, 22))
+
+    def test_multi_task_dit_rejects_history_checkpoint_not_supported_by_engine(self) -> None:
+        policy = _MultiTaskDiTPolicy(n_obs_steps=2)
+
+        with self.assertRaisesRegex(ValueError, "requires n_obs_steps=1"):
+            _Predictor(policy)._predict_chunk({"observation.state": torch.zeros(1, 22)})
+
+    def test_multi_task_dit_rejects_missing_camera(self) -> None:
+        policy = _MultiTaskDiTPolicy()
+        batch = {
+            "observation.state": torch.zeros(1, 22),
+            **{
+                key: torch.zeros(1, 3, 32, 48)
+                for key in policy.camera_keys[:-1]
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "must have shape"):
+            _Predictor(policy)._predict_chunk(batch)
+
+    @unittest.skipUnless(
+        os.environ.get("CYCLO_TEST_MULTI_TASK_DIT_CHECKPOINT"),
+        "set CYCLO_TEST_MULTI_TASK_DIT_CHECKPOINT for the CUDA integration test",
+    )
+    def test_real_multi_task_dit_checkpoint_returns_16_by_22_chunk(self) -> None:
+        from lerobot_engine.loading import LoadingMixin
+
+        checkpoint = os.environ["CYCLO_TEST_MULTI_TASK_DIT_CHECKPOINT"]
+        device = torch.device("cuda")
+        policy, preprocessor, postprocessor = LoadingMixin._load_policy_assets(
+            checkpoint,
+            device,
+        )
+        raw_batch = {
+            "observation.state": torch.zeros(1, 22),
+            **{
+                key: torch.full((1, 3, 256, 256), 0.5)
+                for key in policy.config.image_features
+            },
+            "task": ["pick up the jelly bag"],
+        }
+
+        with torch.inference_mode():
+            normalized = _Predictor(policy)._predict_chunk(
+                preprocessor(raw_batch)
+            )
+            action = postprocessor(normalized)
+
+        self.assertEqual(policy.config.type, "multi_task_dit")
+        self.assertEqual(policy.config.objective, "flow_matching")
+        self.assertEqual(action.shape, (1, 16, 22))
+        self.assertTrue(bool(torch.isfinite(action).all()))
 
 
 if __name__ == "__main__":

@@ -5,17 +5,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import shutil
 import sys
 import tempfile
+import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor
 
 from cyclo_brain.model.act import (
+    ACT_TRAINABLE_GROUPS,
     ACTTwinChunkCritic,
     load_act_physical_action_domain,
     load_act_policy_assets,
@@ -26,6 +29,7 @@ from .learner import ACTTD3Learner
 from .lerobot_offline import (
     ACTTD3LeRobotCollator,
     FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 from .offline_training import (
     ACTTD3OfflineTrainingProgress,
@@ -42,7 +46,10 @@ from .offline_warmup_cli import (
     _require_referenced_dataset_files,
     _seed,
 )
-from .training_identity import build_act_td3_training_data_identity
+from .training_identity import (
+    build_act_td3_multi_root_training_data_identity,
+    build_act_td3_training_data_identity,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
             "critic-to-actor update schedule, capped at 200 episodes."
         )
     )
-    parser.add_argument("--dataset-root", required=True, type=Path)
+    parser.add_argument(
+        "--dataset-root",
+        required=True,
+        type=Path,
+        action="append",
+        help=(
+            "Immutable LeRobot v3 data-epoch root; repeat in collection order "
+            "to construct a virtual cumulative replay without merging files."
+        ),
+    )
     parser.add_argument("--act-checkpoint", required=True, type=Path)
     parser.add_argument("--robot-config", required=True, type=Path)
     parser.add_argument("--robot-type", required=True)
@@ -64,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay permutation seed; defaults to seed + 2.",
     )
     parser.add_argument("--batch-size", required=True, type=_positive)
+    parser.add_argument(
+        "--actor-trainable-group",
+        action="append",
+        choices=ACT_TRAINABLE_GROUPS,
+        dest="actor_trainable_groups",
+        help=(
+            "ACT parameter group to update; repeat for multiple groups. "
+            "Defaults to every group."
+        ),
+    )
     parser.add_argument(
         "--critic-epochs",
         type=_positive,
@@ -165,6 +191,50 @@ def _round_manifest(runner: ACTTD3OfflineTrainingRunner) -> dict[str, int]:
         "batches_per_epoch": runner.batches_per_epoch,
         "critic_updates": runner.total_critic_updates,
         "actor_updates": runner.total_actor_updates,
+    }
+
+
+def _result_manifest(
+    result: ACTTD3OfflineTrainingProgress,
+    *,
+    actor_trainable_groups: Sequence[str],
+    runner: ACTTD3OfflineTrainingRunner,
+    identity: Any,
+    model_directory: Path | None,
+    batch_size: int,
+) -> dict[str, Any]:
+    return {
+        "event": "result",
+        **asdict(result),
+        "actor_trainable_groups": list(actor_trainable_groups),
+        "batch_size": batch_size,
+        "schedule": _schedule_manifest(runner),
+        "round": _round_manifest(runner),
+        "training_data": _training_identity_summary(identity),
+        "model_path": str(model_directory) if model_directory is not None else None,
+    }
+
+
+def _dataset_root_arguments(value: Any) -> tuple[Path, ...]:
+    """Normalize argparse and legacy programmatic one-root namespaces."""
+
+    if isinstance(value, Path):
+        return (value,)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        roots = tuple(value)
+        if roots and all(isinstance(root, Path) for root in roots):
+            return roots
+    raise TypeError("dataset_root must contain one or more paths")
+
+
+def _training_identity_summary(identity: Any) -> dict[str, Any]:
+    roots = identity.virtual_contract.get("data_roots", [])
+    return {
+        "identity": identity.identity,
+        "file_count": identity.file_count,
+        "byte_count": identity.byte_count,
+        "component_sha256": identity.component_sha256,
+        "data_roots": roots,
     }
 
 
@@ -349,9 +419,51 @@ def _publish_policy_assets_for_unchanged_training_data(
     )
 
 
-def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingProgress:
+def _publish_policy_assets_for_unchanged_multi_root_training_data(
+    model_directory: Path,
+    *,
+    learner: ACTTD3Learner,
+    source_assets: Any,
+    expected_identity: Any,
+    datasets: Sequence[Any],
+    dataset_roots: Sequence[Path],
+    act_checkpoint_root: Path,
+    action_domains: Sequence[Any],
+    robot_type: str,
+    video_backend: str,
+) -> None:
+    current_identity = build_act_td3_multi_root_training_data_identity(
+        datasets,
+        dataset_roots,
+        act_checkpoint_root=act_checkpoint_root,
+        action_domains=action_domains,
+        robot_type=robot_type,
+        video_backend=video_backend,
+    )
+    if current_identity != expected_identity:
+        raise RuntimeError(
+            "ACT-TD3 training data identity changed during training; "
+            "refusing model export"
+        )
+    _export_policy_assets(
+        model_directory,
+        learner=learner,
+        source_assets=source_assets,
+    )
+
+
+def _run_from_args_unlocked(
+    args: argparse.Namespace,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> ACTTD3OfflineTrainingProgress:
     _validate_schedule(args.critic_epochs, args.actor_equivalent_epochs)
-    dataset_root = _input_directory(args.dataset_root, "dataset root")
+    dataset_roots = tuple(
+        _input_directory(value, f"dataset root {index}")
+        for index, value in enumerate(_dataset_root_arguments(args.dataset_root))
+    )
+    if len(set(dataset_roots)) != len(dataset_roots):
+        raise ValueError("dataset roots must be unique and ordered")
     act_checkpoint = _input_directory(args.act_checkpoint, "ACT checkpoint")
     robot_config = _input_file(args.robot_config, "robot config")
     if not isinstance(args.robot_type, str) or not args.robot_type.strip():
@@ -370,7 +482,7 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
     output_dir = _output_directory(
         args.output_dir,
         resume=args.resume,
-        inputs=(dataset_root, act_checkpoint, robot_config),
+        inputs=(*dataset_roots, act_checkpoint, robot_config),
     )
     checkpoint = output_dir / "training_state" / "act_td3.pt"
     if args.resume:
@@ -378,33 +490,41 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
     else:
         resume_from = parent_checkpoint
 
-    _require_local_dataset_layout(dataset_root)
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    local_repo_id = f"local/{dataset_root.name}"
-    metadata = LeRobotDatasetMetadata(repo_id=local_repo_id, root=dataset_root)
-    _require_referenced_dataset_files(dataset_root, metadata)
-    dataset = LeRobotDataset(
-        repo_id=local_repo_id,
-        root=dataset_root,
-        image_transforms=None,
-        delta_timestamps=None,
-        force_cache_sync=False,
-        download_videos=False,
-        video_backend=args.video_backend,
-        return_uint8=False,
-    )
-    action_domain = load_act_physical_action_domain(
-        dataset_root / "meta" / "info.json",
-        robot_config,
-        robot_type=args.robot_type,
-    )
-    identity = build_act_td3_training_data_identity(
-        dataset,
-        dataset_root=dataset_root,
+    datasets: list[Any] = []
+    action_domains: list[Any] = []
+    for root_index, dataset_root in enumerate(dataset_roots):
+        _require_local_dataset_layout(dataset_root)
+        local_repo_id = f"local/data_epoch_{root_index:04d}_{dataset_root.name}"
+        metadata = LeRobotDatasetMetadata(repo_id=local_repo_id, root=dataset_root)
+        _require_referenced_dataset_files(dataset_root, metadata)
+        datasets.append(
+            LeRobotDataset(
+                repo_id=local_repo_id,
+                root=dataset_root,
+                image_transforms=None,
+                delta_timestamps=None,
+                force_cache_sync=False,
+                download_videos=False,
+                video_backend=args.video_backend,
+                return_uint8=False,
+            )
+        )
+        action_domains.append(
+            load_act_physical_action_domain(
+                dataset_root / "meta" / "info.json",
+                robot_config,
+                robot_type=args.robot_type,
+            )
+        )
+
+    identity = build_act_td3_multi_root_training_data_identity(
+        datasets,
+        dataset_roots,
         act_checkpoint_root=act_checkpoint,
-        action_domain=action_domain,
+        action_domains=action_domains,
         robot_type=args.robot_type,
         video_backend=args.video_backend,
     )
@@ -417,11 +537,15 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
     critic.initialize_visual_backbones_from_actor(actor)
     critic.to(device=actor_parameter.device, dtype=actor_parameter.dtype)
 
-    replay = FixedHorizonLeRobotACTTD3Dataset(
-        dataset,
-        execution_horizon=int(actor.config.n_action_steps),
-        observation_keys=tuple(actor.config.input_features or {}),
+    root_replays = tuple(
+        FixedHorizonLeRobotACTTD3Dataset(
+            dataset,
+            execution_horizon=int(actor.config.n_action_steps),
+            observation_keys=tuple(actor.config.input_features or {}),
+        )
+        for dataset in datasets
     )
+    replay = VirtualCumulativeLeRobotACTTD3Dataset(root_replays)
     if replay.num_successes < 1 or replay.num_failures < 1:
         raise ValueError(
             "ACT-TD3 cumulative replay requires at least one success and one failure"
@@ -430,6 +554,9 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
     config = ACTTD3Config(
         discount_reference_hz=float(replay.fps),
         critic_warmup_updates=0,
+        actor_trainable_groups=tuple(
+            args.actor_trainable_groups or ACT_TRAINABLE_GROUPS
+        ),
     )
     learner = ACTTD3Learner(
         actor,
@@ -456,6 +583,7 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
         {
             "event": "manifest",
             "algorithm": "ACT-TD3 cumulative replay",
+            "actor_trainable_groups": list(config.actor_trainable_groups),
             "schedule": _schedule_manifest(runner),
             "device": str(device),
             "seed": args.seed,
@@ -466,7 +594,9 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
             "resume_from": str(resume_from) if resume_from is not None else None,
             "legacy_allow_partial_round": bool(args.allow_partial_round),
             "dataset": {
-                "frames": len(dataset),
+                "roots": len(dataset_roots),
+                "root_paths": [str(root) for root in dataset_roots],
+                "frames": sum(len(dataset) for dataset in datasets),
                 "episodes": replay.num_episodes,
                 "successes": replay.num_successes,
                 "failures": replay.num_failures,
@@ -475,10 +605,7 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
             },
             "round": _round_manifest(runner),
             "training_data": {
-                "identity": identity.identity,
-                "file_count": identity.file_count,
-                "byte_count": identity.byte_count,
-                "component_sha256": identity.component_sha256,
+                **_training_identity_summary(identity),
                 "video_backend": args.video_backend,
             },
         }
@@ -486,44 +613,65 @@ def _run_from_args_unlocked(args: argparse.Namespace) -> ACTTD3OfflineTrainingPr
     result = runner.run(
         max_round_critic_updates=args.max_round_critic_updates,
         progress_callback=_progress_line,
+        should_stop=should_stop,
     )
 
     model_directory: Path | None = None
     if result.status == "complete":
         model_directory = output_dir / "pretrained_model"
-        _publish_policy_assets_for_unchanged_training_data(
+        _publish_policy_assets_for_unchanged_multi_root_training_data(
             model_directory,
             learner=learner,
             source_assets=assets,
             expected_identity=identity,
-            dataset=dataset,
-            dataset_root=dataset_root,
+            datasets=datasets,
+            dataset_roots=dataset_roots,
             act_checkpoint_root=act_checkpoint,
-            action_domain=action_domain,
+            action_domains=action_domains,
             robot_type=args.robot_type,
             video_backend=args.video_backend,
         )
-    final = {
-        "event": "result",
-        **asdict(result),
-        "schedule": _schedule_manifest(runner),
-        "round": _round_manifest(runner),
-        "model_path": str(model_directory) if model_directory is not None else None,
-    }
+    final = _result_manifest(
+        result,
+        actor_trainable_groups=config.actor_trainable_groups,
+        runner=runner,
+        identity=identity,
+        model_directory=model_directory,
+        batch_size=args.batch_size,
+    )
     _atomic_json_save(output_dir / "training_manifest.json", final)
     _json_line(final)
     return result
 
 
-def run_from_args(args: argparse.Namespace) -> ACTTD3OfflineTrainingProgress:
+def run_from_args(
+    args: argparse.Namespace,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> ACTTD3OfflineTrainingProgress:
     """Validate, train, and export without blocking concurrent recording."""
-    return _run_from_args_unlocked(args)
+    return _run_from_args_unlocked(args, should_stop=should_stop)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
-        run_from_args(args)
+        stop_requested = threading.Event()
+        previous_sigint_handler = signal.getsignal(signal.SIGINT)
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(
+            signal.SIGINT,
+            lambda _signum, _frame: stop_requested.set(),
+        )
+        signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: stop_requested.set(),
+        )
+        try:
+            run_from_args(args, should_stop=stop_requested.is_set)
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
     except KeyboardInterrupt:
         _json_line(
             {

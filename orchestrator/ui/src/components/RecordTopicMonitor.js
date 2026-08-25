@@ -59,7 +59,7 @@ const rowStatusTitle = (topic) => {
   return `${statusText} (baseline ${formatRate(topic.baselineHz)} Hz, last ${lastText}${cameraText})`;
 };
 
-export default function RecordTopicMonitor() {
+export default function RecordTopicMonitor({ showWhenEmpty = false }) {
   const monitor = useSelector((state) => state.tasks.recordingMonitor);
   const { sendRecordCommand } = useRosServiceCaller();
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -82,12 +82,14 @@ export default function RecordTopicMonitor() {
     ...(monitor?.cameraTopics || []),
   ];
 
-  if (!rows.length) return null;
+  if (!rows.length && !showWhenEmpty) return null;
 
   const sorted = [...rows].sort((a, b) => b.status - a.status);
   const problemCount = rows.filter((t) => t.status !== STATUS_OK).length;
   const worstStatus = rows.reduce((max, t) => Math.max(max, t.status), STATUS_OK);
-  const overallColor = statusColor[worstStatus] || 'bg-green-500';
+  const overallColor = rows.length
+    ? statusColor[worstStatus] || 'bg-green-500'
+    : 'bg-gray-300';
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl shadow-md p-3 w-full h-full overflow-y-auto">
@@ -95,7 +97,9 @@ export default function RecordTopicMonitor() {
         <span className={clsx('inline-block w-3 h-3 rounded-full', overallColor)} />
         <span className="text-sm font-semibold text-gray-800">Topic Monitor</span>
         <span className="text-xs text-gray-400 ml-auto">
-          {problemCount > 0
+          {!rows.length
+            ? 'No topics'
+            : problemCount > 0
             ? `${problemCount} issue(s)`
             : `All ${rows.length} OK`}
         </span>
@@ -104,6 +108,7 @@ export default function RecordTopicMonitor() {
           onClick={handleRefresh}
           disabled={isRefreshing}
           title="Reset topic subscriptions"
+          aria-label="Refresh topic subscriptions"
           className={clsx(
             'p-1 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700',
             'disabled:text-gray-300 disabled:cursor-not-allowed'
@@ -112,41 +117,47 @@ export default function RecordTopicMonitor() {
           <MdRefresh className={clsx('w-4 h-4', isRefreshing && 'animate-spin')} />
         </button>
       </div>
-      <table className="w-full text-xs">
-        <thead>
-          <tr className="text-gray-500 border-b border-gray-100">
-            <th className="text-left py-1 font-medium">Topic</th>
-            <th className="text-right py-1 font-medium w-14">Hz</th>
-            <th className="text-center py-1 font-medium w-12">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((t) => (
-            <tr key={`${t.source}:${t.name}`} className="border-b border-gray-50 last:border-0">
-              <td
-                className="py-1 truncate max-w-[160px]"
-                title={t.source === 'camera' && t.cameraName
-                  ? `${t.name} (${t.cameraName})`
-                  : t.name}
-              >
-                {rowLabel(t)}
-              </td>
-              <td className="py-1 text-right font-mono text-gray-700">
-                {formatRate(t.rateHz)}
-              </td>
-              <td className="py-1 text-center">
-                <span
-                  className={clsx(
-                    'inline-block w-2.5 h-2.5 rounded-full',
-                    statusColor[t.status] || 'bg-gray-300'
-                  )}
-                  title={rowStatusTitle(t)}
-                />
-              </td>
+      {rows.length ? (
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 border-b border-gray-100">
+              <th className="text-left py-1 font-medium">Topic</th>
+              <th className="text-right py-1 font-medium w-14">Hz</th>
+              <th className="text-center py-1 font-medium w-12">Status</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {sorted.map((t) => (
+              <tr key={`${t.source}:${t.name}`} className="border-b border-gray-50 last:border-0">
+                <td
+                  className="py-1 truncate max-w-[160px]"
+                  title={t.source === 'camera' && t.cameraName
+                    ? `${t.name} (${t.cameraName})`
+                    : t.name}
+                >
+                  {rowLabel(t)}
+                </td>
+                <td className="py-1 text-right font-mono text-gray-700">
+                  {formatRate(t.rateHz)}
+                </td>
+                <td className="py-1 text-center">
+                  <span
+                    className={clsx(
+                      'inline-block w-2.5 h-2.5 rounded-full',
+                      statusColor[t.status] || 'bg-gray-300'
+                    )}
+                    title={rowStatusTitle(t)}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="grid min-h-[180px] place-items-center rounded-xl border border-dashed border-gray-200 bg-gray-50 px-5 text-center text-xs text-gray-500">
+          No monitored topics yet. Use Refresh to reset topic subscriptions.
+        </div>
+      )}
     </div>
   );
 }

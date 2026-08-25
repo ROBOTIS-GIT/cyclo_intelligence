@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cyclo_brain.algorithm.rl.act_td3.training_identity import (
+    build_act_td3_multi_root_training_data_identity,
     build_act_td3_training_data_identity,
 )
 
@@ -206,6 +207,83 @@ class ACTTD3TrainingIdentityTest(unittest.TestCase):
             selected.symlink_to(root / "outside.parquet")
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 _identity(dataset, checkpoint, domain)
+
+    def test_multi_root_identity_namespaces_files_and_records_ordered_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, checkpoint, first_domain = _build_fixture(root / "epoch_0000")
+            second, _, second_domain = _build_fixture(root / "epoch_0001")
+            second.episodes = [1]
+
+            identity = build_act_td3_multi_root_training_data_identity(
+                (first, second),
+                (first.root, second.root),
+                checkpoint,
+                (first_domain, second_domain),
+                robot_type="ffw_sg2_rev1",
+                video_backend="pyav",
+            )
+
+            data_roots = identity.virtual_contract["data_roots"]
+            self.assertEqual(identity.virtual_contract["episode_indices"], [0, 1, 2])
+            self.assertEqual(len(data_roots), 2)
+            self.assertEqual(data_roots[0]["root"], str(first.root.resolve()))
+            self.assertEqual(data_roots[0]["episode_indices"], [0, 1])
+            self.assertEqual(data_roots[0]["global_episode_indices"], [0, 1])
+            self.assertEqual(data_roots[1]["episode_indices"], [1])
+            self.assertEqual(data_roots[1]["global_episode_indices"], [2])
+            self.assertEqual(
+                data_roots[0]["identity"],
+                _identity(first, checkpoint, first_domain).identity,
+            )
+            dataset_paths = {
+                entry.path for entry in identity.manifest if entry.component == "dataset"
+            }
+            self.assertTrue(
+                any(path.startswith("data_root_0000/") for path in dataset_paths)
+            )
+            self.assertTrue(
+                any(path.startswith("data_root_0001/") for path in dataset_paths)
+            )
+            self.assertIn("data_root_0000", identity.component_sha256)
+            self.assertIn("data_root_0001", identity.component_sha256)
+            json.dumps(identity.to_dict(), allow_nan=False)
+
+            reordered = build_act_td3_multi_root_training_data_identity(
+                (second, first),
+                (second.root, first.root),
+                checkpoint,
+                (second_domain, first_domain),
+                robot_type="ffw_sg2_rev1",
+                video_backend="pyav",
+            )
+            self.assertNotEqual(identity.identity, reordered.identity)
+
+    def test_multi_root_identity_rejects_duplicate_and_incompatible_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, checkpoint, first_domain = _build_fixture(root / "epoch_0000")
+            second, _, second_domain = _build_fixture(root / "epoch_0001")
+            with self.assertRaisesRegex(ValueError, "must be unique"):
+                build_act_td3_multi_root_training_data_identity(
+                    (first, first),
+                    (first.root, first.root),
+                    checkpoint,
+                    (first_domain, first_domain),
+                    robot_type="ffw_sg2_rev1",
+                    video_backend="pyav",
+                )
+
+            second_domain.names = ("different", "linear_x")
+            with self.assertRaisesRegex(ValueError, "incompatible virtual contract"):
+                build_act_td3_multi_root_training_data_identity(
+                    (first, second),
+                    (first.root, second.root),
+                    checkpoint,
+                    (first_domain, second_domain),
+                    robot_type="ffw_sg2_rev1",
+                    video_backend="pyav",
+                )
 
 
 if __name__ == "__main__":

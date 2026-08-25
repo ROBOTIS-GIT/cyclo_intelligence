@@ -66,6 +66,17 @@ uint16 conversion_fps
 bool convert_v21
 bool convert_v30
 
+# Parent directory for generated LeRobot datasets. Empty keeps the legacy
+# /workspace/lerobot destination used by Data Tools. Offline RL may select an
+# existing directory under /workspace/lerobot; the converter creates its
+# version-suffixed dataset folders inside it.
+string lerobot_output_root
+
+# Destructive conversion opt-in. The cyclo_data worker removes raw numeric
+# episode directories only after validating all requested LeRobot outputs.
+# False preserves the existing Data Tools behaviour.
+bool delete_source_after_success
+
 # CONVERT_MP4 selection knobs — forwarded to StartConversion.srv when
 # the orchestrator dispatches conversion. All optional; empty / 0 means
 # "use everything from robot_config" so older UIs keep working.

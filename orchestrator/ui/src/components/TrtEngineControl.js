@@ -36,7 +36,7 @@ function statusLabel(status) {
   return 'Missing';
 }
 
-function statusClass(status) {
+function statusClass(status, isOfflineRL = false) {
   return clsx(
     'inline-flex',
     'items-center',
@@ -44,14 +44,23 @@ function statusClass(status) {
     'h-7',
     'min-w-20',
     'px-2',
-    'rounded-md',
-    'text-xs',
+    isOfflineRL ? 'rounded-lg' : 'rounded-md',
+    isOfflineRL ? 'text-[9px]' : 'text-xs',
     'font-semibold',
     {
-      'bg-emerald-100 text-emerald-700': status === 'ready',
-      'bg-blue-100 text-blue-700': status === 'building',
-      'bg-red-100 text-red-700': status === 'failed',
-      'bg-gray-100 text-gray-600': !status || status === 'missing' || status === 'unknown',
+      [isOfflineRL
+        ? 'bg-[#e5ece5] text-[#607563]'
+        : 'bg-emerald-100 text-emerald-700']: status === 'ready',
+      [isOfflineRL
+        ? 'bg-[#e7ebed] text-[#67747b]'
+        : 'bg-blue-100 text-blue-700']: status === 'building',
+      [isOfflineRL
+        ? 'bg-[#f4e5e1] text-[#995e54]'
+        : 'bg-red-100 text-red-700']: status === 'failed',
+      [isOfflineRL
+        ? 'bg-[#ece8df] text-[#756e63]'
+        : 'bg-gray-100 text-gray-600']:
+        !status || status === 'missing' || status === 'unknown',
     }
   );
 }
@@ -63,10 +72,12 @@ export default function TrtEngineControl({
   taskInstruction = '',
   disabled = false,
   labelClassName = '',
+  variant = 'default',
 }) {
   const [status, setStatus] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isBuilding, setIsBuilding] = useState(false);
+  const isOfflineRL = variant === 'offlineRL';
 
   const trimmedModelPath = useMemo(() => String(modelPath || '').trim(), [modelPath]);
   const trimmedEnginePath = useMemo(() => String(enginePath || '').trim(), [enginePath]);
@@ -169,7 +180,7 @@ export default function TrtEngineControl({
           position="bottom"
           disabled={!message && !status?.engine_path}
         >
-          <span className={statusClass(currentStatus)}>
+          <span className={statusClass(currentStatus, isOfflineRL)}>
             {statusLabel(currentStatus)}
           </span>
         </Tooltip>
@@ -177,7 +188,12 @@ export default function TrtEngineControl({
           type="button"
           onClick={handleBuild}
           disabled={buildDisabled}
-          className="h-8 px-2 rounded-md bg-blue-500 text-white text-sm font-semibold hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-1"
+          className={clsx(
+            'flex h-8 items-center gap-1 px-2 font-semibold disabled:cursor-not-allowed',
+            isOfflineRL
+              ? 'rounded-lg bg-[#71806b] text-[10px] text-white hover:bg-[#64725f] disabled:bg-[#d7d0c4]'
+              : 'rounded-md bg-blue-500 text-sm text-white hover:bg-blue-600 disabled:bg-gray-300'
+          )}
         >
           <MdBuild size={16} />
           {isBuilding ? 'Starting' : buildText}
@@ -186,7 +202,12 @@ export default function TrtEngineControl({
           type="button"
           onClick={() => refreshStatus()}
           disabled={refreshDisabled}
-          className="h-8 w-8 rounded-md bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+          className={clsx(
+            'flex h-8 w-8 items-center justify-center disabled:cursor-not-allowed disabled:opacity-50',
+            isOfflineRL
+              ? 'rounded-lg border border-[#d9d2c5] bg-[#eee9e0] text-[#6c655a] hover:bg-[#e4ded3]'
+              : 'rounded-md bg-gray-200 text-gray-600 hover:bg-gray-300'
+          )}
           aria-label="Refresh TRT engine status"
         >
           <MdRefresh className={isRefreshing ? 'animate-spin' : ''} size={18} />

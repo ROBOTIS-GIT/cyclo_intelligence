@@ -26,6 +26,7 @@ import replaySlice from '../features/replay/replaySlice';
 import layoutSlice from '../features/layout/layoutSlice';
 import btmanagerSlice from '../features/btmanager/btmanagerSlice';
 import btCatalogSlice from '../features/btmanager/btCatalogSlice';
+import offlineRLSlice from '../features/offlineRL/offlineRLSlice';
 
 export const store = configureStore({
   reducer: {
@@ -38,6 +39,7 @@ export const store = configureStore({
     layout: layoutSlice,
     btmanager: btmanagerSlice,
     btCatalog: btCatalogSlice,
+    offlineRL: offlineRLSlice,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

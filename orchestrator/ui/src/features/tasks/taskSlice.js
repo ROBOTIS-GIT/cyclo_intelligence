@@ -341,6 +341,7 @@ const initialState = {
     taskName: 'idle',
     taskType: '',
     recordInferenceMode: false,
+    taskNum: '',
     running: false,
     recordPhase: RecordPhase.READY,
     progress: 0,

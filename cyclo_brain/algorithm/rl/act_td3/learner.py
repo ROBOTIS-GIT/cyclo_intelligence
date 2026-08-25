@@ -13,7 +13,9 @@ from torch import Tensor, nn
 
 from cyclo_brain.algorithm.rl.td3.functional import critic_loss, polyak_update_
 from cyclo_brain.model.act import (
+    ACT_TRAINABLE_GROUPS,
     ACTTwinChunkCritic,
+    apply_act_trainable_groups,
     compute_act_bc_loss,
     differentiable_act_action_chunk,
 )
@@ -167,7 +169,8 @@ class ACTTD3Learner:
     maps deployed actions back to the robot's raw command coordinates.
     """
 
-    STATE_FORMAT = "cyclo_brain.act_td3_learner/v3"
+    STATE_FORMAT = "cyclo_brain.act_td3_learner/v4"
+    LEGACY_ALL_TRAINABLE_STATE_FORMAT = "cyclo_brain.act_td3_learner/v3"
     BC_SUPPORT = "executed_prefix_zero_padded_to_prediction_horizon"
     ACTION_DOMAIN = "saved_act_preprocessor_mean_std_normalized"
     TARGET_POLICY_SMOOTHING = "clipped_noise_all_dimensions_no_action_clamp"
@@ -243,12 +246,21 @@ class ACTTD3Learner:
         }:
             raise ValueError("ACT-TD3 Q1 and Q2 parameters must be independent")
 
-        self.actor = actor.eval().requires_grad_(True)
+        self.actor = actor.eval()
+        apply_act_trainable_groups(
+            self.actor,
+            self.config.actor_trainable_groups,
+        )
         self.critic = critic.train().requires_grad_(True)
         self.actor_target = copy.deepcopy(self.actor).eval().requires_grad_(False)
         self.critic_target = copy.deepcopy(self.critic).eval().requires_grad_(False)
+        trainable_actor_parameters = [
+            parameter
+            for parameter in self.actor.parameters()
+            if parameter.requires_grad
+        ]
         self.actor_optimizer = torch.optim.AdamW(
-            self.actor.parameters(),
+            trainable_actor_parameters,
             lr=self.config.actor_learning_rate,
             weight_decay=self.config.actor_weight_decay,
         )
@@ -286,6 +298,7 @@ class ACTTD3Learner:
             "target_policy_smoothing": self.TARGET_POLICY_SMOOTHING,
             "actor_q_gradient": self.ACTOR_Q_GRADIENT,
             "action_clamp": False,
+            "actor_trainable_groups": self.config.actor_trainable_groups,
         }
 
     def _validate_batch(self, batch: ACTTD3Batch) -> None:
@@ -608,7 +621,8 @@ class ACTTD3Learner:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         """Restore an exact update boundary without changing the action contract."""
 
-        if not isinstance(state, Mapping) or state.get("format") != self.STATE_FORMAT:
+        state = self._normalize_legacy_all_trainable_state(state)
+        if state.get("format") != self.STATE_FORMAT:
             raise ValueError("ACT-TD3 learner state format is invalid")
         if state.get("contract") != self._state_contract():
             raise ValueError("ACT-TD3 learner state tensor contract disagrees")
@@ -641,10 +655,49 @@ class ACTTD3Learner:
         self.actor_generator.set_state(state["actor_generator"])
         self.completed_critic_updates = critic_updates
         self.completed_actor_updates = actor_updates
-        self.actor.eval().requires_grad_(True)
+        self.actor.eval()
+        apply_act_trainable_groups(
+            self.actor,
+            self.config.actor_trainable_groups,
+        )
         self.critic.train().requires_grad_(True)
         self.actor_target.eval().requires_grad_(False)
         self.critic_target.eval().requires_grad_(False)
+
+    def _normalize_legacy_all_trainable_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Migrate v3 only when it retains its historical all-trainable meaning."""
+
+        if not isinstance(state, Mapping):
+            raise ValueError("ACT-TD3 learner state format is invalid")
+        if state.get("format") != self.LEGACY_ALL_TRAINABLE_STATE_FORMAT:
+            return state
+        if self.config.actor_trainable_groups != ACT_TRAINABLE_GROUPS:
+            raise ValueError(
+                "Legacy ACT-TD3 v3 checkpoints can resume only with all ACT "
+                "actor trainable groups"
+            )
+        legacy_contract = state.get("contract")
+        legacy_config = state.get("config")
+        if (
+            not isinstance(legacy_contract, Mapping)
+            or not isinstance(legacy_config, Mapping)
+            or "actor_trainable_groups" in legacy_contract
+            or "actor_trainable_groups" in legacy_config
+        ):
+            raise ValueError("ACT-TD3 legacy learner state contract is invalid")
+
+        normalized = dict(state)
+        normalized_contract = dict(legacy_contract)
+        normalized_contract["actor_trainable_groups"] = ACT_TRAINABLE_GROUPS
+        normalized_config = dict(legacy_config)
+        normalized_config["actor_trainable_groups"] = ACT_TRAINABLE_GROUPS
+        normalized["format"] = self.STATE_FORMAT
+        normalized["contract"] = normalized_contract
+        normalized["config"] = normalized_config
+        return normalized
 
 
 __all__ = ["ACTTD3Learner", "ACTTD3UpdateResult"]

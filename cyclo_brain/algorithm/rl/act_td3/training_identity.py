@@ -27,6 +27,7 @@ from typing import Any
 
 
 _IDENTITY_SCHEMA = "cyclo.act_td3.training_data_identity.v1"
+_MULTI_IDENTITY_SCHEMA = "cyclo.act_td3.training_data_identity.multi_root.v1"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
 
@@ -823,8 +824,196 @@ def build_act_td3_training_data_identity(
     )
 
 
+def build_act_td3_multi_root_training_data_identity(
+    datasets: Sequence[Any],
+    dataset_roots: Sequence[str | Path],
+    act_checkpoint_root: str | Path,
+    action_domains: Sequence[Any],
+    *,
+    robot_type: str,
+    video_backend: str,
+) -> ACTTD3TrainingDataIdentity:
+    """Bind ordered immutable LeRobot roots into one cumulative identity.
+
+    Each root is first hashed with the strict single-root builder.  Dataset
+    entries are then namespaced by root ordinal while checkpoint and robot
+    inputs are retained once.  The ordered ``data_roots`` contract is what a
+    child training round uses for append-only prefix validation.
+    """
+
+    if isinstance(datasets, (str, bytes)) or not isinstance(datasets, Sequence):
+        raise TypeError("datasets must be an ordered sequence")
+    if isinstance(dataset_roots, (str, bytes)) or not isinstance(
+        dataset_roots, Sequence
+    ):
+        raise TypeError("dataset_roots must be an ordered sequence")
+    if isinstance(action_domains, (str, bytes)) or not isinstance(
+        action_domains, Sequence
+    ):
+        raise TypeError("action_domains must be an ordered sequence")
+    datasets_tuple = tuple(datasets)
+    roots_tuple = tuple(dataset_roots)
+    domains_tuple = tuple(action_domains)
+    if not datasets_tuple or not (
+        len(datasets_tuple) == len(roots_tuple) == len(domains_tuple)
+    ):
+        raise ValueError(
+            "datasets, dataset_roots, and action_domains must have the same non-zero length"
+        )
+
+    resolved_roots = tuple(
+        _secure_root(root, label=f"LeRobot dataset root {index}").path
+        for index, root in enumerate(roots_tuple)
+    )
+    if len(set(resolved_roots)) != len(resolved_roots):
+        raise ValueError("ordered LeRobot dataset roots must be unique")
+
+    identities = tuple(
+        build_act_td3_training_data_identity(
+            dataset,
+            dataset_root=root,
+            act_checkpoint_root=act_checkpoint_root,
+            action_domain=domain,
+            robot_type=robot_type,
+            video_backend=video_backend,
+        )
+        for dataset, root, domain in zip(
+            datasets_tuple, resolved_roots, domains_tuple, strict=True
+        )
+    )
+
+    first = identities[0]
+    common_virtual = {
+        key: value
+        for key, value in first.virtual_contract.items()
+        if key != "episode_indices"
+    }
+    for index, identity in enumerate(identities[1:], start=1):
+        candidate_virtual = {
+            key: value
+            for key, value in identity.virtual_contract.items()
+            if key != "episode_indices"
+        }
+        if candidate_virtual != common_virtual:
+            raise ValueError(
+                f"LeRobot dataset root {index} has an incompatible virtual contract"
+            )
+        for component in ("act_checkpoint", "robot"):
+            if identity.component_sha256.get(component) != first.component_sha256.get(
+                component
+            ):
+                raise ValueError(
+                    f"LeRobot dataset root {index} has a different {component} identity"
+                )
+
+    manifest: list[ACTTD3TrainingIdentityFile] = []
+    for root_index, identity in enumerate(identities):
+        for entry in identity.manifest:
+            if entry.component == "dataset":
+                manifest.append(
+                    ACTTD3TrainingIdentityFile(
+                        component="dataset",
+                        path=f"data_root_{root_index:04d}/{entry.path}",
+                        byte_count=entry.byte_count,
+                        sha256=entry.sha256,
+                    )
+                )
+            elif root_index == 0:
+                manifest.append(entry)
+
+    data_roots: list[dict[str, Any]] = []
+    global_episode_start = 0
+    global_episode_indices: list[int] = []
+    for index, (root, identity) in enumerate(zip(resolved_roots, identities, strict=True)):
+        local_indices = identity.virtual_contract.get("episode_indices")
+        if not isinstance(local_indices, list) or not local_indices:
+            raise RuntimeError("single-root identity returned invalid episode indices")
+        global_episode_stop = global_episode_start + len(local_indices)
+        global_indices = list(range(global_episode_start, global_episode_stop))
+        global_episode_indices.extend(global_indices)
+        data_roots.append(
+            {
+                "ordinal": index,
+                "root": str(root),
+                "name": root.name,
+                "identity": identity.identity,
+                "dataset_sha256": identity.component_sha256["dataset"],
+                "episode_indices": list(local_indices),
+                "global_episode_indices": global_indices,
+                "file_count": sum(
+                    entry.component == "dataset" for entry in identity.manifest
+                ),
+                "byte_count": sum(
+                    entry.byte_count
+                    for entry in identity.manifest
+                    if entry.component == "dataset"
+                ),
+            }
+        )
+        global_episode_start = global_episode_stop
+
+    virtual_contract = {
+        **common_virtual,
+        "episode_indices": global_episode_indices,
+        "data_roots": data_roots,
+    }
+    manifest_tuple = tuple(
+        sorted(manifest, key=lambda entry: (entry.component, entry.path))
+    )
+    dataset_entries = [
+        {
+            "path": entry.path,
+            "byte_count": entry.byte_count,
+            "sha256": entry.sha256,
+        }
+        for entry in manifest_tuple
+        if entry.component == "dataset"
+    ]
+    component_sha256 = {
+        "dataset": _prefixed_sha256(
+            _canonical_json_bytes(
+                {
+                    "schema": _MULTI_IDENTITY_SCHEMA,
+                    "component": "dataset",
+                    "files": dataset_entries,
+                }
+            )
+        ),
+        "act_checkpoint": first.component_sha256["act_checkpoint"],
+        "robot": first.component_sha256["robot"],
+        "virtual_contract": _prefixed_sha256(
+            _canonical_json_bytes(
+                {
+                    "schema": _MULTI_IDENTITY_SCHEMA,
+                    "component": "virtual_contract",
+                    "value": virtual_contract,
+                }
+            )
+        ),
+    }
+    for index, identity in enumerate(identities):
+        component_sha256[f"data_root_{index:04d}"] = identity.component_sha256[
+            "dataset"
+        ]
+
+    identity_payload = {
+        "schema": _MULTI_IDENTITY_SCHEMA,
+        "files": [asdict(entry) for entry in manifest_tuple],
+        "virtual_contract": virtual_contract,
+    }
+    return ACTTD3TrainingDataIdentity(
+        identity=_prefixed_sha256(_canonical_json_bytes(identity_payload)),
+        file_count=len(manifest_tuple),
+        byte_count=sum(entry.byte_count for entry in manifest_tuple),
+        component_sha256=component_sha256,
+        manifest=manifest_tuple,
+        virtual_contract=virtual_contract,
+    )
+
+
 __all__ = [
     "ACTTD3TrainingDataIdentity",
     "ACTTD3TrainingIdentityFile",
+    "build_act_td3_multi_root_training_data_identity",
     "build_act_td3_training_data_identity",
 ]

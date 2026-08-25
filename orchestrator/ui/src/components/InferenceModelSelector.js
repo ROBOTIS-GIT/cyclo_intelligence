@@ -36,6 +36,12 @@ const MODEL_GROUPS = [
       { value: 'lerobot:pi0', label: 'Pi0', serviceType: 'lerobot', policyType: 'pi0' },
       { value: 'lerobot:pi05', label: 'Pi0.5', serviceType: 'lerobot', policyType: 'pi05' },
       { value: 'lerobot:diffusion', label: 'Diffusion', serviceType: 'lerobot', policyType: 'diffusion' },
+      {
+        value: 'lerobot:multi_task_dit',
+        label: 'Diffusion Transformer (Flow)',
+        serviceType: 'lerobot',
+        policyType: 'multi_task_dit',
+      },
     ],
   },
   {
@@ -76,16 +82,21 @@ export const MODEL_OPTIONS = MODEL_GROUPS.flatMap((group) => group.options);
 const AVAILABLE_MODEL_OPTIONS = MODEL_OPTIONS.filter((opt) => !opt.comingSoon);
 const DEFAULT = AVAILABLE_MODEL_OPTIONS[0];
 
-const classLabel = clsx(
-  'text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium'
-);
-
-const InferenceModelSelector = ({ readonly = false }) => {
+const InferenceModelSelector = ({
+  readonly = false,
+  label = 'Model',
+  variant = 'default',
+}) => {
   const dispatch = useDispatch();
   const info = useSelector(selectInferenceTaskInfo, shallowEqual);
   const serviceType = info.serviceType || DEFAULT.serviceType;
   const policyType = info.policyType || DEFAULT.policyType;
   const value = `${serviceType}:${policyType}`;
+  const isOfflineRL = variant === 'offlineRL';
+  const classLabel = clsx(
+    'w-28 flex-shrink-0 font-medium',
+    isOfflineRL ? 'text-[10px] text-[#6e675c]' : 'text-sm text-gray-600'
+  );
 
   const handleChange = (e) => {
     const sel = AVAILABLE_MODEL_OPTIONS.find((o) => o.value === e.target.value);
@@ -107,22 +118,25 @@ const InferenceModelSelector = ({ readonly = false }) => {
 
   return (
     <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-      <span className={classLabel}>Model</span>
+      <span className={classLabel}>{label}</span>
       <select
         className={clsx(
           'flex-1',
           'h-8',
           'px-2',
+          isOfflineRL ? 'text-[11px] text-[#403b34]' : 'text-sm',
           'border',
-          'border-gray-300',
-          'rounded-md',
+          isOfflineRL ? 'border-[#d9d2c5]' : 'border-gray-300',
+          isOfflineRL ? 'rounded-lg' : 'rounded-md',
           'focus:outline-none',
           'focus:ring-2',
-          'focus:ring-blue-500',
+          isOfflineRL ? 'focus:ring-[#c7beb0]' : 'focus:ring-blue-500',
           'focus:border-transparent',
           {
-            'bg-gray-100 cursor-not-allowed text-gray-500': readonly,
-            'bg-white': !readonly,
+            [isOfflineRL
+              ? 'cursor-not-allowed bg-[#ece8df] text-[#8f877b]'
+              : 'bg-gray-100 cursor-not-allowed text-gray-500']: readonly,
+            [isOfflineRL ? 'bg-[#fffefa]' : 'bg-white']: !readonly,
           }
         )}
         value={value}

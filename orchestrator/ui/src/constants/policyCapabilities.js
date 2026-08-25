@@ -22,6 +22,7 @@ export const POLICY_REQUIRES_INSTRUCTION = {
   'lerobot:pi0': true,
   'lerobot:pi05': true,
   'lerobot:diffusion': false,
+  'lerobot:multi_task_dit': true,
 };
 
 export const DEFAULT_REQUIRES_INSTRUCTION = false;

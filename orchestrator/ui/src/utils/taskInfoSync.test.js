@@ -22,6 +22,14 @@ describe('taskInfoSync echo routing', () => {
     })).toBe(true);
   });
 
+  test('applies inference task info to the Offline RL workspace', () => {
+    expect(shouldApplyServerTaskInfoToPage({
+      taskInfo: { taskType: 'inference' },
+      currentPage: PageType.OFFLINE_RL,
+      inferencePhase: InferencePhase.READY,
+    })).toBe(true);
+  });
+
   test('applies record task info to inference pages', () => {
     expect(shouldApplyServerTaskInfoToPage({
       taskInfo: { taskType: 'record' },

@@ -6,6 +6,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 APP_PATH = Path(__file__).resolve().with_name("app.py")
 REPO_ROOT = APP_PATH.parents[2]
 
@@ -100,6 +102,47 @@ def test_navigation_routes_are_registered():
     assert "/navigation/start" in paths
     assert "/navigation/maps/pgm/save" in paths
     assert "/navigation/topics/ws" in paths
+
+
+def test_flow_sde_ppo_routes_are_registered():
+    paths = {route.path for route in app.app.routes if hasattr(route, "path")}
+
+    assert "/flow-sde-ppo/start" in paths
+    assert "/flow-sde-ppo/status" in paths
+    assert "/flow-sde-ppo/stop" in paths
+    assert "/flow-sde-ppo/outcome" in paths
+    assert "/flow-sde-ppo/value-warmup/start" in paths
+    assert "/flow-sde-ppo/value-warmup/status" in paths
+    assert "/flow-sde-ppo/value-warmup/stop" in paths
+
+
+def test_running_flow_sde_ppo_blocks_td3_and_imitation_learning():
+    import pytest
+    from fastapi import HTTPException
+
+    supervisor = app._FLOW_SDE_PPO_SUPERVISOR
+    with supervisor._lock:
+        previous = supervisor._job
+        supervisor._job = SimpleNamespace(status="running")
+    try:
+        td3_request = app.OfflineRLStartRequest(
+            dataset_path="/not-reached",
+            act_checkpoint="/not-reached",
+            robot_type="ffw_sg2_rev1",
+        )
+        with pytest.raises(HTTPException, match="Stop Flow-SDE PPO") as td3_error:
+            asyncio.run(app.offline_rl_start(td3_request))
+        assert td3_error.value.status_code == 409
+
+        il_request = app.ImitationLearningStartRequest(
+            dataset_path="/not-reached",
+        )
+        with pytest.raises(HTTPException, match="Stop Flow-SDE PPO") as il_error:
+            asyncio.run(app.imitation_learning_start(il_request))
+        assert il_error.value.status_code == 409
+    finally:
+        with supervisor._lock:
+            supervisor._job = previous
 
 
 def test_navigation_grid_data_crc32_uses_only_map_data():
@@ -686,6 +729,8 @@ def _offline_rl_test_layout(monkeypatch, tmp_path, episodes=50):
     (dataset / "meta" / "info.json").write_text(json.dumps({
         "codebase_version": "v3.0",
         "total_episodes": episodes,
+        "total_frames": episodes * 10,
+        "fps": 15,
         "features": {"episode_success": {"dtype": "bool"}},
     }))
     (act / "config.json").write_text('{"type":"act"}')
@@ -696,7 +741,664 @@ def _offline_rl_test_layout(monkeypatch, tmp_path, episodes=50):
     monkeypatch.setattr(app, "_OFFLINE_RL_MODEL_ROOT", model_root)
     monkeypatch.setattr(app, "_OFFLINE_RL_OUTPUT_ROOT", model_root / "offline_rl")
     monkeypatch.setattr(app, "_OFFLINE_RL_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(
+        app,
+        "_IMITATION_LEARNING_OUTPUT_ROOT",
+        model_root / "imitation_learning",
+    )
+    monkeypatch.setattr(
+        app,
+        "_IMITATION_LEARNING_LOG_ROOT",
+        tmp_path / "imitation_logs",
+    )
     return dataset, act, model_root
+
+
+def _offline_rl_summary_rows(count):
+    return [
+        app.OfflineRLDatasetEpisode(
+            index=index,
+            frames=10,
+            outcome=(
+                "failure" if index == count - 1 else "success"
+            ),
+            tasks=["pick jelly"],
+        )
+        for index in range(count)
+    ]
+
+
+def test_offline_rl_dataset_summary_reports_episode_labels(monkeypatch, tmp_path):
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["features"]["observation.images.head"] = {"dtype": "video"}
+    info_path.write_text(json.dumps(info))
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: _offline_rl_summary_rows(count),
+    )
+
+    summary = app._offline_rl_dataset_summary(str(dataset))
+
+    assert summary.version == "v3.0"
+    assert summary.fps == 15.0
+    assert summary.total_episodes == 3
+    assert summary.camera_count == 1
+    assert summary.success_count == 2
+    assert summary.failure_count == 1
+    assert summary.unlabeled_count == 0
+    assert summary.success_rate == 66.67
+    assert [episode.index for episode in summary.episodes] == [0, 1, 2]
+
+
+def test_offline_rl_dataset_summary_rejects_non_finite_fps(monkeypatch, tmp_path):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=1,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, _count: pytest.fail("episode rows must not be read"),
+    )
+
+    for fps in (float("nan"), float("inf"), float("-inf")):
+        info["fps"] = fps
+        info_path.write_text(json.dumps(info))
+        with pytest.raises(app.HTTPException) as error:
+            app._offline_rl_dataset_summary(str(dataset))
+        assert error.value.status_code == 400
+        assert "finite and positive" in error.value.detail
+
+
+def test_offline_rl_episode_rows_reject_non_finite_success_stats(
+    monkeypatch,
+    tmp_path,
+):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=1,
+    )
+    v3_metadata = dataset / "meta" / "episodes" / "chunk-000"
+    v3_metadata.mkdir(parents=True)
+    v3_file = v3_metadata / "file-000.parquet"
+    v3_file.write_bytes(b"metadata")
+    current_success = [0.0]
+
+    parquet_stub = types.ModuleType("pyarrow.parquet")
+    parquet_stub.ParquetFile = lambda _path: SimpleNamespace(
+        schema_arrow=SimpleNamespace(names=[
+            "episode_index",
+            "length",
+            "stats/episode_success/mean",
+        ])
+    )
+    parquet_stub.read_table = lambda _path, columns: SimpleNamespace(
+        to_pylist=lambda: [{
+            "episode_index": 0,
+            "length": 10,
+            "stats/episode_success/mean": current_success[0],
+        }]
+    )
+    pyarrow_stub = types.ModuleType("pyarrow")
+    pyarrow_stub.__path__ = []
+    pyarrow_stub.parquet = parquet_stub
+    monkeypatch.setitem(sys.modules, "pyarrow", pyarrow_stub)
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", parquet_stub)
+
+    (dataset / "meta" / "episodes.jsonl").write_text(
+        json.dumps({"episode_index": 0, "length": 10}) + "\n"
+    )
+    v21_stats = dataset / "meta" / "episodes_stats.jsonl"
+
+    for value in (float("nan"), float("inf"), float("-inf")):
+        current_success[0] = value
+        with pytest.raises(app.HTTPException) as error:
+            app._offline_rl_v3_episode_rows(dataset.resolve(), 1)
+        assert error.value.status_code == 400
+        assert "Invalid episode_success" in error.value.detail
+
+        v21_stats.write_text(json.dumps({
+            "episode_index": 0,
+            "stats": {"episode_success": {"mean": [value]}},
+        }) + "\n")
+        with pytest.raises(app.HTTPException) as error:
+            app._offline_rl_v21_episode_rows(dataset.resolve(), 1)
+        assert error.value.status_code == 400
+        assert "Invalid episode_success" in error.value.detail
+
+
+def test_offline_rl_dataset_summary_reads_v21_episode_cards(monkeypatch, tmp_path):
+    dataset, _act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["codebase_version"] = "v2.1"
+    info["total_episodes"] = 2
+    info["total_frames"] = 20
+    info["features"]["observation.images.head"] = {"dtype": "video"}
+    info_path.write_text(json.dumps(info))
+    (dataset / "meta" / "episodes.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "episode_index": index,
+                "length": 10,
+                "tasks": ["pick jelly"],
+            })
+            for index in range(2)
+        ]) + "\n"
+    )
+    (dataset / "meta" / "episodes_stats.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "episode_index": 0,
+                "stats": {"episode_success": {"mean": [1.0]}},
+            }),
+            json.dumps({
+                "episode_index": 1,
+                "stats": {"episode_success": {"mean": [0.0]}},
+            }),
+        ]) + "\n"
+    )
+
+    summary = app._offline_rl_dataset_summary(str(dataset))
+
+    assert summary.version == "v2.1"
+    assert summary.camera_count == 1
+    assert summary.success_count == 1
+    assert summary.failure_count == 1
+    assert summary.success_rate == 50.0
+    assert [episode.frames for episode in summary.episodes] == [10, 10]
+    assert [episode.tasks for episode in summary.episodes] == [
+        ["pick jelly"],
+        ["pick jelly"],
+    ]
+
+
+def test_offline_rl_dataset_inventory_discovers_nested_datasets(monkeypatch, tmp_path):
+    dataset_root = tmp_path / "workspace" / "lerobot"
+    older = dataset_root / "older_lerobot_v30"
+    newer = dataset_root / "RLTEST" / "newer_lerobot_v21"
+    for dataset in (older, newer):
+        (dataset / "meta").mkdir(parents=True)
+        (dataset / "meta" / "info.json").write_text("{}")
+    older_time = 1000
+    newer_time = 2000
+    import os
+    os.utime(older / "meta" / "info.json", (older_time, older_time))
+    os.utime(newer / "meta" / "info.json", (newer_time, newer_time))
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_ROOT", dataset_root)
+
+    def summary(path):
+        dataset = Path(path)
+        version = "v2.1" if dataset.name.endswith("v21") else "v3.0"
+        return app.OfflineRLDatasetSummary(
+            dataset_path=str(dataset),
+            name=dataset.name,
+            version=version,
+            fps=15,
+            total_episodes=1,
+            total_frames=10,
+            camera_count=3,
+            success_count=1,
+            failure_count=0,
+            unlabeled_count=0,
+            success_rate=100,
+            episodes=[],
+        )
+
+    monkeypatch.setattr(app, "_offline_rl_dataset_summary", summary)
+
+    inventory = app._offline_rl_dataset_inventory(str(dataset_root))
+
+    assert inventory.root_path == str(dataset_root)
+    assert [item.dataset_path for item in inventory.datasets] == [
+        str(newer),
+        str(older),
+    ]
+
+    endpoint_inventory = asyncio.run(app.offline_rl_datasets(str(dataset_root)))
+    assert [item.dataset_path for item in endpoint_inventory.datasets] == [
+        str(newer),
+        str(older),
+    ]
+
+
+def test_offline_rl_data_epoch_reservation_is_monotonic_and_writes_provenance(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_root = tmp_path / "workspace" / "lerobot"
+    destination = dataset_root / "RLTEST"
+    rosbag_root = tmp_path / "workspace" / "rosbag2"
+    source = rosbag_root / "Task_failure_inference_MCAP"
+    destination.mkdir(parents=True)
+    for index, outcome in enumerate((True, False, None)):
+        episode = source / str(index)
+        episode.mkdir(parents=True)
+        metadata = {"episode_index": index}
+        if outcome is not None:
+            metadata["episode_success"] = outcome
+        (episode / "episode_info.json").write_text(json.dumps(metadata))
+
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_ROOT", dataset_root)
+    monkeypatch.setattr(app, "_OFFLINE_RL_ROSBAG_ROOT", rosbag_root)
+    monkeypatch.setattr(
+        app,
+        "_OFFLINE_RL_DATASET_LOCK_PATH",
+        tmp_path / "workspace" / ".cyclo_dataset.lock",
+    )
+    request = app.OfflineRLDataEpochReserveRequest(
+        destination_root=str(destination),
+        source_mcap=str(source),
+        behavior_policy_path="/workspace/model/lerobot/base/pretrained_model",
+        boundary_reason="policy_update",
+        fps=15,
+        formats=["v3.0"],
+    )
+
+    first = app._offline_rl_reserve_data_epoch(request)
+    second = asyncio.run(app.offline_rl_reserve_data_epoch(request))
+
+    assert first.data_epoch == 0
+    assert first.epoch_name == "data_epoch_0000"
+    assert first.output_root == str(destination / "data_epoch_0000")
+    epoch_stat = Path(first.output_root).stat()
+    destination_stat = destination.stat()
+    assert (epoch_stat.st_uid, epoch_stat.st_gid) == (
+        destination_stat.st_uid,
+        destination_stat.st_gid,
+    )
+    assert first.source_mcap == str(source)
+    assert first.behavior_policy_path.endswith("/base/pretrained_model")
+    assert first.boundary_reason == "policy_update"
+    assert first.fps == 15
+    assert first.formats == ["v3.0"]
+    assert first.outcome_counts.model_dump() == {
+        "total": 3,
+        "success": 1,
+        "failure": 1,
+        "unlabeled": 1,
+    }
+    assert first.expected_outputs == {
+        "v30": str(
+            destination
+            / "data_epoch_0000"
+            / "Task_failure_inference_MCAP_lerobot_v30"
+        ),
+    }
+    assert first.created_at.endswith("Z")
+    assert second.data_epoch == 1
+    assert second.epoch_name == "data_epoch_0001"
+
+    sidecar = destination / "data_epoch_0000" / app._OFFLINE_RL_DATA_EPOCH_FILE
+    sidecar_stat = sidecar.stat()
+    assert (sidecar_stat.st_uid, sidecar_stat.st_gid) == (
+        destination_stat.st_uid,
+        destination_stat.st_gid,
+    )
+    stored = json.loads(sidecar.read_text())
+    assert stored["schema_version"] == 1
+    assert stored["data_epoch"] == 0
+    assert stored["source_mcap"] == str(source)
+    assert stored["outcome_counts"]["failure"] == 1
+
+
+def test_offline_rl_dataset_summary_reads_parent_data_epoch_sidecar(
+    monkeypatch,
+    tmp_path,
+):
+    dataset_root = tmp_path / "workspace" / "lerobot"
+    destination = dataset_root / "RLTEST"
+    rosbag_root = tmp_path / "workspace" / "rosbag2"
+    source = rosbag_root / "Task_01"
+    destination.mkdir(parents=True)
+    (source / "0").mkdir(parents=True)
+    (source / "0" / "episode_info.json").write_text(json.dumps({
+        "episode_index": 0,
+        "episode_success": False,
+    }))
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_ROOT", dataset_root)
+    monkeypatch.setattr(app, "_OFFLINE_RL_ROSBAG_ROOT", rosbag_root)
+    monkeypatch.setattr(
+        app,
+        "_OFFLINE_RL_DATASET_LOCK_PATH",
+        tmp_path / "workspace" / ".cyclo_dataset.lock",
+    )
+    provenance = app._offline_rl_reserve_data_epoch(
+        app.OfflineRLDataEpochReserveRequest(
+            destination_root=str(destination),
+            source_mcap=str(source),
+            fps=10,
+            formats=["v3.0"],
+        )
+    )
+    dataset = Path(provenance.expected_outputs["v30"])
+    (dataset / "meta").mkdir(parents=True)
+    (dataset / "meta" / "info.json").write_text(json.dumps({
+        "codebase_version": "v3.0",
+        "total_episodes": 1,
+        "total_frames": 20,
+        "fps": 10,
+        "features": {},
+    }))
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, _count: [
+            app.OfflineRLDatasetEpisode(
+                index=0,
+                frames=20,
+                outcome="failure",
+                tasks=[],
+            )
+        ],
+    )
+
+    summary = app._offline_rl_dataset_summary(str(dataset))
+
+    assert summary.data_epoch_provenance is not None
+    assert summary.data_epoch_provenance.data_epoch == 0
+    assert summary.data_epoch_provenance.epoch_name == "data_epoch_0000"
+    assert summary.data_epoch_provenance.outcome_counts.failure == 1
+
+
+def test_offline_rl_dataset_delete_rebuilds_v21_without_reencoding(monkeypatch, tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info.update({
+        "codebase_version": "v2.1",
+        "total_episodes": 3,
+        "total_frames": 6,
+        "total_videos": 3,
+        "total_chunks": 1,
+        "chunks_size": 1000,
+        "splits": {"train": "0:3"},
+        "data_path": (
+            "data/chunk-{episode_chunk:03d}/"
+            "episode_{episode_index:06d}.parquet"
+        ),
+        "video_path": (
+            "videos/chunk-{episode_chunk:03d}/{video_key}/"
+            "episode_{episode_index:06d}.mp4"
+        ),
+        "annotation_path": (
+            "annotations/chunk-{episode_chunk:03d}/"
+            "episode_{episode_index:06d}.json"
+        ),
+        "features": {
+            "episode_success": {"dtype": "bool"},
+            "observation.images.head": {"dtype": "video"},
+        },
+    })
+    info_path.write_text(json.dumps(info))
+    (dataset / "meta" / "tasks.jsonl").write_text(
+        json.dumps({"task_index": 0, "task": "pick jelly"}) + "\n"
+    )
+    (dataset / "meta" / "episodes.jsonl").write_text("".join(
+        json.dumps({
+            "episode_index": index,
+            "length": 2,
+            "tasks": ["pick jelly"],
+        }) + "\n"
+        for index in range(3)
+    ))
+    (dataset / "meta" / "episodes_stats.jsonl").write_text("".join(
+        json.dumps({
+            "episode_index": index,
+            "stats": {
+                "episode_success": {"mean": [1.0 if index != 1 else 0.0]},
+                "episode_index": {
+                    "min": [index], "max": [index], "mean": [float(index)],
+                },
+                "index": {
+                    "min": [index * 2], "max": [index * 2 + 1],
+                    "mean": [index * 2 + 0.5],
+                },
+            },
+        }) + "\n"
+        for index in range(3)
+    ))
+    data_dir = dataset / "data" / "chunk-000"
+    video_dir = dataset / "videos" / "chunk-000" / "observation.images.head"
+    annotation_dir = dataset / "annotations" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    video_dir.mkdir(parents=True)
+    annotation_dir.mkdir(parents=True)
+    for index in range(3):
+        pq.write_table(pa.table({
+            "episode_index": pa.array([index, index], type=pa.int64()),
+            "index": pa.array([index * 2, index * 2 + 1], type=pa.int64()),
+            "frame_index": pa.array([0, 1], type=pa.int64()),
+        }), data_dir / f"episode_{index:06d}.parquet")
+        (video_dir / f"episode_{index:06d}.mp4").write_bytes(
+            f"encoded-video-{index}".encode()
+        )
+        (annotation_dir / f"episode_{index:06d}.json").write_text(
+            json.dumps({"source": index})
+        )
+    (dataset / "README.md").write_text("dataset card")
+    (dataset / "info.json").write_text('{"cyclo": true}')
+
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_LOCK_PATH", tmp_path / "dataset.lock")
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+
+    result = app._offline_rl_delete_dataset_episodes(str(dataset), [1])
+
+    assert result.version == "v2.1"
+    assert result.total_episodes == 2
+    assert result.total_frames == 4
+    rebuilt_info = json.loads(info_path.read_text())
+    assert rebuilt_info["splits"] == {"train": "0:2"}
+    assert rebuilt_info["total_videos"] == 2
+    assert rebuilt_info["total_chunks"] == 1
+    rebuilt_rows = [
+        json.loads(line)
+        for line in (dataset / "meta/episodes.jsonl").read_text().splitlines()
+    ]
+    assert [row["episode_index"] for row in rebuilt_rows] == [0, 1]
+    assert (video_dir / "episode_000000.mp4").read_bytes() == b"encoded-video-0"
+    assert (video_dir / "episode_000001.mp4").read_bytes() == b"encoded-video-2"
+    second = pq.read_table(data_dir / "episode_000001.parquet")
+    assert second.column("episode_index").to_pylist() == [1, 1]
+    assert second.column("index").to_pylist() == [2, 3]
+    assert json.loads(
+        (annotation_dir / "episode_000001.json").read_text()
+    ) == {"source": 2}
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.tmp"))
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.backup"))
+
+
+def test_offline_rl_dataset_delete_v21_validation_failure_keeps_original(
+    monkeypatch,
+    tmp_path,
+):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=2,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info.update({
+        "codebase_version": "v2.1",
+        "total_episodes": 2,
+        "total_frames": 2,
+        "chunks_size": 1000,
+        "splits": {"train": "0:2"},
+        "data_path": (
+            "data/chunk-{episode_chunk:03d}/"
+            "episode_{episode_index:06d}.parquet"
+        ),
+        "features": {},
+    })
+    info_path.write_text(json.dumps(info))
+    (dataset / "meta" / "episodes.jsonl").write_text("".join(
+        json.dumps({"episode_index": index, "length": 1, "tasks": []}) + "\n"
+        for index in range(2)
+    ))
+    original_marker = dataset / "original.txt"
+    original_marker.write_text("untouched")
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_LOCK_PATH", tmp_path / "dataset.lock")
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_delete_dataset_episodes(str(dataset), [0])
+
+    assert error.value.status_code == 400
+    assert "Missing LeRobot v2.1 episode data" in error.value.detail
+    assert original_marker.read_text() == "untouched"
+    assert json.loads(info_path.read_text())["total_episodes"] == 2
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.tmp"))
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.backup"))
+    assert app._OFFLINE_RL_DATASET_EDIT_ACTIVE is False
+
+
+def test_offline_rl_dataset_delete_rebuilds_then_swaps(monkeypatch, tmp_path):
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["annotation_path"] = (
+        "annotations/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.json"
+    )
+    info["chunks_size"] = 1000
+    info_path.write_text(json.dumps(info))
+    (dataset / "README.md").write_text("dataset card")
+    (dataset / "info.json").write_text('{"cyclo": true}')
+    annotations = dataset / "annotations" / "chunk-000"
+    annotations.mkdir(parents=True)
+    for index in range(3):
+        (annotations / f"episode_{index:06d}.json").write_text(
+            json.dumps({"source": index})
+        )
+    (dataset / "old-only.txt").write_text("old")
+
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_LOCK_PATH", tmp_path / "dataset.lock")
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: _offline_rl_summary_rows(count),
+    )
+
+    def fake_rebuild(_source, output, _indices, expected):
+        (output / "meta").mkdir(parents=True)
+        rebuilt_info = dict(info)
+        rebuilt_info["total_episodes"] = expected
+        rebuilt_info["total_frames"] = expected * 10
+        (output / "meta" / "info.json").write_text(json.dumps(rebuilt_info))
+        (output / "rebuilt.txt").write_text("new")
+
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_run_lerobot_episode_delete",
+        fake_rebuild,
+    )
+
+    result = app._offline_rl_delete_dataset_episodes(str(dataset), [1])
+
+    assert result.total_episodes == 2
+    assert not (dataset / "old-only.txt").exists()
+    assert (dataset / "rebuilt.txt").read_text() == "new"
+    assert (dataset / "README.md").read_text() == "dataset card"
+    assert json.loads((dataset / "info.json").read_text()) == {"cyclo": True}
+    assert json.loads((dataset / "meta/info.json").read_text())[
+        "annotation_path"
+    ] == info["annotation_path"]
+    assert json.loads(
+        (dataset / "annotations/chunk-000/episode_000001.json").read_text()
+    ) == {"source": 2}
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.tmp"))
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-*.backup"))
+
+
+def test_offline_rl_dataset_delete_failure_keeps_original(monkeypatch, tmp_path):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    marker = dataset / "original.txt"
+    marker.write_text("untouched")
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_LOCK_PATH", tmp_path / "dataset.lock")
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: _offline_rl_summary_rows(count),
+    )
+
+    def fail_rebuild(*_args):
+        raise app.HTTPException(500, "synthetic rebuild failure")
+
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_run_lerobot_episode_delete",
+        fail_rebuild,
+    )
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_delete_dataset_episodes(str(dataset), [1])
+
+    assert error.value.status_code == 500
+    assert marker.read_text() == "untouched"
+    assert app._OFFLINE_RL_DATASET_EDIT_ACTIVE is False
+
+
+def test_offline_rl_dataset_delete_all_removes_dataset(monkeypatch, tmp_path):
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=2,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_LOCK_PATH", tmp_path / "dataset.lock")
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: _offline_rl_summary_rows(count),
+    )
+
+    result = app._offline_rl_delete_dataset_episodes(str(dataset), [0, 1])
+
+    assert result is None
+    assert not dataset.exists()
+    assert not list(dataset.parent.glob(f".{dataset.name}.delete-all-*.trash"))
+    assert app._OFFLINE_RL_DATASET_EDIT_ACTIVE is False
 
 
 def test_offline_rl_rejects_dataset_symlink_escape(monkeypatch, tmp_path):
@@ -714,6 +1416,73 @@ def test_offline_rl_rejects_dataset_symlink_escape(monkeypatch, tmp_path):
     assert error.value.status_code == 400
     assert "symbolic links" in error.value.detail
     assert app._offline_rl_dataset(str(dataset))[1] == 50
+
+
+def test_offline_rl_multi_dataset_request_is_ordered_and_aggregated(monkeypatch, tmp_path):
+    import pytest
+
+    first, act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=2,
+    )
+    second = first.parent / "data_epoch_0002" / "recording_v30"
+    (second / "meta").mkdir(parents=True)
+    (second / "meta" / "info.json").write_text(json.dumps({
+        "codebase_version": "v3.0",
+        "total_episodes": 3,
+        "total_frames": 30,
+        "fps": 15,
+        "features": {"episode_success": {"dtype": "bool"}},
+    }))
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda current, count: [
+            app.OfflineRLDatasetEpisode(
+                index=index,
+                frames=10,
+                outcome="success" if current == first.resolve() else "failure",
+                tasks=["pick jelly"],
+            )
+            for index in range(count)
+        ],
+    )
+
+    request = app.OfflineRLStartRequest(
+        dataset_path=str(first),
+        dataset_paths=[str(first), str(second)],
+        act_checkpoint=str(act),
+        robot_type="ffw_sg2_rev1",
+    )
+    assert app._offline_rl_requested_dataset_paths(request) == [
+        str(first),
+        str(second),
+    ]
+    datasets, episodes, successes, failures = app._offline_rl_datasets(
+        request.dataset_paths
+    )
+    assert datasets == [first.resolve(), second.resolve()]
+    assert (episodes, successes, failures) == (5, 2, 3)
+
+    duplicate = app.OfflineRLStartRequest(
+        dataset_paths=[str(first), str(first)],
+        act_checkpoint=str(act),
+        robot_type="ffw_sg2_rev1",
+    )
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_datasets(duplicate.dataset_paths)
+    assert "duplicates" in error.value.detail
+
+    ambiguous = app.OfflineRLStartRequest(
+        dataset_path=str(second),
+        dataset_paths=[str(first), str(second)],
+        act_checkpoint=str(act),
+        robot_type="ffw_sg2_rev1",
+    )
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_requested_dataset_paths(ambiguous)
+    assert "first ordered" in error.value.detail
 
 
 def test_offline_rl_enforces_v30_max_and_first_round_cap(monkeypatch, tmp_path):
@@ -797,6 +1566,141 @@ def test_offline_rl_parent_validates_its_recorded_td3_schedule(monkeypatch, tmp_
     assert "schedule is invalid" in error.value.detail
 
 
+def test_offline_rl_parent_requires_matching_batch_size(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    round_root = model_root / "offline_rl" / "round_batch"
+    parent = round_root / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"checkpoint")
+    (round_root / "training_manifest.json").write_text(json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 30,
+        "checkpoint_path": str(parent),
+        "batch_size": 8,
+    }))
+
+    assert app._offline_rl_parent_checkpoint(
+        str(parent),
+        60,
+        batch_size=8,
+    ) == (parent, 30, 1)
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(str(parent), 60, batch_size=4)
+    assert error.value.status_code == 400
+    assert "batch_size does not match" in error.value.detail
+
+
+def test_offline_rl_actor_trainability_contract_normalizes_and_validates():
+    import pytest
+
+    assert app._offline_rl_actor_trainable_groups([
+        "action_decoder",
+        "visual_backbone",
+        "transformer_encoder",
+    ]) == [
+        "visual_backbone",
+        "transformer_encoder",
+        "action_decoder",
+    ]
+
+    invalid_contracts = (
+        ([], "all-frozen"),
+        (["visual_backbone", "visual_backbone"], "duplicates"),
+        (["visual_backbone", "unknown"], "Unknown"),
+        (["cvae_encoder"], "CVAE-only"),
+    )
+    for groups, message in invalid_contracts:
+        with pytest.raises(app.HTTPException) as error:
+            app._offline_rl_actor_trainable_groups(groups)
+        assert error.value.status_code == 400
+        assert message in error.value.detail
+
+    request = app.OfflineRLStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        robot_type="ffw_sg2_rev1",
+    )
+    assert request.actor_trainable_groups == list(
+        app._OFFLINE_RL_ACTOR_TRAINABLE_GROUPS
+    )
+
+
+def test_offline_rl_parent_requires_matching_actor_trainability(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    round_root = model_root / "offline_rl" / "round_contract"
+    parent = round_root / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"checkpoint")
+    (round_root / "training_manifest.json").write_text(json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 30,
+        "checkpoint_path": str(parent),
+        "actor_trainable_groups": ["visual_backbone", "action_decoder"],
+    }))
+
+    assert app._offline_rl_parent_checkpoint(
+        str(parent),
+        60,
+        ["visual_backbone", "action_decoder"],
+    ) == (parent, 30, 1)
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(
+            str(parent),
+            60,
+            ["action_decoder"],
+        )
+    assert error.value.status_code == 400
+    assert "do not match" in error.value.detail
+
+
+def test_offline_rl_legacy_parent_requires_all_actor_groups(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    round_root = model_root / "offline_rl" / "legacy_round_contract"
+    parent = round_root / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"checkpoint")
+    (round_root / "training_manifest.json").write_text(json.dumps({
+        "event": "result",
+        "status": "complete",
+        "episode_count": 30,
+        "checkpoint_path": str(parent),
+    }))
+
+    assert app._offline_rl_parent_checkpoint(
+        str(parent),
+        60,
+        list(app._OFFLINE_RL_ACTOR_TRAINABLE_GROUPS),
+    ) == (parent, 30, 1)
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(
+            str(parent),
+            60,
+            ["visual_backbone", "action_decoder"],
+        )
+    assert error.value.status_code == 400
+    assert "Legacy parent checkpoints" in error.value.detail
+
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_parent_checkpoint(
+            str(parent),
+            60,
+            list(app._OFFLINE_RL_ACTOR_TRAINABLE_GROUPS),
+            8,
+        )
+    assert error.value.status_code == 400
+    assert "batch_size does not match" in error.value.detail
+
+
 def test_offline_rl_command_is_pinned_and_offline(monkeypatch):
     monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
     job = app._OfflineRLJob(
@@ -807,6 +1711,11 @@ def test_offline_rl_command_is_pinned_and_offline(monkeypatch):
         output_dir="/workspace/model/lerobot/offline_rl/round",
         episode_count=100,
         log_path="/tmp/job.log",
+        batch_size=16,
+        dataset_paths=[
+            "/workspace/lerobot/data_epoch_0001/data",
+            "/workspace/lerobot/data_epoch_0002/data",
+        ],
     )
 
     command = app._offline_rl_command(
@@ -820,10 +1729,38 @@ def test_offline_rl_command_is_pinned_and_offline(monkeypatch):
     assert command[command.index("--user") + 1] == "1000:1000"
     assert command[command.index("--entrypoint") + 1] == "/lerobot/.venv/bin/python"
     assert "HOME=/tmp" in command
+    assert "XDG_CACHE_HOME=/tmp/cyclo_offline_rl_cache" in command
+    assert "HF_HOME=/tmp/cyclo_offline_rl_cache/huggingface" in command
+    assert (
+        "HF_LEROBOT_HOME=/tmp/cyclo_offline_rl_cache/huggingface/lerobot"
+        in command
+    )
+    assert "TORCH_HOME=/tmp/cyclo_offline_rl_cache/torch" in command
+    assert "TRITON_CACHE_DIR=/tmp/cyclo_offline_rl_cache/triton" in command
+    runtime_environment = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--env"
+    ]
+    assert all("/root/.cache" not in value for value in runtime_environment)
     assert "HF_HUB_OFFLINE=1" in command
     assert "--allow-partial-round" not in command
+    dataset_roots = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--dataset-root"
+    ]
+    assert dataset_roots == job.dataset_paths
+    assert command[command.index("--batch-size") + 1] == "16"
+    assert app._offline_rl_status(job).batch_size == 16
     assert command[command.index("--critic-epochs") + 1] == "10"
     assert command[command.index("--actor-equivalent-epochs") + 1] == "5"
+    trainable_groups = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--actor-trainable-group"
+    ]
+    assert trainable_groups == list(app._OFFLINE_RL_ACTOR_TRAINABLE_GROUPS)
     assert command[-2:] == ["--parent-checkpoint", job.parent_checkpoint]
 
 
@@ -908,6 +1845,7 @@ def test_offline_rl_monitor_accepts_only_verified_export(monkeypatch, tmp_path):
         episode_count=50,
         log_path=str(tmp_path / "logs" / "job.log"),
         process=FakeProcess(),
+        stop_requested=True,
     )
 
     app._monitor_offline_rl_job(job)
@@ -915,6 +1853,220 @@ def test_offline_rl_monitor_accepts_only_verified_export(monkeypatch, tmp_path):
     assert job.status == "completed"
     assert job.returncode == 0
     assert app._offline_rl_status(job).model_path == str(model)
+
+
+def test_offline_rl_monitor_confirms_cooperative_stop_and_preserves_failures(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(app, "_OFFLINE_RL_LOG_ROOT", tmp_path / "logs")
+    stopped_result = json.dumps({
+        "event": "result",
+        "status": "stopped",
+        "percentage": 25.0,
+        "completed_critic_updates": 10,
+        "total_critic_updates": 40,
+        "eta_seconds": 60.0,
+        "checkpoint_path": str(tmp_path / "stopped" / "act_td3.pt"),
+        "model_path": None,
+    })
+
+    class StoppedProcess:
+        stdout = [stopped_result + "\n"]
+
+        @staticmethod
+        def wait():
+            return 0
+
+    stopped_job = app._OfflineRLJob(
+        job_id="stopped",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/stopped",
+        episode_count=50,
+        log_path=str(tmp_path / "stopped.log"),
+        process=StoppedProcess(),
+        stop_requested=True,
+    )
+    app._monitor_offline_rl_job(stopped_job)
+
+    assert stopped_job.status == "stopped"
+    assert stopped_job.stop_confirmed is True
+    assert stopped_job.returncode == 0
+    assert stopped_job.checkpoint_path.endswith("act_td3.pt")
+    assert stopped_job.eta_seconds is None
+
+    class FailedProcess:
+        stdout = []
+
+        @staticmethod
+        def wait():
+            return 1
+
+    failed_job = app._OfflineRLJob(
+        job_id="failed",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/failed",
+        episode_count=50,
+        log_path=str(tmp_path / "failed.log"),
+        process=FailedProcess(),
+        stop_requested=True,
+    )
+    app._monitor_offline_rl_job(failed_job)
+
+    assert failed_job.status == "failed"
+    assert failed_job.stop_confirmed is False
+
+
+def test_offline_rl_stop_rejects_stale_id_and_signals_only_current_container(
+    monkeypatch,
+    tmp_path,
+):
+    import pytest
+
+    class FakeProcess:
+        def __init__(self):
+            self.signals = []
+
+        @staticmethod
+        def poll():
+            return None
+
+        def send_signal(self, value):
+            self.signals.append(value)
+
+    class FakeContainer:
+        def __init__(self):
+            self.signals = []
+
+        def kill(self, *, signal):
+            self.signals.append(signal)
+
+    process = FakeProcess()
+    container = FakeContainer()
+    requested_containers = []
+
+    class FakeContainers:
+        def get(self, name):
+            requested_containers.append(name)
+            return container
+
+    job = app._OfflineRLJob(
+        job_id="1234567890abcdef1234567890abcdef",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/current",
+        episode_count=50,
+        log_path=str(tmp_path / "current.log"),
+        process=process,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(containers=FakeContainers()),
+    )
+
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_stop(app.OfflineRLStopRequest(job_id="stale")))
+    assert error.value.status_code == 409
+    assert requested_containers == []
+
+    response = asyncio.run(app.offline_rl_stop(
+        app.OfflineRLStopRequest(job_id=job.job_id)
+    ))
+    assert response.status == "running"
+    assert response.message == "Stopping ACT-TD3 training"
+    assert response.job_id == job.job_id
+    assert requested_containers == ["cyclo_offline_rl_1234567890ab"]
+    assert container.signals == ["SIGINT"]
+    assert process.signals == []
+    assert job.stop_requested is True
+
+    # A repeated request is idempotent and does not signal the target twice.
+    asyncio.run(app.offline_rl_stop(app.OfflineRLStopRequest(job_id=job.job_id)))
+    assert container.signals == ["SIGINT"]
+
+
+def test_offline_rl_stop_falls_back_to_current_compose_process(monkeypatch, tmp_path):
+    class FakeProcess:
+        def __init__(self):
+            self.signals = []
+
+        @staticmethod
+        def poll():
+            return None
+
+        def send_signal(self, value):
+            self.signals.append(value)
+
+    class MissingContainers:
+        @staticmethod
+        def get(_name):
+            raise app.NotFound("not created")
+
+    process = FakeProcess()
+    job = app._OfflineRLJob(
+        job_id="current-job",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/current",
+        episode_count=50,
+        log_path=str(tmp_path / "current.log"),
+        process=process,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(containers=MissingContainers()),
+    )
+
+    asyncio.run(app.offline_rl_stop(app.OfflineRLStopRequest(job_id=job.job_id)))
+
+    assert process.signals == [app.signal.SIGINT]
+    assert job.stop_requested is True
+
+
+def test_offline_rl_stop_rolls_back_when_no_target_can_be_signalled(
+    monkeypatch,
+    tmp_path,
+):
+    import pytest
+
+    class MissingContainers:
+        @staticmethod
+        def get(_name):
+            raise app.NotFound("already gone")
+
+    job = app._OfflineRLJob(
+        job_id="already-exited",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/exited",
+        episode_count=50,
+        log_path=str(tmp_path / "exited.log"),
+        process=None,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(containers=MissingContainers()),
+    )
+
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_stop(app.OfflineRLStopRequest(job_id=job.job_id)))
+
+    assert error.value.status_code == 409
+    assert job.stop_requested is False
+    assert job.status == "running"
 
 
 def test_offline_rl_start_launches_single_pinned_compose_job(monkeypatch, tmp_path):
@@ -955,6 +2107,11 @@ def test_offline_rl_start_launches_single_pinned_compose_job(monkeypatch, tmp_pa
         lambda: SimpleNamespace(hex="1234567890abcdef1234567890abcdef"),
     )
     monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: _offline_rl_summary_rows(count),
+    )
 
     response = asyncio.run(app.offline_rl_start(app.OfflineRLStartRequest(
         dataset_path=str(dataset),
@@ -962,19 +2119,32 @@ def test_offline_rl_start_launches_single_pinned_compose_job(monkeypatch, tmp_pa
         parent_checkpoint="",
         algorithm="td3",
         robot_type="ffw_sg2_rev1",
+        batch_size=8,
+        actor_trainable_groups=["action_decoder", "visual_backbone"],
     )))
 
     assert response.status == "running"
     assert response.episode_count == 50
+    assert response.dataset_paths == [str(dataset)]
+    assert response.success_count == 49
+    assert response.failure_count == 1
     assert response.round_index == 1
     assert response.round_episode_count == 50
+    assert response.batch_size == 8
     assert response.critic_epochs == 10
     assert response.actor_equivalent_epochs == 5
+    assert response.actor_trainable_groups == ["visual_backbone", "action_decoder"]
     assert response.model_path == ""
     assert launched["thread_started"] is True
     assert launched["kwargs"]["text"] is True
     assert launched["command"][launched["command"].index("--pull") + 1] == "never"
     assert "/lerobot/.venv/bin/python" in launched["command"]
+    assert launched["command"][launched["command"].index("--batch-size") + 1] == "8"
+    assert [
+        launched["command"][index + 1]
+        for index, value in enumerate(launched["command"][:-1])
+        if value == "--actor-trainable-group"
+    ] == ["visual_backbone", "action_decoder"]
 
 
 def test_offline_rl_start_rejects_concurrent_job(monkeypatch, tmp_path):
@@ -1043,3 +2213,517 @@ def test_offline_rl_start_rejects_invalid_td3_epoch_ratio():
 
     assert error.value.status_code == 400
     assert "policy_update_period" in error.value.detail
+
+
+def test_offline_rl_start_request_validates_batch_size():
+    import pytest
+
+    common = {
+        "dataset_path": "/workspace/lerobot/data",
+        "act_checkpoint": "/workspace/model/lerobot/base",
+        "algorithm": "td3",
+        "robot_type": "ffw_sg2_rev1",
+    }
+    assert app.OfflineRLStartRequest(**common).batch_size == 4
+    assert app.OfflineRLStartRequest(**common, batch_size=64).batch_size == 64
+    for value in (0, 65, True, 4.5, "8"):
+        with pytest.raises(app.ValidationError):
+            app.OfflineRLStartRequest(**common, batch_size=value)
+
+
+def test_imitation_learning_selects_only_successful_episodes(monkeypatch, tmp_path):
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=4,
+    )
+    rows = [
+        app.OfflineRLDatasetEpisode(
+            index=index,
+            frames=10,
+            outcome=outcome,
+            tasks=["pick jelly"],
+        )
+        for index, outcome in enumerate(
+            ("success", "failure", "success", "unlabeled")
+        )
+    ]
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, _count: rows,
+    )
+
+    datasets, episodes, selected, excluded = app._imitation_learning_datasets(
+        [str(dataset)]
+    )
+
+    assert datasets == [dataset.resolve()]
+    assert episodes == [[0, 2]]
+    assert selected == 2
+    assert excluded == 2
+
+
+def test_imitation_learning_accepts_unlabeled_v3_demos_but_td3_does_not(
+    monkeypatch,
+    tmp_path,
+):
+    import pytest
+
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["features"].pop("episode_success")
+    info_path.write_text(json.dumps(info))
+    rows = [
+        app.OfflineRLDatasetEpisode(
+            index=index,
+            frames=10,
+            outcome="unlabeled",
+            tasks=["pick jelly"],
+        )
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, _count: rows,
+    )
+
+    datasets, episodes, selected, excluded = app._imitation_learning_datasets(
+        [str(dataset)]
+    )
+
+    assert datasets == [dataset.resolve()]
+    assert episodes == [[0, 1, 2]]
+    assert selected == 3
+    assert excluded == 0
+    with pytest.raises(app.HTTPException) as error:
+        app._offline_rl_datasets([str(dataset)])
+    assert error.value.status_code == 400
+    assert "missing episode_success labels" in error.value.detail
+
+
+def test_imitation_learning_command_is_pinned_offline_and_multi_root(monkeypatch):
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    job = app._ImitationLearningJob(
+        job_id="1234567890abcdef",
+        dataset_path="/workspace/lerobot/data_epoch_0001/data",
+        dataset_paths=[
+            "/workspace/lerobot/data_epoch_0001/data",
+            "/workspace/lerobot/data_epoch_0002/data",
+        ],
+        success_episodes=[[0, 2], [1]],
+        output_dir="/workspace/model/lerobot/imitation_learning/run",
+        episode_count=3,
+        excluded_episode_count=2,
+        log_path="/tmp/imitation.log",
+        total_steps=80_000,
+        batch_size=8,
+        save_freq=10_000,
+        chunk_size=30,
+    )
+
+    command = app._imitation_learning_command(job)
+
+    assert command[:4] == ["docker", "compose", "run", "--rm"]
+    assert command[command.index("--pull") + 1] == "never"
+    assert command[command.index("--user") + 1] == "1000:1000"
+    assert command[command.index("--entrypoint") + 1] == "/lerobot/.venv/bin/python"
+    assert "HOME=/tmp" in command
+    assert "HF_HUB_OFFLINE=1" in command
+    assert "TRANSFORMERS_OFFLINE=1" in command
+    assert "HF_DATASETS_OFFLINE=1" in command
+    assert "cyclo_brain.algorithm.il.act_bc.training_cli" in command
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--dataset-root"
+    ] == job.dataset_paths
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--episodes"
+    ] == ["0,2", "1"]
+    assert command[command.index("--steps") + 1] == "80000"
+    assert command[command.index("--batch-size") + 1] == "8"
+    assert command[command.index("--save-freq") + 1] == "10000"
+    assert command[command.index("--chunk-size") + 1] == "30"
+
+
+def test_imitation_learning_multi_task_dit_contract(monkeypatch, tmp_path):
+    import pytest
+
+    _dataset, _act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    request = app.ImitationLearningStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        policy_type="multi_task_dit",
+        chunk_size=16,
+    )
+    assert request.policy_type == "multi_task_dit"
+    assert app.ImitationLearningStartRequest().policy_type == "act"
+    assert app.ImitationLearningStartRequest().chunk_size == 30
+    with pytest.raises(app.ValidationError):
+        app.ImitationLearningStartRequest(policy_type="diffusion")
+
+    output = app._imitation_learning_output_path(
+        "1234567890abcdef",
+        80_000,
+        policy_type=request.policy_type,
+    )
+    assert output.name == "multi_task_dit_bc_steps_080000_1234567890ab"
+
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    job = app._ImitationLearningJob(
+        job_id="1234567890abcdef",
+        dataset_path="/workspace/lerobot/data",
+        dataset_paths=["/workspace/lerobot/data"],
+        success_episodes=[[0, 1]],
+        output_dir=str(output),
+        episode_count=2,
+        excluded_episode_count=0,
+        log_path="/tmp/imitation.log",
+        chunk_size=16,
+        policy_type="multi_task_dit",
+        task_instruction="  pick up the blue jelly bag  ",
+    )
+    command = app._imitation_learning_command(job)
+    assert "cyclo_brain.algorithm.il.multi_task_dit.training_cli" in command
+    assert "cyclo_brain.algorithm.il.act_bc.training_cli" not in command
+    assert command[command.index("--chunk-size") + 1] == "16"
+    assert command[command.index("--task-instruction") + 1] == (
+        "pick up the blue jelly bag"
+    )
+    assert "HF_HUB_CACHE=/huggingface_hub" in command
+    assert "HUGGINGFACE_HUB_CACHE=/huggingface_hub" in command
+    assert "TRANSFORMERS_CACHE=/huggingface_hub" in command
+    assert "HF_HUB_OFFLINE=1" in command
+    assert "TRANSFORMERS_OFFLINE=1" in command
+    assert job.message == "Starting MultiTaskDiT imitation learning"
+
+    app._imitation_learning_consume_event(job, {"event": "manifest"})
+    status = app._imitation_learning_status(job)
+    assert status.policy_type == "multi_task_dit"
+    assert status.chunk_size == 16
+    assert status.task_instruction == "pick up the blue jelly bag"
+    assert status.message == "MultiTaskDiT imitation learning is running"
+
+
+def test_imitation_learning_model_verification_requires_requested_policy_type(
+    monkeypatch,
+    tmp_path,
+):
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    output = model_root / "imitation_learning" / "dit_run"
+    model = output / "checkpoints" / "000100" / "pretrained_model"
+    model.mkdir(parents=True)
+    for name, contents in (
+        ("config.json", b'{"type":"multi_task_dit"}'),
+        ("model.safetensors", b"weights"),
+        ("policy_preprocessor.json", b"{}"),
+        ("policy_postprocessor.json", b"{}"),
+    ):
+        (model / name).write_bytes(contents)
+    job = app._ImitationLearningJob(
+        job_id="dit",
+        dataset_path="/workspace/lerobot/data",
+        dataset_paths=["/workspace/lerobot/data"],
+        success_episodes=[[0]],
+        output_dir=str(output),
+        episode_count=1,
+        excluded_episode_count=0,
+        log_path=str(tmp_path / "imitation.log"),
+        total_steps=100,
+        policy_type="multi_task_dit",
+        model_path=str(model),
+    )
+
+    assert app._imitation_learning_verified_model(job) is True
+    (model / "config.json").write_text('{"type":"act"}')
+    assert app._imitation_learning_verified_model(job) is False
+
+
+def test_imitation_learning_progress_and_verified_completion(monkeypatch, tmp_path):
+    _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    output = model_root / "imitation_learning" / "run"
+    model = output / "checkpoints" / "000100" / "pretrained_model"
+    model.mkdir(parents=True)
+    for name, contents in (
+        ("config.json", b'{"type":"act"}'),
+        ("model.safetensors", b"weights"),
+        ("policy_preprocessor.json", b"{}"),
+        ("policy_postprocessor.json", b"{}"),
+    ):
+        (model / name).write_bytes(contents)
+    training_state = model.parent / "training_state"
+    training_state.mkdir()
+    result = json.dumps({
+        "event": "result",
+        "status": "complete",
+        "step": 100,
+        "total_steps": 100,
+        "percentage": 100.0,
+        "loss": 0.3,
+        "l1_loss": 0.2,
+        "kld_loss": 0.01,
+        "eta_seconds": 0.0,
+        "checkpoint_path": str(training_state),
+        "model_path": str(model),
+    })
+
+    class FakeProcess:
+        stdout = [result + "\n"]
+
+        @staticmethod
+        def wait():
+            return 0
+
+    job = app._ImitationLearningJob(
+        job_id="job",
+        dataset_path=str(app._OFFLINE_RL_DATASET_ROOT / "recording_v30"),
+        dataset_paths=[str(app._OFFLINE_RL_DATASET_ROOT / "recording_v30")],
+        success_episodes=[[0]],
+        output_dir=str(output),
+        episode_count=1,
+        excluded_episode_count=0,
+        log_path=str(tmp_path / "imitation.log"),
+        total_steps=100,
+        process=FakeProcess(),
+    )
+
+    app._monitor_imitation_learning_job(job)
+
+    status = app._imitation_learning_status(job)
+    assert status.status == "completed"
+    assert status.completed_steps == 100
+    assert status.loss == 0.3
+    assert status.l1_loss == 0.2
+    assert status.kld_loss == 0.01
+    assert status.model_path == str(model)
+    assert status.checkpoint_path == str(training_state)
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "chunk_size", "training_module", "output_prefix"),
+    (
+        (
+            "act",
+            30,
+            "cyclo_brain.algorithm.il.act_bc.training_cli",
+            "act_bc_steps_080000_",
+        ),
+        (
+            "multi_task_dit",
+            16,
+            "cyclo_brain.algorithm.il.multi_task_dit.training_cli",
+            "multi_task_dit_bc_steps_080000_",
+        ),
+    ),
+)
+def test_imitation_learning_start_launches_selected_policy_job(
+    monkeypatch,
+    tmp_path,
+    policy_type,
+    chunk_size,
+    training_module,
+    output_prefix,
+):
+    dataset, _act, _model_root = _offline_rl_test_layout(
+        monkeypatch,
+        tmp_path,
+        episodes=3,
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["features"].pop("episode_success")
+    info_path.write_text(json.dumps(info))
+    launched = {}
+
+    class FakeProcess:
+        stdout = []
+
+        @staticmethod
+        def wait():
+            return 0
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return FakeProcess()
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            launched["thread"] = kwargs
+
+        def start(self):
+            launched["thread_started"] = True
+
+    monkeypatch.setattr(app, "_compose_base_cmd", lambda: ["docker", "compose"])
+    monkeypatch.setattr(app, "_compose_env", lambda: {"ARCH": "amd64"})
+    monkeypatch.setattr(app.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        app.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="1234567890abcdef1234567890abcdef"),
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", None)
+    monkeypatch.setattr(app, "_IMITATION_LEARNING_JOB", None)
+    monkeypatch.setattr(app, "_OFFLINE_RL_DATASET_EDIT_ACTIVE", False)
+    monkeypatch.setattr(
+        app,
+        "_offline_rl_v3_episode_rows",
+        lambda _dataset, count: [
+            app.OfflineRLDatasetEpisode(
+                index=index,
+                frames=10,
+                outcome="unlabeled",
+                tasks=["pick jelly"],
+            )
+            for index in range(count)
+        ],
+    )
+
+    response = asyncio.run(app.imitation_learning_start(
+        app.ImitationLearningStartRequest(
+            dataset_path=str(dataset),
+            dataset_paths=[str(dataset)],
+            policy_type=policy_type,
+            steps=80_000,
+            batch_size=8,
+            save_freq=10_000,
+            chunk_size=chunk_size,
+            task_instruction=(
+                "pick up the red jelly bag"
+                if policy_type == "multi_task_dit"
+                else ""
+            ),
+        )
+    ))
+
+    assert response.status == "running"
+    assert response.episode_count == 3
+    assert response.excluded_episode_count == 0
+    assert response.dataset_paths == [str(dataset.resolve())]
+    assert response.total_steps == 80_000
+    assert response.batch_size == 8
+    assert response.chunk_size == chunk_size
+    assert response.policy_type == policy_type
+    assert response.task_instruction == (
+        "pick up the red jelly bag"
+        if policy_type == "multi_task_dit"
+        else ""
+    )
+    assert Path(response.output_dir).name.startswith(output_prefix)
+    assert launched["thread_started"] is True
+    assert launched["kwargs"]["text"] is True
+    assert training_module in launched["command"]
+    if policy_type == "multi_task_dit":
+        assert launched["command"][
+            launched["command"].index("--task-instruction") + 1
+        ] == "pick up the red jelly bag"
+    else:
+        assert "--task-instruction" not in launched["command"]
+    assert launched["command"][launched["command"].index("--episodes") + 1] == "0,1,2"
+
+
+def test_imitation_learning_rejects_wrong_chunk_and_running_td3():
+    import pytest
+
+    wrong_chunk = app.ImitationLearningStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        chunk_size=31,
+    )
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.imitation_learning_start(wrong_chunk))
+    assert error.value.status_code == 400
+    assert "chunk_size=30" in error.value.detail
+
+    wrong_dit_chunk = app.ImitationLearningStartRequest(
+        dataset_path="/workspace/lerobot/data",
+        policy_type="multi_task_dit",
+        chunk_size=30,
+    )
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.imitation_learning_start(wrong_dit_chunk))
+    assert error.value.status_code == 400
+    assert "MultiTaskDiT" in error.value.detail
+    assert "chunk_size=16" in error.value.detail
+
+    running = app._OfflineRLJob(
+        job_id="td3",
+        dataset_path="/workspace/lerobot/data",
+        act_checkpoint="/workspace/model/lerobot/base",
+        parent_checkpoint="",
+        output_dir="/workspace/model/lerobot/offline_rl/current",
+        episode_count=2,
+        log_path="/tmp/td3.log",
+    )
+    original = app._OFFLINE_RL_JOB
+    try:
+        app._OFFLINE_RL_JOB = running
+        with pytest.raises(app.HTTPException) as error:
+            asyncio.run(app.imitation_learning_start(
+                app.ImitationLearningStartRequest(
+                    dataset_path="/workspace/lerobot/data",
+                )
+            ))
+        assert error.value.status_code == 409
+        assert "offline RL" in error.value.detail
+    finally:
+        app._OFFLINE_RL_JOB = original
+
+
+def test_imitation_learning_stop_signals_only_matching_job(monkeypatch, tmp_path):
+    import pytest
+
+    class FakeContainer:
+        def __init__(self):
+            self.signals = []
+
+        def kill(self, *, signal):
+            self.signals.append(signal)
+
+    container = FakeContainer()
+
+    class FakeContainers:
+        @staticmethod
+        def get(name):
+            assert name == "cyclo_imitation_learning_1234567890ab"
+            return container
+
+    job = app._ImitationLearningJob(
+        job_id="1234567890abcdef1234567890abcdef",
+        dataset_path="/workspace/lerobot/data",
+        dataset_paths=["/workspace/lerobot/data"],
+        success_episodes=[[0]],
+        output_dir="/workspace/model/lerobot/imitation_learning/current",
+        episode_count=1,
+        excluded_episode_count=0,
+        log_path=str(tmp_path / "imitation.log"),
+    )
+    monkeypatch.setattr(app, "_IMITATION_LEARNING_JOB", job)
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(containers=FakeContainers()),
+    )
+
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.imitation_learning_stop(
+            app.ImitationLearningStopRequest(job_id="stale")
+        ))
+    assert error.value.status_code == 409
+    assert container.signals == []
+
+    response = asyncio.run(app.imitation_learning_stop(
+        app.ImitationLearningStopRequest(job_id=job.job_id)
+    ))
+    assert response.status == "running"
+    assert response.message == "Stopping ACT imitation learning"
+    assert container.signals == ["SIGINT"]
+    assert job.stop_requested is True

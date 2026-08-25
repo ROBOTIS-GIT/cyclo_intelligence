@@ -239,6 +239,7 @@ export default function DatasetConvertSection({
     const fire = async () => {
       try {
         const result = await sendRecordCommand('convert_mp4', {
+          taskSource: 'record',
           conversionFps,
           convertV21,
           convertV30,

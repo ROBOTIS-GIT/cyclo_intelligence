@@ -303,6 +303,7 @@ export function useRosTopicSubscription() {
               recordInferenceMode: Boolean(
                 msg.task_info?.record_inference_mode
               ),
+              taskNum: msg.task_info?.task_num || '',
               running: isRunning,
               recordPhase: currentPhase || 0,
               progress: Math.round(encodingProgress),

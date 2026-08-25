@@ -1,5 +1,5 @@
 import { configureStore } from '@reduxjs/toolkit';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import RecordTopicMonitor from './RecordTopicMonitor';
 import taskReducer from '../features/tasks/taskSlice';
@@ -9,8 +9,9 @@ jest.mock('../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: jest.fn(),
 }));
 
-const renderMonitor = (recordingMonitor) => {
-  useRosServiceCaller.mockReturnValue({ sendRecordCommand: jest.fn() });
+const renderMonitor = (recordingMonitor, props = {}) => {
+  const sendRecordCommand = jest.fn().mockResolvedValue(undefined);
+  useRosServiceCaller.mockReturnValue({ sendRecordCommand });
   const initialTasks = taskReducer(undefined, { type: '@@INIT' });
   const store = configureStore({
     reducer: {
@@ -26,9 +27,10 @@ const renderMonitor = (recordingMonitor) => {
 
   render(
     <Provider store={store}>
-      <RecordTopicMonitor />
+      <RecordTopicMonitor {...props} />
     </Provider>
   );
+  return sendRecordCommand;
 };
 
 describe('RecordTopicMonitor', () => {
@@ -84,5 +86,27 @@ describe('RecordTopicMonitor', () => {
 
     expect(screen.getByTitle(/Timestamp skew/)).toBeInTheDocument();
     expect(screen.getByTitle(/skew 1.250s/)).toBeInTheDocument();
+  });
+
+  test('stays hidden by default when no monitored topics exist', () => {
+    renderMonitor({ topics: [], cameraTopics: [] });
+
+    expect(screen.queryByText('Topic Monitor')).not.toBeInTheDocument();
+  });
+
+  test('can show an empty monitor with a working Refresh action', () => {
+    const sendRecordCommand = renderMonitor(
+      { topics: [], cameraTopics: [] },
+      { showWhenEmpty: true }
+    );
+
+    expect(screen.getByText('Topic Monitor')).toBeInTheDocument();
+    expect(screen.getByText('No topics')).toBeInTheDocument();
+    expect(screen.getByText(/No monitored topics yet/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Refresh topic subscriptions',
+    }));
+    expect(sendRecordCommand).toHaveBeenCalledWith('refresh_topics');
   });
 });

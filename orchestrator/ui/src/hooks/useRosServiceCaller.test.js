@@ -1,10 +1,42 @@
 import {
   getEpisodeOutcomeForCommand,
+  getCommandRecordingFolder,
+  getConversionCommandFields,
   getRecordCommandServiceTimeoutMs,
+  isInferenceCommandRequest,
   normalizeEpisodeOutcome,
   transformReplayDataResult,
 } from './useRosServiceCaller';
 import { EpisodeOutcome } from '../constants/taskCommand';
+import PageType from '../constants/pageType';
+
+describe('command task-info source', () => {
+  test('requires an explicit inference source on Offline RL pages', () => {
+    expect(isInferenceCommandRequest(PageType.INFERENCE)).toBe(true);
+    expect(isInferenceCommandRequest(PageType.OFFLINE_RL)).toBe(false);
+    expect(isInferenceCommandRequest(
+      PageType.OFFLINE_RL,
+      'inference'
+    )).toBe(true);
+    expect(isInferenceCommandRequest(PageType.INFERENCE, 'record')).toBe(false);
+  });
+});
+
+describe('recording folder command override', () => {
+  const taskInfo = {
+    recordingFolder: '/workspace/rosbag2/Task_stale_inference_MCAP',
+  };
+
+  test('uses an atomic command override before the Redux snapshot', () => {
+    expect(getCommandRecordingFolder(taskInfo, {
+      recordingFolder: '/workspace/rosbag2/Task_fresh_inference_MCAP',
+    })).toBe('/workspace/rosbag2/Task_fresh_inference_MCAP');
+    expect(getCommandRecordingFolder(taskInfo, {}))
+      .toBe('/workspace/rosbag2/Task_stale_inference_MCAP');
+    expect(getCommandRecordingFolder(taskInfo, { recordingFolder: '' }))
+      .toBe('');
+  });
+});
 
 describe('getRecordCommandServiceTimeoutMs', () => {
   test('does not time out recording save commands', () => {
@@ -22,6 +54,25 @@ describe('getRecordCommandServiceTimeoutMs', () => {
     expect(getRecordCommandServiceTimeoutMs('stop_segment', {
       serviceTimeoutMs: 45000,
     })).toBe(45000);
+  });
+});
+
+describe('conversion command fields', () => {
+  test('forwards a normalized LeRobot destination and preserves empty legacy default', () => {
+    expect(getConversionCommandFields({
+      conversionFps: 15,
+      convertV21: true,
+      convertV30: false,
+      lerobotOutputRoot: ' /workspace/lerobot/round_1 ',
+      deleteSourceAfterSuccess: true,
+    })).toEqual({
+      conversion_fps: 15,
+      convert_v21: true,
+      convert_v30: false,
+      lerobot_output_root: '/workspace/lerobot/round_1',
+      delete_source_after_success: true,
+    });
+    expect(getConversionCommandFields().lerobot_output_root).toBe('');
   });
 });
 

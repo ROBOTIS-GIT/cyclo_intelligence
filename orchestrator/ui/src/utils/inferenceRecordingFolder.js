@@ -5,6 +5,43 @@ const INFERENCE_FOLDER_PATTERN =
 
 const normalizePath = (value) => String(value || '').trim().replace(/\/+$/, '');
 
+export function buildInferenceRecordingFolderPath(
+  sessionId,
+  recordingRoot = DEFAULT_PATHS.ROSBAG2_PATH
+) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  const normalizedRoot = normalizePath(recordingRoot);
+  const folder = `${normalizedRoot}/Task_${normalizedSessionId}_inference_MCAP`;
+  if (!getInferenceRecordingSessionId(folder, normalizedRoot)) {
+    throw new Error('Invalid RL recording session ID');
+  }
+  return folder;
+}
+
+export function createInferenceRecordingFolder({
+  now = new Date(),
+  nonce = Math.floor(Math.random() * 0xFFFFFFFF)
+    .toString(36)
+    .padStart(7, '0'),
+  recordingRoot = DEFAULT_PATHS.ROSBAG2_PATH,
+} = {}) {
+  const date = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Invalid RL recording timestamp');
+  }
+  const safeNonce = String(nonce || '');
+  if (!/^[A-Za-z0-9-]{1,32}$/.test(safeNonce)) {
+    throw new Error('Invalid RL recording nonce');
+  }
+  const timestamp = date.toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.(\d{3})Z$/, '_$1Z');
+  return buildInferenceRecordingFolderPath(
+    `${timestamp}_${safeNonce}`,
+    recordingRoot
+  );
+}
+
 export function getInferenceRecordingSessionId(
   folderPath,
   recordingRoot = DEFAULT_PATHS.ROSBAG2_PATH

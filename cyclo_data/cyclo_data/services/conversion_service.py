@@ -37,6 +37,7 @@ import uuid
 from cyclo_data.converter.pipeline_worker import (
     LEROBOT_OUTPUT_ROOT,
     Mp4ConversionWorker,
+    resolve_lerobot_output_root,
 )
 
 from interfaces.msg import DataOperationStatus
@@ -240,6 +241,16 @@ class ConversionService:
             convert_v21 = True
             convert_v30 = True
 
+        try:
+            lerobot_output_root = resolve_lerobot_output_root(
+                getattr(request, 'lerobot_output_root', '')
+            )
+        except ValueError as exc:
+            response.success = False
+            response.job_id = ''
+            response.message = str(exc)
+            return response
+
         # Refuse if any target LeRobot output already has a previous
         # conversion (meta/episodes.jsonl exists). The v21/v30 writers
         # *append* to episodes.jsonl, so a second run with the same
@@ -277,6 +288,10 @@ class ConversionService:
             'fps': int(getattr(request, 'fps', 0) or 0),
             'convert_v21': convert_v21,
             'convert_v30': convert_v30,
+            'lerobot_output_root': str(lerobot_output_root),
+            'delete_source_after_success': bool(
+                getattr(request, 'delete_source_after_success', False)
+            ),
             'selected_cameras': list(getattr(request, 'selected_cameras', []) or []),
             'camera_rotations': camera_rotations,
             'image_resize': image_resize,
@@ -295,7 +310,11 @@ class ConversionService:
 
         try:
             existing = self._existing_lerobot_outputs(
-                request.dataset_path, convert_v21, convert_v30)
+                request.dataset_path,
+                convert_v21,
+                convert_v30,
+                output_root=lerobot_output_root,
+            )
         except Exception:
             self._release_dataset_operation_lock()
             raise
@@ -489,6 +508,7 @@ class ConversionService:
         dataset_path: str,
         convert_v21: bool,
         convert_v30: bool,
+        output_root: Optional[Path] = None,
     ) -> List[Path]:
         """Return target LeRobot output dirs that already hold a prior conversion.
 
@@ -498,11 +518,12 @@ class ConversionService:
         appended to or overwritten silently.
         """
         name = Path(dataset_path).name
+        root = Path(output_root) if output_root is not None else LEROBOT_OUTPUT_ROOT
         candidates: List[Path] = []
         if convert_v21:
-            candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v21')
+            candidates.append(root / f'{name}_lerobot_v21')
         if convert_v30:
-            candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v30')
+            candidates.append(root / f'{name}_lerobot_v30')
         existing: List[Path] = []
         for candidate in candidates:
             metadata = candidate / 'meta'

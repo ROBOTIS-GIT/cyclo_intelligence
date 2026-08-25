@@ -108,7 +108,7 @@ test('renders the Cyclo Intelligence shell navigation', () => {
     .toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Inference/i }))
     .toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Offline RL/i }))
+  expect(screen.getByRole('button', { name: /RL Framework/i }))
     .toBeInTheDocument();
   expect(screen.getByText('Home Page')).toBeInTheDocument();
 });

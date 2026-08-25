@@ -12,6 +12,7 @@ from unittest import mock
 import torch
 from torch import nn
 
+from cyclo_brain.algorithm.rl.act_td3 import ACTTD3Config
 from cyclo_brain.algorithm.rl.act_td3 import offline_training_cli as cli
 
 
@@ -67,12 +68,26 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
         ]
         args = parser.parse_args(required)
         self.assertEqual(args.batch_size, 4)
+        self.assertEqual(args.dataset_root, [Path("/dataset")])
         self.assertFalse(args.resume)
         self.assertIsNone(args.parent_checkpoint)
         self.assertIsNone(args.max_round_critic_updates)
         self.assertEqual(args.critic_epochs, 10)
         self.assertEqual(args.actor_equivalent_epochs, 5)
         self.assertFalse(args.allow_partial_round)
+        self.assertIsNone(args.actor_trainable_groups)
+
+        multiple = parser.parse_args(
+            [*required, "--dataset-root", "/dataset_epoch_0001"]
+        )
+        self.assertEqual(
+            multiple.dataset_root,
+            [Path("/dataset"), Path("/dataset_epoch_0001")],
+        )
+        self.assertEqual(
+            cli._dataset_root_arguments(Path("/legacy_single")),  # noqa: SLF001
+            (Path("/legacy_single"),),
+        )
 
         configured = parser.parse_args(
             [
@@ -87,6 +102,26 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
         self.assertEqual(configured.critic_epochs, 6)
         self.assertEqual(configured.actor_equivalent_epochs, 3)
         self.assertTrue(configured.allow_partial_round)
+
+        selected = parser.parse_args(
+            [
+                *required,
+                "--actor-trainable-group",
+                "action_decoder",
+                "--actor-trainable-group",
+                "visual_backbone",
+            ]
+        )
+        self.assertEqual(
+            selected.actor_trainable_groups,
+            ["action_decoder", "visual_backbone"],
+        )
+        self.assertEqual(
+            ACTTD3Config(
+                actor_trainable_groups=tuple(selected.actor_trainable_groups)
+            ).actor_trainable_groups,
+            ("visual_backbone", "action_decoder"),
+        )
 
         with self.assertRaises(SystemExit):
             parser.parse_args(
@@ -131,6 +166,83 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
                 "actor_updates": 33,
             },
         )
+
+        progress = cli.ACTTD3OfflineTrainingProgress(
+            status="stopped",
+            round_index=2,
+            episode_count=87,
+            completed_epochs=1,
+            total_epochs=6,
+            completed_critic_updates=11,
+            total_critic_updates=66,
+            completed_actor_updates=5,
+            total_actor_updates=33,
+            percentage=16.7,
+            critic_loss=0.1,
+            actor_loss=0.2,
+            elapsed_seconds=12.0,
+            eta_seconds=None,
+            durable_critic_updates=11,
+            checkpoint_path="/output/training_state/act_td3.pt",
+        )
+        identity = SimpleNamespace(
+            identity="sha256:identity",
+            file_count=3,
+            byte_count=42,
+            component_sha256={"data": "abc"},
+            virtual_contract={"data_roots": ["/dataset"]},
+        )
+        result_manifest = cli._result_manifest(  # noqa: SLF001
+            progress,
+            actor_trainable_groups=("visual_backbone", "action_decoder"),
+            runner=runner,
+            identity=identity,
+            model_directory=None,
+            batch_size=8,
+        )
+        self.assertEqual(result_manifest["batch_size"], 8)
+        self.assertEqual(result_manifest["status"], "stopped")
+        self.assertIsNone(result_manifest["model_path"])
+
+    def test_main_turns_sigint_into_cooperative_stop_request(self) -> None:
+        installed: dict[int, object] = {}
+        signal_calls: list[tuple[int, object]] = []
+        previous = {
+            cli.signal.SIGINT: object(),
+            cli.signal.SIGTERM: object(),
+        }
+
+        def fake_signal(signum: int, handler: object) -> None:
+            installed[signum] = handler
+            signal_calls.append((signum, handler))
+
+        def fake_run_from_args(_args: object, *, should_stop) -> object:
+            self.assertFalse(should_stop())
+            installed[cli.signal.SIGINT](cli.signal.SIGINT, None)
+            self.assertTrue(should_stop())
+            return object()
+
+        parser = SimpleNamespace(parse_args=lambda _argv: SimpleNamespace())
+        with (
+            mock.patch.object(cli, "build_parser", return_value=parser),
+            mock.patch.object(
+                cli.signal,
+                "getsignal",
+                side_effect=lambda signum: previous[signum],
+            ),
+            mock.patch.object(cli.signal, "signal", side_effect=fake_signal),
+            mock.patch.object(
+                cli,
+                "run_from_args",
+                side_effect=fake_run_from_args,
+            ),
+        ):
+            self.assertEqual(cli.main([]), 0)
+
+        self.assertEqual(signal_calls[-2:], [
+            (cli.signal.SIGINT, previous[cli.signal.SIGINT]),
+            (cli.signal.SIGTERM, previous[cli.signal.SIGTERM]),
+        ])
 
     def test_model_export_is_strictly_verified_and_idempotent(self) -> None:
         torch.manual_seed(7)
