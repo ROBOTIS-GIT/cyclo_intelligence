@@ -86,6 +86,33 @@ export function getConversionCommandFields(options = {}) {
   };
 }
 
+export function getActionPolicyCommandFields(
+  taskInfo = {},
+  command = '',
+  options = {}
+) {
+  // A fresh inference session always starts on the base GR00T action
+  // path. SET_ACTION_POLICY is the only command allowed to select the
+  // preloaded RLT actor without unloading the model.
+  const requestedMode = command === 'start_inference'
+    ? 'base'
+    : String(
+      Object.prototype.hasOwnProperty.call(options, 'actionPolicyMode')
+        ? options.actionPolicyMode
+        : taskInfo.actionPolicyMode
+    ).trim().toLowerCase();
+  return {
+    rlt_enabled: Boolean(taskInfo.rltEnabled),
+    rlt_bundle_path: String(taskInfo.rltBundlePath || '').trim(),
+    rlt_robot_override: Boolean(
+      Object.prototype.hasOwnProperty.call(options, 'rltRobotOverride')
+        ? options.rltRobotOverride
+        : taskInfo.rltRobotOverride
+    ),
+    action_policy_mode: requestedMode === 'rlt' ? 'rlt' : 'base',
+  };
+}
+
 export function isInferenceCommandRequest(page, taskSource = '') {
   const requestedTaskSource = String(taskSource || '').trim().toLowerCase();
   return (
@@ -357,6 +384,9 @@ export function useRosServiceCaller() {
           case 'cancel_segment':
             command_enum = TaskCommand.CANCEL_SEGMENT;
             break;
+          case 'set_action_policy':
+            command_enum = TaskCommand.SET_ACTION_POLICY;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }
@@ -434,6 +464,11 @@ export function useRosServiceCaller() {
             ? 'sync'
             : 'async'
         );
+        const actionPolicyFields = getActionPolicyCommandFields(
+          taskInfo,
+          command,
+          options
+        );
         const recordingFolder = getCommandRecordingFolder(taskInfo, options);
         const inferenceRecordingSessionId = recordingFolder
           ? getInferenceRecordingSessionId(recordingFolder)
@@ -473,6 +508,7 @@ export function useRosServiceCaller() {
             action_request_mode: actionRequestMode,
             acceleration_mode: accelerationMode || 'pytorch',
             acceleration_engine_path: accelerationEnginePath,
+            ...actionPolicyFields,
           },
           command: Number(command_enum),
           episode_outcome: getEpisodeOutcomeForCommand(

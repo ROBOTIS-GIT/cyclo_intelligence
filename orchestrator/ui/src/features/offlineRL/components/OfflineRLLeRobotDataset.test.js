@@ -6,6 +6,7 @@ import editDatasetReducer, {
 } from '../../editDataset/editDatasetSlice';
 import {
   deleteOfflineRLDatasetEpisodes,
+  getOfflineRLDatasetEpisodeData,
   getOfflineRLDatasetInfo,
   getOfflineRLDatasets,
   getOfflineRLStatus,
@@ -18,12 +19,15 @@ import offlineRLReducer, {
   setOfflineRLDatasetSelection,
 } from '../offlineRLSlice';
 import OfflineRLLeRobotDataset, {
+  buildSelectedTrainingComposition,
+  buildLeRobotEpisodeMedia,
   compareDatasetSelections,
   normalizeLeRobotEpisodes,
 } from './OfflineRLLeRobotDataset';
 
 jest.mock('../../../utils/offlineRlApi', () => ({
   deleteOfflineRLDatasetEpisodes: jest.fn(),
+  getOfflineRLDatasetEpisodeData: jest.fn(),
   getOfflineRLDatasetInfo: jest.fn(),
   getOfflineRLDatasets: jest.fn(),
   getOfflineRLStatus: jest.fn(),
@@ -56,6 +60,15 @@ const renderDataset = () => {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getOfflineRLDatasetEpisodeData.mockResolvedValue({
+    joint_timestamps: [],
+    joint_names: [],
+    joint_positions: [],
+    action_timestamps: [],
+    action_names: [],
+    action_values: [],
+    duration: 0,
+  });
   getOfflineRLStatus.mockResolvedValue({ status: 'idle' });
   getOfflineRLDatasets.mockResolvedValue({
     root_path: '/workspace/lerobot',
@@ -102,7 +115,10 @@ test('ignores a stale inventory response after the collection root changes', asy
     store.dispatch(setOfflineRLConversionDestinationPath('/workspace/lerobot/new'));
   });
   await waitFor(() => {
-    expect(screen.getByRole('combobox', { name: 'LeRobot dataset' })).toHaveValue(newPath);
+    expect(store.getState().offlineRL.datasetPath).toBe(newPath);
+    expect(screen.getByRole('button', {
+      name: 'Preview Task_new_lerobot_v30 v3.0',
+    })).toHaveAttribute('aria-pressed', 'true');
   });
 
   await act(async () => {
@@ -111,7 +127,10 @@ test('ignores a stale inventory response after the collection root changes', asy
       datasets: [{ dataset_path: oldPath, name: 'Task_old_lerobot_v30', version: 'v3.0' }],
     });
   });
-  expect(screen.getByRole('combobox', { name: 'LeRobot dataset' })).toHaveValue(newPath);
+  expect(store.getState().offlineRL.datasetPath).toBe(newPath);
+  expect(screen.getByRole('button', {
+    name: 'Preview Task_new_lerobot_v30 v3.0',
+  })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('normalizes API episode outcomes and indices', () => {
@@ -128,6 +147,60 @@ test('normalizes API episode outcomes and indices', () => {
   ]);
 });
 
+test('builds safe ordered LeRobot camera segments for one episode', () => {
+  const [episode] = normalizeLeRobotEpisodes({
+    episodes: [{
+      index: 0,
+      outcome: 'success',
+      frames: 459,
+      tasks: ['Pick up the pack'],
+      media: [
+        {
+          camera_key: 'observation.images.rgb.cam_right_wrist',
+          relative_path: 'videos/right/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+        {
+          camera_key: 'observation.images.rgb.cam_left_wrist',
+          relative_path: 'videos/left/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+        {
+          camera_key: 'observation.images.rgb.cam_left_head',
+          relative_path: 'videos/head/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+      ],
+    }],
+  });
+
+  expect(episode.frames).toBe(459);
+  expect(episode.tasks).toEqual(['Pick up the pack']);
+  expect(buildLeRobotEpisodeMedia(datasetPath, episode, 15)).toEqual([
+    expect.objectContaining({
+      label: 'Left wrist',
+      url: `/files${datasetPath}/videos/left/chunk-000/file-000.mp4`,
+      fromS: 30.6,
+      toS: 64.6,
+      fps: 15,
+    }),
+    expect.objectContaining({ label: 'Head' }),
+    expect.objectContaining({ label: 'Right wrist' }),
+  ]);
+});
+
+test('rejects unsafe LeRobot media paths in the browser URL builder', () => {
+  expect(buildLeRobotEpisodeMedia(datasetPath, {
+    media: [{
+      camera_key: 'cam_left_head',
+      relative_path: '../outside.mp4',
+    }],
+  }, 15)).toEqual([]);
+});
+
 test('keeps a legacy checkpoint root before newly numbered Data Epochs', () => {
   const legacy = { path: '/workspace/lerobot/legacy_v30', dataEpoch: null };
   const epoch = {
@@ -136,6 +209,41 @@ test('keeps a legacy checkpoint root before newly numbered Data Epochs', () => {
   };
 
   expect([epoch, legacy].sort(compareDatasetSelections)).toEqual([legacy, epoch]);
+});
+
+test('aggregates composition from checked Training Data Epochs only', () => {
+  const epoch1 = '/workspace/lerobot/data_epoch_0001/Task_one_lerobot_v30';
+  const epoch2 = '/workspace/lerobot/data_epoch_0002/Task_two_lerobot_v30';
+  const result = buildSelectedTrainingComposition(
+    [{ path: epoch2, version: 'v3.0' }],
+    [
+      {
+        dataset_path: epoch1,
+        total_episodes: 2,
+        episodes: [
+          { index: 0, outcome: 'success' },
+          { index: 1, outcome: 'success' },
+        ],
+      },
+      {
+        dataset_path: epoch2,
+        total_episodes: 3,
+        episodes: [
+          { index: 0, outcome: 'failure' },
+          { index: 1, outcome: 'failure' },
+          { index: 2, outcome: 'unlabeled' },
+        ],
+      },
+    ]
+  );
+
+  expect(result.totalCount).toBe(3);
+  expect(result.episodes.map((episode) => episode.outcome)).toEqual([
+    'failure',
+    'failure',
+    'unlabeled',
+  ]);
+  expect(result.episodes.every((episode) => episode.sourcePath === epoch2)).toBe(true);
 });
 
 test('renders converted episodes with an episode-weighted success percentage', async () => {
@@ -154,20 +262,102 @@ test('renders converted episodes with an episode-weighted success percentage', a
 
   expect(await screen.findByText('episode_002')).toBeInTheDocument();
   expect(screen.getByText('Success rate 67%')).toBeInTheDocument();
-  const datasetDetail = screen.getByText('v3.0 · 15 FPS · ready for training');
   const episodeList = screen.getByRole('list', { name: 'LeRobot Dataset episodes' });
   const successBar = screen.getByRole('progressbar', {
     name: 'LeRobot episodes success rate',
   });
-  expect(datasetDetail.compareDocumentPosition(episodeList))
+  expect(successBar.compareDocumentPosition(episodeList))
     .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-  expect(episodeList.compareDocumentPosition(successBar))
-    .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(screen.getByRole('button', {
+    name: 'Preview Task_test_lerobot_v30 v3.0',
+  })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.queryByText('Dataset preview')).not.toBeInTheDocument();
   expect(screen.getByTestId('offline-rl-lerobot-dataset'))
-    .toHaveClass('h-full', 'min-h-0', 'overflow-hidden');
+    .toHaveClass('min-h-0', 'flex-col', 'gap-2');
   expect(screen.getByTestId('offline-rl-lerobot-episode-region'))
-    .toHaveClass('h-[160px]', 'min-h-0', 'shrink-0', 'overflow-hidden');
-  expect(episodeList).toHaveClass('flex-1', 'overflow-y-auto');
+    .toHaveClass('min-h-[232px]', 'shrink-0');
+  expect(screen.getByTestId('replay-buffer-composition-layout'))
+    .toHaveClass('md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]');
+  expect(screen.getByText('Training composition')).toBeInTheDocument();
+  expect(screen.getByRole('group', { name: 'Training Data Epochs' }))
+    .toHaveClass('max-h-[108px]', 'overflow-y-auto');
+  expect(episodeList).toHaveClass(
+    'h-[156px]',
+    'min-h-[156px]',
+    'max-h-[156px]',
+    'flex-none',
+    'overflow-y-auto',
+    'overscroll-contain'
+  );
+});
+
+test('opens the selected LeRobot episode camera segment in the media dialog', async () => {
+  getOfflineRLDatasetEpisodeData.mockResolvedValue({
+    joint_timestamps: [0, 1 / 15],
+    joint_names: ['arm_l_joint1'],
+    joint_positions: [0.1, 0.2],
+    action_timestamps: [0, 1 / 15],
+    action_names: ['arm_l_joint1'],
+    action_values: [0.15, 0.25],
+    duration: 1 / 15,
+  });
+  getOfflineRLDatasetInfo.mockResolvedValue({
+    codebase_version: 'v3.0',
+    total_episodes: 1,
+    fps: 15,
+    episodes: [{
+      index: 0,
+      outcome: 'success',
+      frames: 459,
+      tasks: ['Pick up the pack'],
+      media: [
+        {
+          camera_key: 'observation.images.rgb.cam_left_head',
+          relative_path: 'videos/head/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+        {
+          camera_key: 'observation.images.rgb.cam_left_wrist',
+          relative_path: 'videos/left/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+        {
+          camera_key: 'observation.images.rgb.cam_right_wrist',
+          relative_path: 'videos/right/chunk-000/file-000.mp4',
+          from_s: 30.6,
+          to_s: 64.6,
+        },
+      ],
+    }],
+  });
+
+  renderDataset();
+  fireEvent.click(await screen.findByLabelText('Open episode 0 video'));
+
+  expect(await screen.findByRole('dialog', { name: 'episode_000' }))
+    .toBeInTheDocument();
+  const videos = screen.getAllByLabelText(/episode video$/);
+  expect(videos).toHaveLength(3);
+  expect(videos[0]).toHaveAttribute(
+    'src',
+    `/files${datasetPath}/videos/left/chunk-000/file-000.mp4`
+  );
+  expect(videos[1]).toHaveAttribute(
+    'src',
+    `/files${datasetPath}/videos/head/chunk-000/file-000.mp4`
+  );
+  expect(videos[2]).toHaveAttribute(
+    'src',
+    `/files${datasetPath}/videos/right/chunk-000/file-000.mp4`
+  );
+  expect(screen.getByText('Pick up the pack')).toBeInTheDocument();
+  await waitFor(() => {
+    expect(getOfflineRLDatasetEpisodeData).toHaveBeenCalledWith(datasetPath, 0);
+  });
+  expect(screen.getByText('Joint Data')).toBeInTheDocument();
+  expect(screen.getByText('arm_l_joint1')).toBeInTheDocument();
 });
 
 test('keeps a fixed episode viewport and scrolls a large dataset internally', async () => {
@@ -187,12 +377,17 @@ test('keeps a fixed episode viewport and scrolls a large dataset internally', as
   const viewport = screen.getByTestId('offline-rl-lerobot-episode-region');
   const episodeList = screen.getByRole('list', { name: 'LeRobot Dataset episodes' });
   expect(viewport).toHaveClass(
-    'h-[160px]',
-    'min-h-0',
-    'shrink-0',
-    'overflow-hidden'
+    'min-h-[232px]',
+    'shrink-0'
   );
-  expect(episodeList).toHaveClass('flex-1', 'overflow-y-auto');
+  expect(episodeList).toHaveClass(
+    'h-[156px]',
+    'min-h-[156px]',
+    'max-h-[156px]',
+    'flex-none',
+    'overflow-y-auto',
+    'overscroll-contain'
+  );
   expect(screen.getByText('Success rate 50%')).toBeInTheDocument();
 });
 
@@ -219,8 +414,12 @@ test('renders a converted v2.1 dataset with transactional episode deletion enabl
 
   expect(await screen.findByText('episode_001')).toBeInTheDocument();
   expect(screen.getByText('Success rate 100%')).toBeInTheDocument();
-  expect(screen.getByText('v2.1 · 15 FPS · editable; select v3.0 for training'))
-    .toBeInTheDocument();
+  expect(screen.getByRole('button', {
+    name: 'Preview Task_test_lerobot_v21 v2.1',
+  })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('checkbox', {
+    name: 'Include Task_test_lerobot_v21 v2.1 in training',
+  })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Delete episode 1' }))
     .toBeInTheDocument();
 });
@@ -259,10 +458,12 @@ test('discovers nested converted datasets and restores a selection after reload'
     expect(store.getState().offlineRL.datasetVersion).toBe('v2.1');
   });
   expect(await screen.findByText('episode_000')).toBeInTheDocument();
-  expect(screen.getByRole('combobox', { name: 'LeRobot dataset' })).toHaveValue(nestedPath);
+  expect(screen.getByRole('button', {
+    name: 'Preview Task_new_lerobot_v21 v2.1',
+  })).toHaveAttribute('aria-pressed', 'true');
 });
 
-test('explicitly includes multiple Data Epochs in deterministic epoch order', async () => {
+test('keeps preview and checked Training Data Epochs independent in deterministic order', async () => {
   const epoch1 = '/workspace/lerobot/data_epoch_0001/Task_one_lerobot_v30';
   const epoch2 = '/workspace/lerobot/data_epoch_0002/Task_two_lerobot_v30';
   getOfflineRLDatasets.mockResolvedValue({
@@ -274,22 +475,49 @@ test('explicitly includes multiple Data Epochs in deterministic epoch order', as
         dataset_path: epoch2,
         name: 'Task_two_lerobot_v30',
         version: 'v3.0',
+        total_episodes: 2,
+        episodes: [
+          { index: 0, outcome: 'failure' },
+          { index: 1, outcome: 'failure' },
+        ],
         data_epoch_provenance: { data_epoch: 2, epoch_name: 'data_epoch_0002' },
       },
       {
         dataset_path: epoch1,
         name: 'Task_one_lerobot_v30',
         version: 'v3.0',
+        total_episodes: 3,
+        episodes: [
+          { index: 0, outcome: 'success' },
+          { index: 1, outcome: 'success' },
+          { index: 2, outcome: 'success' },
+        ],
         data_epoch_provenance: { data_epoch: 1, epoch_name: 'data_epoch_0001' },
       },
     ],
   });
-  getOfflineRLDatasetInfo.mockResolvedValue({
-    codebase_version: 'v3.0',
-    total_episodes: 1,
-    fps: 15,
-    episodes: [{ index: 0, outcome: 'success' }],
-  });
+  getOfflineRLDatasetInfo.mockImplementation(async (path) => (
+    path === epoch1
+      ? {
+        codebase_version: 'v3.0',
+        total_episodes: 3,
+        fps: 15,
+        episodes: [
+          { index: 0, outcome: 'success' },
+          { index: 1, outcome: 'success' },
+          { index: 2, outcome: 'success' },
+        ],
+      }
+      : {
+        codebase_version: 'v3.0',
+        total_episodes: 2,
+        fps: 15,
+        episodes: [
+          { index: 0, outcome: 'failure' },
+          { index: 1, outcome: 'failure' },
+        ],
+      }
+  ));
   const store = configureStore({
     reducer: {
       editDataset: editDatasetReducer,
@@ -303,18 +531,45 @@ test('explicitly includes multiple Data Epochs in deterministic epoch order', as
   );
 
   // The initially previewed newest dataset remains the only implicit choice.
-  expect(await screen.findByLabelText('Include data_epoch_0002 in training'))
+  expect(await screen.findByLabelText('Include data_epoch_0002 v3.0 in training'))
     .toBeChecked();
-  expect(screen.getByLabelText('Include data_epoch_0001 in training'))
+  expect(screen.getByLabelText('Include data_epoch_0001 v3.0 in training'))
     .not.toBeChecked();
-  fireEvent.click(screen.getByLabelText('Include data_epoch_0001 in training'));
+  await waitFor(() => {
+    expect(screen.getByRole('img', {
+      name: 'LeRobot episodes buffer composition',
+    })).toHaveAttribute('data-capacity-used', '2');
+  });
+  fireEvent.click(screen.getByLabelText('Include data_epoch_0001 v3.0 in training'));
 
   await waitFor(() => {
     expect(store.getState().offlineRL.datasetSelections.map((item) => item.path))
       .toEqual([epoch1, epoch2]);
   });
-  expect(screen.getByRole('combobox', { name: 'LeRobot dataset' })).toHaveValue(epoch1);
-  expect(screen.getByText('2 Data Epochs included')).toBeInTheDocument();
+  expect(store.getState().offlineRL.datasetPath).toBe(epoch2);
+  expect(screen.getByRole('button', {
+    name: 'Preview data_epoch_0002 v3.0',
+  })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('2 included')).toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.getByRole('img', {
+      name: 'LeRobot episodes buffer composition',
+    })).toHaveAttribute('data-capacity-used', '5');
+  });
+  expect(screen.getByText('Success rate 60%')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', {
+    name: 'Preview data_epoch_0001 v3.0',
+  }));
+  await waitFor(() => {
+    expect(store.getState().offlineRL.datasetPath).toBe(epoch1);
+  });
+  expect(store.getState().offlineRL.datasetSelections.map((item) => item.path))
+    .toEqual([epoch1, epoch2]);
+  expect(screen.getByLabelText('Include data_epoch_0001 v3.0 in training'))
+    .toBeChecked();
+  expect(screen.getByLabelText('Include data_epoch_0002 v3.0 in training'))
+    .toBeChecked();
 });
 
 test('keeps checked v3 roots when a new conversion is added to dataset_paths', async () => {
@@ -374,7 +629,7 @@ test('keeps checked v3 roots when a new conversion is added to dataset_paths', a
     </Provider>
   );
 
-  expect(await screen.findByLabelText('Include data_epoch_0000 in training'))
+  expect(await screen.findByLabelText('Include data_epoch_0000 v3.0 in training'))
     .toBeChecked();
 
   act(() => {
@@ -391,17 +646,17 @@ test('keeps checked v3 roots when a new conversion is added to dataset_paths', a
   });
 
   const epoch1Checkboxes = await screen.findAllByLabelText(
-    'Include data_epoch_0001 in training'
+    /Include data_epoch_0001 v(?:2\.1|3\.0) in training/
   );
   const epoch1V30Checkbox = epoch1Checkboxes.find((checkbox) => !checkbox.disabled);
   const epoch1V21Checkbox = epoch1Checkboxes.find((checkbox) => checkbox.disabled);
   expect(epoch1V30Checkbox).toBeChecked();
   expect(epoch1V21Checkbox).not.toBeChecked();
-  expect(screen.getByLabelText('Include data_epoch_0000 in training')).toBeChecked();
+  expect(screen.getByLabelText('Include data_epoch_0000 v3.0 in training')).toBeChecked();
   await waitFor(() => {
     expect(selectOfflineRLDatasetPaths(store.getState())).toEqual([epoch0, epoch1]);
   });
-  expect(screen.getByText('2 Data Epochs included')).toBeInTheDocument();
+  expect(screen.getByText('2 included')).toBeInTheDocument();
 });
 
 test('deletes through the transactional dataset API and refreshes compacted indices', async () => {

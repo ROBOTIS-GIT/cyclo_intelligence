@@ -43,6 +43,7 @@ const TaskCommand = {
   DISCARD_EPISODE: 22,
   SET_TASK_INFO: 23,
   CANCEL_SEGMENT: 24,
+  SET_ACTION_POLICY: 25,
 };
 
 export const EpisodeOutcome = Object.freeze({

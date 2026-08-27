@@ -1,37 +1,28 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import PI05ArchitectureDiagram from './PI05ArchitectureDiagram';
 
-const expectState = (name, state) => {
-  expect(screen.getByRole('group', { name: `${name}: ${state}` })).toBeInTheDocument();
-};
-
 describe('PI05ArchitectureDiagram', () => {
-  test('derives only the three freeze modes supported by PI05Config', () => {
+  test('shows the Pi0.5 inputs, policy topology, and action output', () => {
     render(<PI05ArchitectureDiagram />);
 
-    expect(screen.getByRole('button', { name: 'Full fine-tune' }))
-      .toHaveAttribute('aria-pressed', 'true');
-    expectState('SigLIP vision encoder', 'Trainable');
-    expectState('PaliGemma VLM', 'Trainable');
-    expectState('Action/time projections', 'Trainable');
-    expectState('Gemma action expert', 'Trainable');
+    const inputs = screen.getByTestId('pi05-policy-inputs');
+    expect(within(inputs).getByText('Camera images + task instruction')).toBeInTheDocument();
+    expect(within(inputs).getByText('Robot state')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Frozen vision' }));
-    expectState('SigLIP vision encoder', 'Frozen');
-    expectState('PaliGemma VLM', 'Trainable');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expert only' }));
-    expectState('SigLIP vision encoder', 'Frozen');
-    expectState('PaliGemma VLM', 'Frozen');
-    expectState('Action/time projections', 'Trainable');
-    expectState('Gemma action expert', 'Trainable');
+    expect(screen.getByRole('group', { name: 'Vision-language encoder' }))
+      .toHaveTextContent('SigLIP + PaliGemma');
+    expect(screen.getByRole('group', { name: 'Action conditioning' }))
+      .toHaveTextContent('Robot state + noisy action + time');
+    expect(screen.getByRole('group', { name: 'Action Module' }))
+      .toHaveTextContent('Flow-matching velocity prediction');
+    expect(screen.getByTestId('pi05-policy-output')).toHaveTextContent('Action chunk');
   });
 
-  test('locks mode previews while the surrounding workflow is locked', () => {
+  test('does not expose preview-only fine-tune controls', () => {
     render(<PI05ArchitectureDiagram disabled />);
 
-    for (const name of ['Full fine-tune', 'Frozen vision', 'Expert only']) {
-      expect(screen.getByRole('button', { name })).toBeDisabled();
-    }
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Fire|Frozen/)).not.toBeInTheDocument();
+    expect(screen.getByText(/training controls pending integration/i)).toBeInTheDocument();
   });
 });

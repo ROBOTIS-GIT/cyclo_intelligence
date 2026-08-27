@@ -14,6 +14,7 @@ import {
   selectInferenceTaskInfo,
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
+import { supportsRltInference } from '../constants/policyCapabilities';
 
 // Inference models. Each option pairs a backend (orchestrator routing
 // via TaskInfo.service_type) with a policy class (drives instruction
@@ -111,6 +112,14 @@ const InferenceModelSelector = ({
         accelerationEnginePath: sel.serviceType === 'groot'
           ? (info.accelerationEnginePath || '')
           : '',
+        // Keep the selected bundle for quick return to N1.7, but never leave
+        // RLT logically enabled on a policy that cannot consume it.
+        rltEnabled: supportsRltInference(sel.serviceType, sel.policyType)
+          ? Boolean(info.rltEnabled)
+          : false,
+        rltRobotOverride: supportsRltInference(sel.serviceType, sel.policyType)
+          ? Boolean(info.rltRobotOverride)
+          : false,
       })
     );
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));

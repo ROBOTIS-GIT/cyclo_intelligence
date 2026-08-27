@@ -129,6 +129,14 @@ const inferenceTaskInfoInitialState = {
   actionRequestMode: 'async',
   accelerationMode: 'pytorch',
   accelerationEnginePath: '',
+  // RLT is preloaded with the base policy. actionPolicyMode is runtime
+  // routing state and always resets to the base GR00T path on a fresh start.
+  rltEnabled: false,
+  rltBundlePath: '',
+  // Explicit safety opt-in required before an RLT action can be routed to a
+  // physical robot. Simulation remains available without this override.
+  rltRobotOverride: false,
+  actionPolicyMode: 'base',
 };
 
 const stringArray = (items) => (
@@ -150,6 +158,13 @@ const copyInferenceTaskInfo = (
 ) => ({
   ...inferenceTaskInfoInitialState,
   ...inferenceTaskInfo,
+  rltEnabled: Boolean(inferenceTaskInfo.rltEnabled),
+  rltBundlePath: String(inferenceTaskInfo.rltBundlePath ?? ''),
+  rltRobotOverride: Boolean(inferenceTaskInfo.rltRobotOverride),
+  actionPolicyMode:
+    String(inferenceTaskInfo.actionPolicyMode || '').trim().toLowerCase() === 'rlt'
+      ? 'rlt'
+      : 'base',
   actionRequestMode:
     String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
@@ -317,6 +332,24 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     accelerationEnginePath: String(
       taskInfo.accelerationEnginePath ?? state.inferenceTaskInfo.accelerationEnginePath ?? ''
     ),
+    rltEnabled: Object.prototype.hasOwnProperty.call(taskInfo, 'rltEnabled')
+      ? Boolean(taskInfo.rltEnabled)
+      : Boolean(state.inferenceTaskInfo.rltEnabled),
+    rltBundlePath: String(
+      taskInfo.rltBundlePath ?? state.inferenceTaskInfo.rltBundlePath ?? ''
+    ),
+    rltRobotOverride: Object.prototype.hasOwnProperty.call(
+      taskInfo,
+      'rltRobotOverride'
+    )
+      ? Boolean(taskInfo.rltRobotOverride)
+      : Boolean(state.inferenceTaskInfo.rltRobotOverride),
+    actionPolicyMode:
+      String(
+        taskInfo.actionPolicyMode ?? state.inferenceTaskInfo.actionPolicyMode ?? ''
+      ).trim().toLowerCase() === 'rlt'
+        ? 'rlt'
+        : 'base',
   };
   syncLegacyTaskInfo(state, 'inference');
 };
@@ -707,10 +740,23 @@ const taskSlice = createSlice({
         const inferenceServerTaskInfo = protectRecordSharedInstruction
           ? omitTaskInstruction(serverTaskInfo)
           : serverTaskInfo;
+        const preserveRuntimeRouting =
+          state.inferenceStatus.inferencePhase !== InferencePhase.READY;
         const nextInferenceTaskInfo = {
           ...currentInferenceTaskInfo,
           ...inferenceServerTaskInfo,
           taskType: 'inference',
+          // Recording status republishes the TaskInfo snapshot captured when
+          // inference started; it is not authoritative for hot-switched
+          // runtime routing. While inference is active, keep the locally
+          // acknowledged route and approval instead of letting that stale
+          // snapshot flip the UI back. READY still accepts server hydration.
+          ...(preserveRuntimeRouting
+            ? {
+                actionPolicyMode: currentInferenceTaskInfo.actionPolicyMode,
+                rltRobotOverride: currentInferenceTaskInfo.rltRobotOverride,
+              }
+            : {}),
         };
         const currentInferenceTaskKey = getInferenceTaskInfoKey(currentInferenceTaskInfo);
         const nextInferenceTaskKey = getInferenceTaskInfoKey(nextInferenceTaskInfo);

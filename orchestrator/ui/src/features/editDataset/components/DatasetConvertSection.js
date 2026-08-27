@@ -15,7 +15,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { shallowEqual, useDispatch, useSelector } from 'react-redux';
-import { MdDeleteSweep, MdFolderOpen, MdMovie, MdRefresh } from 'react-icons/md';
+import { MdFolderOpen, MdMovie } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import {
   selectRecordTaskInfo,
@@ -45,11 +45,7 @@ export default function DatasetConvertSection({
   onBusyChange,
 }) {
   const dispatch = useDispatch();
-  const {
-    getDatasetInfo,
-    sendEditDatasetCommand,
-    sendRecordCommand,
-  } = useRosServiceCaller();
+  const { sendRecordCommand } = useRosServiceCaller();
   const info = useSelector(selectRecordTaskInfo, shallowEqual);
   const conversionStatus = useSelector(
     (state) => state.editDataset.conversionStatus
@@ -63,13 +59,6 @@ export default function DatasetConvertSection({
   const [hasSeenConverting, setHasSeenConverting] = useState(false);
   const [convertError, setConvertError] = useState('');
   const [pendingSingleConvert, setPendingSingleConvert] = useState(false);
-  const [datasetStatus, setDatasetStatus] = useState(null);
-  const [statusLoading, setStatusLoading] = useState(false);
-  const [isPruning, setIsPruning] = useState(false);
-  const [pruneSuccessCount, setPruneSuccessCount] = useState(0);
-  const [pruneFailureCount, setPruneFailureCount] = useState(0);
-  const [dataStatusMessage, setDataStatusMessage] = useState('');
-
   // Conversion-only knobs. Defaults match cyclo_data's defaults: fps=15
   // (DEFAULT_CONVERSION_FPS in pipeline_worker.py) and both LeRobot
   // formats enabled.
@@ -102,105 +91,8 @@ export default function DatasetConvertSection({
   }, [conversionStatus.status, conversionStatus.message, isConverting, hasSeenConverting]);
 
   useEffect(() => {
-    if (onBusyChange) onBusyChange(isConverting || isPruning);
-  }, [isConverting, isPruning, onBusyChange]);
-
-  const rawTaskPath = singleTaskName
-    ? `${DEFAULT_PATHS.ROSBAG2_PATH.replace(/\/+$/, '')}/${singleTaskName}`
-    : '';
-
-  const refreshDatasetStatus = useCallback(async () => {
-    if (!rawTaskPath) {
-      setDatasetStatus(null);
-      return null;
-    }
-    setStatusLoading(true);
-    setDataStatusMessage('');
-    try {
-      const result = await getDatasetInfo(rawTaskPath);
-      if (!result?.success || !result.dataset_info) {
-        throw new Error(result?.message || 'Failed to read dataset status');
-      }
-      const info = result.dataset_info;
-      const nextStatus = {
-        episodeCount: Number(info.episode_count || 0),
-        successCount: Number(info.success_count || 0),
-        failureCount: Number(info.failure_count || 0),
-        unlabeledCount: Number(info.unlabeled_count || 0),
-      };
-      setDatasetStatus(nextStatus);
-      return nextStatus;
-    } catch (error) {
-      setDatasetStatus(null);
-      setDataStatusMessage(error.message || 'Failed to read dataset status');
-      return null;
-    } finally {
-      setStatusLoading(false);
-    }
-  }, [getDatasetInfo, rawTaskPath]);
-
-  useEffect(() => {
-    refreshDatasetStatus();
-  }, [refreshDatasetStatus]);
-
-  useEffect(() => {
-    if (conversionStatus.status === 'completed') refreshDatasetStatus();
-  }, [conversionStatus.status, refreshDatasetStatus]);
-
-  const handlePruneOldest = useCallback(async () => {
-    const successCount = Number(pruneSuccessCount);
-    const failureCount = Number(pruneFailureCount);
-    if (
-      !Number.isInteger(successCount) ||
-      !Number.isInteger(failureCount) ||
-      successCount < 0 ||
-      failureCount < 0 ||
-      successCount + failureCount < 1
-    ) {
-      setDataStatusMessage('Enter a non-negative count and delete at least one episode.');
-      return;
-    }
-    if (
-      !datasetStatus ||
-      successCount > datasetStatus.successCount ||
-      failureCount > datasetStatus.failureCount
-    ) {
-      setDataStatusMessage('Delete count exceeds the available labeled episodes.');
-      return;
-    }
-    if (!window.confirm(
-      `Delete the oldest ${successCount} success and ${failureCount} failure ` +
-      `episode(s) from\n${rawTaskPath}?\n\nThis deletes MCAP source data.`
-    )) return;
-
-    setIsPruning(true);
-    setDataStatusMessage('');
-    try {
-      const result = await sendEditDatasetCommand('prune_oldest', {
-        deleteTaskDir: rawTaskPath,
-        pruneOldestSuccessCount: successCount,
-        pruneOldestFailureCount: failureCount,
-      });
-      if (!result?.success) {
-        throw new Error(result?.message || 'Oldest episode deletion failed');
-      }
-      setPruneSuccessCount(0);
-      setPruneFailureCount(0);
-      await refreshDatasetStatus();
-      setDataStatusMessage(result.message || 'Oldest episodes deleted.');
-    } catch (error) {
-      setDataStatusMessage(error.message || 'Oldest episode deletion failed');
-    } finally {
-      setIsPruning(false);
-    }
-  }, [
-    datasetStatus,
-    pruneFailureCount,
-    pruneSuccessCount,
-    rawTaskPath,
-    refreshDatasetStatus,
-    sendEditDatasetCommand,
-  ]);
+    if (onBusyChange) onBusyChange(isConverting);
+  }, [isConverting, onBusyChange]);
 
   // ----- single convert ---------------------------------------------------
   // Two-step: dispatch taskInfo first, then fire sendRecordCommand from a
@@ -278,14 +170,7 @@ export default function DatasetConvertSection({
     Number.isFinite(conversionFps) &&
     conversionFps > 0;
   const canConvertSingle =
-    !isConverting && !isPruning && Boolean(singleTaskName) && isEditable && optionsValid;
-  const canPrune =
-    isEditable &&
-    !isConverting &&
-    !isPruning &&
-    !statusLoading &&
-    Boolean(datasetStatus) &&
-    Number(pruneSuccessCount) + Number(pruneFailureCount) > 0;
+    !isConverting && Boolean(singleTaskName) && isEditable && optionsValid;
 
   // Match cyclo_data's progress-band layout so the label tracks the
   // actual stage. Stage 1 (MP4) always runs; v21 / v30 are conditional.
@@ -341,78 +226,6 @@ export default function DatasetConvertSection({
           <div className="text-xs text-gray-500">
             Picks a folder under <code>/workspace/rosbag2/</code>.
           </div>
-        </div>
-
-        {/* Raw MCAP status and outcome-aware cleanup --------------------- */}
-        <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <MdDeleteSweep className="h-5 w-5 text-red-500" />
-              <span className="text-sm font-semibold text-gray-700">
-                Data Status &amp; Cleanup
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={refreshDatasetStatus}
-              disabled={!rawTaskPath || statusLoading || isPruning}
-              className="flex items-center gap-1 rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <MdRefresh />
-              {statusLoading ? 'Checking…' : 'Refresh'}
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-            <div className="rounded-md bg-white p-2"><span className="block text-gray-400">Total</span><b>{datasetStatus?.episodeCount ?? '—'} / 200</b></div>
-            <div className="rounded-md bg-white p-2"><span className="block text-gray-400">Success</span><b>{datasetStatus?.successCount ?? '—'}</b></div>
-            <div className="rounded-md bg-white p-2"><span className="block text-gray-400">Fail</span><b>{datasetStatus?.failureCount ?? '—'}</b></div>
-            <div className="rounded-md bg-white p-2"><span className="block text-gray-400">Unlabeled</span><b>{datasetStatus?.unlabeledCount ?? '—'}</b></div>
-          </div>
-
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1 text-xs text-gray-600">
-              Delete oldest Success
-              <input
-                aria-label="Delete oldest success count"
-                type="number"
-                min={0}
-                step={1}
-                value={pruneSuccessCount}
-                onChange={(event) => setPruneSuccessCount(event.target.value)}
-                disabled={!isEditable || isConverting || isPruning}
-                className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 text-sm disabled:bg-gray-100"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs text-gray-600">
-              Delete oldest Fail
-              <input
-                aria-label="Delete oldest failure count"
-                type="number"
-                min={0}
-                step={1}
-                value={pruneFailureCount}
-                onChange={(event) => setPruneFailureCount(event.target.value)}
-                disabled={!isEditable || isConverting || isPruning}
-                className="h-9 w-28 rounded-md border border-gray-300 bg-white px-2 text-sm disabled:bg-gray-100"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={handlePruneOldest}
-              disabled={!canPrune}
-              className="h-9 rounded-md bg-red-500 px-4 text-sm font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
-            >
-              {isPruning ? 'Deleting…' : 'Delete Oldest'}
-            </button>
-          </div>
-          <p className="text-xs leading-relaxed text-amber-700">
-            Cleanup changes the MCAP source only. Re-convert to a new LeRobot
-            dataset and start a new checkpoint lineage; do not reuse an existing parent.
-          </p>
-          {dataStatusMessage && (
-            <div className="text-xs text-gray-600">{dataStatusMessage}</div>
-          )}
         </div>
 
         {/* Conversion options --------------------------------------------- */}

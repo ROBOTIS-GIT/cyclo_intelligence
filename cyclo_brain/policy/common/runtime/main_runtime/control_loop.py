@@ -48,6 +48,9 @@ logger = get_logger("main_runtime.control_loop")
 ACTION_REQUEST_MODE_ASYNC = "async"
 ACTION_REQUEST_MODE_SYNC = "sync"
 ACTION_REQUEST_MODES = {ACTION_REQUEST_MODE_ASYNC, ACTION_REQUEST_MODE_SYNC}
+ACTION_POLICY_BASE = "base"
+ACTION_POLICY_RLT = "rlt"
+ACTION_POLICY_MODES = {ACTION_POLICY_BASE, ACTION_POLICY_RLT}
 
 
 def normalize_action_request_mode(value: object) -> str:
@@ -55,6 +58,13 @@ def normalize_action_request_mode(value: object) -> str:
     if mode == ACTION_REQUEST_MODE_SYNC:
         return ACTION_REQUEST_MODE_SYNC
     return ACTION_REQUEST_MODE_ASYNC
+
+
+def normalize_action_policy_mode(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode not in ACTION_POLICY_MODES:
+        raise ValueError("action_policy_mode must be 'base' or 'rlt'")
+    return mode
 
 
 class ControlLoop:
@@ -97,6 +107,7 @@ class ControlLoop:
         self._action_request_mode = self._default_action_request_mode
 
         self._lock = threading.RLock()
+        self._mode_condition = threading.Condition(self._lock)
         self._robot: Optional[RobotClient] = None
         self._processor: Optional[ActionChunkProcessor] = None
         self._task_instruction = ""
@@ -107,6 +118,11 @@ class ControlLoop:
         self._shutdown = threading.Event()
         self._request_thread: Optional[threading.Thread] = None
         self._thread: Optional[threading.Thread] = None
+        self._rlt_enabled = False
+        self._active_action_policy_mode = ACTION_POLICY_BASE
+        self._pending_action_policy_mode: Optional[str] = None
+        self._active_rlt_robot_override = False
+        self._pending_rlt_robot_override: Optional[bool] = None
 
     def configure(
         self,
@@ -115,6 +131,7 @@ class ControlLoop:
         action_keys: Optional[list[str]] = None,
         publish_to_robot: bool = False,
         action_request_mode: Optional[str] = None,
+        rlt_enabled: bool = False,
     ) -> None:
         with self._lock:
             self.deconfigure()
@@ -139,6 +156,11 @@ class ControlLoop:
             self._task_instruction = task_instruction or ""
             self._action_keys = list(action_keys or self._robot.action_keys)
             self._publish_to_robot = bool(publish_to_robot)
+            self._rlt_enabled = bool(rlt_enabled)
+            self._active_action_policy_mode = ACTION_POLICY_BASE
+            self._pending_action_policy_mode = None
+            self._active_rlt_robot_override = False
+            self._pending_rlt_robot_override = None
             self._reset_request_latency_locked()
             self._generation += 1
             logger.info(
@@ -156,12 +178,18 @@ class ControlLoop:
             self._action_keys = []
             self._publish_to_robot = False
             self._action_request_mode = self._default_action_request_mode
+            self._rlt_enabled = False
+            self._active_action_policy_mode = ACTION_POLICY_BASE
+            self._pending_action_policy_mode = None
+            self._active_rlt_robot_override = False
+            self._pending_rlt_robot_override = None
             self._processor = None
             self._generation += 1
             if self._robot is not None:
                 self._robot.close()
                 self._robot = None
             self._reset_request_latency_locked()
+            self._mode_condition.notify_all()
 
     def start(self, publish_to_robot: Optional[bool] = None) -> None:
         with self._lock:
@@ -175,6 +203,11 @@ class ControlLoop:
             if self._processor is not None:
                 self._processor.clear()
             self._generation += 1
+            self._active_action_policy_mode = ACTION_POLICY_BASE
+            self._pending_action_policy_mode = None
+            self._active_rlt_robot_override = False
+            self._pending_rlt_robot_override = None
+            self._mode_condition.notify_all()
 
     def stop(self) -> None:
         with self._lock:
@@ -182,6 +215,78 @@ class ControlLoop:
             if self._processor is not None:
                 self._processor.clear()
             self._generation += 1
+            self._active_action_policy_mode = ACTION_POLICY_BASE
+            self._pending_action_policy_mode = None
+            self._active_rlt_robot_override = False
+            self._pending_rlt_robot_override = None
+            self._mode_condition.notify_all()
+
+    def set_action_policy(
+        self,
+        action_policy_mode: str,
+        *,
+        allow_robot_rlt: bool = False,
+        timeout_s: float = 5.0,
+    ) -> tuple[bool, str]:
+        """Switch at the next drained-buffer boundary without reloading.
+
+        A generation bump invalidates any old-mode async request already in
+        flight. Actions already committed to the processor remain untouched.
+        """
+        try:
+            target = normalize_action_policy_mode(action_policy_mode)
+        except ValueError as error:
+            return False, str(error)
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._mode_condition:
+            if not self._running or self._processor is None:
+                return False, "inference is not running"
+            requested_robot_override = False
+            if target == ACTION_POLICY_RLT:
+                if not self._rlt_enabled:
+                    return False, "RLT bundle was not preloaded"
+                requested_robot_override = bool(allow_robot_rlt)
+                if self._publish_to_robot and not requested_robot_override:
+                    return False, (
+                        "Real-robot RLT routing requires explicit "
+                        "rlt_robot_override for the current bundle"
+                    )
+            if (
+                self._active_action_policy_mode == target
+                and self._pending_action_policy_mode is None
+            ):
+                if target == ACTION_POLICY_RLT and requested_robot_override:
+                    self._active_rlt_robot_override = True
+                return True, f"{target.upper()} action already active"
+
+            self._pending_action_policy_mode = target
+            self._pending_rlt_robot_override = requested_robot_override
+            self._generation += 1
+            self._mode_condition.notify_all()
+            while (
+                self._running
+                and self._pending_action_policy_mode == target
+                and self._active_action_policy_mode != target
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._mode_condition.wait(timeout=remaining)
+
+            if (
+                self._active_action_policy_mode == target
+                and self._pending_action_policy_mode is None
+            ):
+                return True, f"{target.upper()} action active"
+            if self._pending_action_policy_mode == target:
+                self._pending_action_policy_mode = None
+                self._pending_rlt_robot_override = None
+                self._generation += 1
+                self._mode_condition.notify_all()
+            if not self._running:
+                return False, "inference stopped before action switch"
+            return False, f"Timed out waiting for {target.upper()} chunk boundary"
 
     def set_publish_to_robot(self, publish_to_robot: bool) -> None:
         with self._lock:
@@ -193,7 +298,26 @@ class ControlLoop:
         self._publish_to_robot = publish_to_robot
         if self._processor is not None:
             self._processor.clear()
+        if publish_to_robot:
+            active_rlt_is_unsafe = (
+                self._active_action_policy_mode == ACTION_POLICY_RLT
+                and not self._active_rlt_robot_override
+            )
+            pending_rlt_is_unsafe = (
+                self._pending_action_policy_mode == ACTION_POLICY_RLT
+                and not bool(self._pending_rlt_robot_override)
+            )
+            if active_rlt_is_unsafe or pending_rlt_is_unsafe:
+                logger.warning(
+                    "falling back to base action while enabling robot publish: "
+                    "RLT lacks explicit operator override"
+                )
+                self._active_action_policy_mode = ACTION_POLICY_BASE
+                self._pending_action_policy_mode = None
+                self._active_rlt_robot_override = False
+                self._pending_rlt_robot_override = None
         self._generation += 1
+        self._mode_condition.notify_all()
 
     def set_task_instruction(self, task_instruction: str) -> None:
         with self._lock:
@@ -231,9 +355,17 @@ class ControlLoop:
             processor = self._processor
             task_instruction = self._task_instruction
             action_keys = list(self._action_keys)
-            generation = self._generation
             publish_to_robot = self._publish_to_robot
             action_request_mode = self._action_request_mode
+
+            if (
+                publish_to_robot
+                and self._active_action_policy_mode == ACTION_POLICY_RLT
+                and not self._active_rlt_robot_override
+            ):
+                self._fallback_rlt_to_base_locked(
+                    "blocked unauthorized RLT action before robot publish"
+                )
 
             action = processor.pop_action()
             if action is not None:
@@ -256,12 +388,20 @@ class ControlLoop:
                     except Exception as e:
                         logger.error("failed to publish idle robot action: %s", e)
 
+            self._commit_pending_action_policy_locked(processor)
+            generation = self._generation
+            action_policy_mode = self._active_action_policy_mode
             should_request = self._should_request_actions(processor)
 
         if should_request:
             self._request_thread = threading.Thread(
                 target=self._request_and_buffer,
-                args=(task_instruction, generation, action_request_mode),
+                args=(
+                    task_instruction,
+                    generation,
+                    action_request_mode,
+                    action_policy_mode,
+                ),
                 daemon=True,
             )
             self._request_thread.start()
@@ -271,34 +411,86 @@ class ControlLoop:
         task_instruction: str,
         generation: int,
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
+        action_policy_mode: str = ACTION_POLICY_BASE,
     ) -> None:
         action_request_mode = normalize_action_request_mode(action_request_mode)
+        action_policy_mode = normalize_action_policy_mode(action_policy_mode)
         started_at = time.monotonic()
         try:
-            response = self._requester.get_action(task_instruction)
+            response = self._requester.get_action(
+                task_instruction,
+                action_policy_mode=action_policy_mode,
+            )
         except Exception as e:
             latency_s = time.monotonic() - started_at
             self._record_request_latency(latency_s)
-            logger.warning("get_action raised: %s", e)
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                f"get_action raised: {e}",
+            )
             return
         latency_s = time.monotonic() - started_at
         self._record_request_latency(latency_s)
-        if not response.success:
-            logger.warning("get_action failed: %s", response.message)
-            return
-        if response.chunk_size <= 0 or response.action_dim <= 0:
-            logger.warning("get_action returned empty action list")
-            return
-        data = np.asarray(response.action_list, dtype=np.float64)
-        if data.size != response.chunk_size * response.action_dim:
-            logger.warning(
-                "action list size mismatch: %d != %d * %d",
-                data.size,
-                response.chunk_size,
-                response.action_dim,
+        if not bool(getattr(response, "success", False)):
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                f"get_action failed: {getattr(response, 'message', '')}",
             )
             return
-        chunk = data.reshape(response.chunk_size, response.action_dim)
+        try:
+            chunk_size = int(getattr(response, "chunk_size", 0))
+            action_dim = int(getattr(response, "action_dim", 0))
+        except (TypeError, ValueError) as error:
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                f"get_action returned invalid chunk shape: {error}",
+            )
+            return
+        if chunk_size <= 0 or action_dim <= 0:
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                "get_action returned empty action list",
+            )
+            return
+        try:
+            data = np.asarray(
+                getattr(response, "action_list", []),
+                dtype=np.float64,
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                f"action list is not numeric: {error}",
+            )
+            return
+        if not bool(np.isfinite(data).all()):
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                "action list contains NaN or Inf",
+            )
+            return
+        if data.size != chunk_size * action_dim:
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                f"action list size mismatch: {data.size} != "
+                f"{chunk_size} * {action_dim}",
+            )
+            return
+        chunk = data.reshape(chunk_size, action_dim)
+        if not bool(np.isfinite(chunk).all()):
+            self._handle_action_request_failure(
+                generation,
+                action_policy_mode,
+                "reshaped action chunk contains NaN or Inf",
+            )
+            return
         with self._lock:
             if (
                 generation == self._generation
@@ -328,16 +520,69 @@ class ControlLoop:
                     "buffered action chunk: source=%d produced=%d "
                     "mode=%s latency=%.3fs buffer_delay=%.3fs "
                     "scheduled_start=%s",
-                    response.chunk_size,
+                    chunk_size,
                     produced,
-                    action_request_mode,
+                    f"{action_request_mode}/{action_policy_mode}",
                     latency_s,
                     buffer_delay_s,
                     scheduled_start_text,
                 )
 
+    def _handle_action_request_failure(
+        self,
+        generation: int,
+        action_policy_mode: str,
+        reason: str,
+    ) -> None:
+        logger.warning("%s", reason)
+        if action_policy_mode != ACTION_POLICY_RLT:
+            return
+        with self._mode_condition:
+            if (
+                generation != self._generation
+                or not self._running
+                or self._active_action_policy_mode != ACTION_POLICY_RLT
+            ):
+                return
+            self._fallback_rlt_to_base_locked(
+                f"RLT inference failed; reverting to base action: {reason}"
+            )
+
+    def _fallback_rlt_to_base_locked(self, reason: str) -> None:
+        if self._processor is not None:
+            self._processor.clear()
+        self._active_action_policy_mode = ACTION_POLICY_BASE
+        self._pending_action_policy_mode = None
+        self._active_rlt_robot_override = False
+        self._pending_rlt_robot_override = None
+        self._generation += 1
+        logger.error("%s", reason)
+        self._mode_condition.notify_all()
+
+    def _commit_pending_action_policy_locked(
+        self,
+        processor: ActionChunkProcessor,
+    ) -> None:
+        target = self._pending_action_policy_mode
+        if target is None or processor.buffer_size > 0:
+            return
+        if self._request_thread is not None and self._request_thread.is_alive():
+            return
+        self._active_action_policy_mode = target
+        self._active_rlt_robot_override = (
+            bool(self._pending_rlt_robot_override)
+            if target == ACTION_POLICY_RLT
+            else False
+        )
+        self._pending_action_policy_mode = None
+        self._pending_rlt_robot_override = None
+        logger.info("action policy switched at chunk boundary: %s", target)
+        self._mode_condition.notify_all()
+
     def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
         if self._request_thread is not None and self._request_thread.is_alive():
+            return False
+        if self._pending_action_policy_mode is not None:
             return False
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
             return processor.buffer_size <= 0

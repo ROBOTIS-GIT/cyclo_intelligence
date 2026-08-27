@@ -21,6 +21,12 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+# LOAD_POLICY-only RLT preload settings.
+bool rlt_enabled
+string rlt_bundle_path
+# GET_ACTION router selection ("base" or "rlt"). The Main process changes
+# this value only after the previously committed action buffer drains.
+string action_policy_mode
 ---
 uint64 seq_id
 bool success

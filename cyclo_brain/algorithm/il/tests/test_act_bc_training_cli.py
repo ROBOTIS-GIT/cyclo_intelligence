@@ -31,6 +31,10 @@ class ACTBCTrainingCLITest(unittest.TestCase):
                     "20",
                     "--device",
                     "cpu",
+                    "--trainable-group",
+                    "action_decoder",
+                    "--trainable-group",
+                    "transformer_encoder",
                 ]
             )
             config = config_from_args(args)
@@ -44,6 +48,10 @@ class ACTBCTrainingCLITest(unittest.TestCase):
             )
             self.assertEqual(config.chunk_size, 30)
             self.assertEqual(config.batch_size, 8)
+            self.assertEqual(
+                config.trainable_groups,
+                ("transformer_encoder", "action_decoder"),
+            )
 
     def test_root_and_success_repeat_counts_must_match(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,6 +102,15 @@ class ACTBCTrainingCLITest(unittest.TestCase):
             )
             config = config_from_args(args)
             self.assertEqual(config.selections[0].success_episodes, (0, 1, 2))
+            self.assertEqual(
+                config.trainable_groups,
+                (
+                    "visual_backbone",
+                    "cvae_encoder",
+                    "transformer_encoder",
+                    "action_decoder",
+                ),
+            )
 
 
 if __name__ == "__main__":

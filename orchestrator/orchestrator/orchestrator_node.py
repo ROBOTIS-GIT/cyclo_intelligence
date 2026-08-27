@@ -205,6 +205,9 @@ class OrchestratorNode(Node):
         self._loaded_inference_acceleration_mode: str = 'pytorch'
         self._loaded_inference_acceleration_engine_path: str = ''
         self._loaded_inference_action_request_mode: str = 'async'
+        self._loaded_inference_rlt_enabled: bool = False
+        self._loaded_inference_rlt_bundle_path: str = ''
+        self._loaded_inference_action_policy_mode: str = 'base'
 
         # HF endpoint registry — orchestrator-owned because the
         # set/get/list/select_hf_endpoint services also read and mutate
@@ -406,6 +409,10 @@ class OrchestratorNode(Node):
             'action_request_mode',
             'acceleration_mode',
             'acceleration_engine_path',
+            'rlt_enabled',
+            'rlt_bundle_path',
+            'action_policy_mode',
+            'rlt_robot_override',
         ):
             value = getattr(task_info, field_name)
             if isinstance(value, list):
@@ -1470,6 +1477,18 @@ class OrchestratorNode(Node):
                         response.success = False
                         response.message = folder_error
                         return response
+                requested_rlt_enabled = bool(
+                    getattr(task_info, 'rlt_enabled', False)
+                )
+                requested_rlt_bundle_path = self._normalize_policy_path(
+                    getattr(task_info, 'rlt_bundle_path', '')
+                )
+                if requested_rlt_enabled and not requested_rlt_bundle_path:
+                    response.success = False
+                    response.message = (
+                        'RLT Bundle Path is required when RLT is enabled'
+                    )
+                    return response
                 self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 task_instruction = (
@@ -1513,6 +1532,10 @@ class OrchestratorNode(Node):
                     loaded_action_request_mode = (
                         self._loaded_inference_action_request_mode
                     )
+                    loaded_rlt_enabled = self._loaded_inference_rlt_enabled
+                    loaded_rlt_bundle_path = (
+                        self._loaded_inference_rlt_bundle_path
+                    )
                 start_handled = False
                 if (
                     existing_client is not None
@@ -1523,12 +1546,16 @@ class OrchestratorNode(Node):
                         loaded_acceleration_mode,
                         loaded_acceleration_engine_path,
                         loaded_action_request_mode,
+                        loaded_rlt_enabled,
+                        loaded_rlt_bundle_path,
                     )
                     requested_signature = (
                         requested_policy_path,
                         requested_acceleration_mode,
                         requested_acceleration_engine_path,
                         requested_action_request_mode,
+                        requested_rlt_enabled,
+                        requested_rlt_bundle_path,
                     )
                     if (
                         requested_policy_path
@@ -1638,6 +1665,9 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     ),
                                     action_request_mode=requested_action_request_mode,
+                                    rlt_enabled=requested_rlt_enabled,
+                                    rlt_bundle_path=requested_rlt_bundle_path,
+                                    action_policy_mode='base',
                                 )
 
                             with self._inference_lifecycle_lock:
@@ -1733,6 +1763,15 @@ class OrchestratorNode(Node):
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
+                                    self._loaded_inference_rlt_enabled = (
+                                        requested_rlt_enabled
+                                    )
+                                    self._loaded_inference_rlt_bundle_path = (
+                                        requested_rlt_bundle_path
+                                    )
+                                    self._loaded_inference_action_policy_mode = (
+                                        'base'
+                                    )
 
                                 self._set_session_active(
                                     on_inference=True,
@@ -1766,6 +1805,57 @@ class OrchestratorNode(Node):
                         f'{service_prefix.strip("/").upper()} inference loading '
                         f'({"robot" if publish_to_robot else "simulation"} mode)'
                     )
+
+            elif request.command == SendCommand.Request.SET_ACTION_POLICY:
+                target_mode = str(
+                    getattr(request.task_info, 'action_policy_mode', '') or ''
+                ).strip().lower()
+                if target_mode not in {'base', 'rlt'}:
+                    response.success = False
+                    response.message = (
+                        'Action policy mode must be either "base" or "rlt"'
+                    )
+                    return response
+
+                with self._state_lock:
+                    client = self.container_service_client
+                    inference_active = self.on_inference
+                    rlt_preloaded = self._loaded_inference_rlt_enabled
+
+                if client is None or not inference_active:
+                    response.success = False
+                    response.message = 'No active inference session'
+                    return response
+                if target_mode == 'rlt' and not rlt_preloaded:
+                    response.success = False
+                    response.message = (
+                        'RLT action cannot be selected because no RLT bundle '
+                        'was preloaded for this inference session'
+                    )
+                    return response
+
+                result = client.inference_command(
+                    ContainerServiceClient.CMD_SET_ACTION_POLICY,
+                    action_policy_mode=target_mode,
+                    rlt_robot_override=bool(
+                        getattr(
+                            request.task_info,
+                            'rlt_robot_override',
+                            False,
+                        )
+                    ),
+                )
+                if result.success:
+                    with self._state_lock:
+                        if self.container_service_client is client:
+                            self._loaded_inference_action_policy_mode = (
+                                target_mode
+                            )
+                response.success = result.success
+                response.message = (
+                    result.message
+                    or f'Action policy switched to {target_mode}'
+                )
 
             elif request.command == SendCommand.Request.CONVERT_MP4:
                 # CONVERT_MP4 path resolution stays orchestrator-side
@@ -2798,6 +2888,9 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_mode = 'pytorch'
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
+            self._loaded_inference_rlt_enabled = False
+            self._loaded_inference_rlt_bundle_path = ''
+            self._loaded_inference_action_policy_mode = 'base'
             self._inference_record_session_id = None
             self._inference_record_robot_type = None
             self._prepared_inference_task_info = None

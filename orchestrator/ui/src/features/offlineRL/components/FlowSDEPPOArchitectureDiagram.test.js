@@ -9,8 +9,6 @@ describe('FlowSDEPPOArchitectureDiagram', () => {
     expect(screen.getByText('GAE advantages')).toBeInTheDocument();
     expect(screen.getByLabelText('DiT actor: Fire; Trainable; fixed')).toBeInTheDocument();
     expect(screen.getByLabelText('Value head: Fire; Trainable; fixed')).toBeInTheDocument();
-    expect(screen.getByText('PPO checkpoint → standard Flow-Matching inference'))
-      .toBeInTheDocument();
   });
 
   test('reports backend readiness without changing the algorithm label', () => {

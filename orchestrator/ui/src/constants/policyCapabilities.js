@@ -27,6 +27,10 @@ export const POLICY_REQUIRES_INSTRUCTION = {
 
 export const DEFAULT_REQUIRES_INSTRUCTION = false;
 
+const RLT_INFERENCE_POLICIES = new Set([
+  'groot:n17',
+]);
+
 export function requiresInstruction(serviceType, policyType) {
   const exact = `${serviceType}:${policyType}`;
   if (exact in POLICY_REQUIRES_INSTRUCTION) {
@@ -37,4 +41,13 @@ export function requiresInstruction(serviceType, policyType) {
     return POLICY_REQUIRES_INSTRUCTION[wild];
   }
   return DEFAULT_REQUIRES_INSTRUCTION;
+}
+
+/**
+ * Policies whose frozen feature boundary is compatible with the staged RLT
+ * bundle contract. Runtime routing is connected independently from this UI
+ * capability so unsupported policies never expose a misleading RLT control.
+ */
+export function supportsRltInference(serviceType, policyType) {
+  return RLT_INFERENCE_POLICIES.has(`${serviceType}:${policyType}`);
 }

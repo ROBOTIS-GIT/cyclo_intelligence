@@ -1,17 +1,21 @@
 import {
   deleteOfflineRLDatasetEpisodes,
+  getACTTD3CriticWarmupStatus,
   getFlowSDEPPOValueWarmupStatus,
   getFlowSDEPPOStatus,
   getImitationLearningStatus,
   getOfflineRLDatasetInfo,
+  getOfflineRLDatasetEpisodeData,
   getOfflineRLDatasets,
   getOfflineRLStatus,
   reserveOfflineRLDataEpoch,
+  startACTTD3CriticWarmup,
   startFlowSDEPPOTraining,
   startFlowSDEPPOValueWarmup,
   startImitationLearningTraining,
   startOfflineRLTraining,
   stopImitationLearningTraining,
+  stopACTTD3CriticWarmup,
   stopFlowSDEPPOTraining,
   stopFlowSDEPPOValueWarmup,
   stopOfflineRLTraining,
@@ -92,6 +96,76 @@ describe('offline RL API', () => {
     });
   });
 
+  test('starts ACT-TD3 critic warm-up with the supplied request', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      job_id: 'critic-job-123',
+    }));
+    const request = {
+      dataset_path: '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+      dataset_paths: [
+        '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+        '/workspace/lerobot/data_epoch_0001/task_lerobot_v30',
+      ],
+      act_checkpoint: '/workspace/model/lerobot/base/pretrained_model',
+      robot_type: 'ffw_sg2_rev1',
+      batch_size: 4,
+    };
+
+    await expect(startACTTD3CriticWarmup(request)).resolves.toEqual({
+      status: 'running',
+      job_id: 'critic-job-123',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/offline-rl/critic-warmup/start',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      }
+    );
+  });
+
+  test('reads ACT-TD3 critic warm-up status without browser caching', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      percentage: 25,
+      completed_critic_updates: 1250,
+    }));
+
+    await expect(getACTTD3CriticWarmupStatus()).resolves.toEqual({
+      status: 'running',
+      percentage: 25,
+      completed_critic_updates: 1250,
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/offline-rl/critic-warmup/status',
+      { cache: 'no-store' }
+    );
+  });
+
+  test('stops only the observed ACT-TD3 critic warm-up job', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      job_id: 'critic-job-123',
+      message: 'Stopping ACT-TD3 critic warm-up',
+    }));
+
+    await expect(stopACTTD3CriticWarmup('critic-job-123')).resolves.toEqual({
+      status: 'running',
+      job_id: 'critic-job-123',
+      message: 'Stopping ACT-TD3 critic warm-up',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/offline-rl/critic-warmup/stop',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: 'critic-job-123' }),
+      }
+    );
+  });
+
   test('starts ACT imitation learning with the supplied request', async () => {
     global.fetch.mockResolvedValue(jsonResponse({ status: 'starting' }));
     const request = {
@@ -105,6 +179,11 @@ describe('offline RL API', () => {
       batch_size: 8,
       save_freq: 10000,
       chunk_size: 30,
+      trainable_groups: [
+        'visual_backbone',
+        'transformer_encoder',
+        'action_decoder',
+      ],
     };
 
     await expect(startImitationLearningTraining(request)).resolves.toEqual({
@@ -329,6 +408,22 @@ describe('offline RL API', () => {
 
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/offline-rl/dataset?dataset_path=%2Fworkspace%2Flerobot%2Ftask+v30',
+      { cache: 'no-store' }
+    );
+  });
+
+  test('reads one LeRobot episode trajectory without caching', async () => {
+    global.fetch.mockResolvedValue(
+      jsonResponse({ joint_names: ['arm_l_joint1'], joint_timestamps: [0] })
+    );
+
+    await getOfflineRLDatasetEpisodeData(
+      '/workspace/lerobot/task v30',
+      7
+    );
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/offline-rl/dataset/episode-data?dataset_path=%2Fworkspace%2Flerobot%2Ftask+v30&episode_index=7',
       { cache: 'no-store' }
     );
   });

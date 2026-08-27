@@ -6,7 +6,6 @@
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,8 +15,6 @@ import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import {
   MdCreateNewFolder,
   MdFolderOpen,
-  MdKeyboardDoubleArrowDown,
-  MdKeyboardDoubleArrowUp,
 } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import ImageGrid from '../../../components/ImageGrid';
@@ -48,9 +45,9 @@ import {
   setOfflineRLReplayBufferPath,
 } from '../offlineRLSlice';
 import OfflineRLRecordingSubtaskPlan from './OfflineRLRecordingSubtaskPlan';
+import OfflineRLWorkspaceStatusModal from './OfflineRLWorkspaceStatusModal';
 
 const CAMERA_LABELS = ['Left wrist', 'Head', 'Right wrist'];
-const DEFAULT_EXPANDED_SETTINGS_HEIGHT = 360;
 
 const PATH_CONFIG = {
   model: {
@@ -109,6 +106,8 @@ export default function OfflineRLInferenceWorkspace({
   isActive = true,
   workspaceMode = 'inference',
   policyEpoch = 0,
+  workspaceStatusOpen = false,
+  onCloseWorkspaceStatus = () => {},
 }) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -128,21 +127,12 @@ export default function OfflineRLInferenceWorkspace({
   const replayBufferPath = useSelector(selectOfflineRLReplayBufferPath);
   const { sendRecordCommand } = useRosServiceCaller();
   const [browserTarget, setBrowserTarget] = useState(null);
-  const [isSettingsCollapsed, setIsSettingsCollapsed] = useState(false);
-  const [expandedSettingsHeight, setExpandedSettingsHeight] = useState(
-    DEFAULT_EXPANDED_SETTINGS_HEIGHT
-  );
   const [subtaskInstructions, setSubtaskInstructions] = useState([]);
   const [activeSubtaskIndex, setActiveSubtaskIndex] = useState(0);
   const [savedSubtaskIndices, setSavedSubtaskIndices] = useState([]);
   const [subtaskAdvancing, setSubtaskAdvancing] = useState(false);
   const recordingFolderRef = useRef(taskInfo.recordingFolder || '');
-  const settingsSlotRef = useRef(null);
   const isRecordingWorkspace = workspaceMode === 'recording';
-  const settingsTitle = isRecordingWorkspace
-    ? 'Recording Settings'
-    : 'Inference Settings';
-  const settingsKind = isRecordingWorkspace ? 'recording' : 'inference';
 
   const inferenceMode = taskInfo.inferenceMode || 'simulation';
   const isEditable =
@@ -173,32 +163,6 @@ export default function OfflineRLInferenceWorkspace({
       taskSource: 'inference',
     }).catch(() => {});
   }, [isActive, isRecordingWorkspace, sendRecordCommand]);
-
-  // Recording Settings is intentionally shorter than Inference Settings.
-  // Preserve the expanded Inference footprint across the mode switch so the
-  // flex camera row keeps the same height; any unused Recording space remains
-  // blank below the settings card. Collapsing settings still releases this
-  // footprint and lets the camera grow, as before.
-  useLayoutEffect(() => {
-    if (isRecordingWorkspace || isSettingsCollapsed) return undefined;
-    const slot = settingsSlotRef.current;
-    if (!slot) return undefined;
-
-    const rememberHeight = () => {
-      const measuredHeight = Math.ceil(slot.getBoundingClientRect().height);
-      if (measuredHeight > 0) {
-        setExpandedSettingsHeight((current) => (
-          current === measuredHeight ? current : measuredHeight
-        ));
-      }
-    };
-
-    rememberHeight();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver(rememberHeight);
-    observer.observe(slot);
-    return () => observer.disconnect();
-  }, [isRecordingWorkspace, isSettingsCollapsed]);
 
   // Offline RL always exposes inference recording without an extra opt-in
   // toggle. The backend contract still requires this flag for command-enabled
@@ -480,49 +444,15 @@ export default function OfflineRLInferenceWorkspace({
         )}
       </div>
 
-      <div
-        ref={settingsSlotRef}
-        className="shrink-0"
-        style={isRecordingWorkspace && !isSettingsCollapsed
-          ? { minHeight: `${expandedSettingsHeight}px` }
-          : undefined}
-        data-testid="offline-rl-settings-slot"
-      >
+      <OfflineRLWorkspaceStatusModal
+        isOpen={isActive && workspaceStatusOpen}
+        onClose={onCloseWorkspaceStatus}
+        workspaceMode={workspaceMode}
+        settingsContent={(
         <div
-          className={`relative rounded-xl border border-[#e2dcd1] bg-[#f6f3ec] ${
-            isSettingsCollapsed ? 'min-h-10 px-3 py-2' : 'p-3'
-          }`}
-          data-testid="offline-rl-inference-settings-panel"
-          data-collapsed={String(isSettingsCollapsed)}
+          className="rounded-xl border border-[#e2dcd1] bg-[#f6f3ec] p-3"
+          data-testid="offline-rl-inference-settings-content"
         >
-          {isSettingsCollapsed && (
-            <div className="pr-10 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#81796d]">
-              {settingsTitle}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => setIsSettingsCollapsed((collapsed) => !collapsed)}
-            aria-label={isSettingsCollapsed
-              ? `Show ${settingsKind} settings`
-              : `Hide ${settingsKind} settings`}
-            aria-expanded={!isSettingsCollapsed}
-            title={isSettingsCollapsed
-              ? `Show ${settingsKind} settings`
-              : `Hide ${settingsKind} settings`}
-            className="absolute right-2 top-1.5 z-10 grid h-7 w-7 place-items-center rounded-full border border-[#d4ccbf] bg-[#fbfaf6] text-[#6f685d] shadow-sm transition-colors hover:bg-[#ebe6dd] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
-          >
-            {isSettingsCollapsed ? (
-              <MdKeyboardDoubleArrowUp size={18} aria-hidden="true" />
-            ) : (
-              <MdKeyboardDoubleArrowDown size={18} aria-hidden="true" />
-            )}
-          </button>
-          <div
-            className={isSettingsCollapsed ? 'hidden' : 'block'}
-            aria-hidden={isSettingsCollapsed}
-            data-testid="offline-rl-inference-settings-content"
-          >
             {isRecordingWorkspace ? (
               <>
                 <div
@@ -642,9 +572,9 @@ export default function OfflineRLInferenceWorkspace({
                 settingsAside={workspacePathsPanel}
               />
             )}
-          </div>
         </div>
-      </div>
+        )}
+      />
 
       <FileBrowserModal
         key={browserTarget || 'closed'}
@@ -668,6 +598,7 @@ export default function OfflineRLInferenceWorkspace({
         initialPath={selectedConfig?.root || DEFAULT_PATHS.BASE_WORKSPACE}
         defaultPath={selectedConfig?.root || DEFAULT_PATHS.BASE_WORKSPACE}
         homePath={selectedConfig?.root || DEFAULT_PATHS.BASE_WORKSPACE}
+        overlayZClass="z-[80]"
       />
     </div>
   );

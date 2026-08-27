@@ -65,6 +65,10 @@ bool publish_to_robot
 string action_request_mode
 string acceleration_mode
 string acceleration_engine_path
+bool rlt_enabled
+string rlt_bundle_path
+string action_policy_mode
+bool rlt_robot_override
 """
 
 INFERENCE_COMMAND_RESPONSE_DEF = """\
@@ -85,6 +89,9 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+bool rlt_enabled
+string rlt_bundle_path
+string action_policy_mode
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\

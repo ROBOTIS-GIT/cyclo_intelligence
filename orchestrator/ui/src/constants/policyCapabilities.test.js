@@ -1,4 +1,7 @@
-import { requiresInstruction } from './policyCapabilities';
+import {
+  requiresInstruction,
+  supportsRltInference,
+} from './policyCapabilities';
 import { MODEL_OPTIONS } from '../components/InferenceModelSelector';
 
 describe('policy capabilities', () => {
@@ -13,5 +16,12 @@ describe('policy capabilities', () => {
       serviceType: 'lerobot',
       policyType: 'multi_task_dit',
     }));
+  });
+
+  test('exposes RLT inference settings only for GR00T N1.7', () => {
+    expect(supportsRltInference('groot', 'n17')).toBe(true);
+    expect(supportsRltInference('groot', 'future')).toBe(false);
+    expect(supportsRltInference('lerobot', 'pi05')).toBe(false);
+    expect(supportsRltInference('lerobot', 'act')).toBe(false);
   });
 });

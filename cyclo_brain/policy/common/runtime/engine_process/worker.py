@@ -100,7 +100,10 @@ class EngineWorker:
 
     def _get_action(self, request: EngineCommandRequest) -> EngineCommandResponse:
         result = self._engine.get_action_chunk(
-            SimpleNamespace(task_instruction=request.task_instruction)
+            SimpleNamespace(
+                task_instruction=request.task_instruction,
+                action_policy_mode=request.action_policy_mode,
+            )
         )
         if not result.get("success"):
             return EngineCommandResponse(

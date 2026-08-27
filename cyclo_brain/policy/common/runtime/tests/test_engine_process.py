@@ -101,6 +101,7 @@ class EngineWorkerTests(unittest.TestCase):
                 command=CMD_GET_ACTION,
                 seq_id=12,
                 task_instruction="move",
+                action_policy_mode="rlt",
             )
         )
 
@@ -111,6 +112,7 @@ class EngineWorkerTests(unittest.TestCase):
         self.assertEqual(response.action_list, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
         self.assertIsInstance(engine.action_requested_with, SimpleNamespace)
         self.assertEqual(engine.action_requested_with.task_instruction, "move")
+        self.assertEqual(engine.action_requested_with.action_policy_mode, "rlt")
 
     def test_unload_is_idempotent_cleanup(self) -> None:
         engine = FakeEngine()

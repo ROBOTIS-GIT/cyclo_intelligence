@@ -13,6 +13,7 @@ import reducer, {
   selectRecordTaskInfo,
   selectRobotType,
   setCameraRecordingMonitor,
+  setInferenceStatus,
   setInferenceMode,
   setInferenceTaskInfo,
   setRecordTaskInfo,
@@ -47,6 +48,90 @@ describe('taskSlice task ownership', () => {
     expect(inferenceInfo.inferenceMode).toBe('simulation');
     expect(inferenceInfo.actionRequestMode).toBe('async');
     expect(inferenceInfo.accelerationMode).toBe('pytorch');
+    expect(inferenceInfo.rltEnabled).toBe(false);
+    expect(inferenceInfo.rltBundlePath).toBe('');
+    expect(inferenceInfo.rltRobotOverride).toBe(false);
+    expect(inferenceInfo.actionPolicyMode).toBe('base');
+  });
+
+  test('stores the staged RLT bundle selection without changing the base policy', () => {
+    const initial = reducer(undefined, { type: '@@INIT' });
+    const withPolicy = reducer(initial, setInferenceTaskInfo({
+      serviceType: 'groot',
+      policyType: 'n17',
+      policyPath: '/workspace/model/groot/showroom_groot',
+    }));
+    const next = reducer(withPolicy, setInferenceTaskInfo({
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+      rltRobotOverride: true,
+      actionPolicyMode: 'rlt',
+    }));
+    const inferenceInfo = selectInferenceTaskInfo({ tasks: next });
+
+    expect(inferenceInfo.policyPath).toBe('/workspace/model/groot/showroom_groot');
+    expect(inferenceInfo.rltEnabled).toBe(true);
+    expect(inferenceInfo.rltBundlePath).toBe(
+      '/workspace/checkpoint/rlt/showroom_groot_bundle'
+    );
+    expect(inferenceInfo.rltRobotOverride).toBe(true);
+    expect(inferenceInfo.actionPolicyMode).toBe('rlt');
+  });
+
+  test('recording status cannot overwrite hot-switched runtime action routing', () => {
+    const inferencing = reducer(
+      undefined,
+      setInferenceStatus({ inferencePhase: 'inferencing' })
+    );
+    const switched = reducer(
+      inferencing,
+      setInferenceTaskInfo({
+        taskType: 'inference',
+        actionPolicyMode: 'rlt',
+        rltRobotOverride: true,
+      })
+    );
+
+    const next = reducer(
+      switched,
+      receiveServerRecordTaskInfo({
+        taskType: 'inference',
+        actionPolicyMode: 'base',
+        rltRobotOverride: false,
+        policyPath: '/workspace/model/groot/showroom_groot',
+      })
+    );
+
+    const inferenceInfo = selectInferenceTaskInfo({ tasks: next });
+    expect(inferenceInfo.actionPolicyMode).toBe('rlt');
+    expect(inferenceInfo.rltRobotOverride).toBe(true);
+    expect(inferenceInfo.policyPath).toBe(
+      '/workspace/model/groot/showroom_groot'
+    );
+  });
+
+  test('recording status can hydrate runtime routing again while ready', () => {
+    const staged = reducer(
+      undefined,
+      setInferenceTaskInfo({
+        taskType: 'inference',
+        actionPolicyMode: 'rlt',
+        rltRobotOverride: true,
+      })
+    );
+
+    const next = reducer(
+      staged,
+      receiveServerRecordTaskInfo({
+        taskType: 'inference',
+        actionPolicyMode: 'base',
+        rltRobotOverride: false,
+      })
+    );
+
+    const inferenceInfo = selectInferenceTaskInfo({ tasks: next });
+    expect(inferenceInfo.actionPolicyMode).toBe('base');
+    expect(inferenceInfo.rltRobotOverride).toBe(false);
   });
 
   test('sets inference mode without changing record identity', () => {

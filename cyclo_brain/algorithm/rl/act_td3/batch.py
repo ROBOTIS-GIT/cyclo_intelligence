@@ -39,6 +39,7 @@ class ACTTD3Batch:
     rewards: Tensor
     executed_mask: Tensor
     step_durations_s: Tensor
+    episode_success: Tensor
     terminated: Tensor
     truncated: Tensor
     next_observation_valid: Tensor
@@ -109,6 +110,7 @@ class ACTTD3Batch:
         ):
             raise ValueError("ACT-TD3 executed_mask must be boolean (B, T)")
         for name, value in (
+            ("episode_success", self.episode_success),
             ("terminated", self.terminated),
             ("truncated", self.truncated),
             ("next_observation_valid", self.next_observation_valid),
@@ -203,6 +205,7 @@ class ACTTD3Batch:
             rewards=move(self.rewards),
             executed_mask=move(self.executed_mask),
             step_durations_s=move(self.step_durations_s),
+            episode_success=move(self.episode_success),
             terminated=move(self.terminated),
             truncated=move(self.truncated),
             next_observation_valid=move(self.next_observation_valid),

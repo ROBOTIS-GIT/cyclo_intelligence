@@ -15,26 +15,36 @@ import offlineRLReducer, {
   setOfflineRLDatasetSelection,
   setOfflineRLDatasetSelections,
 } from '../offlineRLSlice';
-import OfflineRLTrainingSection from './OfflineRLTrainingSection';
+import OfflineRLTrainingSection, {
+  resolveTrainingPolicyModel,
+} from './OfflineRLTrainingSection';
 import {
+  getACTTD3CriticWarmupStatus,
   getFlowSDEPPOValueWarmupStatus,
   getImitationLearningStatus,
+  getOfflineRLDatasetInfo,
   getOfflineRLStatus,
+  startACTTD3CriticWarmup,
   startFlowSDEPPOValueWarmup,
   startImitationLearningTraining,
   startOfflineRLTraining,
+  stopACTTD3CriticWarmup,
   stopFlowSDEPPOValueWarmup,
   stopImitationLearningTraining,
   stopOfflineRLTraining,
 } from '../../../utils/offlineRlApi';
 
 jest.mock('../../../utils/offlineRlApi', () => ({
+  getACTTD3CriticWarmupStatus: jest.fn(),
   getFlowSDEPPOValueWarmupStatus: jest.fn(),
   getImitationLearningStatus: jest.fn(),
+  getOfflineRLDatasetInfo: jest.fn(),
   getOfflineRLStatus: jest.fn(),
+  startACTTD3CriticWarmup: jest.fn(),
   startFlowSDEPPOValueWarmup: jest.fn(),
   startImitationLearningTraining: jest.fn(),
   startOfflineRLTraining: jest.fn(),
+  stopACTTD3CriticWarmup: jest.fn(),
   stopFlowSDEPPOValueWarmup: jest.fn(),
   stopImitationLearningTraining: jest.fn(),
   stopOfflineRLTraining: jest.fn(),
@@ -66,12 +76,47 @@ const renderSection = (props = {}) => {
 };
 
 describe('OfflineRLTrainingSection', () => {
+  test.each([
+    ['lerobot', 'act', 'act'],
+    ['lerobot', 'multi_task_dit', 'multi_task_dit'],
+    ['lerobot', 'pi05', 'pi05'],
+    ['groot', 'n17', 'groot'],
+    ['lerobot', 'diffusion', null],
+  ])('maps Inference %s:%s to the supported Training model %s', (
+    serviceType,
+    policyType,
+    expected
+  ) => {
+    expect(resolveTrainingPolicyModel({ serviceType, policyType })).toBe(expected);
+  });
+
   beforeEach(() => {
+    getACTTD3CriticWarmupStatus.mockResolvedValue({
+      status: 'idle',
+      percentage: 0,
+      total_critic_updates: 5000,
+    });
     getFlowSDEPPOValueWarmupStatus.mockResolvedValue({ status: 'idle', percentage: 0 });
     getImitationLearningStatus.mockResolvedValue({ status: 'idle', percentage: 0 });
+    getOfflineRLDatasetInfo.mockImplementation(async (path) => ({
+      dataset_path: path,
+      name: String(path).split('/').filter(Boolean).pop() || 'dataset',
+      version: 'v3.0',
+      total_episodes: 0,
+      success_count: 0,
+      failure_count: 0,
+      unlabeled_count: 0,
+      episodes: [],
+    }));
     getOfflineRLStatus.mockResolvedValue({ status: 'idle', percentage: 0 });
     startImitationLearningTraining.mockResolvedValue({ status: 'starting', percentage: 0 });
     startOfflineRLTraining.mockResolvedValue({ status: 'starting', percentage: 0 });
+    startACTTD3CriticWarmup.mockResolvedValue({
+      status: 'running',
+      percentage: 0,
+      job_id: 'act-critic-warmup-job-1',
+      total_critic_updates: 5000,
+    });
     startFlowSDEPPOValueWarmup.mockResolvedValue({
       status: 'running',
       percentage: 0,
@@ -79,6 +124,11 @@ describe('OfflineRLTrainingSection', () => {
     });
     stopImitationLearningTraining.mockResolvedValue({ status: 'running', percentage: 10 });
     stopOfflineRLTraining.mockResolvedValue({ status: 'running', percentage: 10 });
+    stopACTTD3CriticWarmup.mockResolvedValue({
+      status: 'running',
+      percentage: 10,
+      job_id: 'act-critic-warmup-job-1',
+    });
     stopFlowSDEPPOValueWarmup.mockResolvedValue({
       status: 'running',
       percentage: 10,
@@ -102,6 +152,23 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByRole('option', { name: /SAC.*Coming soon/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /RLT.*Coming soon/i })).toBeDisabled();
     await screen.findByRole('button', { name: 'Start Training' });
+  });
+
+  test('keeps backend critic-source diagnostics out of the compact TD3 card', async () => {
+    getOfflineRLStatus.mockResolvedValue({
+      status: 'running',
+      percentage: 10,
+      job_id: 'td3-policy-warmup',
+      critic_source: 'policy_warmup',
+      critic_checkpoint: '/workspace/model/act/critic/latest.pt',
+    });
+
+    renderSection({ variant: 'workflow' });
+
+    await screen.findByText('Training…');
+    expect(screen.queryByLabelText('TD3 critic initialization')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('TD3 critic source')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('TD3 critic checkpoint')).not.toBeInTheDocument();
   });
 
   test('keeps inputs and Start locked until the first successful status response', async () => {
@@ -151,6 +218,7 @@ describe('OfflineRLTrainingSection', () => {
       act_checkpoint: '/workspace/model/lerobot/base/pretrained_model',
       parent_checkpoint: '/workspace/model/lerobot/round1/training_state/act_td3.pt',
       algorithm: 'td3',
+      actor_objective: 'td3_bc',
       robot_type: 'ffw_sg2_rev1',
       critic_epochs: 6,
       actor_equivalent_epochs: 3,
@@ -162,6 +230,91 @@ describe('OfflineRLTrainingSection', () => {
         'action_decoder',
       ],
     }));
+  });
+
+  test('switches to pure TD3 and freezes the CVAE encoder in the submitted contract', async () => {
+    renderSection();
+    await screen.findByRole('button', { name: 'Start Training' });
+    fireEvent.change(screen.getByLabelText('LeRobot v3 Dataset Path'), {
+      target: { value: '/workspace/lerobot/task_lerobot_v30' },
+    });
+    fireEvent.change(screen.getByLabelText('Original ACT Checkpoint'), {
+      target: { value: '/workspace/model/lerobot/base/pretrained_model' },
+    });
+    fireEvent.change(screen.getByLabelText('Loss option'), {
+      target: { value: 'td3' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
+
+    await waitFor(() => expect(startOfflineRLTraining).toHaveBeenCalledWith(
+      expect.objectContaining({
+        algorithm: 'td3',
+        actor_objective: 'td3',
+        actor_trainable_groups: [
+          'visual_backbone',
+          'transformer_encoder',
+          'action_decoder',
+        ],
+      })
+    ));
+  });
+
+  test('hydrates the TD3 loss option from an existing pure-TD3 job', async () => {
+    getOfflineRLStatus.mockResolvedValue({
+      status: 'running',
+      percentage: 12,
+      job_id: 'pure-td3-running',
+      algorithm: 'td3',
+      actor_objective: 'td3',
+      actor_trainable_groups: [
+        'visual_backbone',
+        'transformer_encoder',
+        'action_decoder',
+      ],
+    });
+
+    renderSection({ variant: 'workflow' });
+
+    const pureTD3Option = await screen.findByRole('button', { name: 'TD3 loss' });
+    await waitFor(() => expect(pureTD3Option).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('button', { name: 'TD3-BC loss' }))
+      .toHaveAttribute('aria-pressed', 'false');
+    const cvae = screen.getByRole('button', { name: /CVAE encoder: Frozen/i });
+    expect(cvae).toHaveAttribute('aria-pressed', 'false');
+    expect(cvae).toBeDisabled();
+    expect(cvae).toHaveTextContent('Frozen · TD3');
+  });
+
+  test('does not let status polling overwrite an explicit TD3 loss selection', async () => {
+    jest.useFakeTimers();
+    getOfflineRLStatus.mockResolvedValue({
+      status: 'completed',
+      percentage: 100,
+      job_id: 'previous-td3-bc',
+      algorithm: 'td3',
+      actor_objective: 'td3_bc',
+    });
+
+    renderSection({ variant: 'workflow' });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const pureTD3Option = screen.getByRole('button', { name: 'TD3 loss' });
+    expect(screen.getByRole('button', { name: 'TD3-BC loss' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(pureTD3Option);
+    expect(pureTD3Option).toHaveAttribute('aria-pressed', 'true');
+
+    await act(async () => {
+      jest.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(pureTD3Option).toHaveAttribute('aria-pressed', 'true');
   });
 
   test('submits chronologically ordered immutable Data Epoch roots', async () => {
@@ -207,34 +360,550 @@ describe('OfflineRLTrainingSection', () => {
     expect(policyGroup).toHaveTextContent('ACT');
     expect(screen.getByRole('button', { name: 'GR00T' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'Pi0.5' })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: 'TD3' }))
+    const lossGroup = screen.getByRole('group', { name: 'Loss option' });
+    const trainingLoop = screen.getByTestId('act-td3-training-loop');
+    expect(trainingLoop).toContainElement(lossGroup);
+    expect(screen.getByTestId('act-td3-algorithm-card')).toContainElement(lossGroup);
+    expect(screen.getByRole('button', { name: 'TD3-BC loss' }))
       .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'TD3' })).not.toBeDisabled();
+    expect(within(screen.getByRole('group', { name: 'RL algorithm' }))
+      .queryByRole('button', { name: 'TD3+BC' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i }))
       .toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i }))
+      .toBeDisabled();
     expect(screen.getByRole('button', { name: 'SAC' })).toBeDisabled();
     const methodGroup = screen.getByRole('group', { name: 'Training method' });
     expect(within(methodGroup).getByRole('button', { name: 'Reinforcement Learning' }))
       .toHaveAttribute('aria-pressed', 'true');
+    expect(within(methodGroup).getByRole('button', { name: 'Reinforcement Learning' }))
+      .toHaveTextContent(/^RL$/);
     expect(within(methodGroup).getByRole('button', { name: 'Imitation Learning' }))
       .toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByTestId('td3-architecture-diagram')).toBeInTheDocument();
-    expect(screen.getByLabelText('Q1 critic: Fire; Trainable; fixed')).toBeInTheDocument();
-    expect(screen.getByLabelText('Q2 critic: Fire; Trainable; fixed')).toBeInTheDocument();
-    expect(screen.getByText('ACT ← maximize Q1')).toBeInTheDocument();
+    expect(within(methodGroup).getByRole('button', { name: 'Imitation Learning' }))
+      .toHaveTextContent(/^IL$/);
+    expect(within(methodGroup).getByRole('button', { name: 'Critic Warm-up' }))
+      .toHaveAttribute('aria-pressed', 'false');
+    expect(within(methodGroup).getByRole('button', { name: 'Critic Warm-up' }))
+      .toHaveTextContent(/^Critic$/);
+    expect(within(methodGroup).getAllByRole('button').map((button) => button.textContent))
+      .toEqual(['IL', 'Critic', 'RL']);
+    expect(screen.getByTestId('act-td3-training-loop')).toBeInTheDocument();
+    expect(screen.getByTestId('training-replay-buffer-card')).toBeInTheDocument();
+    expect(screen.getByTestId('act-td3-algorithm-card')).toHaveTextContent('Critic Network');
     expect(screen.getByLabelText('Critic epochs')).toHaveValue(10);
-    expect(screen.getByLabelText('Actor equivalent epochs')).toHaveValue(5);
+    expect(screen.getByLabelText('Actor epochs')).toHaveValue(5);
     expect(screen.getByLabelText('Batch size')).toHaveValue(4);
 
+    const workflow = screen.getByTestId('offline-rl-workflow-training');
+    expect(workflow).toHaveClass(
+      'grid',
+      'flex-none',
+      'grid-rows-[auto_auto_auto]',
+      'overflow-hidden'
+    );
+
     const architecture = screen.getByTestId('offline-rl-training-architecture');
-    expect(architecture).toHaveClass('flex-1', 'items-stretch');
-    expect(screen.getByTestId('td3-architecture-diagram').parentElement)
-      .toHaveClass('h-full', 'flex-col');
+    expect(architecture).toHaveClass(
+      'flex-1',
+      'items-stretch',
+      'min-h-0',
+      'overflow-y-auto',
+      'overscroll-contain'
+    );
+    expect(architecture).toContainElement(screen.getByTestId('act-td3-training-loop'));
 
     const footer = screen.getByTestId('offline-rl-training-footer');
-    expect(footer).toHaveClass('mt-auto', 'shrink-0');
+    expect(footer).toHaveClass(
+      'mt-3',
+      'shrink-0',
+      'items-stretch',
+      'xl:grid-cols-[minmax(0,1fr)_220px]'
+    );
+    expect(footer).not.toHaveClass('mt-auto');
+    expect(workflow.lastElementChild).toBe(footer);
     expect(footer).toHaveTextContent('Training progress');
+    expect(footer).toHaveTextContent('Training loss');
     expect(footer).toHaveTextContent('Training action');
     expect(footer).toHaveTextContent('ETA');
+    const progressCard = screen.getByTestId('offline-rl-training-progress-card');
+    expect(progressCard).toHaveClass('bg-[#f8f5ef]');
+    expect(within(progressCard).getByTestId('training-loss-chart')).toHaveClass('bg-white');
+  });
+
+  test('keeps ACT Policy and Replay Buffer fixed while IL, Critic, and RL replace only the training card', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    const policyStage = screen.getByTestId('act-td3-policy-stage');
+    const replayStage = screen.getByTestId('training-replay-buffer-card');
+    expect(screen.getByTestId('act-td3-algorithm-card')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    await screen.findByTestId('act-imitation-algorithm-card');
+    expect(screen.getByTestId('act-td3-policy-stage')).toBe(policyStage);
+    expect(screen.getByTestId('training-replay-buffer-card')).toBe(replayStage);
+    expect(screen.queryByTestId('act-td3-algorithm-card')).not.toBeInTheDocument();
+
+    const criticMethod = screen.getByRole('button', { name: 'Critic Warm-up' });
+    await waitFor(() => expect(criticMethod).not.toBeDisabled());
+    fireEvent.click(criticMethod);
+    await screen.findByTestId('act-critic-warmup-card');
+    expect(screen.getByTestId('act-td3-policy-stage')).toBe(policyStage);
+    expect(screen.getByTestId('training-replay-buffer-card')).toBe(replayStage);
+    expect(screen.queryByTestId('act-imitation-algorithm-card')).not.toBeInTheDocument();
+
+    const reinforcementMethod = screen.getByRole('button', { name: 'Reinforcement Learning' });
+    await waitFor(() => expect(reinforcementMethod).not.toBeDisabled());
+    fireEvent.click(reinforcementMethod);
+    await screen.findByTestId('act-td3-algorithm-card');
+    expect(screen.getByTestId('act-td3-policy-stage')).toBe(policyStage);
+    expect(screen.getByTestId('training-replay-buffer-card')).toBe(replayStage);
+    expect(screen.queryByTestId('act-critic-warmup-card')).not.toBeInTheDocument();
+  });
+
+  test('hydrates selected dataset outcome counts in the ACT training replay buffer', async () => {
+    getOfflineRLDatasetInfo.mockResolvedValue({
+      dataset_path: '/workspace/lerobot/data_epoch_0003/showroom_v30',
+      name: 'showroom_v30',
+      version: 'v3.0',
+      total_episodes: 42,
+      success_count: 31,
+      failure_count: 9,
+      unlabeled_count: 2,
+      episodes: [],
+    });
+
+    const { testStore } = renderSection({ variant: 'workflow' });
+    act(() => {
+      testStore.dispatch(setOfflineRLDatasetSelections([{
+        path: '/workspace/lerobot/data_epoch_0003/showroom_v30',
+        version: 'v3.0',
+        dataEpoch: 3,
+      }]));
+    });
+
+    await waitFor(() => expect(getOfflineRLDatasetInfo).toHaveBeenCalledWith(
+      '/workspace/lerobot/data_epoch_0003/showroom_v30'
+    ));
+    const replayCard = screen.getByTestId('training-replay-buffer-card');
+    await waitFor(() => expect(within(replayCard).getByText('42 / 200 episodes'))
+      .toBeInTheDocument());
+    expect(within(replayCard).getByText('21%')).toBeInTheDocument();
+    expect(within(replayCard).getByText('Success 31')).toBeInTheDocument();
+    expect(within(replayCard).getByText('Failure 9')).toBeInTheDocument();
+    expect(within(replayCard).getByText('Unlabeled 2')).toBeInTheDocument();
+  });
+
+  test('renders backend ACT-TD3 latest losses and exposes RL epoch metrics', async () => {
+    getOfflineRLStatus.mockResolvedValue({
+      status: 'running',
+      job_id: 'act-td3-loss-history-job',
+      algorithm: 'td3',
+      actor_objective: 'td3_bc',
+      percentage: 37.5,
+      completed_critic_updates: 20,
+      actor_loss: -0.45,
+      critic_loss: 0.8,
+      loss_history: [
+        { step: 5, actor_loss: null, critic_loss: 2.0 },
+        { step: 10, actor_loss: -0.2, critic_loss: 1.4 },
+        { step: 20, actor_loss: -0.45, critic_loss: 0.8 },
+      ],
+      rl_metric_history: [{
+        rl_epoch: 1,
+        actor_loss_mean: -0.45,
+        critic_loss_mean: 0.8,
+        replay_average_reward: 0.75,
+      }],
+    });
+
+    renderSection({ variant: 'workflow' });
+
+    const chart = await screen.findByTestId('training-loss-chart');
+    await waitFor(() => {
+      expect(within(chart).getByLabelText('Latest actor loss'))
+        .toHaveTextContent('-0.45');
+      expect(within(chart).getByLabelText('Latest critic loss'))
+        .toHaveTextContent('0.80');
+    });
+    expect(within(chart).getByRole('progressbar', { name: 'Training loss progress' }))
+      .toHaveAttribute('aria-valuenow', '37.5');
+    expect(within(chart).getByLabelText('Training percentage')).toHaveTextContent('37.5%');
+    expect(within(chart).queryByRole('img')).not.toBeInTheDocument();
+    expect(within(chart).getByRole('button', { name: 'Expand training metrics' }))
+      .toBeInTheDocument();
+  });
+
+  test('reports the selected IL, RL, or Critic method to the workflow layout', async () => {
+    const methodListener = jest.fn();
+    renderSection({
+      variant: 'workflow',
+      onTrainingMethodStateChange: methodListener,
+    });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    await waitFor(() => expect(methodListener).toHaveBeenLastCalledWith('reinforcement'));
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    await waitFor(() => expect(methodListener).toHaveBeenLastCalledWith('imitation'));
+    expect(screen.queryByRole('button', { name: 'Expand training metrics' }))
+      .not.toBeInTheDocument();
+    const criticMethod = screen.getByRole('button', { name: 'Critic Warm-up' });
+    await waitFor(() => expect(criticMethod).not.toBeDisabled());
+    fireEvent.click(criticMethod);
+    await waitFor(() => expect(methodListener).toHaveBeenLastCalledWith('critic'));
+    await screen.findByRole('button', { name: 'Start Critic Warm-up' });
+    expect(screen.queryByRole('button', { name: 'Expand training metrics' }))
+      .not.toBeInTheDocument();
+  });
+
+  test('can leave Critic when its status channel is unavailable', async () => {
+    getACTTD3CriticWarmupStatus.mockRejectedValue(
+      new Error('critic status unavailable')
+    );
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+    await waitFor(() => expect(getACTTD3CriticWarmupStatus).toHaveBeenCalled());
+
+    const imitationMethod = screen.getByRole('button', { name: 'Imitation Learning' });
+    const reinforcementMethod = screen.getByRole('button', { name: 'Reinforcement Learning' });
+    expect(imitationMethod).not.toBeDisabled();
+    expect(reinforcementMethod).not.toBeDisabled();
+
+    fireEvent.click(imitationMethod);
+    await waitFor(() => {
+      expect(imitationMethod).toHaveAttribute('aria-pressed', 'true');
+      expect(getImitationLearningStatus).toHaveBeenCalled();
+    });
+  });
+
+  test('keeps every model selectable while Critic remains unavailable for preview-only models', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+    await screen.findByRole('button', { name: 'Start Critic Warm-up' });
+
+    const policyGroup = screen.getByRole('group', { name: 'Policy model' });
+    expect(within(policyGroup).getByRole('button', { name: 'ACT' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    for (const modelName of ['Diffusion Transformer', 'GR00T', 'Pi0.5']) {
+      expect(within(policyGroup).getByRole('button', { name: modelName }))
+        .not.toBeDisabled();
+    }
+
+    fireEvent.click(within(policyGroup).getByRole('button', { name: 'Pi0.5' }));
+    await waitFor(() => {
+      expect(within(policyGroup).getByRole('button', { name: 'Pi0.5' }))
+        .toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByRole('button', { name: 'Critic Warm-up' }))
+        .toHaveAttribute('aria-pressed', 'true');
+    });
+    expect(screen.getByText(/Pi0.5 critic warm-up is not connected/))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start Critic Warm-up' }))
+      .toBeDisabled();
+  });
+
+  test('keeps Pi0.5 selectable in IL as an explicit preview-only model', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    const policyGroup = screen.getByRole('group', { name: 'Policy model' });
+    const piButton = within(policyGroup).getByRole('button', { name: 'Pi0.5' });
+    await waitFor(() => expect(piButton).not.toBeDisabled());
+    fireEvent.click(piButton);
+
+    expect(piButton).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Imitation Learning' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('pi05-architecture-diagram')).toBeInTheDocument();
+    const loop = screen.getByTestId('policy-training-loop');
+    expect(loop).toHaveAttribute('data-policy-model', 'pi05');
+    expect(loop).toHaveAttribute('data-fit-content', 'true');
+    expect(within(loop).getByTestId('training-replay-buffer-card')).toBeInTheDocument();
+    expect(within(loop).getByTestId('pi05-imitation-algorithm-card')).toBeInTheDocument();
+    expect(within(loop).getByTestId('policy-training-loop-connectors')).toBeInTheDocument();
+    expect(within(loop).getByText('Flow-Matching Action Reconstruction')).toBeInTheDocument();
+    expect(screen.getByText(/Pi0.5 imitation-learning preview is available/))
+      .toBeInTheDocument();
+    const startTraining = screen.getByRole('button', { name: 'Start Training' });
+    expect(startTraining).toBeDisabled();
+    fireEvent.click(startTraining);
+    expect(startImitationLearningTraining).not.toHaveBeenCalled();
+  });
+
+  test('keeps GR00T selectable in IL as an explicit preview-only model', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    const policyGroup = screen.getByRole('group', { name: 'Policy model' });
+    const grootButton = within(policyGroup).getByRole('button', { name: 'GR00T' });
+    await waitFor(() => expect(grootButton).not.toBeDisabled());
+    fireEvent.click(grootButton);
+
+    expect(grootButton).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Imitation Learning' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('groot-architecture-diagram')).toBeInTheDocument();
+    const loop = screen.getByTestId('policy-training-loop');
+    expect(loop).toHaveAttribute('data-policy-model', 'groot');
+    expect(loop).toHaveAttribute('data-fit-content', 'true');
+    expect(within(loop).getByTestId('training-replay-buffer-card')).toBeInTheDocument();
+    expect(within(loop).getByTestId('groot-imitation-algorithm-card')).toBeInTheDocument();
+    expect(within(loop).getByTestId('policy-training-loop-connectors')).toBeInTheDocument();
+    expect(within(loop).getByText('Flow-Matching Action Reconstruction')).toBeInTheDocument();
+    expect(screen.getByText(/GR00T imitation-learning preview is available/))
+      .toBeInTheDocument();
+    const startTraining = screen.getByRole('button', { name: 'Start Training' });
+    expect(startTraining).toBeDisabled();
+    fireEvent.click(startTraining);
+    expect(startImitationLearningTraining).not.toHaveBeenCalled();
+  });
+
+  test('starts independent ACT critic warm-up with the actor frozen and ordered replay', async () => {
+    const onFreshLineageConsumed = jest.fn();
+    const { testStore } = renderSection({
+      variant: 'workflow',
+      forceFreshLineage: true,
+      onFreshLineageConsumed,
+    });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setOfflineRLDatasetSelections([
+        {
+          path: '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+          version: 'v3.0',
+          dataEpoch: 0,
+        },
+        {
+          path: '/workspace/lerobot/data_epoch_0001/task_lerobot_v30',
+          version: 'v3.0',
+          dataEpoch: 1,
+        },
+      ]));
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/model/lerobot/imitation/act/pretrained_model',
+      }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+    await waitFor(() => expect(getACTTD3CriticWarmupStatus).toHaveBeenCalled());
+
+    expect(screen.getByRole('button', { name: 'Critic Warm-up' }))
+      .toHaveTextContent(/^Critic$/);
+    expect(screen.getByRole('button', { name: 'Critic Warm-up' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'TD3' }))
+      .toHaveAttribute('aria-pressed', 'false');
+    const criticPolicyGroup = screen.getByRole('group', { name: 'Policy model' });
+    expect(within(criticPolicyGroup).getByRole('button', {
+      name: 'Diffusion Transformer',
+    })).not.toBeDisabled();
+    expect(within(criticPolicyGroup).getByRole('button', { name: 'GR00T' }))
+      .not.toBeDisabled();
+    expect(within(criticPolicyGroup).getByRole('button', { name: 'Pi0.5' }))
+      .not.toBeDisabled();
+    for (const label of [
+      'Visual backbone',
+      'CVAE encoder',
+      'Action Module',
+    ]) {
+      const actorBlock = screen.getByRole('button', {
+        name: new RegExp(`${label}: Frozen`, 'i'),
+      });
+      expect(actorBlock).toBeDisabled();
+      expect(actorBlock).toHaveAttribute('aria-pressed', 'false');
+    }
+    expect(screen.getByLabelText('ACT actor: Frozen; no gradients')).toBeInTheDocument();
+    expect(screen.queryByText('ACT ← maximize Q1')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Critic warm-up batch size')).toHaveValue(4);
+    expect(screen.getByLabelText('Critic warm-up total updates')).toHaveValue(5000);
+    expect(screen.getByLabelText('Critic warm-up ACT actor mode')).toHaveTextContent('Frozen');
+    expect(screen.getByLabelText('Critic checkpoint path')).toHaveTextContent(
+      'Resolved by backend under selected ACT policy/critic/latest.pt'
+    );
+    expect(screen.queryByLabelText(/ACT-TD3 policy RL Epoch/)).not.toBeInTheDocument();
+
+    const criticUpdates = screen.getByLabelText('Critic warm-up total updates');
+    await waitFor(() => expect(criticUpdates).not.toBeDisabled());
+    fireEvent.change(criticUpdates, {
+      target: { value: '1200' },
+    });
+    const startCritic = await screen.findByRole('button', { name: 'Start Critic Warm-up' });
+    await waitFor(() => expect(startCritic).not.toBeDisabled());
+    fireEvent.click(startCritic);
+
+    await waitFor(() => expect(startACTTD3CriticWarmup).toHaveBeenCalledWith({
+      dataset_path: '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+      dataset_paths: [
+        '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+        '/workspace/lerobot/data_epoch_0001/task_lerobot_v30',
+      ],
+      act_checkpoint: '/workspace/model/lerobot/imitation/act/pretrained_model',
+      robot_type: 'ffw_sg2_rev1',
+      batch_size: 4,
+      critic_updates: 1200,
+    }));
+    await screen.findByRole('button', { name: 'Warming Critic…' });
+    expect(startOfflineRLTraining).not.toHaveBeenCalled();
+    expect(startImitationLearningTraining).not.toHaveBeenCalled();
+    expect(onFreshLineageConsumed).not.toHaveBeenCalled();
+  });
+
+  test('enables the independent Critic method for Diffusion Transformer', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
+
+    const criticMethod = screen.getByRole('button', { name: 'Critic Warm-up' });
+    expect(criticMethod).not.toBeDisabled();
+    fireEvent.click(criticMethod);
+
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    expect(criticMethod).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByRole('button', { name: 'Start Critic Warm-up' }))
+      .toBeInTheDocument();
+  });
+
+  test('shows ACT critic progress and stops only the exact warm-up job', async () => {
+    getACTTD3CriticWarmupStatus.mockResolvedValue({
+      status: 'running',
+      percentage: 40,
+      job_id: 'act-critic-job-exact',
+      completed_critic_updates: 2000,
+      total_critic_updates: 5000,
+      critic_loss: 0.012345,
+      target_mean: 0.75,
+      eta_seconds: 125,
+      actor_exactly_unchanged: true,
+      checkpoint_path: '/workspace/model/lerobot/imitation/act/pretrained_model/critic/latest.pt',
+      act_checkpoint: '/workspace/model/lerobot/imitation/act/pretrained_model',
+      batch_size: 4,
+    });
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const { testStore } = renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setOfflineRLDatasetSelection({
+        path: '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+        version: 'v3.0',
+        dataEpoch: 0,
+      }));
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/model/lerobot/imitation/act',
+      }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+
+    const criticProgress = await screen.findByTestId('training-loss-chart');
+    await waitFor(() => {
+      expect(within(criticProgress).getByLabelText('Training percentage'))
+        .toHaveTextContent('40.0%');
+    });
+    expect(within(criticProgress).getByText('Training critic')).toBeInTheDocument();
+    expect(within(criticProgress).getByLabelText('Training update detail'))
+      .toHaveTextContent('Update 2,000/5,000');
+    expect(within(criticProgress).getByLabelText('Training ETA'))
+      .toHaveTextContent('ETA 2m 05s');
+    expect(screen.getByRole('progressbar', { name: 'ACT critic warm-up progress' }))
+      .toHaveAttribute('aria-valuenow', '40');
+    expect(screen.getByText('Critic loss').parentElement).toHaveTextContent('0.012345');
+    expect(screen.getByText('Target mean').parentElement).toHaveTextContent('0.75000');
+    expect(within(screen.getByTestId('offline-rl-training-footer')).getByText('Actor').parentElement)
+      .toHaveTextContent('Unchanged');
+    expect(screen.getByLabelText('Critic checkpoint path')).toHaveTextContent(
+      '/workspace/model/lerobot/imitation/act/pretrained_model/critic/latest.pt'
+    );
+    expect(screen.getByRole('button', { name: 'Reinforcement Learning' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Imitation Learning' })).toBeDisabled();
+    expect(within(screen.getByRole('group', { name: 'Policy model' })).getByRole(
+      'button', { name: 'Diffusion Transformer' }
+    )).toBeDisabled();
+
+    const stopCritic = screen.getByRole('button', { name: 'Stop Critic Warm-up' });
+    await waitFor(() => expect(stopCritic).not.toBeDisabled());
+    fireEvent.click(stopCritic);
+    await waitFor(() => {
+      expect(stopACTTD3CriticWarmup).toHaveBeenCalledWith('act-critic-job-exact');
+    });
+    expect(stopOfflineRLTraining).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  test('hides a critic checkpoint reported for a different ACT policy', async () => {
+    getACTTD3CriticWarmupStatus.mockResolvedValue({
+      status: 'completed',
+      percentage: 100,
+      job_id: 'stale-act-critic-job',
+      checkpoint_path: '/workspace/model/lerobot/other/pretrained_model/critic/latest.pt',
+      act_checkpoint: '/workspace/model/lerobot/other/pretrained_model',
+    });
+    const { testStore } = renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/model/lerobot/current/pretrained_model',
+      }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+
+    const criticCheckpoint = await screen.findByLabelText('Critic checkpoint path');
+    await waitFor(() => {
+      expect(criticCheckpoint).toHaveTextContent(
+        'Saved critic belongs to a different or unverified ACT policy'
+      );
+    });
+    expect(criticCheckpoint).not.toHaveTextContent(
+      '/workspace/model/lerobot/other/pretrained_model/critic/latest.pt'
+    );
+  });
+
+  test('never publishes a completed critic warm-up as a deployable policy', async () => {
+    getACTTD3CriticWarmupStatus.mockResolvedValue({
+      status: 'completed',
+      percentage: 100,
+      job_id: 'act-critic-complete',
+      completed_critic_updates: 5000,
+      total_critic_updates: 5000,
+      actor_exactly_unchanged: true,
+      checkpoint_path: '/workspace/model/lerobot/imitation/act/pretrained_model/critic/latest.pt',
+      act_checkpoint: '/workspace/model/lerobot/imitation/act/pretrained_model',
+    });
+    const deploymentListener = jest.fn();
+    const { testStore } = renderSection({
+      variant: 'workflow',
+      currentPolicyEpoch: 3,
+      onDeploymentStateChange: deploymentListener,
+    });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/model/lerobot/imitation/act/pretrained_model',
+      }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+
+    await waitFor(() => expect(deploymentListener).toHaveBeenLastCalledWith({
+      ready: false,
+      modelPath: '',
+      serviceType: 'lerobot',
+      policyType: 'act',
+      rlEpoch: 3,
+      lineageMode: 'unchanged',
+    }));
+    expect(screen.queryByLabelText('ACT-TD3 policy RL Epoch 3 to 4'))
+      .not.toBeInTheDocument();
   });
 
   test('maps Diffusion Transformer exclusively to Flow-SDE PPO and gates Start by readiness', async () => {
@@ -262,18 +931,85 @@ describe('OfflineRLTrainingSection', () => {
       .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'TD3' }))
       .toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(/backend is not ready/i);
     const gatedStart = await screen.findByRole('button', { name: 'Start Training' });
     expect(gatedStart).toBeDisabled();
     fireEvent.click(gatedStart);
     expect(startOfflineRLTraining).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'TD3' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'TD3' }));
+    expect(screen.getByTestId('multi-task-dit-architecture-diagram')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Diffusion Transformer' }))
+      .toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'ACT' }));
     expect(await screen.findByTestId('act-architecture-diagram')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'ACT' }))
       .toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'TD3' }))
+    expect(screen.getByRole('button', { name: 'TD3-BC loss' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'TD3' })).not.toBeDisabled();
+    });
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i })).toBeDisabled();
+  });
+
+  test('follows supported Inference model changes without aliasing plain Diffusion', async () => {
+    const { testStore } = renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        serviceType: 'lerobot',
+        policyType: 'multi_task_dit',
+        policyPath: '/workspace/model/multi_task_dit/showroom/pretrained_model',
+      }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Diffusion Transformer' }))
+        .toHaveAttribute('aria-pressed', 'true');
+    });
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
+
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        serviceType: 'lerobot',
+        policyType: 'diffusion',
+      }));
+    });
+    expect(screen.getByRole('button', { name: 'Diffusion Transformer' }))
+      .toHaveAttribute('aria-pressed', 'true');
+
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        serviceType: 'groot',
+        policyType: 'n17',
+        policyPath: '/workspace/model/groot/showroom',
+      }));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'GR00T' }))
+        .toHaveAttribute('aria-pressed', 'true');
+    });
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i })).toBeDisabled();
+
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        serviceType: 'lerobot',
+        policyType: 'act',
+        policyPath: '/workspace/model/act/showroom/pretrained_model',
+      }));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'ACT' }))
+        .toHaveAttribute('aria-pressed', 'true');
+    });
+    expect(screen.getByRole('button', { name: 'TD3-BC loss' }))
       .toHaveAttribute('aria-pressed', 'true');
   });
 
@@ -360,7 +1096,14 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /PPO.*Flow-SDE/i }));
+    const ppoButton = screen.getByRole('button', { name: /PPO.*Flow-SDE/i });
+    expect(ppoButton).toBeDisabled();
+    fireEvent.click(ppoButton);
+    expect(screen.getByRole('button', { name: 'ACT' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
+    await waitFor(() => expect(ppoButton).not.toBeDisabled());
+    expect(ppoButton).toHaveAttribute('aria-pressed', 'true');
     await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
@@ -377,7 +1120,7 @@ describe('OfflineRLTrainingSection', () => {
     expect(startOfflineRLTraining).not.toHaveBeenCalled();
   });
 
-  test('keeps critic warm-up off by default and submits checked replay roots when enabled', async () => {
+  test('starts independent Diffusion critic warm-up with checked replay roots', async () => {
     const getFlowSDEPPOStatus = jest.fn().mockResolvedValue({ status: 'idle', percentage: 0 });
     const { testStore } = renderSection({
       variant: 'workflow',
@@ -406,26 +1149,28 @@ describe('OfflineRLTrainingSection', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
-    await screen.findByRole('button', { name: 'Start Training' });
-    const warmupGroup = screen.getByRole('group', { name: 'Critic warm-up' });
-    expect(within(warmupGroup).getByRole('button', { name: 'No' }))
-      .toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
-
-    fireEvent.click(within(warmupGroup).getByRole('button', { name: 'Yes' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
     await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    const criticPanel = screen.getByRole('region', {
+      name: 'Diffusion Policy critic warm-up',
+    });
+    expect(criticPanel).toBeInTheDocument();
+    expect(within(criticPanel).getByText('Value initialization')).toBeInTheDocument();
+    expect(within(criticPanel).getByText('Critic Warm-up')).toBeInTheDocument();
+    expect(within(criticPanel).getByText('Diffusion Policy')).toBeInTheDocument();
+    expect(within(criticPanel).getByText('Value Critic Network')).toBeInTheDocument();
+    expect(within(criticPanel).getByText(/State value V\(s\)/)).toBeInTheDocument();
+    expect(within(criticPanel).getByLabelText('Critic warm-up Diffusion policy mode'))
+      .toHaveTextContent('Frozen');
+    expect(within(criticPanel).getByText('Trainable')).toBeInTheDocument();
+    expect(getACTTD3CriticWarmupStatus).not.toHaveBeenCalled();
 
     expect(screen.getByLabelText('Critic warm-up steps')).toHaveValue(2000);
     expect(screen.getByLabelText('Critic warm-up batch size')).toHaveValue(8);
     expect(screen.getByLabelText('Critic warm-up value learning rate')).toHaveValue(0.0001);
     expect(screen.getByLabelText('Critic warm-up discount')).toHaveValue(0.99);
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/Train the critic to completion/i);
-    });
-    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
 
-    const trainCritic = screen.getByRole('button', { name: 'Train Critic' });
+    const trainCritic = await screen.findByRole('button', { name: 'Start Critic Warm-up' });
     await waitFor(() => expect(trainCritic).not.toBeDisabled());
     fireEvent.click(trainCritic);
 
@@ -442,9 +1187,10 @@ describe('OfflineRLTrainingSection', () => {
       value_learning_rate: 0.0001,
       discount: 0.99,
     }));
+    expect(startACTTD3CriticWarmup).not.toHaveBeenCalled();
   });
 
-  test('shows completed critic warm-up progress, value loss, ETA, and bundle path', async () => {
+  test('shows completed critic warm-up progress, critic loss, ETA, and bundle path', async () => {
     getFlowSDEPPOValueWarmupStatus.mockResolvedValue({
       status: 'completed',
       percentage: 100,
@@ -472,23 +1218,40 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    await screen.findByRole('button', { name: 'Start Training' });
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    await waitFor(() => {
-      expect(within(warmupGroup).getByRole('button', { name: 'Yes' })).not.toBeDisabled();
-    });
-    fireEvent.click(within(warmupGroup).getByRole('button', { name: 'Yes' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
 
     expect(await screen.findByText(/Complete · 100% · ETA 0s/)).toBeInTheDocument();
-    expect(screen.getByText(/Step 2,000\/2,000 · Value loss 0.012345/)).toBeInTheDocument();
-    expect(screen.getByRole('progressbar', { name: 'Critic warm-up progress' }))
+    expect(screen.getByText(/Step 2,000\/2,000 · Critic loss 0.012345/)).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: 'Diffusion critic warm-up progress' }))
       .toHaveAttribute('aria-valuenow', '100');
     expect(screen.getByLabelText('Critic warm-up bundle path')).toHaveTextContent(
       '/workspace/checkpoint/multi_task_dit/value_warmup/warmup-job-1'
     );
-    expect(screen.getByTestId('critic-warmup-source')).toHaveTextContent(
-      'Critic source: Warm-up · warmup-j · Ready for online PPO'
-    );
+  });
+
+  test('keeps the PPO screen free of a nested critic warm-up toggle', async () => {
+    const getFlowSDEPPOStatus = jest.fn().mockResolvedValue({ status: 'idle', percentage: 0 });
+    const { testStore } = renderSection({
+      variant: 'workflow',
+      flowSdePpoReady: true,
+      getFlowSDEPPOStatus,
+      onStartFlowSDEPPO: jest.fn(),
+    });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
+        taskInstruction: ['Pick up the jelly bag'],
+      }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
+    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+
+    expect(screen.queryByRole('group', { name: 'Critic warm-up' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Train Critic' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
   });
 
@@ -501,6 +1264,8 @@ describe('OfflineRLTrainingSection', () => {
       policy_checkpoint: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
       task_instruction: 'Pick up the jelly bag',
       bundle_path: bundlePath,
+      checkpoint_path: `${bundlePath}/training_state/value_warmup.pt`,
+      model_path: `${bundlePath}/pretrained_model`,
     });
     const startFlowSDEPPO = jest.fn().mockResolvedValue({
       status: 'starting',
@@ -522,12 +1287,7 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    const warmupYes = within(warmupGroup).getByRole('button', { name: 'Yes' });
-    await waitFor(() => expect(warmupYes).not.toBeDisabled());
-    fireEvent.click(warmupYes);
-
-    await screen.findByTestId('critic-warmup-source');
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
     });
@@ -555,6 +1315,8 @@ describe('OfflineRLTrainingSection', () => {
       policy_checkpoint: basePolicy,
       task_instruction: 'Pick up the jelly bag',
       bundle_path: warmupBundle,
+      checkpoint_path: `${warmupBundle}/training_state/value_warmup.pt`,
+      model_path: `${warmupBundle}/pretrained_model`,
     });
     const getFlowSDEPPOStatus = jest.fn().mockResolvedValue({
       status: 'completed',
@@ -585,14 +1347,8 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    const warmupYes = within(warmupGroup).getByRole('button', { name: 'Yes' });
-    await waitFor(() => expect(warmupYes).not.toBeDisabled());
-    fireEvent.click(warmupYes);
-
-    expect(await screen.findByTestId('critic-warmup-source')).toHaveTextContent(
-      'Critic source: PPO · ppo-job- · Ready to continue'
-    );
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
 
@@ -607,8 +1363,9 @@ describe('OfflineRLTrainingSection', () => {
     expect(startFlowSDEPPO.mock.calls[0][0]).not.toHaveProperty('value_warmup_bundle');
   });
 
-  test('keeps a fresh critic when warm-up is No even if a completed PPO state exists', async () => {
+  test('starts PPO with a fresh critic when the recovered PPO has no trainer artifacts', async () => {
     const basePolicy = '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model';
+    getFlowSDEPPOValueWarmupStatus.mockResolvedValue({ status: 'idle', percentage: 0 });
     const getFlowSDEPPOStatus = jest.fn().mockResolvedValue({
       status: 'completed',
       percentage: 100,
@@ -616,8 +1373,8 @@ describe('OfflineRLTrainingSection', () => {
       policy_checkpoint: basePolicy,
       lineage_policy_checkpoint: basePolicy,
       task_instruction: 'Pick up the jelly bag',
-      checkpoint_path: '/workspace/checkpoint/multi_task_dit/flow_sde_ppo/ppo-job-2/training_state/trainer_state.pt',
-      model_path: '/workspace/checkpoint/multi_task_dit/flow_sde_ppo/ppo-job-2/pretrained_model',
+      checkpoint_path: '',
+      model_path: '',
     });
     const startFlowSDEPPO = jest.fn().mockResolvedValue({
       status: 'running',
@@ -639,6 +1396,7 @@ describe('OfflineRLTrainingSection', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
     await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
     const start = await screen.findByRole('button', { name: 'Start Training' });
     await waitFor(() => expect(start).not.toBeDisabled());
     fireEvent.click(start);
@@ -673,10 +1431,10 @@ describe('OfflineRLTrainingSection', () => {
       },
       /different task instruction/i,
     ],
-  ])('blocks a stale completed PPO %s when no compatible warm-up exists', async (
+  ])('ignores a stale completed PPO %s and starts with a fresh critic', async (
     _label,
     lineage,
-    expectedMessage
+    _expectedMessage
   ) => {
     const basePolicy = '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model';
     getFlowSDEPPOValueWarmupStatus.mockResolvedValue({ status: 'idle', percentage: 0 });
@@ -703,16 +1461,21 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    const warmupYes = within(warmupGroup).getByRole('button', { name: 'Yes' });
-    await waitFor(() => expect(warmupYes).not.toBeDisabled());
-    fireEvent.click(warmupYes);
+    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    const start = screen.getByRole('button', { name: 'Start Training' });
+    await waitFor(() => expect(start).not.toBeDisabled());
+    fireEvent.click(start);
 
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(expectedMessage);
-    });
-    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
-    expect(startFlowSDEPPO).not.toHaveBeenCalled();
+    await waitFor(() => expect(startFlowSDEPPO).toHaveBeenCalledWith({
+      policy_type: 'multi_task_dit',
+      policy_checkpoint: basePolicy,
+      algorithm: 'flow_sde_ppo',
+      robot_type: 'ffw_sg2_rev1',
+      task_instruction: 'Pick up the jelly bag',
+    }));
+    expect(startFlowSDEPPO.mock.calls[0][0]).not.toHaveProperty('resume_checkpoint');
+    expect(startFlowSDEPPO.mock.calls[0][0]).not.toHaveProperty('value_warmup_bundle');
   });
 
   test('falls back to a compatible warm-up when the recovered PPO belongs to another lineage', async () => {
@@ -725,6 +1488,8 @@ describe('OfflineRLTrainingSection', () => {
       policy_checkpoint: basePolicy,
       task_instruction: 'Pick up the jelly bag',
       bundle_path: warmupBundle,
+      checkpoint_path: `${warmupBundle}/training_state/value_warmup.pt`,
+      model_path: `${warmupBundle}/pretrained_model`,
     });
     const getFlowSDEPPOStatus = jest.fn().mockResolvedValue({
       status: 'completed',
@@ -755,14 +1520,8 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    const warmupYes = within(warmupGroup).getByRole('button', { name: 'Yes' });
-    await waitFor(() => expect(warmupYes).not.toBeDisabled());
-    fireEvent.click(warmupYes);
-
-    expect(await screen.findByTestId('critic-warmup-source')).toHaveTextContent(
-      'Critic source: Warm-up · compatib · Ready for online PPO'
-    );
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
     const start = screen.getByRole('button', { name: 'Start Training' });
     expect(start).not.toBeDisabled();
     fireEvent.click(start);
@@ -795,7 +1554,11 @@ describe('OfflineRLTrainingSection', () => {
       },
       /different task instruction/i,
     ],
-  ])('blocks a stale warm-up with a different %s', async (_label, lineage, message) => {
+  ])('ignores a stale warm-up with a different %s and starts with a fresh critic', async (
+    _label,
+    lineage,
+    _message
+  ) => {
     getFlowSDEPPOValueWarmupStatus.mockResolvedValue({
       status: 'completed',
       percentage: 100,
@@ -819,17 +1582,21 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    const warmupYes = within(warmupGroup).getByRole('button', { name: 'Yes' });
-    await waitFor(() => expect(warmupYes).not.toBeDisabled());
-    fireEvent.click(warmupYes);
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
+    await waitFor(() => expect(getFlowSDEPPOStatus).toHaveBeenCalled());
+    const start = screen.getByRole('button', { name: 'Start Training' });
+    await waitFor(() => expect(start).not.toBeDisabled());
+    fireEvent.click(start);
 
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(message);
-    });
-    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
-    expect(startFlowSDEPPO).not.toHaveBeenCalled();
+    await waitFor(() => expect(startFlowSDEPPO).toHaveBeenCalledWith({
+      policy_type: 'multi_task_dit',
+      policy_checkpoint: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
+      algorithm: 'flow_sde_ppo',
+      robot_type: 'ffw_sg2_rev1',
+      task_instruction: 'Pick up the jelly bag',
+    }));
+    expect(startFlowSDEPPO.mock.calls[0][0]).not.toHaveProperty('resume_checkpoint');
+    expect(startFlowSDEPPO.mock.calls[0][0]).not.toHaveProperty('value_warmup_bundle');
   });
 
   test('stops only the running critic warm-up job', async () => {
@@ -856,14 +1623,10 @@ describe('OfflineRLTrainingSection', () => {
       }));
     });
     fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
-    await screen.findByRole('button', { name: 'Start Training' });
-    const warmupGroup = await screen.findByRole('group', { name: 'Critic warm-up' });
-    await waitFor(() => {
-      expect(within(warmupGroup).getByRole('button', { name: 'Yes' })).not.toBeDisabled();
-    });
-    fireEvent.click(within(warmupGroup).getByRole('button', { name: 'Yes' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Critic Warm-up' }));
+    await waitFor(() => expect(getFlowSDEPPOValueWarmupStatus).toHaveBeenCalled());
 
-    const stopButton = await screen.findByRole('button', { name: 'Stop' });
+    const stopButton = await screen.findByRole('button', { name: 'Stop Critic Warm-up' });
     await waitFor(() => expect(stopButton).not.toBeDisabled());
     fireEvent.click(stopButton);
 
@@ -1012,11 +1775,12 @@ describe('OfflineRLTrainingSection', () => {
       modelPath: '/workspace/model/multi_task_dit/ppo/pretrained_model',
       serviceType: 'lerobot',
       policyType: 'multi_task_dit',
-      rlEpoch: 0,
+      rlEpoch: 1,
+      lineageMode: 'advance',
     }));
   });
 
-  test('uses ACT imitation learning with fixed full-ACT settings by default', async () => {
+  test('uses ACT imitation learning with editable full-ACT settings by default', async () => {
     renderSection({ variant: 'workflow' });
     await screen.findByRole('button', { name: 'Start Training' });
 
@@ -1026,20 +1790,28 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByLabelText('Imitation steps')).toHaveValue(80000);
     expect(screen.getByLabelText('Imitation batch size')).toHaveValue(8);
     expect(screen.getByLabelText('Imitation save frequency')).toHaveValue(10000);
-    expect(screen.getByLabelText('Imitation action chunk')).toHaveTextContent('30');
+    expect(screen.getByLabelText('Imitation action chunk')).toHaveValue(30);
     expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'SAC' })).toBeDisabled();
+
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: /Visual backbone: Trainable/i,
+    })).not.toBeDisabled());
 
     [
       /Visual backbone: Trainable/i,
       /CVAE encoder: Trainable/i,
-      /Transformer encoder: Trainable/i,
-      /Action decoder: Trainable/i,
+      /Action Module: Trainable/i,
     ].forEach((name) => {
       const block = screen.getByRole('button', { name });
-      expect(block).toBeDisabled();
+      expect(block).not.toBeDisabled();
       expect(block).toHaveAttribute('aria-pressed', 'true');
     });
+
+    fireEvent.click(screen.getByRole('button', { name: /CVAE encoder: Trainable/i }));
+    expect(screen.getByRole('button', {
+      name: /CVAE encoder: Frozen/i,
+    })).toHaveAttribute('aria-pressed', 'false');
   });
 
   test('starts ACT imitation learning on every selected Data Epoch without a base checkpoint', async () => {
@@ -1062,6 +1834,12 @@ describe('OfflineRLTrainingSection', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    const cvaeBlock = screen.getByRole('button', { name: /CVAE encoder: Trainable/i });
+    await waitFor(() => expect(cvaeBlock).not.toBeDisabled());
+    fireEvent.click(cvaeBlock);
+    fireEvent.change(screen.getByLabelText('Imitation action chunk'), {
+      target: { value: '24' },
+    });
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
     });
@@ -1078,9 +1856,33 @@ describe('OfflineRLTrainingSection', () => {
       steps: 80000,
       batch_size: 8,
       save_freq: 10000,
-      chunk_size: 30,
+      chunk_size: 24,
+      trainable_groups: [
+        'visual_backbone',
+        'transformer_encoder',
+        'action_decoder',
+      ],
     }));
     expect(startOfflineRLTraining).not.toHaveBeenCalled();
+  });
+
+  test('blocks all-frozen and CVAE-only ACT imitation-learning configurations', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+    const visualBlock = screen.getByRole('button', { name: /Visual backbone/i });
+    await waitFor(() => expect(visualBlock).not.toBeDisabled());
+    fireEvent.click(visualBlock);
+    fireEvent.click(screen.getByRole('button', { name: /Action Module/i }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/CVAE-only is not supported/i);
+    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /CVAE encoder/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/At least one ACT network block/i);
+    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
+    expect(startImitationLearningTraining).not.toHaveBeenCalled();
   });
 
   test('keeps Diffusion Transformer selected for flow-matching imitation learning', async () => {
@@ -1108,11 +1910,20 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByRole('button', { name: 'Diffusion Transformer' }))
       .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByTestId('multi-task-dit-architecture-diagram')).toBeInTheDocument();
-    expect(screen.getByLabelText('Imitation action chunk')).toHaveTextContent('16');
+    const loop = screen.getByTestId('policy-training-loop');
+    expect(loop).toHaveAttribute('data-policy-model', 'multi_task_dit');
+    expect(loop).toHaveAttribute('data-fit-content', 'true');
+    expect(within(loop).getByTestId('training-replay-buffer-card')).toBeInTheDocument();
+    expect(within(loop).getByTestId('multi_task_dit-imitation-algorithm-card'))
+      .toBeInTheDocument();
+    expect(within(loop).getByTestId('policy-training-loop-connectors')).toBeInTheDocument();
+    expect(within(loop).getByText('Flow-Matching Reconstruction')).toBeInTheDocument();
+    expect(screen.getByLabelText('Imitation action chunk')).toHaveValue(16);
+    expect(screen.getByLabelText('Imitation action chunk')).toBeDisabled();
     expect(screen.getByText(/Supervised flow-matching/i)).toBeInTheDocument();
     expect(screen.getByText(/no reward or outcome labels required/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'GR00T' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Pi0.5' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'GR00T' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Pi0.5' })).not.toBeDisabled();
     expect(await screen.findByRole('button', { name: 'Start Training' }))
       .not.toBeDisabled();
 
@@ -1146,7 +1957,7 @@ describe('OfflineRLTrainingSection', () => {
       .toHaveAttribute('aria-pressed', 'false');
     expect(await screen.findByRole('button', { name: 'Start Training' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(
-      /Training is available for ACT and Diffusion Transformer/i
+      /GR00T imitation-learning preview is available.*backend is not connected/i
     );
   });
 
@@ -1162,16 +1973,21 @@ describe('OfflineRLTrainingSection', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
-    await screen.findByLabelText('Imitation steps');
-    fireEvent.change(screen.getByLabelText('Imitation save frequency'), {
+    const saveFrequency = await screen.findByLabelText('Imitation save frequency');
+    await waitFor(() => expect(saveFrequency).not.toBeDisabled());
+    fireEvent.change(saveFrequency, {
       target: { value: '90000' },
     });
-    expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start Training' }))
+      .toBeDisabled());
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText('Imitation save frequency'), {
+    fireEvent.change(saveFrequency, {
       target: { value: '10000' },
     });
-    expect(screen.getByRole('button', { name: 'Start Training' })).not.toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start Training' }))
+      .not.toBeDisabled());
   });
 
   test('shows ACT imitation losses and locks the method while stopping the exact job', async () => {
@@ -1200,11 +2016,22 @@ describe('OfflineRLTrainingSection', () => {
     await screen.findByRole('button', { name: 'Start Training' });
     fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
 
-    expect(await screen.findByText(/Training · 25%.*Step 20,000.*80,000.*ETA 2m 5s/))
-      .toBeInTheDocument();
-    expect(screen.getByText('Total loss').parentElement).toHaveTextContent('0.12000');
-    expect(screen.getByText('L1 loss').parentElement).toHaveTextContent('0.080000');
-    expect(screen.getByText('KLD loss').parentElement).toHaveTextContent('0.0040000');
+    const imitationProgress = await screen.findByTestId('training-loss-chart');
+    await waitFor(() => {
+      expect(within(imitationProgress).getByText('Training')).toBeInTheDocument();
+      expect(within(imitationProgress).getByLabelText('Training percentage'))
+        .toHaveTextContent('25.0%');
+      expect(within(imitationProgress).getByLabelText('Training update detail'))
+        .toHaveTextContent('Step 20,000/80,000');
+      expect(within(imitationProgress).getByLabelText('Training ETA'))
+        .toHaveTextContent('ETA 2m 05s');
+      expect(within(imitationProgress).getByText('Total loss').parentElement)
+        .toHaveTextContent('0.12000');
+      expect(within(imitationProgress).getByText('L1 loss').parentElement)
+        .toHaveTextContent('0.080000');
+      expect(within(imitationProgress).getByText('KLD loss').parentElement)
+        .toHaveTextContent('0.0040000');
+    });
     expect(screen.getByRole('button', { name: 'Imitation Learning' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Reinforcement Learning' })).toBeDisabled();
 
@@ -1229,6 +2056,7 @@ describe('OfflineRLTrainingSection', () => {
     renderSection({
       variant: 'workflow',
       onDeploymentStateChange: deploymentListener,
+      currentPolicyEpoch: 3,
     });
     await screen.findByRole('button', { name: 'Start Training' });
     fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
@@ -1239,6 +2067,7 @@ describe('OfflineRLTrainingSection', () => {
       serviceType: 'lerobot',
       policyType: 'act',
       rlEpoch: 0,
+      lineageMode: 'new',
     }));
   });
 
@@ -1267,6 +2096,7 @@ describe('OfflineRLTrainingSection', () => {
       serviceType: 'lerobot',
       policyType: 'multi_task_dit',
       rlEpoch: 0,
+      lineageMode: 'new',
     }));
   });
 
@@ -1292,11 +2122,69 @@ describe('OfflineRLTrainingSection', () => {
       .not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
 
-    expect(await screen.findByText(/Training · 25%.*Step 20,000.*80,000.*ETA 2m 5s/))
-      .toBeInTheDocument();
+    const imitationProgress = await screen.findByTestId('training-loss-chart');
+    expect(within(imitationProgress).getByText('Training')).toBeInTheDocument();
+    expect(within(imitationProgress).getByLabelText('Training percentage'))
+      .toHaveTextContent('25.0%');
+    expect(within(imitationProgress).getByLabelText('Training update detail'))
+      .toHaveTextContent('Step 20,000/80,000');
+    expect(within(imitationProgress).getByLabelText('Training ETA'))
+      .toHaveTextContent('ETA 2m 05s');
     expect(screen.getByText('Flow loss').parentElement).toHaveTextContent('0.012000');
     expect(screen.queryByText('L1 loss')).not.toBeInTheDocument();
     expect(screen.queryByText('KLD loss')).not.toBeInTheDocument();
+  });
+
+  test('uses the ACT-style Policy, Replay Buffer, and Algorithm loop for every other policy', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    const cases = [
+      {
+        button: 'Diffusion Transformer',
+        model: 'multi_task_dit',
+        policyDiagram: 'multi-task-dit-architecture-diagram',
+        algorithmDiagram: 'flow-sde-ppo-architecture-diagram',
+      },
+      {
+        button: 'GR00T',
+        model: 'groot',
+        policyDiagram: 'groot-architecture-diagram',
+        algorithmDiagram: 'rlt-architecture-diagram',
+      },
+      {
+        button: 'Pi0.5',
+        model: 'pi05',
+        policyDiagram: 'pi05-architecture-diagram',
+        algorithmDiagram: 'rlt-architecture-diagram',
+      },
+    ];
+
+    for (const item of cases) {
+      fireEvent.click(screen.getByRole('button', { name: item.button }));
+      const loop = await screen.findByTestId('policy-training-loop');
+      await waitFor(() => expect(loop).toHaveAttribute('data-policy-model', item.model));
+
+      const policyStage = within(loop).getByTestId('training-policy-stage');
+      const replayStage = within(loop).getByTestId('training-replay-buffer-card');
+      const algorithmStage = within(loop).getByTestId('training-algorithm-stage');
+      expect(policyStage).toContainElement(screen.getByTestId(item.policyDiagram));
+      expect(algorithmStage).toContainElement(screen.getByTestId(item.algorithmDiagram));
+      expect(loop).toContainElement(replayStage);
+      expect(within(loop).getAllByTestId('training-replay-buffer-card')).toHaveLength(1);
+
+      const progressMetrics = within(screen.getByTestId('offline-rl-training-footer'))
+        .getByTestId('training-progress-metrics');
+      if (item.model === 'multi_task_dit') {
+        expect(within(progressMetrics).getByText('Critic loss')).toBeInTheDocument();
+        expect(within(progressMetrics).queryByText('Value loss')).not.toBeInTheDocument();
+      } else {
+        expect(progressMetrics).toHaveClass('grid-cols-2');
+        expect(within(progressMetrics).getByText('Critic loss')).toBeInTheDocument();
+        expect(within(progressMetrics).getByText('Action MLP loss')).toBeInTheDocument();
+        expect(within(progressMetrics).queryByText('Action chunk')).not.toBeInTheDocument();
+      }
+    }
   });
 
   test('previews GR00T and Pi0.5 diagrams without calling the ACT-TD3 backend', async () => {
@@ -1314,9 +2202,11 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByRole('button', { name: 'GR00T' }))
       .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('alert')).toHaveTextContent(
-      /GR00T diagram preview only.*backend is not connected/i
+      /GR00T \+ RLT architecture.*backend is not connected/i
     );
     expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'TD3' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /PPO.*Flow-SDE/i })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
     expect(startOfflineRLTraining).not.toHaveBeenCalled();
 
@@ -1325,7 +2215,10 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByRole('button', { name: 'Pi0.5' }))
       .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('alert')).toHaveTextContent(
-      /Pi0.5 diagram preview only.*backend is not connected/i
+      /Pi0.5 \+ RLT architecture.*backend is not connected/i
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /Pi0.5-compatible RLT checkpoint is required.*GR00T-only/i
     );
     expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
@@ -1335,6 +2228,65 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByTestId('act-architecture-diagram')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'ACT' }))
       .toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('enables RLT only for GR00T and Pi0.5 and exposes both trainable RLT blocks', async () => {
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    const rltButton = screen.getByRole('button', { name: 'RLT' });
+    expect(rltButton).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'GR00T' }));
+    await waitFor(() => expect(rltButton).not.toBeDisabled());
+    expect(rltButton).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('groot-architecture-diagram'))
+      .toHaveAttribute('data-architecture-mode', 'all-frozen');
+    const rltLoop = screen.getByTestId('policy-training-loop');
+    const workflow = screen.getByTestId('offline-rl-workflow-training');
+    const trainingFooter = screen.getByTestId('offline-rl-training-footer');
+    expect(screen.getByTestId('rlt-architecture-diagram')).toBeInTheDocument();
+    expect(rltLoop).toHaveAttribute('data-fit-content', 'true');
+    expect(rltLoop).toHaveClass('self-start');
+    expect(workflow).toHaveClass('flex-none');
+    expect(workflow).toHaveClass('grid-rows-[auto_auto_auto]');
+    expect(trainingFooter).toHaveClass('mt-3');
+    expect(trainingFooter).not.toHaveClass('mt-auto');
+    expect(screen.getByTestId('training-algorithm-card')).toHaveClass('h-fit');
+    expect(screen.getByTestId('training-algorithm-card')).not.toHaveClass('h-full');
+    expect(screen.getByText('Action MLP loss')).toBeInTheDocument();
+    const grootProgressMetrics = within(trainingFooter)
+      .getByTestId('training-progress-metrics');
+    expect(grootProgressMetrics).toHaveClass('grid-cols-2');
+    expect(within(grootProgressMetrics).queryByText('Action chunk')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'RL Token Encoder: Frozen; make trainable',
+    })).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Action MLP: Trainable; freeze',
+    })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'RL Token Encoder: Frozen; make trainable',
+    }));
+    expect(screen.getByRole('button', {
+      name: 'RL Token Encoder: Trainable; freeze',
+    })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', {
+      name: 'Action MLP: Trainable; freeze',
+    })).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pi0.5' }));
+    await waitFor(() => expect(rltButton).not.toBeDisabled());
+    expect(rltButton).toHaveAttribute('aria-pressed', 'true');
+    const piProgressMetrics = within(trainingFooter)
+      .getByTestId('training-progress-metrics');
+    expect(piProgressMetrics).toHaveClass('grid-cols-2');
+    expect(within(piProgressMetrics).queryByText('Action chunk')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'ACT' }));
+    await waitFor(() => expect(rltButton).toBeDisabled());
+    expect(screen.queryByTestId('rlt-architecture-diagram')).not.toBeInTheDocument();
   });
 
   test('submits the selected ACT trainable groups from the workflow graph', async () => {
@@ -1385,6 +2337,8 @@ describe('OfflineRLTrainingSection', () => {
   test('auto-resumes a completed workflow round with its server-reported lineage', async () => {
     getOfflineRLStatus.mockResolvedValue({
       status: 'completed',
+      algorithm: 'td3',
+      actor_objective: 'td3_bc',
       percentage: 100,
       dataset_path: '/workspace/lerobot/task_lerobot_v30',
       dataset_paths: ['/workspace/lerobot/task_lerobot_v30'],
@@ -1425,6 +2379,7 @@ describe('OfflineRLTrainingSection', () => {
       serviceType: 'lerobot',
       policyType: 'act',
       rlEpoch: 1,
+      lineageMode: 'advance',
     }));
     expect(screen.getAllByText('Policy').length).toBeGreaterThan(0);
     expect(screen.queryByText('Checkpoint')).not.toBeInTheDocument();
@@ -1442,9 +2397,59 @@ describe('OfflineRLTrainingSection', () => {
     ));
   });
 
+  test('starts a fresh lineage when the selected TD3 loss differs from the completed round', async () => {
+    getOfflineRLStatus.mockResolvedValue({
+      status: 'completed',
+      algorithm: 'td3',
+      actor_objective: 'td3_bc',
+      percentage: 100,
+      dataset_path: '/workspace/lerobot/task_lerobot_v30',
+      dataset_paths: ['/workspace/lerobot/task_lerobot_v30'],
+      act_checkpoint: '/workspace/model/lerobot/base/pretrained_model',
+      checkpoint_path: '/workspace/model/round1/training_state/act_td3.pt',
+      model_path: '/workspace/model/round1/pretrained_model',
+      round_index: 1,
+    });
+    const { testStore } = renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+    act(() => {
+      testStore.dispatch(setOfflineRLDatasetSelections([
+        {
+          path: '/workspace/lerobot/task_lerobot_v30',
+          version: 'v3.0',
+          dataEpoch: 0,
+        },
+        {
+          path: '/workspace/lerobot/data_epoch_0001/task_lerobot_v30',
+          version: 'v3.0',
+          dataEpoch: 1,
+        },
+      ]));
+      testStore.dispatch(setInferenceTaskInfo({
+        policyPath: '/workspace/model/round1/pretrained_model',
+      }));
+    });
+
+    const pureTD3Option = screen.getByRole('button', { name: 'TD3 loss' });
+    fireEvent.click(pureTD3Option);
+    expect(pureTD3Option).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Start Training' }));
+
+    await waitFor(() => expect(startOfflineRLTraining).toHaveBeenCalledWith(
+      expect.objectContaining({
+        algorithm: 'td3',
+        actor_objective: 'td3',
+        act_checkpoint: '/workspace/model/round1/pretrained_model',
+        parent_checkpoint: '',
+      })
+    ));
+  });
+
   test('shows policy RL Epoch separately from critic replay progress', async () => {
     getOfflineRLStatus.mockResolvedValue({
       status: 'running',
+      algorithm: 'td3',
+      actor_objective: 'td3_bc',
       percentage: 40,
       round_index: 2,
       completed_epochs: 4,
@@ -1554,10 +2559,30 @@ describe('OfflineRLTrainingSection', () => {
       name: /CVAE encoder: Frozen/i,
     })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', {
-      name: /Transformer encoder: Trainable/i,
+      name: /Action Module: Trainable/i,
     })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('restores a running ACT imitation-learning trainability contract', async () => {
+    getImitationLearningStatus.mockResolvedValue({
+      status: 'running',
+      percentage: 12,
+      policy_type: 'act',
+      trainable_groups: ['transformer_encoder', 'action_decoder'],
+    });
+
+    renderSection({ variant: 'workflow' });
+    await screen.findByRole('button', { name: 'Start Training' });
+    fireEvent.click(screen.getByRole('button', { name: 'Imitation Learning' }));
+
+    expect(await screen.findByRole('button', {
+      name: /Visual backbone: Frozen/i,
+    })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', {
-      name: /Action decoder: Trainable/i,
+      name: /CVAE encoder: Frozen/i,
+    })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', {
+      name: /Action Module: Trainable/i,
     })).toHaveAttribute('aria-pressed', 'true');
   });
 
@@ -1566,8 +2591,7 @@ describe('OfflineRLTrainingSection', () => {
     await screen.findByRole('button', { name: 'Start Training' });
 
     fireEvent.click(screen.getByRole('button', { name: /Visual backbone/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Transformer encoder/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Action decoder/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Action Module/i }));
 
     expect(screen.getByRole('alert')).toHaveTextContent(/CVAE-only is not supported/i);
     expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
@@ -1640,7 +2664,10 @@ describe('OfflineRLTrainingSection', () => {
 
     renderSection({ variant: 'workflow' });
 
-    expect(await screen.findByText(/Training · 25% · ETA 2m 5s/)).toBeInTheDocument();
+    const lossChart = await screen.findByTestId('training-loss-chart');
+    expect(within(lossChart).getByText('Training')).toBeInTheDocument();
+    expect(within(lossChart).getByLabelText('Training percentage')).toHaveTextContent('25.0%');
+    expect(within(lossChart).getByLabelText('Training ETA')).toHaveTextContent('ETA 2m 05s');
     await waitFor(() => expect(screen.getByLabelText('Batch size')).toHaveValue(8));
     const stopButton = screen.getByRole('button', { name: 'Stop Training' });
     expect(stopButton).not.toBeDisabled();
@@ -1828,5 +2855,39 @@ describe('OfflineRLTrainingSection', () => {
     expect(screen.getByRole('button', { name: 'Checking status…' })).toBeDisabled();
 
     view.unmount();
+  });
+
+  test('uses the compact outer loop for ACT and Diffusion Transformer workflows', async () => {
+    const onCompactLayoutChange = jest.fn();
+    const { unmount } = renderSection({
+      variant: 'workflow',
+      flowSdePpoReady: true,
+      getFlowSDEPPOStatus: jest.fn().mockResolvedValue({ status: 'idle', percentage: 0 }),
+      onStartFlowSDEPPO: jest.fn(),
+      onCompactLayoutChange,
+    });
+    await screen.findByRole('button', { name: 'Start Training' });
+
+    const workflow = screen.getByTestId('offline-rl-workflow-training');
+    const footer = screen.getByTestId('offline-rl-training-footer');
+    const actLoop = screen.getByTestId('act-td3-training-loop');
+    expect(actLoop).toHaveAttribute('data-fit-content', 'true');
+    expect(actLoop).toHaveClass('self-start');
+    expect(workflow).toHaveClass('flex-none', 'grid-rows-[auto_auto_auto]');
+    expect(footer).toHaveClass('mt-3');
+    expect(footer).not.toHaveClass('mt-auto');
+    await waitFor(() => expect(onCompactLayoutChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Diffusion Transformer' }));
+    const diffusionLoop = await screen.findByTestId('policy-training-loop');
+    expect(diffusionLoop).toHaveAttribute('data-fit-content', 'true');
+    expect(diffusionLoop).toHaveClass('self-start');
+    expect(screen.getByTestId('training-algorithm-card')).toHaveClass('h-fit');
+    expect(workflow).toHaveClass('flex-none', 'grid-rows-[auto_auto_auto]');
+    expect(footer).toHaveClass('mt-3');
+    await waitFor(() => expect(onCompactLayoutChange).toHaveBeenLastCalledWith(true));
+
+    unmount();
+    expect(onCompactLayoutChange).toHaveBeenLastCalledWith(false);
   });
 });

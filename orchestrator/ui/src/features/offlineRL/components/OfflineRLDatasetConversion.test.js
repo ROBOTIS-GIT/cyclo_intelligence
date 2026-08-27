@@ -1,5 +1,5 @@
 import { configureStore } from '@reduxjs/toolkit';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import editDatasetReducer, {
   setConversionStatus,
@@ -83,6 +83,44 @@ test('derives the Step 1 source task and destination-relative LeRobot outputs', 
 test('shows the formats supported by the existing conversion backend', async () => {
   renderConversion();
 
+  expect(screen.getByTestId('offline-rl-conversion-engine')).toBeInTheDocument();
+  expect(screen.queryByText('MCAP Source')).not.toBeInTheDocument();
+  expect(screen.queryByText('Validate & Align')).not.toBeInTheDocument();
+  expect(screen.queryByText('LeRobot Output')).not.toBeInTheDocument();
+  expect(screen.getByText('Conversion setup')).toBeInTheDocument();
+  expect(screen.getByTestId('conversion-setup-surface'))
+    .toHaveClass('bg-[#f8f5ef]');
+  expect(screen.getByText('Validation')).toBeInTheDocument();
+  expect(screen.getByText('MCAP linked')).toBeInTheDocument();
+  expect(screen.getByText('Destination valid')).toBeInTheDocument();
+  expect(screen.getByText('Output selected')).toBeInTheDocument();
+  const pathRow = screen.getByTestId('conversion-path-row');
+  expect(pathRow).toHaveClass('grid-cols-2');
+  expect(within(pathRow).getByText('Conversion setup')).toBeInTheDocument();
+  expect(within(pathRow).getByLabelText('LeRobot collection root')).toBeInTheDocument();
+  const optionsRow = screen.getByTestId('conversion-options-row');
+  const outputFormat = within(optionsRow).getByTestId('conversion-output-format');
+  const validation = within(optionsRow).getByLabelText('Conversion validation');
+  const dataEpoch = within(optionsRow).getByTestId('offline-rl-data-epoch-output');
+  const convertButton = within(optionsRow).getByRole('button', { name: 'Convert Dataset' });
+  expect(within(outputFormat).getByRole('button', { name: 'v3.0' }))
+    .toBeInTheDocument();
+  expect(validation).toBeInTheDocument();
+  expect(dataEpoch.nextElementSibling).toBe(convertButton);
+  expect(optionsRow.lastElementChild).toBe(convertButton);
+  expect(screen.getAllByRole('button', { name: 'Convert Dataset' })).toHaveLength(1);
+  expect(screen.queryByRole('progressbar', { name: 'Dataset conversion progress' }))
+    .not.toBeInTheDocument();
+  expect(within(validation).getByTestId('conversion-validation-summary'))
+    .toBeInTheDocument();
+  expect(screen.queryByText('Atomic output')).not.toBeInTheDocument();
+  expect(screen.queryByText('Reserved at start')).not.toBeInTheDocument();
+  expect(screen.queryByText('An immutable output folder is reserved when conversion starts'))
+    .not.toBeInTheDocument();
+  expect(screen.queryByText(
+    'Source MCAP episodes are removed only after every selected LeRobot output passes verification.'
+  )).not.toBeInTheDocument();
+  expect(screen.queryByText('Ready to convert')).not.toBeInTheDocument();
   expect(await screen.findByRole('button', { name: 'v2.1' }))
     .toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByRole('button', { name: 'v3.0' }))

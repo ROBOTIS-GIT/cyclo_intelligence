@@ -6,7 +6,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { shallowEqual, useDispatch, useSelector } from 'react-redux';
-import { MdFolderOpen, MdPlayArrow } from 'react-icons/md';
+import {
+  MdCheckCircle,
+  MdFolderOpen,
+  MdPlayArrow,
+  MdStorage,
+  MdWarningAmber,
+} from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
@@ -262,146 +268,219 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
   ]);
 
   const progress = Math.max(0, Math.min(100, Number(conversionStatus.progress) || 0));
+  const validationItems = [
+    { label: 'MCAP linked', valid: Boolean(taskName) },
+    { label: 'Destination valid', valid: destinationValid },
+    { label: 'Output selected', valid: formatsValid },
+  ];
 
   return (
-    <div className="flex min-h-0 flex-col gap-2">
-      <div className="flex flex-col gap-1 text-[9px] font-medium text-[#756e63]">
-        MCAP source · Step 1 Replay Buffer
+    <div className="flex min-h-0 flex-col gap-2" data-testid="offline-rl-conversion-engine">
+      <div
+        className="rounded-xl border border-[#e2dbcf] bg-[#f8f5ef] p-2.5"
+        data-testid="conversion-setup-surface"
+      >
         <div
-          className="h-7 truncate rounded-md border border-[#e0d9cd] bg-[#efebe3] px-2 py-1.5 text-[9px] font-normal text-[#6f685d]"
-          title={sourcePath || undefined}
+          className="grid grid-cols-2 gap-2"
+          data-testid="conversion-path-row"
         >
-          {sourcePath || 'Waiting for an inference recording'}
-        </div>
-      </div>
+          <div className="min-w-0">
+            <div className="mb-1 text-[10px] font-semibold text-[#5e584f]">
+              Conversion setup
+            </div>
+            <div className="rounded-lg border border-[#e2dbcf] bg-white px-2.5 py-1.5">
+              <div className="mb-0.5 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#8a8276]">
+                <MdStorage size={12} aria-hidden="true" />
+                MCAP source
+              </div>
+              <div
+                className="truncate text-[10px] font-medium text-[#5f594f]"
+                title={sourcePath || undefined}
+              >
+                {sourcePath || 'No MCAP selected'}
+              </div>
+            </div>
+          </div>
 
-      <label className="flex flex-col gap-1 text-[9px] font-medium text-[#756e63]">
-        LeRobot collection root
-        <div className="flex min-w-0 gap-1">
-          <input
-            aria-label="LeRobot collection root"
-            value={destinationPath}
-            onChange={(event) => dispatch(
-              setOfflineRLConversionDestinationPath(event.target.value)
+          <label className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]">
+            LeRobot collection root
+            <div className="flex min-w-0 gap-1.5">
+              <input
+                aria-label="LeRobot collection root"
+                value={destinationPath}
+                onChange={(event) => dispatch(
+                  setOfflineRLConversionDestinationPath(event.target.value)
+                )}
+                disabled={isRunning || !isActive}
+                placeholder="/workspace/lerobot"
+                className="h-9 min-w-0 flex-1 rounded-lg border border-[#d9d2c5] bg-white px-2.5 text-[10px] text-[#4c473f] outline-none transition-colors focus:border-[#879b89] focus:ring-2 focus:ring-[#879b89]/15 disabled:bg-[#efebe3]"
+              />
+              <button
+                type="button"
+                onClick={() => setShowBrowser(true)}
+                disabled={isRunning || !isActive}
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#d9d2c5] bg-[#f1ede4] text-[#70695e] transition-colors hover:bg-[#e9e4da] disabled:opacity-45"
+                aria-label="Browse LeRobot collection root"
+              >
+                <MdFolderOpen size={14} />
+              </button>
+            </div>
+          </label>
+        </div>
+
+        <div
+          className="mt-2 grid grid-cols-[64px_minmax(112px,0.7fr)_minmax(190px,1.2fr)_minmax(104px,0.7fr)_minmax(116px,0.65fr)] items-start gap-2"
+          data-testid="conversion-options-row"
+        >
+          <label className="flex flex-col gap-1 text-[10px] font-medium text-[#756e63]">
+            FPS
+            <input
+              aria-label="Conversion FPS"
+              type="number"
+              min="1"
+              max="120"
+              step="1"
+              value={fps}
+              onChange={(event) => dispatch(setOfflineRLConversionFps(event.target.value))}
+              disabled={isRunning || !isActive}
+              className="h-9 rounded-lg border border-[#d9d2c5] bg-white px-2 text-[10px] font-semibold text-[#4c473f] outline-none focus:border-[#879b89] disabled:bg-[#efebe3]"
+            />
+          </label>
+          <div
+            className="flex flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            data-testid="conversion-output-format"
+          >
+            Output format
+            <div className="grid h-9 grid-cols-2 gap-1">
+              {[
+                ['v21', 'v2.1'],
+                ['v30', 'v3.0'],
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={Boolean(formats[key])}
+                  onClick={() => dispatch(setOfflineRLConversionFormats({
+                    [key]: !formats[key],
+                  }))}
+                  disabled={isRunning || !isActive}
+                  className={clsx(
+                    'rounded-lg border text-[10px] font-semibold transition-colors disabled:opacity-45',
+                    formats[key]
+                      ? 'border-[#7f9a84] bg-[#e3ece3] text-[#58705d]'
+                      : 'border-[#ddd6ca] bg-white text-[#938b7f]'
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div
+            className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            aria-label="Conversion validation"
+          >
+            Validation
+            <div
+              className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-[#e0d9cd] bg-white px-2"
+              data-testid="conversion-validation-summary"
+            >
+              {validationItems.map(({ label, valid }) => (
+                <span
+                  key={label}
+                  className={clsx(
+                    'inline-flex items-center gap-1 text-[9px] font-medium',
+                    valid ? 'text-[#5e7a64]' : 'text-[#9a7250]'
+                  )}
+                >
+                  {valid ? <MdCheckCircle size={12} /> : <MdWarningAmber size={12} />}
+                  {label}
+                </span>
+              ))}
+            </div>
+            {!destinationValid && (
+              <div className="text-[9px] text-[#a06b61]">
+                Destination must be inside {LEROBOT_ROOT}
+              </div>
             )}
-            disabled={isRunning || !isActive}
-            placeholder="/workspace/lerobot"
-            className="h-7 min-w-0 flex-1 rounded-md border border-[#d9d2c5] bg-white px-2 text-[9px] text-[#4c473f] outline-none focus:border-[#879b89] disabled:bg-[#efebe3]"
-          />
+          </div>
+          <div
+            className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            data-testid="offline-rl-data-epoch-output"
+            title={reservedEpoch?.output_root || undefined}
+          >
+            Data Epoch
+            <div className="flex h-9 min-w-0 items-center rounded-lg border border-[#ded7ca] bg-white px-2.5">
+              <span className="truncate text-[10px] font-semibold text-[#58705d]">
+                {reservedEpoch?.epoch_name || 'Next available'}
+              </span>
+            </div>
+          </div>
           <button
             type="button"
-            onClick={() => setShowBrowser(true)}
-            disabled={isRunning || !isActive}
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-[#d9d2c5] bg-[#f1ede4] text-[#70695e] hover:bg-[#e9e4da] disabled:opacity-45"
-            aria-label="Browse LeRobot collection root"
+            onClick={handleConvert}
+            disabled={!canConvert}
+            className="flex h-9 self-end items-center justify-center gap-1.5 rounded-lg border border-[#66836c] bg-[#69866f] px-2 text-[10px] font-semibold text-white shadow-[0_4px_10px_rgba(74,101,80,0.15)] transition-colors hover:bg-[#5e7b64] disabled:cursor-not-allowed disabled:border-[#d7d0c4] disabled:bg-[#e8e3da] disabled:text-[#9d9589] disabled:shadow-none"
           >
-            <MdFolderOpen size={13} />
+            <MdPlayArrow size={14} />
+            {isRunning ? 'Converting…' : 'Convert Dataset'}
           </button>
         </div>
-      </label>
-
-      <div
-        className="rounded-md border border-[#ded7ca] bg-[#f7f4ed] px-2 py-1.5 text-[8px] text-[#756e63]"
-        data-testid="offline-rl-data-epoch-output"
-        title={reservedEpoch?.output_root || 'Assigned atomically when conversion starts'}
-      >
-        <div className="flex items-center justify-between gap-2">
-          <span className="font-semibold uppercase tracking-[0.08em]">Data Epoch</span>
-          <span className="font-semibold text-[#58705d]">
-            {reservedEpoch?.epoch_name || 'Next available'}
-          </span>
-        </div>
-        <div className="mt-0.5 truncate text-[#948c80]">
-          {reservedEpoch?.output_root || 'An immutable output folder is reserved at start'}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-[56px_minmax(0,1fr)] gap-2">
-        <label className="flex flex-col gap-1 text-[9px] font-medium text-[#756e63]">
-          FPS
-          <input
-            aria-label="Conversion FPS"
-            type="number"
-            min="1"
-            max="120"
-            step="1"
-            value={fps}
-            onChange={(event) => dispatch(setOfflineRLConversionFps(event.target.value))}
-            disabled={isRunning || !isActive}
-            className="h-7 rounded-md border border-[#d9d2c5] bg-white px-2 text-[9px] text-[#4c473f] outline-none focus:border-[#879b89] disabled:bg-[#efebe3]"
-          />
-        </label>
-        <div className="flex flex-col gap-1 text-[9px] font-medium text-[#756e63]">
-          Output format
-          <div className="grid h-7 grid-cols-2 gap-1">
-            {[
-              ['v21', 'v2.1'],
-              ['v30', 'v3.0'],
-            ].map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={Boolean(formats[key])}
-                onClick={() => dispatch(setOfflineRLConversionFormats({
-                  [key]: !formats[key],
-                }))}
-                disabled={isRunning || !isActive}
-                className={clsx(
-                  'rounded-md border text-[9px] font-semibold transition-colors disabled:opacity-45',
-                  formats[key]
-                    ? 'border-[#7f9a84] bg-[#e3ece3] text-[#58705d]'
-                    : 'border-[#ddd6ca] bg-white text-[#938b7f]'
-                )}
-              >
-                {label}
-              </button>
-            ))}
+        {reservedEpoch?.output_root && (
+          <div
+            className="mt-1 truncate text-[9px] text-[#948c80]"
+            title={reservedEpoch.output_root}
+          >
+            {reservedEpoch.output_root}
           </div>
-        </div>
-      </div>
-
-      {!destinationValid && (
-        <div className="text-[8px] text-[#a06b61]">
-          Destination must be inside {LEROBOT_ROOT}
-        </div>
-      )}
-
-      {isRunning && (
-        <div>
-          <div className="mb-1 flex items-center justify-between text-[8px] text-[#857d71]">
-            <span className="truncate">{conversionStatus.stage || 'queued'}</span>
-            <span>{Math.round(progress)}%</span>
-          </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-[#e8e3da]">
-            <div
-              className="h-full rounded-full bg-[#72917a] transition-[width] duration-300"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        </div>
-      )}
-
-      <button
-        type="button"
-        onClick={handleConvert}
-        disabled={!canConvert}
-        className="mt-auto flex h-8 items-center justify-center gap-1 rounded-lg border border-[#66836c] bg-[#69866f] text-[9px] font-semibold text-white hover:bg-[#5e7b64] disabled:cursor-not-allowed disabled:border-[#d7d0c4] disabled:bg-[#e8e3da] disabled:text-[#9d9589]"
-      >
-        <MdPlayArrow size={13} />
-        {isRunning ? 'Converting…' : 'Convert Dataset'}
-      </button>
-
-      <div
-        className={clsx(
-          'min-h-[11px] truncate text-[8px]',
-          feedback.toLowerCase().includes('fail') || feedback.toLowerCase().includes('reject')
-            ? 'text-[#a06b61]'
-            : 'text-[#8c857a]'
         )}
-        title={feedback}
-      >
-        {feedback || 'Ready · source is removed only after verified conversion'}
       </div>
+
+      {(feedback || isRunning) && (
+        <div className="rounded-xl border border-[#e2dbcf] bg-[#f8f5ef] px-2.5 py-2">
+          <div className={clsx(
+            'flex items-center justify-between gap-3 text-[10px]',
+            isRunning && 'mb-1.5'
+          )}>
+            <span
+              className={clsx(
+                'min-w-0 truncate font-medium',
+                feedback.toLowerCase().includes('fail') || feedback.toLowerCase().includes('reject')
+                  ? 'text-[#a06b61]'
+                  : 'text-[#756e63]'
+              )}
+              title={feedback}
+            >
+              {feedback || 'Converting dataset…'}
+            </span>
+            {isRunning && (
+              <span className="shrink-0 font-semibold text-[#58705d]">
+                {Math.round(progress)}%
+              </span>
+            )}
+          </div>
+          {isRunning && (
+            <>
+              <div
+                className="h-1.5 overflow-hidden rounded-full bg-[#e8e3da]"
+                role="progressbar"
+                aria-label="Dataset conversion progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={progress}
+              >
+                <div
+                  className="h-full rounded-full bg-[#72917a] transition-[width] duration-300"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <div className="mt-1 truncate text-[9px] text-[#91897d]">
+                {conversionStatus.stage || 'queued'}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <FileBrowserModal
         isOpen={showBrowser}

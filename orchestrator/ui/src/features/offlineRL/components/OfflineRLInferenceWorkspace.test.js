@@ -84,13 +84,43 @@ jest.mock('../../../components/InferencePanel', () => function MockInferencePane
   );
 });
 
+jest.mock('./OfflineRLWorkspaceStatusModal', () => {
+  return function MockOfflineRLWorkspaceStatusModal({
+    isOpen,
+    onClose,
+    workspaceMode,
+    settingsContent,
+  }) {
+    if (!isOpen) return null;
+    return (
+      <div
+        role="dialog"
+        aria-label={workspaceMode === 'recording'
+          ? 'Recording Workspace Status'
+          : 'Inference Workspace Status'}
+        data-testid="mock-workspace-status-modal"
+        data-workspace-mode={workspaceMode}
+      >
+        <button type="button" onClick={onClose}>Back</button>
+        {settingsContent}
+      </div>
+    );
+  };
+});
+
 jest.mock('../../../components/FileBrowserModal', () => {
-  return function MockFileBrowserModal({ isOpen, onFileSelect, title }) {
+  return function MockFileBrowserModal({
+    isOpen,
+    onFileSelect,
+    title,
+    overlayZClass,
+  }) {
     if (!isOpen) return null;
     return (
       <button
         type="button"
         onClick={() => onFileSelect({ full_path: '/workspace/selected' })}
+        data-overlay-z-class={overlayZClass}
       >
         Choose {title}
       </button>
@@ -104,6 +134,8 @@ function renderWorkspace({
   isActive = true,
   workspaceMode = 'inference',
   policyEpoch = 0,
+  workspaceStatusOpen = true,
+  onCloseWorkspaceStatus = jest.fn(),
   robotType = 'ffw_sg2_rev1',
   sendRecordCommand = jest.fn().mockResolvedValue({ success: true }),
 } = {}) {
@@ -134,10 +166,17 @@ function renderWorkspace({
         isActive={isActive}
         workspaceMode={workspaceMode}
         policyEpoch={policyEpoch}
+        workspaceStatusOpen={workspaceStatusOpen}
+        onCloseWorkspaceStatus={onCloseWorkspaceStatus}
       />
     </Provider>
   );
-  return { ...view, store, sendRecordCommand };
+  return {
+    ...view,
+    store,
+    sendRecordCommand,
+    onCloseWorkspaceStatus,
+  };
 }
 
 describe('OfflineRLInferenceWorkspace', () => {
@@ -186,6 +225,9 @@ describe('OfflineRLInferenceWorkspace', () => {
     );
     expect(screen.getByTestId('offline-rl-camera-region')).not.toHaveClass('p-2');
     expect(screen.getByTestId('offline-rl-workspace-paths')).toBeInTheDocument();
+    expect(screen.queryByTestId('offline-rl-settings-slot')).not.toBeInTheDocument();
+    expect(screen.getByTestId('inference-settings').closest('[role="dialog"]'))
+      .toBe(screen.getByRole('dialog', { name: 'Inference Workspace Status' }));
     const content = container.textContent;
     expect(content.indexOf('Left wrist')).toBeLessThan(content.indexOf('Head'));
     expect(content.indexOf('Head')).toBeLessThan(content.indexOf('Right wrist'));
@@ -217,22 +259,8 @@ describe('OfflineRLInferenceWorkspace', () => {
     expect(screen.getByLabelText('Recording MCAP Dataset')).toHaveValue('');
     expect(screen.queryByTestId('inference-controls')).not.toBeInTheDocument();
     expect(screen.queryByTestId('inference-settings')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', {
-      name: 'Hide recording settings',
-    })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', {
-      name: 'Hide recording settings',
-    }));
-
-    expect(screen.getAllByText('Recording Settings').length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', {
-      name: 'Show recording settings',
-    })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', {
-      name: 'Show recording settings',
-    }));
+    expect(screen.getByTestId('mock-workspace-status-modal'))
+      .toHaveAttribute('data-workspace-mode', 'recording');
     fireEvent.click(screen.getByRole('button', { name: 'Start recording' }));
 
     await waitFor(() => {
@@ -401,7 +429,11 @@ describe('OfflineRLInferenceWorkspace', () => {
     expect(screen.queryByLabelText('Checkpoint')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Browse Model' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Choose Select inference model' }));
+    const modelBrowser = screen.getByRole('button', {
+      name: 'Choose Select inference model',
+    });
+    expect(modelBrowser).toHaveAttribute('data-overlay-z-class', 'z-[80]');
+    fireEvent.click(modelBrowser);
     expect(store.getState().tasks.inferenceTaskInfo.policyPath)
       .toBe('/workspace/selected');
 
@@ -431,98 +463,30 @@ describe('OfflineRLInferenceWorkspace', () => {
     expect(screen.queryByLabelText('Checkpoint')).not.toBeInTheDocument();
   });
 
-  test('collapses inference settings while preserving the expanded camera and centered recording dock', () => {
+  test('moves settings into Workspace Status while cameras fill the environment canvas', () => {
     renderWorkspace();
 
     const cameraRegion = screen.getByTestId('offline-rl-camera-region');
     const recordingDock = screen.getByTestId('offline-rl-recording-dock');
-    const settingsContent = screen.getByTestId(
-      'offline-rl-inference-settings-content'
-    );
 
     expect(screen.getByTestId('inference-settings')).toBeInTheDocument();
     expect(screen.getByTestId('offline-rl-workspace-paths')).toBeInTheDocument();
+    expect(screen.queryByTestId('offline-rl-settings-slot')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('offline-rl-inference-settings-panel'))
+      .not.toBeInTheDocument();
     expect(cameraRegion).toHaveClass('flex-1', 'min-h-[260px]');
     expect(recordingDock).toHaveClass('mx-auto', 'w-full');
     expect(recordingDock.className).toMatch(/(?:^|\s)max-w-/);
     expect(within(recordingDock).getByTestId('inference-controls'))
       .toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', {
-      name: 'Hide inference settings',
-    }));
-
-    expect(settingsContent).toHaveClass('hidden');
-    expect(settingsContent).toHaveAttribute('aria-hidden', 'true');
-    expect(screen.getByTestId('inference-settings')).toBeInTheDocument();
-    expect(screen.getByTestId('offline-rl-workspace-paths')).toBeInTheDocument();
-    expect(screen.getByRole('button', {
-      name: 'Show inference settings',
-    })).toBeInTheDocument();
-    expect(screen.getByTestId('offline-rl-camera-region'))
-      .toHaveClass('flex-1', 'min-h-[260px]');
-    expect(screen.getByTestId('offline-rl-recording-dock')).toBe(recordingDock);
-    expect(recordingDock).toHaveClass('mx-auto', 'w-full');
-    expect(recordingDock.className).toMatch(/(?:^|\s)max-w-/);
-
-    fireEvent.click(screen.getByRole('button', {
-      name: 'Show inference settings',
-    }));
-
-    expect(screen.getByRole('button', {
-      name: 'Hide inference settings',
-    })).toBeInTheDocument();
-    expect(settingsContent).toHaveClass('block');
-    expect(settingsContent).toHaveAttribute('aria-hidden', 'false');
-    expect(screen.getByTestId('inference-settings')).toBeInTheDocument();
-    expect(screen.getByTestId('offline-rl-workspace-paths')).toBeInTheDocument();
-    expect(screen.getByTestId('offline-rl-recording-dock')).toBe(recordingDock);
   });
 
-  test('reserves the expanded inference settings height when switching to recording', async () => {
-    const bounds = jest.spyOn(
-      HTMLElement.prototype,
-      'getBoundingClientRect'
-    ).mockReturnValue({
-      bottom: 412,
-      height: 412,
-      left: 0,
-      right: 0,
-      top: 0,
-      width: 0,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
-    const { rerender, store } = renderWorkspace();
+  test('closes Workspace Status through the workspace-owned modal', () => {
+    const onCloseWorkspaceStatus = jest.fn();
+    renderWorkspace({ onCloseWorkspaceStatus });
 
-    await waitFor(() => {
-      expect(bounds).toHaveBeenCalled();
-    });
-    expect(screen.getByTestId('offline-rl-settings-slot').style.minHeight)
-      .toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
 
-    rerender(
-      <Provider store={store}>
-        <OfflineRLInferenceWorkspace
-          isActive
-          workspaceMode="recording"
-        />
-      </Provider>
-    );
-
-    const settingsSlot = screen.getByTestId('offline-rl-settings-slot');
-    expect(settingsSlot).toHaveStyle({ minHeight: '412px' });
-    expect(screen.getByTestId('offline-rl-camera-region')).toHaveClass(
-      'flex-1',
-      'min-h-[260px]'
-    );
-
-    fireEvent.click(screen.getByRole('button', {
-      name: 'Hide recording settings',
-    }));
-
-    expect(settingsSlot.style.minHeight).toBe('');
-    bounds.mockRestore();
+    expect(onCloseWorkspaceStatus).toHaveBeenCalledTimes(1);
   });
 });

@@ -20,6 +20,7 @@ from cyclo_brain.algorithm.rl.act_td3 import (
     ACTTD3Learner,
     ACTTD3LeRobotCollator,
     FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 from cyclo_brain.algorithm.rl.tests.test_act_td3_lerobot_offline import (
     _FakeLeRobotDataset,
@@ -160,6 +161,18 @@ class ACTTD3CriticWarmupRunnerTest(unittest.TestCase):
             self.assertEqual(progress[0].percentage, 0.0)
             self.assertEqual(progress[-1], result)
             self.assertEqual(runner.learner.completed_actor_updates, 0)
+            self.assertFalse(
+                any(
+                    parameter.requires_grad
+                    for parameter in runner.learner.actor.parameters()
+                )
+            )
+            self.assertFalse(
+                any(
+                    parameter.requires_grad
+                    for parameter in runner.learner.actor_target.parameters()
+                )
+            )
             self.assertEqual(len(set(runner.last_sampled_indices)), 2)
             state = torch.load(checkpoint, map_location="cpu", weights_only=True)
             learner_contract = state["contract"]["learner"]
@@ -176,6 +189,63 @@ class ACTTD3CriticWarmupRunnerTest(unittest.TestCase):
                     rtol=0.0,
                     atol=0.0,
                 )
+
+            artifact = runner.critic_artifact_state()
+            self.assertEqual(
+                artifact["format"],
+                "cyclo_brain.act_td3_critic/v1",
+            )
+            self.assertEqual(artifact["status"], "complete")
+            self.assertEqual(artifact["completed_critic_updates"], 4)
+            self.assertEqual(artifact["completed_actor_updates"], 0)
+            self.assertNotIn("actor", artifact)
+            self.assertNotIn("actor_target", artifact)
+            self.assertNotIn("actor_optimizer", artifact)
+            self.assertEqual(
+                set(artifact),
+                {
+                    "format",
+                    "status",
+                    "contract",
+                    "actor_sha256",
+                    "actor_target_sha256",
+                    "critic",
+                    "critic_target",
+                    "critic_optimizer",
+                    "completed_critic_updates",
+                    "completed_actor_updates",
+                },
+            )
+
+    def test_virtual_cumulative_replay_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            replay = VirtualCumulativeLeRobotACTTD3Dataset(
+                (_dataset(), _dataset())
+            )
+            runner = ACTTD3CriticWarmupRunner(
+                _learner(),
+                replay,
+                ACTTD3LeRobotCollator(_OffsetPreprocessor()),
+                batch_size=2,
+                sampling_seed=19,
+                training_data_identity="multi-root-data-sha256",
+                checkpoint_path=Path(directory) / "multi.pt",
+                checkpoint_interval=2,
+            )
+
+            result = runner.run(max_critic_updates=1)
+
+            self.assertEqual(result.completed_critic_updates, 1)
+            self.assertEqual(runner.dataset.num_episodes, 4)
+            self.assertEqual(len(set(runner.last_sampled_indices)), 2)
+
+    def test_critic_artifact_requires_complete_durable_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = _runner(Path(directory) / "partial.pt")
+            runner.run(max_critic_updates=1)
+
+            with self.assertRaisesRegex(RuntimeError, "completed warm-up"):
+                runner.critic_artifact_state()
 
     def test_split_resume_matches_continuous_updates_and_rng(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

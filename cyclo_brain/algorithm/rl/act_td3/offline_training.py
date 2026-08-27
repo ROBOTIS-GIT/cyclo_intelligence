@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
+import stat
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
@@ -20,12 +24,22 @@ from .lerobot_offline import (
     FixedHorizonLeRobotACTTD3Dataset,
     VirtualCumulativeLeRobotACTTD3Dataset,
 )
-from .offline_warmup import _atomic_torch_save, _positive_integer
+from .offline_warmup import _atomic_torch_save, _module_sha256, _positive_integer
 from .training_identity import ACTTD3TrainingDataIdentity
 
 
 ProgressCallback = Callable[["ACTTD3OfflineTrainingProgress"], None]
 StopPredicate = Callable[[], bool]
+
+
+@dataclass(frozen=True)
+class RLMetricHistoryPoint:
+    """One replay-round metric point keyed by the public RL epoch."""
+
+    rl_epoch: int
+    actor_loss_mean: float | None
+    critic_loss_mean: float | None
+    replay_average_reward: float | None
 
 
 @dataclass(frozen=True)
@@ -48,6 +62,7 @@ class ACTTD3OfflineTrainingProgress:
     eta_seconds: float | None
     durable_critic_updates: int
     checkpoint_path: str
+    rl_metric_history: tuple[RLMetricHistoryPoint, ...] = ()
 
 
 def _checked_episode_indices(identity: ACTTD3TrainingDataIdentity) -> tuple[int, ...]:
@@ -174,6 +189,547 @@ def _training_identity_same_or_single_root_upgrade(
     )
 
 
+_CRITIC_ARTIFACT_FORMAT = "cyclo_brain.act_td3_critic/v1"
+_CRITIC_MANIFEST_FORMAT = "cyclo_brain.act_td3_critic_manifest/v1"
+
+
+def _path_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _lstat_if_missing(path: Path, *, label: str) -> os.stat_result | None:
+    """Return None only for genuine absence; permission/I/O failures are fatal."""
+
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError(f"{label} cannot be inspected safely: {path}") from error
+
+
+def _open_regular_nofollow(path: Path, *, label: str):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"{label} cannot be opened safely: {path}") from error
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        os.close(descriptor)
+        raise ValueError(f"{label} must be a regular file: {path}")
+    return descriptor, before
+
+
+def _assert_unchanged_open_file(
+    path: Path,
+    *,
+    label: str,
+    before: os.stat_result,
+    after: os.stat_result,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError as error:
+        raise ValueError(f"{label} disappeared while it was read: {path}") from error
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _path_snapshot(before) != _path_snapshot(after)
+        or _path_snapshot(before) != _path_snapshot(current)
+    ):
+        raise ValueError(f"{label} changed while it was read: {path}")
+
+
+def _read_critic_manifest(path: Path) -> Mapping[str, Any]:
+    descriptor, before = _open_regular_nofollow(
+        path,
+        label="ACT-TD3 critic manifest",
+    )
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        payload = stream.read()
+        after = os.fstat(stream.fileno())
+    _assert_unchanged_open_file(
+        path,
+        label="ACT-TD3 critic manifest",
+        before=before,
+        after=after,
+    )
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"ACT-TD3 critic manifest contains {value}")
+
+    try:
+        manifest = json.loads(payload, parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("ACT-TD3 critic manifest is not valid JSON") from error
+    if not isinstance(manifest, Mapping):
+        raise ValueError("ACT-TD3 critic manifest root must be an object")
+    return manifest
+
+
+def _load_verified_critic_artifact(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_bytes: int,
+) -> Mapping[str, Any]:
+    descriptor, before = _open_regular_nofollow(
+        path,
+        label="ACT-TD3 critic artifact",
+    )
+    if before.st_size != expected_bytes:
+        os.close(descriptor)
+        raise ValueError("ACT-TD3 critic artifact byte count disagrees")
+    digest = hashlib.sha256()
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("ACT-TD3 critic artifact SHA-256 disagrees")
+        stream.seek(0)
+        try:
+            artifact = torch.load(stream, map_location="cpu", weights_only=True)
+        except Exception as error:
+            raise ValueError("ACT-TD3 critic artifact cannot be read") from error
+        after = os.fstat(stream.fileno())
+    _assert_unchanged_open_file(
+        path,
+        label="ACT-TD3 critic artifact",
+        before=before,
+        after=after,
+    )
+    if not isinstance(artifact, Mapping):
+        raise ValueError("ACT-TD3 critic artifact root must be a mapping")
+    return artifact
+
+
+def _json_canonical(value: Any) -> Any:
+    try:
+        return json.loads(
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("ACT-TD3 critic contract is not JSON-compatible") from error
+
+
+def _validate_critic_optimizer_contract(
+    stored: Any,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    """Reject an optimizer state that could remap critic parameters silently."""
+
+    current = optimizer.state_dict()
+    if (
+        not isinstance(stored, Mapping)
+        or set(stored) != {"state", "param_groups"}
+        or not isinstance(stored.get("state"), Mapping)
+        or not isinstance(stored.get("param_groups"), list)
+        or not isinstance(current.get("state"), Mapping)
+        or not isinstance(current.get("param_groups"), list)
+        or len(stored["param_groups"]) != len(current["param_groups"])
+    ):
+        raise ValueError("ACT-TD3 critic optimizer contract is invalid")
+
+    stored_parameter_ids: list[int] = []
+    current_parameter_ids: list[int] = []
+    for stored_group, current_group in zip(
+        stored["param_groups"],
+        current["param_groups"],
+        strict=True,
+    ):
+        if not isinstance(stored_group, Mapping) or not isinstance(
+            current_group, Mapping
+        ):
+            raise ValueError("ACT-TD3 critic optimizer parameter group is invalid")
+        stored_parameters = stored_group.get("params")
+        current_parameters = current_group.get("params")
+        if (
+            set(stored_group) != set(current_group)
+            or not isinstance(stored_parameters, list)
+            or not isinstance(current_parameters, list)
+            or len(stored_parameters) != len(current_parameters)
+            or stored_parameters != current_parameters
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (*stored_parameters, *current_parameters)
+            )
+            or _json_canonical(
+                {key: value for key, value in stored_group.items() if key != "params"}
+            )
+            != _json_canonical(
+                {key: value for key, value in current_group.items() if key != "params"}
+            )
+        ):
+            raise ValueError("ACT-TD3 critic optimizer parameter groups disagree")
+        stored_parameter_ids.extend(stored_parameters)
+        current_parameter_ids.extend(current_parameters)
+
+    if (
+        len(stored_parameter_ids) != len(set(stored_parameter_ids))
+        or len(current_parameter_ids) != len(set(current_parameter_ids))
+        or len(stored_parameter_ids)
+        != sum(len(group["params"]) for group in optimizer.param_groups)
+        or set(stored["state"]) != set(stored_parameter_ids)
+    ):
+        raise ValueError("ACT-TD3 critic optimizer parameter cardinality disagrees")
+
+
+def _validate_warmup_replay_prefix(
+    training_data: Mapping[str, Any],
+    current: ACTTD3TrainingDataIdentity,
+) -> tuple[Mapping[str, Any], ...]:
+    warm_virtual = training_data.get("virtual_contract")
+    if not isinstance(warm_virtual, Mapping):
+        raise ValueError("ACT-TD3 critic training-data contract is invalid")
+    current_virtual = current.virtual_contract
+    warm_roots = warm_virtual.get("data_roots")
+    current_roots = current_virtual.get("data_roots")
+    if (
+        not isinstance(warm_roots, list)
+        or not warm_roots
+        or not isinstance(current_roots, list)
+        or len(warm_roots) > len(current_roots)
+        or _json_canonical(warm_roots) != _json_canonical(current_roots[: len(warm_roots)])
+    ):
+        raise ValueError(
+            "ACT-TD3 critic replay is not an immutable prefix of current replay"
+        )
+    if {
+        key: value
+        for key, value in warm_virtual.items()
+        if key not in {"episode_indices", "data_roots"}
+    } != {
+        key: value
+        for key, value in current_virtual.items()
+        if key not in {"episode_indices", "data_roots"}
+    }:
+        raise ValueError("ACT-TD3 critic replay action/data contract disagrees")
+    component_sha256 = training_data.get("component_sha256")
+    if not isinstance(component_sha256, Mapping):
+        raise ValueError("ACT-TD3 critic component identity is invalid")
+    for component in ("act_checkpoint", "robot"):
+        if component_sha256.get(component) != current.component_sha256.get(component):
+            raise ValueError(
+                f"ACT-TD3 critic {component} identity disagrees with current training"
+            )
+    return tuple(warm_roots)
+
+
+def load_policy_local_warmup_critic(
+    learner: ACTTD3Learner,
+    dataset: FixedHorizonLeRobotACTTD3Dataset | VirtualCumulativeLeRobotACTTD3Dataset,
+    training_data_identity: ACTTD3TrainingDataIdentity,
+    *,
+    act_checkpoint: str | Path,
+) -> Path | None:
+    """Load a committed policy-local warm critic without touching either actor.
+
+    No committed pair means random critic initialization. If either committed
+    filename exists, both files and every identity/contract check are required.
+    """
+
+    if learner.completed_critic_updates != 0 or learner.completed_actor_updates != 0:
+        raise ValueError("ACT-TD3 policy warm critic requires a fresh learner")
+    actor_root = Path(act_checkpoint).expanduser().resolve(strict=True)
+    critic_dir = actor_root / "critic"
+    directory_stat = _lstat_if_missing(
+        critic_dir,
+        label="ACT-TD3 critic directory",
+    )
+    if directory_stat is not None:
+        if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode):
+            raise ValueError("ACT-TD3 critic directory must be a real directory")
+    latest = critic_dir / "latest.pt"
+    manifest_path = critic_dir / "manifest.json"
+    latest_exists = _lstat_if_missing(
+        latest,
+        label="ACT-TD3 critic artifact",
+    ) is not None
+    manifest_exists = _lstat_if_missing(
+        manifest_path,
+        label="ACT-TD3 critic manifest",
+    ) is not None
+    if not latest_exists and not manifest_exists:
+        return None
+    if latest_exists != manifest_exists:
+        raise ValueError("ACT-TD3 critic committed artifact pair is incomplete")
+
+    manifest = _read_critic_manifest(manifest_path)
+    expected_manifest_fields = {
+        "format",
+        "status",
+        "created_at",
+        "base_policy",
+        "artifact",
+        "training_data",
+        "dataset",
+        "learner",
+        "completed_critic_updates",
+        "completed_actor_updates",
+        "actor_exactly_unchanged",
+    }
+    if set(manifest) != expected_manifest_fields:
+        raise ValueError("ACT-TD3 critic manifest fields disagree")
+    artifact_ref = manifest.get("artifact")
+    base_policy = manifest.get("base_policy")
+    training_data = manifest.get("training_data")
+    if (
+        manifest.get("format") != _CRITIC_MANIFEST_FORMAT
+        or manifest.get("status") != "complete"
+        or manifest.get("actor_exactly_unchanged") is not True
+        or manifest.get("completed_actor_updates") != 0
+        or not isinstance(artifact_ref, Mapping)
+        or set(artifact_ref) != {"format", "checkpoint_path", "sha256", "byte_count"}
+        or artifact_ref.get("format") != _CRITIC_ARTIFACT_FORMAT
+        or artifact_ref.get("checkpoint_path") != "latest.pt"
+        or not isinstance(base_policy, Mapping)
+        or set(base_policy) != {"path", "actor_sha256"}
+        or not isinstance(base_policy.get("path"), str)
+        or not base_policy["path"]
+        or not Path(base_policy["path"]).is_absolute()
+        or not isinstance(training_data, Mapping)
+    ):
+        raise ValueError("ACT-TD3 critic manifest contract disagrees")
+    expected_sha256 = artifact_ref.get("sha256")
+    expected_bytes = artifact_ref.get("byte_count")
+    completed_updates = manifest.get("completed_critic_updates")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+        or isinstance(expected_bytes, bool)
+        or not isinstance(expected_bytes, int)
+        or expected_bytes < 1
+        or isinstance(completed_updates, bool)
+        or not isinstance(completed_updates, int)
+        or completed_updates < 1
+    ):
+        raise ValueError("ACT-TD3 critic manifest artifact metadata is invalid")
+
+    warm_roots = _validate_warmup_replay_prefix(training_data, training_data_identity)
+    if training_data.get("dataset_roots") != [root.get("root") for root in warm_roots]:
+        raise ValueError("ACT-TD3 critic dataset-root provenance disagrees")
+    if (
+        not isinstance(training_data.get("identity"), str)
+        or not training_data["identity"].startswith("sha256:")
+        or isinstance(training_data.get("file_count"), bool)
+        or not isinstance(training_data.get("file_count"), int)
+        or training_data["file_count"] < 1
+        or isinstance(training_data.get("byte_count"), bool)
+        or not isinstance(training_data.get("byte_count"), int)
+        or training_data["byte_count"] < 0
+    ):
+        raise ValueError("ACT-TD3 critic training-data provenance is invalid")
+
+    actor_sha256 = _module_sha256(learner.actor)
+    actor_target_sha256 = _module_sha256(learner.actor_target)
+    if actor_sha256 != actor_target_sha256 or base_policy.get("actor_sha256") != actor_sha256:
+        raise ValueError("ACT-TD3 critic base actor identity disagrees")
+
+    artifact = _load_verified_critic_artifact(
+        latest,
+        expected_sha256=expected_sha256,
+        expected_bytes=expected_bytes,
+    )
+    expected_artifact_fields = {
+        "format",
+        "status",
+        "contract",
+        "actor_sha256",
+        "actor_target_sha256",
+        "critic",
+        "critic_target",
+        "critic_optimizer",
+        "completed_critic_updates",
+        "completed_actor_updates",
+    }
+    contract = artifact.get("contract")
+    if (
+        set(artifact) != expected_artifact_fields
+        or artifact.get("format") != _CRITIC_ARTIFACT_FORMAT
+        or artifact.get("status") != "complete"
+        or artifact.get("actor_sha256") != actor_sha256
+        or artifact.get("actor_target_sha256") != actor_target_sha256
+        or artifact.get("completed_critic_updates") != completed_updates
+        or artifact.get("completed_actor_updates") != 0
+        or not isinstance(contract, Mapping)
+        or set(contract)
+        != {"training_data_identity", "sampling", "sampling_seed", "batch_size", "dataset", "learner"}
+        or contract.get("training_data_identity") != training_data.get("identity")
+    ):
+        raise ValueError("ACT-TD3 critic artifact contract disagrees")
+    warm_dataset = contract.get("dataset")
+    warm_learner = contract.get("learner")
+    if (
+        not isinstance(warm_dataset, Mapping)
+        or _json_canonical(warm_dataset) != manifest.get("dataset")
+        or not isinstance(warm_learner, Mapping)
+        or _json_canonical(warm_learner) != manifest.get("learner")
+    ):
+        raise ValueError("ACT-TD3 critic manifest and artifact disagree")
+    expected_dataset_fields = {
+        "transition_count",
+        "episode_count",
+        "success_count",
+        "failure_count",
+        "fps",
+        "execution_horizon",
+        "action_dim",
+    }
+    warm_episode_count = warm_dataset.get("episode_count")
+    warm_successes = warm_dataset.get("success_count")
+    warm_failures = warm_dataset.get("failure_count")
+    warm_transitions = warm_dataset.get("transition_count")
+    warm_fps = warm_dataset.get("fps")
+    root_episode_count = sum(len(root.get("episode_indices", ())) for root in warm_roots)
+    if isinstance(dataset, VirtualCumulativeLeRobotACTTD3Dataset):
+        warm_root_count = len(warm_roots)
+        if warm_root_count > dataset.num_roots:
+            raise ValueError("ACT-TD3 critic replay root count disagrees")
+        expected_transition_count = sum(
+            dataset.root_transition_counts[:warm_root_count]
+        )
+        expected_episode_count = dataset.root_episode_ranges[warm_root_count - 1][1]
+        expected_episode_records = dataset.episode_records[:expected_episode_count]
+        expected_success_count = sum(record[2] for record in expected_episode_records)
+    else:
+        if len(warm_roots) != 1:
+            raise ValueError("ACT-TD3 critic replay root count disagrees")
+        expected_transition_count = len(dataset)
+        expected_episode_count = dataset.num_episodes
+        expected_success_count = dataset.num_successes
+    expected_failure_count = expected_episode_count - expected_success_count
+    if (
+        set(warm_dataset) != expected_dataset_fields
+        or isinstance(warm_episode_count, bool)
+        or not isinstance(warm_episode_count, int)
+        or warm_episode_count != root_episode_count
+        or warm_episode_count != expected_episode_count
+        or isinstance(warm_successes, bool)
+        or not isinstance(warm_successes, int)
+        or isinstance(warm_failures, bool)
+        or not isinstance(warm_failures, int)
+        or warm_successes < 1
+        or warm_failures < 1
+        or warm_successes + warm_failures != warm_episode_count
+        or warm_successes != expected_success_count
+        or warm_failures != expected_failure_count
+        or isinstance(warm_transitions, bool)
+        or not isinstance(warm_transitions, int)
+        or warm_transitions != expected_transition_count
+        or isinstance(warm_fps, bool)
+        or not isinstance(warm_fps, (int, float))
+        or not math.isfinite(float(warm_fps))
+        or float(warm_fps) != float(dataset.fps)
+        or warm_dataset.get("execution_horizon") != dataset.execution_horizon
+        or warm_dataset.get("action_dim") != dataset.action_dim
+    ):
+        raise ValueError("ACT-TD3 critic replay tensor contract disagrees")
+
+    expected_learner_fields = {
+        "config",
+        "prediction_horizon",
+        "execution_horizon",
+        "action_dim",
+        "observation_keys",
+        "action_domain",
+        "target_policy_smoothing",
+        "actor_q_gradient",
+        "action_clamp",
+        "device",
+        "dtype",
+    }
+    stored_config = warm_learner.get("config")
+    current_config = asdict(learner.config)
+    if not isinstance(stored_config, Mapping):
+        raise ValueError("ACT-TD3 critic learner config is invalid")
+    stored_config = dict(stored_config)
+    # Critic artifacts created before actor-objective selection remain valid:
+    # warm-up never updates or evaluates the actor objective.
+    stored_config.setdefault("actor_objective", current_config["actor_objective"])
+    # A policy-local critic is independent of the actor loss used after
+    # warm-up. Reuse it for either pure TD3 or TD3+BC while keeping full-round
+    # resume checkpoints objective-exact.
+    ignored_config = {
+        "critic_warmup_updates",
+        "actor_trainable_groups",
+        "actor_objective",
+    }
+    if (
+        set(warm_learner) != expected_learner_fields
+        or stored_config.get("critic_warmup_updates") != completed_updates
+        or {
+            key: value for key, value in stored_config.items() if key not in ignored_config
+        }
+        != {
+            key: value for key, value in current_config.items() if key not in ignored_config
+        }
+        or warm_learner.get("prediction_horizon") != learner.prediction_horizon
+        or warm_learner.get("execution_horizon") != learner.execution_horizon
+        or warm_learner.get("action_dim") != learner.action_dim
+        or tuple(warm_learner.get("observation_keys", ()))
+        != tuple(learner.critic.observation_keys)
+        or warm_learner.get("action_domain") != learner.ACTION_DOMAIN
+        or warm_learner.get("target_policy_smoothing") != learner.TARGET_POLICY_SMOOTHING
+        or warm_learner.get("actor_q_gradient") != learner.ACTOR_Q_GRADIENT
+        or warm_learner.get("action_clamp") is not False
+        or not isinstance(warm_learner.get("device"), str)
+        or not warm_learner["device"]
+        or warm_learner.get("dtype") != str(learner.dtype)
+    ):
+        raise ValueError("ACT-TD3 critic learner tensor contract disagrees")
+
+    _validate_critic_optimizer_contract(
+        artifact["critic_optimizer"],
+        learner.critic_optimizer,
+    )
+    learner.critic.load_state_dict(artifact["critic"], strict=True)
+    learner.critic_target.load_state_dict(artifact["critic_target"], strict=True)
+    learner.critic_optimizer.load_state_dict(artifact["critic_optimizer"])
+    _validate_critic_optimizer_contract(
+        learner.critic_optimizer.state_dict(),
+        learner.critic_optimizer,
+    )
+    learner.critic_optimizer.zero_grad(set_to_none=True)
+    learner.critic.train().requires_grad_(True)
+    learner.critic_target.eval().requires_grad_(False)
+    if (
+        learner.completed_critic_updates != 0
+        or learner.completed_actor_updates != 0
+        or _module_sha256(learner.actor) != actor_sha256
+        or _module_sha256(learner.actor_target) != actor_target_sha256
+    ):
+        raise RuntimeError("ACT-TD3 critic-only restore changed actor or round counters")
+    return latest
+
+
 class ACTTD3OfflineTrainingRunner:
     """Train one versioned round over the entire current cumulative replay.
 
@@ -197,6 +753,7 @@ class ACTTD3OfflineTrainingRunner:
     ACTOR_EQUIVALENT_EPOCHS = 5
     MAX_EPISODES = 200
     ROUND_EPISODES = 50
+    RL_METRIC_HISTORY_POINTS = 200
 
     def __init__(
         self,
@@ -340,6 +897,11 @@ class ACTTD3OfflineTrainingRunner:
         self._last_update: ACTTD3UpdateResult | None = None
         self._last_sampled_indices: tuple[int, ...] = ()
         self._durable_critic_updates = 0
+        self._critic_loss_sum = 0.0
+        self._critic_loss_count = 0
+        self._actor_loss_sum = 0.0
+        self._actor_loss_count = 0
+        self._round_telemetry_available = True
 
         if self.resume_from is not None:
             self._load_checkpoint()
@@ -412,7 +974,7 @@ class ACTTD3OfflineTrainingRunner:
         return self.learner.completed_actor_updates - self._round_start_actor_updates
 
     def _current_round_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "round_index": self._round_index,
             "new_episode_count": self._new_episode_count,
             "schedule": self._schedule_contract(),
@@ -420,6 +982,116 @@ class ACTTD3OfflineTrainingRunner:
             "completed_critic_updates": self._completed_critic_updates(),
             "completed_actor_updates": self._completed_actor_updates(),
         }
+        if self._round_telemetry_available:
+            summary["telemetry"] = {
+                "critic_loss_sum": self._critic_loss_sum,
+                "critic_loss_count": self._critic_loss_count,
+                "actor_loss_sum": self._actor_loss_sum,
+                "actor_loss_count": self._actor_loss_count,
+            }
+        return summary
+
+    @staticmethod
+    def _validated_round_telemetry(
+        round_summary: Mapping[str, Any],
+        *,
+        completed_critic_updates: int,
+        completed_actor_updates: int,
+    ) -> tuple[float, int, float, int] | None:
+        """Return exact running sums, or ``None`` for a legacy round."""
+
+        raw = round_summary.get("telemetry")
+        if raw is None:
+            return None
+        expected = {
+            "critic_loss_sum",
+            "critic_loss_count",
+            "actor_loss_sum",
+            "actor_loss_count",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise ValueError("ACT-TD3 checkpoint round telemetry is invalid")
+        critic_sum = raw["critic_loss_sum"]
+        critic_count = raw["critic_loss_count"]
+        actor_sum = raw["actor_loss_sum"]
+        actor_count = raw["actor_loss_count"]
+        if (
+            isinstance(critic_sum, bool)
+            or not isinstance(critic_sum, (int, float))
+            or not math.isfinite(float(critic_sum))
+            or isinstance(actor_sum, bool)
+            or not isinstance(actor_sum, (int, float))
+            or not math.isfinite(float(actor_sum))
+            or isinstance(critic_count, bool)
+            or not isinstance(critic_count, int)
+            or critic_count != completed_critic_updates
+            or isinstance(actor_count, bool)
+            or not isinstance(actor_count, int)
+            or actor_count != completed_actor_updates
+            or (critic_count == 0 and float(critic_sum) != 0.0)
+            or (actor_count == 0 and float(actor_sum) != 0.0)
+        ):
+            raise ValueError("ACT-TD3 checkpoint round telemetry disagrees")
+        return float(critic_sum), critic_count, float(actor_sum), actor_count
+
+    @classmethod
+    def _metric_point_from_round(
+        cls,
+        round_summary: Mapping[str, Any],
+    ) -> RLMetricHistoryPoint | None:
+        round_index = round_summary.get("round_index")
+        critic_updates = round_summary.get("completed_critic_updates")
+        actor_updates = round_summary.get("completed_actor_updates")
+        if (
+            isinstance(round_index, bool)
+            or not isinstance(round_index, int)
+            or round_index < 1
+            or isinstance(critic_updates, bool)
+            or not isinstance(critic_updates, int)
+            or critic_updates < 0
+            or isinstance(actor_updates, bool)
+            or not isinstance(actor_updates, int)
+            or actor_updates < 0
+        ):
+            raise ValueError("ACT-TD3 checkpoint metric round is invalid")
+        telemetry = cls._validated_round_telemetry(
+            round_summary,
+            completed_critic_updates=critic_updates,
+            completed_actor_updates=actor_updates,
+        )
+        if telemetry is None:
+            return None
+        critic_sum, critic_count, actor_sum, actor_count = telemetry
+        dataset = round_summary.get("dataset")
+        if not isinstance(dataset, Mapping):
+            raise ValueError("ACT-TD3 checkpoint metric dataset is invalid")
+        episodes = dataset.get("episode_count")
+        successes = dataset.get("success_count")
+        if (
+            isinstance(episodes, bool)
+            or not isinstance(episodes, int)
+            or episodes < 1
+            or isinstance(successes, bool)
+            or not isinstance(successes, int)
+            or not 0 <= successes <= episodes
+        ):
+            raise ValueError("ACT-TD3 checkpoint replay reward is invalid")
+        return RLMetricHistoryPoint(
+            rl_epoch=round_index,
+            actor_loss_mean=(actor_sum / actor_count if actor_count else None),
+            critic_loss_mean=(critic_sum / critic_count if critic_count else None),
+            replay_average_reward=float(successes) / float(episodes),
+        )
+
+    def _rl_metric_history(self) -> tuple[RLMetricHistoryPoint, ...]:
+        points: list[RLMetricHistoryPoint] = []
+        for round_summary in (*self._history, self._current_round_summary()):
+            point = self._metric_point_from_round(round_summary)
+            if point is not None:
+                if points and point.rl_epoch <= points[-1].rl_epoch:
+                    raise RuntimeError("ACT-TD3 RL metric history is not ordered")
+                points.append(point)
+        return tuple(points[-self.RL_METRIC_HISTORY_POINTS :])
 
     def _checkpoint_state(self, elapsed_seconds: float) -> dict[str, Any]:
         return {
@@ -705,6 +1377,13 @@ class ACTTD3OfflineTrainingRunner:
             != previous_actor_completed
         ):
             raise ValueError("ACT-TD3 checkpoint round counters disagree")
+        loaded_telemetry = self._validated_round_telemetry(
+            previous_round,
+            completed_critic_updates=previous_completed,
+            completed_actor_updates=previous_actor_completed,
+        )
+        for historical_round in history:
+            self._metric_point_from_round(historical_round)
         if previous_completed == 0:
             if raw_update is not None or raw_indices:
                 raise ValueError("ACT-TD3 empty round has update metadata")
@@ -785,6 +1464,22 @@ class ACTTD3OfflineTrainingRunner:
             self._new_episode_count = recorded_previous_delta
             self._round_start_critic_updates = round_start_critic
             self._round_start_actor_updates = round_start_actor
+            if loaded_telemetry is None:
+                # A legacy partial round has no exact prior loss sums. Keep it
+                # loadable, but do not fabricate an incomplete RL-epoch point.
+                self._round_telemetry_available = previous_completed == 0
+                self._critic_loss_sum = 0.0
+                self._critic_loss_count = 0
+                self._actor_loss_sum = 0.0
+                self._actor_loss_count = 0
+            else:
+                (
+                    self._critic_loss_sum,
+                    self._critic_loss_count,
+                    self._actor_loss_sum,
+                    self._actor_loss_count,
+                ) = loaded_telemetry
+                self._round_telemetry_available = True
             self._last_sampled_indices = raw_indices
             self._validate_restored_progress(state)
             self._durable_critic_updates = self._completed_critic_updates()
@@ -881,6 +1576,11 @@ class ACTTD3OfflineTrainingRunner:
         self._last_update = None
         self._last_sampled_indices = ()
         self._durable_critic_updates = 0
+        self._critic_loss_sum = 0.0
+        self._critic_loss_count = 0
+        self._actor_loss_sum = 0.0
+        self._actor_loss_count = 0
+        self._round_telemetry_available = True
 
     def _next_batch(self):
         if self._permutation.numel() == 0:
@@ -929,6 +1629,7 @@ class ACTTD3OfflineTrainingRunner:
             eta_seconds=float(eta) if eta is not None else None,
             durable_critic_updates=self._durable_critic_updates,
             checkpoint_path=str(self.checkpoint_path),
+            rl_metric_history=self._rl_metric_history(),
         )
 
     def run(
@@ -978,6 +1679,26 @@ class ACTTD3OfflineTrainingRunner:
                 self.learner.completed_actor_updates - before_actor
             ) != int(expected_actor):
                 raise RuntimeError("ACT-TD3 learner violated the delayed actor schedule")
+            critic_loss = float(update.critic_loss)
+            if not math.isfinite(critic_loss):
+                raise RuntimeError("ACT-TD3 learner returned a non-finite critic loss")
+            if update.actor_updated:
+                if update.actor_loss is None or not math.isfinite(
+                    float(update.actor_loss)
+                ):
+                    raise RuntimeError(
+                        "ACT-TD3 learner returned an invalid delayed actor loss"
+                    )
+            elif update.actor_loss is not None:
+                raise RuntimeError(
+                    "ACT-TD3 learner returned actor loss without an actor update"
+                )
+            if self._round_telemetry_available:
+                self._critic_loss_sum += critic_loss
+                self._critic_loss_count += 1
+                if update.actor_updated:
+                    self._actor_loss_sum += float(update.actor_loss)
+                    self._actor_loss_count += 1
             self._last_update = update
             step = self._completed_critic_updates()
             checkpoint_due = step % self.checkpoint_interval == 0
@@ -1008,4 +1729,9 @@ class ACTTD3OfflineTrainingRunner:
         return result
 
 
-__all__ = ["ACTTD3OfflineTrainingProgress", "ACTTD3OfflineTrainingRunner"]
+__all__ = [
+    "ACTTD3OfflineTrainingProgress",
+    "ACTTD3OfflineTrainingRunner",
+    "RLMetricHistoryPoint",
+    "load_policy_local_warmup_critic",
+]

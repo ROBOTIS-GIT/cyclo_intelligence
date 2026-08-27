@@ -15,7 +15,13 @@ jest.mock('react-hot-toast', () => ({
 }));
 
 jest.mock('../features/offlineRL/components/OfflineRLInferenceWorkspace', () => {
-  return function MockOfflineRLInferenceWorkspace({ isActive, workspaceMode, policyEpoch }) {
+  return function MockOfflineRLInferenceWorkspace({
+    isActive,
+    workspaceMode,
+    policyEpoch,
+    workspaceStatusOpen,
+    onCloseWorkspaceStatus,
+  }) {
     return (
       <div
         data-testid="offline-rl-workspace"
@@ -26,27 +32,44 @@ jest.mock('../features/offlineRL/components/OfflineRLInferenceWorkspace', () => 
         <span>Left wrist</span>
         <span>Head</span>
         <span>Right wrist</span>
-        <span>Inference Settings</span>
+        {workspaceStatusOpen && (
+          <div role="dialog" aria-label="Inference Workspace Status">
+            <button type="button" onClick={onCloseWorkspaceStatus}>Back</button>
+            <span>Inference Settings</span>
+          </div>
+        )}
       </div>
     );
   };
 });
 
 jest.mock('../features/offlineRL/components/OfflineRLReplayBuffer', () => {
-  return function MockOfflineRLReplayBuffer() {
-    return <div data-testid="replay-buffer-stack">Replay Buffer stack</div>;
+  return function MockOfflineRLReplayBuffer({ isActive }) {
+    return (
+      <div data-testid="replay-buffer-stack" data-active={String(isActive)}>
+        Replay Buffer stack
+      </div>
+    );
   };
 });
 
 jest.mock('../features/offlineRL/components/OfflineRLDatasetConversion', () => {
-  return function MockOfflineRLDatasetConversion() {
-    return <div data-testid="dataset-conversion">Conversion controls</div>;
+  return function MockOfflineRLDatasetConversion({ isActive }) {
+    return (
+      <div data-testid="dataset-conversion" data-active={String(isActive)}>
+        Conversion controls
+      </div>
+    );
   };
 });
 
 jest.mock('../features/offlineRL/components/OfflineRLLeRobotDataset', () => {
-  return function MockOfflineRLLeRobotDataset() {
-    return <div data-testid="lerobot-dataset-stack">LeRobot Dataset stack</div>;
+  return function MockOfflineRLLeRobotDataset({ isActive }) {
+    return (
+      <div data-testid="lerobot-dataset-stack" data-active={String(isActive)}>
+        LeRobot Dataset stack
+      </div>
+    );
   };
 });
 
@@ -56,10 +79,12 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
     variant,
     inferencePhase,
     onDeploymentStateChange,
+    onTrainingMethodStateChange,
     currentPolicyEpoch,
     forceFreshLineage,
     onFreshLineageConsumed,
     onRunningChange,
+    onCompactLayoutChange,
   }) {
     return (
       <div
@@ -93,6 +118,30 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
           <button type="button" onClick={() => onFreshLineageConsumed?.()}>
             Consume fresh lineage
           </button>
+          <button type="button" onClick={() => onCompactLayoutChange?.(true)}>
+            Compact training layout
+          </button>
+          <button type="button" onClick={() => onCompactLayoutChange?.(false)}>
+            Restore training layout
+          </button>
+          <button
+            type="button"
+            onClick={() => onTrainingMethodStateChange?.('reinforcement')}
+          >
+            Select RL
+          </button>
+          <button
+            type="button"
+            onClick={() => onTrainingMethodStateChange?.('imitation')}
+          >
+            Select IL
+          </button>
+          <button
+            type="button"
+            onClick={() => onTrainingMethodStateChange?.('critic')}
+          >
+            Select Critic
+          </button>
           <button
             type="button"
             onClick={() => onDeploymentStateChange?.({
@@ -101,6 +150,7 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
               serviceType: 'lerobot',
               policyType: 'act',
               rlEpoch: 1,
+              lineageMode: 'advance',
             })}
           >
             Mark training complete
@@ -112,23 +162,26 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
               modelPath: '/workspace/model/multi_task_dit/ppo/pretrained_model',
               serviceType: 'lerobot',
               policyType: 'multi_task_dit',
-              rlEpoch: currentPolicyEpoch,
+              rlEpoch: currentPolicyEpoch + 1,
+              lineageMode: 'advance',
             })}
           >
             Mark MultiTaskDiT training complete
           </button>
+          <button
+            type="button"
+            onClick={() => onDeploymentStateChange?.({
+              ready: true,
+              modelPath: '/workspace/model/imitation/act/pretrained_model',
+              serviceType: 'lerobot',
+              policyType: 'act',
+              rlEpoch: 0,
+              lineageMode: 'new',
+            })}
+          >
+            Mark IL training complete
+          </button>
         </div>
-      </div>
-    );
-  };
-});
-
-jest.mock('../features/offlineRL/components/OfflineRLWorkspaceStatusModal', () => {
-  return function MockOfflineRLWorkspaceStatusModal({ isOpen, onClose }) {
-    if (!isOpen) return null;
-    return (
-      <div role="dialog" aria-label="Inference Workspace Status">
-        <button type="button" onClick={onClose}>Back</button>
       </div>
     );
   };
@@ -144,12 +197,27 @@ const renderPage = (props = {}) => {
   return { ...view, testStore };
 };
 
+const openTrainingDrawer = () => {
+  const trigger = screen.getByRole('button', { name: 'Training' });
+  if (trigger.getAttribute('aria-expanded') !== 'true') {
+    fireEvent.click(trigger);
+  }
+  return {
+    trigger,
+    drawer: screen.getByTestId('offline-rl-training-drawer'),
+  };
+};
+
 beforeEach(() => {
   window.sessionStorage.clear();
 });
 
 test('renders the TD3 and ACT workflow in pipeline order', () => {
-  const { container } = renderPage();
+  renderPage();
+  const frameworkNavigation = screen.getByRole('navigation', {
+    name: 'Playground sections',
+  });
+  const workflowSteps = screen.getByTestId('offline-rl-workflow-steps');
 
   expect(screen.queryByRole('heading', {
     name: 'Offline Reinforcement Learning',
@@ -157,10 +225,18 @@ test('renders the TD3 and ACT workflow in pipeline order', () => {
   expect(screen.getByRole('heading', {
     name: 'Inference Workspace',
   })).toBeInTheDocument();
-  expect(screen.getByText('Replay Buffer')).toBeInTheDocument();
-  expect(screen.getByText('Dataset Conversion')).toBeInTheDocument();
-  expect(screen.getByText('LeRobot Dataset')).toBeInTheDocument();
-  expect(screen.getByRole('heading', { name: 'Training' })).toBeInTheDocument();
+  expect(within(frameworkNavigation).getByRole('button', {
+    name: 'Environment',
+  })).toHaveAttribute('aria-current', 'page');
+  expect(workflowSteps).toHaveAttribute('data-panel-state', 'environment');
+  openTrainingDrawer();
+  expect(within(workflowSteps).getByText('Replay Buffer')).toBeInTheDocument();
+  expect(within(workflowSteps).getByText('Data Collection')).toBeInTheDocument();
+  expect(within(workflowSteps).getByText('Dataset Conversion')).toBeInTheDocument();
+  expect(within(workflowSteps).getByText('LeRobot Dataset')).toBeInTheDocument();
+  expect(within(screen.getByTestId('offline-rl-training-content')).getByRole(
+    'heading', { name: 'Training' }
+  )).toBeInTheDocument();
   expect(screen.getByLabelText('Training policy RL Epoch 0 to 1'))
     .toHaveTextContent('RL Epoch E0000 → E0001');
   expect(screen.getByTestId('offline-rl-workspace'))
@@ -168,9 +244,11 @@ test('renders the TD3 and ACT workflow in pipeline order', () => {
   expect(screen.getByTestId('replay-buffer-stack')).toBeInTheDocument();
   expect(screen.getByTestId('dataset-conversion')).toBeInTheDocument();
   expect(screen.getByTestId('lerobot-dataset-stack')).toBeInTheDocument();
+  expect(screen.getByTestId('workflow-training-controller')).toBeInTheDocument();
+  expect(screen.getByTestId('offline-rl-deployment')).toBeInTheDocument();
 
-  const content = container.textContent;
-  expect(content.indexOf('Replay Buffer')).toBeLessThan(
+  const content = workflowSteps.textContent;
+  expect(content.indexOf('Data Collection')).toBeLessThan(
     content.indexOf('Dataset Conversion')
   );
   expect(content.indexOf('Dataset Conversion')).toBeLessThan(
@@ -179,15 +257,230 @@ test('renders the TD3 and ACT workflow in pipeline order', () => {
   expect(content.indexOf('LeRobot Dataset')).toBeLessThan(
     content.indexOf('Training')
   );
-  expect(screen.getByTestId('offline-rl-workflow-grid')).toHaveClass(
-    'xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'
-  );
-  expect(screen.getByTestId('offline-rl-workflow-steps')).toHaveClass(
-    'xl:grid-rows-[minmax(260px,2fr)_minmax(390px,3fr)_auto]'
-  );
+  expect(screen.getByTestId('offline-rl-workflow-grid'))
+    .toHaveAttribute('data-layout', 'environment-canvas');
+  expect(screen.getByTestId('offline-rl-main')).toHaveClass('overflow-hidden');
+  expect(screen.getByTestId('offline-rl-workflow-grid'))
+    .toHaveClass('h-full', 'min-h-0');
+  expect(screen.getByTestId('offline-rl-environment-canvas'))
+    .toHaveClass('h-full', 'w-full', 'overflow-y-auto');
+  expect(screen.getByTestId('offline-rl-workflow-steps'))
+    .toHaveAttribute('data-panel-state', 'training');
   expect(screen.getByTestId('offline-rl-dataset-pipeline')).toHaveClass(
-    'min-h-[260px]'
+    'flex-col', 'justify-between', 'gap-3', 'overflow-y-auto'
   );
+  const dataCollectionStep = screen.getByTestId('offline-rl-pipeline-step-01');
+  const datasetConversionStep = screen.getByTestId('offline-rl-pipeline-step-02');
+  const lerobotDatasetStep = screen.getByTestId('offline-rl-pipeline-step-03');
+  [dataCollectionStep, datasetConversionStep, lerobotDatasetStep].forEach((step) => {
+    expect(step).toHaveClass('w-full', 'shrink-0', 'min-h-0');
+    expect(step).not.toHaveClass('min-h-[240px]');
+  });
+  expect(screen.getByTestId('offline-rl-dataset-pipeline').lastElementChild)
+    .toBe(lerobotDatasetStep);
+});
+
+test('shows the Playground rail and collapses it to icon-only navigation', () => {
+  renderPage();
+
+  const rail = screen.getByRole('complementary', {
+    name: 'Playground navigation',
+  });
+  const workspace = screen.getByTestId('offline-rl-workspace');
+
+  expect(rail).toHaveAttribute('data-collapsed', 'false');
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
+  expect(workspace).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', {
+    name: 'Collapse Playground menu',
+  }));
+
+  expect(rail).toHaveAttribute('data-collapsed', 'true');
+  expect(screen.getByRole('button', {
+    name: 'Expand Playground menu',
+  })).toBeInTheDocument();
+  expect(workspace).toBeInTheDocument();
+});
+
+test('slides the Replay Buffer data workflow over the mounted environment', () => {
+  renderPage();
+
+  const workspace = screen.getByTestId('offline-rl-workspace');
+  const replayStack = screen.getByTestId('replay-buffer-stack');
+  const conversion = screen.getByTestId('dataset-conversion');
+  const lerobotDataset = screen.getByTestId('lerobot-dataset-stack');
+  const drawer = screen.getByTestId('offline-rl-replay-drawer');
+  const replayButton = screen.getByRole('button', { name: 'Replay Buffer' });
+
+  expect(drawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(drawer).toHaveAttribute('aria-hidden', 'true');
+  expect(drawer).toHaveAttribute('inert');
+  expect(replayButton).toHaveAttribute(
+    'aria-controls', 'offline-rl-replay-drawer'
+  );
+  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(replayStack).toHaveAttribute('data-active', 'true');
+  expect(conversion).toHaveAttribute('data-active', 'true');
+  expect(lerobotDataset).toHaveAttribute('data-active', 'true');
+  expect(drawer).toHaveClass(
+    'absolute', 'w-[calc(100%_-_2rem)]', 'lg:w-1/2'
+  );
+  expect(screen.getByTestId('offline-rl-workflow-steps'))
+    .not.toHaveClass('xl:contents');
+  expect(screen.getByTestId('offline-rl-environment-canvas'))
+    .toHaveClass('w-full', 'flex-1');
+
+  fireEvent.click(replayButton);
+
+  expect(drawer).toHaveAttribute('data-panel-state', 'open');
+  expect(drawer).toHaveAttribute('aria-hidden', 'false');
+  expect(drawer).not.toHaveAttribute('inert');
+  expect(drawer).toHaveClass('absolute', 'lg:w-1/2');
+  expect(drawer).not.toHaveClass('xl:static', 'xl:mr-4');
+  expect(screen.getByTestId('offline-rl-dataset-pipeline'))
+    .toHaveClass('min-h-0', 'w-full', 'flex-1', 'overflow-y-auto');
+  expect(screen.getByTestId('offline-rl-workflow-steps'))
+    .toHaveAttribute('data-panel-state', 'replay');
+  expect(replayButton).toHaveAttribute('aria-current', 'page');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('button', {
+    name: 'Close Replay Buffer panel',
+  })).toHaveFocus();
+  const replayCloseButton = screen.getByRole('button', {
+    name: 'Close Replay Buffer panel',
+  });
+  expect(screen.getByTestId('offline-rl-replay-drawer-header').firstElementChild)
+    .toBe(replayCloseButton);
+  expect(screen.getByTestId('replay-drawer-toggle-glyph'))
+    .toHaveClass('bg-[#f3f0e8]');
+  expect(screen.getByTestId('replay-drawer-toggle-accent'))
+    .toHaveClass('left-0', 'w-[20%]', 'bg-[#627d68]');
+  expect(replayStack).toHaveAttribute('data-active', 'true');
+  expect(conversion).toHaveAttribute('data-active', 'true');
+  expect(lerobotDataset).toHaveAttribute('data-active', 'true');
+  expect(workspace).toBeInTheDocument();
+  expect(screen.getByTestId('offline-rl-environment-canvas'))
+    .toHaveClass('w-full', 'flex-1');
+
+  fireEvent.click(replayButton);
+  expect(drawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
+
+  fireEvent.click(replayButton);
+  fireEvent.click(screen.getByRole('button', {
+    name: 'Close Replay Buffer panel',
+  }));
+
+  expect(drawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(replayButton).toHaveFocus();
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
+  expect(screen.getByTestId('replay-buffer-stack')).toBe(replayStack);
+  expect(screen.getByTestId('dataset-conversion')).toBe(conversion);
+  expect(screen.getByTestId('lerobot-dataset-stack')).toBe(lerobotDataset);
+  expect(replayStack).toHaveAttribute('data-active', 'true');
+  expect(workspace).toBeInTheDocument();
+
+  fireEvent.click(replayButton);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(drawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayButton).toHaveFocus();
+});
+
+test('slides Training from the right without remounting policy state', () => {
+  renderPage();
+
+  const workspace = screen.getByTestId('offline-rl-workspace');
+  const replayDrawer = screen.getByTestId('offline-rl-replay-drawer');
+  const trainingDrawer = screen.getByTestId('offline-rl-training-drawer');
+  const replayButton = screen.getByRole('button', { name: 'Replay Buffer' });
+  const trainingButton = screen.getByRole('button', { name: 'Training' });
+  const trainingController = screen.getByTestId('workflow-training-controller');
+  const deployment = screen.getByTestId('offline-rl-deployment');
+
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingDrawer).toHaveAttribute('aria-hidden', 'true');
+  expect(trainingDrawer).toHaveAttribute('inert');
+  expect(trainingButton).toHaveAttribute(
+    'aria-controls', 'offline-rl-training-drawer'
+  );
+  expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
+  expect(trainingController).toHaveAttribute('data-active', 'true');
+  expect(trainingDrawer).toHaveClass(
+    'absolute', 'min-h-0', 'w-[calc(100%_-_2rem)]', 'lg:w-1/2'
+  );
+  expect(trainingDrawer.style.width).toBe('');
+
+  fireEvent.click(replayButton);
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'open');
+
+  fireEvent.click(trainingButton);
+
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayDrawer).toHaveAttribute('inert');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(replayButton).not.toHaveAttribute('aria-current');
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'open');
+  expect(trainingDrawer).toHaveAttribute('aria-hidden', 'false');
+  expect(trainingDrawer).not.toHaveAttribute('inert');
+  expect(trainingDrawer).toHaveClass('absolute', 'lg:w-1/2');
+  expect(trainingDrawer).not.toHaveClass('xl:static', 'xl:ml-4');
+  expect(within(trainingDrawer).getByRole('heading', { name: 'Training Pipeline' }))
+    .toBeInTheDocument();
+  expect(trainingButton).toHaveAttribute('aria-current', 'page');
+  expect(trainingButton).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('button', {
+    name: 'Close Training panel',
+  })).toHaveFocus();
+  const trainingCloseButton = screen.getByRole('button', {
+    name: 'Close Training panel',
+  });
+  expect(screen.getByTestId('offline-rl-training-drawer-header').firstElementChild)
+    .toBe(trainingCloseButton);
+  expect(screen.getByTestId('training-drawer-toggle-glyph'))
+    .toHaveClass('bg-[#f3f0e8]');
+  expect(screen.getByTestId('training-drawer-toggle-accent'))
+    .toHaveClass('right-0', 'w-[20%]', 'bg-[#627d68]');
+  expect(screen.getByTestId('training-drawer-toggle-accent'))
+    .not.toHaveClass('left-0');
+  expect(screen.getByTestId('offline-rl-training-content'))
+    .toHaveClass('min-h-0', 'w-full', 'flex-1', 'overflow-y-auto');
+  expect(screen.getByTestId('offline-rl-training-stage'))
+    .toHaveClass('h-full', 'min-h-[640px]', 'w-full', 'shrink-0');
+  expect(deployment).toHaveClass('w-full', 'shrink-0');
+  expect(workspace).toBeInTheDocument();
+  expect(screen.getByTestId('offline-rl-environment-canvas'))
+    .toHaveClass('w-full', 'flex-1');
+
+  fireEvent.click(trainingButton);
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
+
+  fireEvent.click(trainingButton);
+  fireEvent.click(screen.getByRole('button', {
+    name: 'Close Training panel',
+  }));
+
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
+  expect(trainingButton).toHaveFocus();
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
+  expect(screen.getByTestId('workflow-training-controller')).toBe(trainingController);
+  expect(screen.getByTestId('offline-rl-deployment')).toBe(deployment);
+  expect(trainingController).toHaveAttribute('data-active', 'true');
+
+  fireEvent.click(trainingButton);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingButton).toHaveFocus();
 });
 
 test('switches the environment between inference and recording workspaces', () => {
@@ -260,6 +553,7 @@ test('locks workspace switching while inference or recording is active', () => {
 
 test('keeps ACT and TD3 active while future model and algorithm options are disabled', () => {
   renderPage();
+  openTrainingDrawer();
 
   expect(screen.getAllByText('TD3').length).toBeGreaterThan(0);
   expect(screen.getAllByText('ACT').length).toBeGreaterThan(0);
@@ -267,9 +561,9 @@ test('keeps ACT and TD3 active while future model and algorithm options are disa
   expect(screen.getByRole('button', { name: 'Pi0.5' })).toBeDisabled();
   expect(screen.queryByText('RLT')).not.toBeInTheDocument();
 
-  const trainingSection = screen.getByRole('heading', {
-    name: 'Training',
-  }).closest('section');
+  const trainingSection = within(
+    screen.getByTestId('offline-rl-training-content')
+  ).getByRole('heading', { name: 'Training' }).closest('section');
   const algorithmGroup = within(trainingSection).getByRole('group', {
     name: 'RL algorithm',
   });
@@ -286,6 +580,7 @@ test('keeps ACT and TD3 active while future model and algorithm options are disa
 
 test('keeps architecture above one fixed training footer', () => {
   const { container } = renderPage();
+  openTrainingDrawer();
   const architecture = screen.getByTestId('offline-rl-training-architecture');
   const footer = screen.getByTestId('offline-rl-training-footer');
 
@@ -296,8 +591,30 @@ test('keeps architecture above one fixed training footer', () => {
   expect(within(footer).getByText('Training action')).toBeInTheDocument();
 });
 
+test('pulls Training progress and Policy Deploy upward for compact workflows', () => {
+  renderPage();
+  openTrainingDrawer();
+  const stage = screen.getByTestId('offline-rl-training-stage');
+  const deployment = screen.getByTestId('offline-rl-deployment');
+
+  expect(stage).toHaveAttribute('data-compact-layout', 'false');
+  expect(stage).toHaveClass('h-full', 'min-h-[640px]');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Compact training layout' }));
+
+  expect(stage).toHaveAttribute('data-compact-layout', 'true');
+  expect(stage).toHaveClass('min-h-0');
+  expect(stage).not.toHaveClass('h-full', 'min-h-[640px]');
+  expect(stage.compareDocumentPosition(deployment) & Node.DOCUMENT_POSITION_FOLLOWING)
+    .toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Restore training layout' }));
+  expect(stage).toHaveAttribute('data-compact-layout', 'false');
+});
+
 test('shows three camera slots without enabling unfinished actions', () => {
   const { container } = renderPage();
+  openTrainingDrawer();
 
   expect(screen.getByText('Left wrist')).toBeInTheDocument();
   expect(screen.getByText('Head')).toBeInTheDocument();
@@ -320,6 +637,8 @@ test('opens workspace status from the Environment icon and closes with Back', ()
     'title',
     'Open inference workspace status'
   );
+  expect(statusButton.querySelector('[data-robot-lab-icon="true"]'))
+    .toBeInTheDocument();
 
   fireEvent.click(statusButton);
   expect(screen.getByRole('dialog', {
@@ -332,8 +651,57 @@ test('opens workspace status from the Environment icon and closes with Back', ()
   })).not.toBeInTheDocument();
 });
 
+test('opens Training Guide from the Step 04 icon without closing Training', () => {
+  renderPage();
+  const { drawer } = openTrainingDrawer();
+  const guideButton = screen.getByRole('button', {
+    name: 'Open Training Guide',
+  });
+
+  guideButton.focus();
+  fireEvent.click(guideButton);
+
+  expect(screen.getByRole('dialog', { name: 'Training Guide' }))
+    .toBeInTheDocument();
+  expect(screen.getByTestId('offline-rl-training-guide-backdrop').parentElement)
+    .toBe(document.body);
+
+  fireEvent.keyDown(document, { key: 'Escape' });
+
+  expect(screen.queryByRole('dialog', { name: 'Training Guide' }))
+    .not.toBeInTheDocument();
+  expect(drawer).toHaveAttribute('data-panel-state', 'open');
+  expect(guideButton).toHaveFocus();
+});
+
+test('opens Data Conversion Guide from the Step 01 icon without closing Replay Buffer', () => {
+  renderPage();
+  const replayButton = screen.getByRole('button', { name: 'Replay Buffer' });
+  fireEvent.click(replayButton);
+  const replayDrawer = screen.getByTestId('offline-rl-replay-drawer');
+  const guideButton = screen.getByRole('button', {
+    name: 'Open Data Conversion Guide',
+  });
+
+  guideButton.focus();
+  fireEvent.click(guideButton);
+
+  expect(screen.getByRole('dialog', { name: 'Data Conversion Guide' }))
+    .toBeInTheDocument();
+  expect(screen.getByTestId('offline-rl-data-conversion-guide-backdrop').parentElement)
+    .toBe(document.body);
+
+  fireEvent.keyDown(window, { key: 'Escape' });
+
+  expect(screen.queryByRole('dialog', { name: 'Data Conversion Guide' }))
+    .not.toBeInTheDocument();
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'open');
+  expect(guideButton).toHaveFocus();
+});
+
 test('deploys a completed model into the shared inference Model path', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
 
   expect(screen.getByText('Policy Deploy')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Mark training complete' }));
@@ -356,8 +724,82 @@ test('deploys a completed model into the shared inference Model path', () => {
   expect(screen.getByRole('button', { name: 'Discard Policy' })).not.toBeDisabled();
 });
 
+test('deploys imitation learning as a new Epoch 0 policy lineage', () => {
+  window.sessionStorage.setItem(OFFLINE_RL_LINEAGE_STORAGE_KEY, JSON.stringify({
+    policyEpoch: 3,
+    policyPath: '/workspace/model/rl_epoch_0003/pretrained_model',
+    forceFresh: false,
+    lineageId: 'existing-lineage',
+  }));
+  const { testStore } = renderPage();
+  openTrainingDrawer();
+
+  act(() => {
+    testStore.dispatch(setInferenceTaskInfo({
+      policyPath: '/workspace/model/rl_epoch_0003/pretrained_model',
+      serviceType: 'lerobot',
+      policyType: 'act',
+    }));
+  });
+  expect(screen.getByLabelText('Training policy RL Epoch 3 to 4'))
+    .toHaveTextContent('RL Epoch E0003 → E0004');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Select IL' }));
+  expect(screen.getByLabelText('Imitation Learning base policy RL Epoch 0'))
+    .toHaveTextContent('Base Policy E0000');
+  expect(screen.queryByLabelText('Training policy RL Epoch 3 to 4'))
+    .not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Mark IL training complete' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Deploy Policy' }));
+
+  expect(testStore.getState().tasks.inferenceTaskInfo.policyPath)
+    .toBe('/workspace/model/imitation/act/pretrained_model');
+  expect(screen.getByTestId('offline-rl-workspace'))
+    .toHaveAttribute('data-policy-epoch', '0');
+  const newLineage = JSON.parse(
+    window.sessionStorage.getItem(OFFLINE_RL_LINEAGE_STORAGE_KEY)
+  );
+  expect(newLineage).toMatchObject({
+    policyEpoch: 0,
+    policyPath: '/workspace/model/imitation/act/pretrained_model',
+    forceFresh: true,
+  });
+  expect(newLineage.lineageId).not.toBe('existing-lineage');
+});
+
+test('keeps the current RL Epoch unchanged during independent critic warm-up', () => {
+  window.sessionStorage.setItem(OFFLINE_RL_LINEAGE_STORAGE_KEY, JSON.stringify({
+    policyEpoch: 3,
+    policyPath: '/workspace/model/rl_epoch_0003/pretrained_model',
+    forceFresh: false,
+    lineageId: 'existing-lineage',
+  }));
+  renderPage();
+  openTrainingDrawer();
+
+  expect(screen.getByLabelText('Training policy RL Epoch 3 to 4'))
+    .toHaveTextContent('RL Epoch E0003 → E0004');
+  fireEvent.click(screen.getByRole('button', { name: 'Select Critic' }));
+
+  expect(screen.getByLabelText('Critic Warm-up policy RL Epoch 3 unchanged'))
+    .toHaveTextContent('Critic · E0003');
+  expect(screen.queryByLabelText('Training policy RL Epoch 3 to 4'))
+    .not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Deploy Policy' })).toBeDisabled();
+  expect(JSON.parse(
+    window.sessionStorage.getItem(OFFLINE_RL_LINEAGE_STORAGE_KEY)
+  )).toMatchObject({
+    policyEpoch: 3,
+    policyPath: '/workspace/model/rl_epoch_0003/pretrained_model',
+    forceFresh: false,
+    lineageId: 'existing-lineage',
+  });
+});
+
 test('starts a new RL lineage at Epoch 0 without deleting or clearing selected paths', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
   const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
 
   act(() => {
@@ -389,6 +831,7 @@ test('starts a new RL lineage at Epoch 0 without deleting or clearing selected p
 
 test('discards only the active deployment and restores its previous inference path', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
 
   act(() => {
     testStore.dispatch(setInferenceTaskInfo({
@@ -411,6 +854,7 @@ test('discards only the active deployment and restores its previous inference pa
 
 test('deploys MultiTaskDiT as lerobot:multi_task_dit and restores all inference fields', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
 
   act(() => {
     testStore.dispatch(setInferenceTaskInfo({
@@ -449,6 +893,7 @@ test('deploys MultiTaskDiT as lerobot:multi_task_dit and restores all inference 
 
 test('does not let discard overwrite a manually selected policy path', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
 
   fireEvent.click(screen.getByRole('button', { name: 'Mark training complete' }));
   fireEvent.click(screen.getByRole('button', { name: 'Deploy Policy' }));
@@ -466,6 +911,7 @@ test('does not let discard overwrite a manually selected policy path', () => {
 
 test('keeps deployment locked while inference is running', () => {
   const { testStore } = renderPage();
+  openTrainingDrawer();
 
   fireEvent.click(screen.getByRole('button', { name: 'Mark training complete' }));
   expect(screen.getByRole('button', { name: 'Deploy Policy' })).not.toBeDisabled();
@@ -489,50 +935,61 @@ test('reflects inactive page state', () => {
     .toHaveAttribute('data-active', 'false');
 });
 
-test('collapses the workflow panel and lets the inference workspace use the full grid width', () => {
+test('keeps closed Replay and Training controllers mounted outside the environment canvas', () => {
   renderPage();
 
   const workflowGrid = screen.getByTestId('offline-rl-workflow-grid');
   const workflowSteps = screen.getByTestId('offline-rl-workflow-steps');
-  expect(workflowGrid).toHaveClass(
-    'xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'
+  const replayDrawer = screen.getByTestId('offline-rl-replay-drawer');
+  const trainingDrawer = screen.getByTestId('offline-rl-training-drawer');
+  expect(workflowGrid).toHaveAttribute('data-layout', 'environment-canvas');
+  expect(screen.getByTestId('offline-rl-environment-canvas'))
+    .toHaveClass('w-full');
+  expect(workflowSteps).toHaveClass(
+    'absolute', 'inset-0', 'overflow-hidden'
   );
-  expect(screen.getByTestId('offline-rl-workflow-steps')).toBeInTheDocument();
+  expect(workflowSteps).not.toHaveClass('xl:contents');
+  expect(workflowSteps).toHaveAttribute('data-panel-state', 'environment');
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayDrawer).toHaveAttribute('inert');
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingDrawer).toHaveAttribute('aria-hidden', 'true');
+  expect(trainingDrawer).toHaveAttribute('inert');
   expect(screen.getByTestId('replay-buffer-stack')).toBeInTheDocument();
   expect(screen.getByTestId('dataset-conversion')).toBeInTheDocument();
   expect(screen.getByTestId('lerobot-dataset-stack')).toBeInTheDocument();
+  expect(screen.getByTestId('workflow-training-controller')).toBeInTheDocument();
+  expect(screen.getByTestId('workflow-training-controller'))
+    .toHaveAttribute('data-active', 'true');
+  expect(screen.getByTestId('offline-rl-deployment')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Hide workflow panel' }))
+    .not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Show workflow panel' }))
+    .not.toBeInTheDocument();
+});
 
-  fireEvent.click(screen.getByRole('button', {
-    name: 'Hide workflow panel',
-  }));
+test('uses white bordered workflow surfaces without shrinking the environment', () => {
+  renderPage();
 
-  expect(workflowSteps).toHaveClass('hidden');
-  expect(workflowSteps).toHaveAttribute('aria-hidden', 'true');
-  expect(screen.getByTestId('replay-buffer-stack')).toBeInTheDocument();
-  expect(screen.getByTestId('dataset-conversion')).toBeInTheDocument();
-  expect(screen.getByTestId('lerobot-dataset-stack')).toBeInTheDocument();
-  expect(workflowGrid).toHaveClass('xl:grid-cols-[minmax(0,1fr)]');
-  expect(workflowGrid).not.toHaveClass(
-    'xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'
-  );
-  expect(screen.getByRole('button', {
-    name: 'Show workflow panel',
-  })).toBeInTheDocument();
+  const environment = screen.getByTestId('offline-rl-environment-stage');
+  const environmentCanvas = screen.getByTestId('offline-rl-environment-canvas');
+  const replayButton = screen.getByRole('button', { name: 'Replay Buffer' });
 
-  fireEvent.click(screen.getByRole('button', {
-    name: 'Show workflow panel',
-  }));
+  expect(environment).toHaveClass('border', 'bg-[#fbfaf6]');
+  expect(environmentCanvas).toHaveClass('w-full', 'flex-1');
 
-  expect(screen.getByRole('button', {
-    name: 'Hide workflow panel',
-  })).toBeInTheDocument();
-  expect(screen.getByTestId('offline-rl-workflow-steps')).toBeInTheDocument();
-  expect(workflowSteps).toHaveClass('grid');
-  expect(workflowSteps).toHaveAttribute('aria-hidden', 'false');
-  expect(screen.getByTestId('replay-buffer-stack')).toBeInTheDocument();
-  expect(screen.getByTestId('dataset-conversion')).toBeInTheDocument();
-  expect(screen.getByTestId('lerobot-dataset-stack')).toBeInTheDocument();
-  expect(workflowGrid).toHaveClass(
-    'xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'
-  );
+  fireEvent.click(replayButton);
+
+  const collectionCard = screen.getByRole('heading', {
+    name: 'Data Collection',
+  }).closest('section');
+  expect(collectionCard).toHaveClass('border', 'bg-[#fbfaf6]');
+  expect(environmentCanvas).toHaveClass('w-full', 'flex-1');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Training' }));
+  expect(screen.getByTestId('offline-rl-training-stage'))
+    .toHaveClass('border', 'bg-[#fbfaf6]');
+  expect(screen.getByTestId('offline-rl-deployment'))
+    .toHaveClass('border', 'bg-[#fbfaf6]');
+  expect(environmentCanvas).toHaveClass('w-full', 'flex-1');
 });

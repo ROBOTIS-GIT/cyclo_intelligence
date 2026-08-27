@@ -134,6 +134,7 @@ class ACTTD3FunctionalTest(unittest.TestCase):
             "behavior_action_chunks": torch.zeros(1, 3, 2),
             "rewards": torch.zeros(1, 3),
             "step_durations_s": torch.tensor([[0.1, 0.0, 0.0]]),
+            "episode_success": torch.tensor([False]),
             "terminated": torch.tensor([False]),
             "truncated": torch.tensor([True]),
             "next_observation_valid": torch.tensor([False]),

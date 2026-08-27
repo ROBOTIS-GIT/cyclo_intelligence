@@ -53,7 +53,7 @@ export default function FlowSDEPPOArchitectureDiagram({ backendReady = false }) 
       </div>
 
       <div
-        className="grid min-h-0 flex-1 grid-rows-[minmax(50px,1fr)_20px_minmax(50px,1fr)_20px_minmax(54px,1fr)_auto] gap-1"
+        className="grid min-h-0 flex-1 grid-rows-[minmax(50px,1fr)_20px_minmax(50px,1fr)_20px_minmax(54px,1fr)] gap-1"
         data-testid="flow-sde-ppo-architecture-flow"
       >
         <FixedNode
@@ -73,9 +73,6 @@ export default function FlowSDEPPOArchitectureDiagram({ backendReady = false }) 
         <div className="grid min-h-0 grid-cols-2 gap-1.5">
           <TrainableNode label="DiT actor" detail="Clipped PPO surrogate" />
           <TrainableNode label="Value head" detail="Clipped value loss" />
-        </div>
-        <div className="rounded-lg border border-[#d9d2c5] bg-white px-2.5 py-2 text-center text-[10px] font-semibold text-[#514b42]">
-          PPO checkpoint → standard Flow-Matching inference
         </div>
       </div>
     </div>

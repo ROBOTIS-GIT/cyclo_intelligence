@@ -19,12 +19,16 @@ import ProgressBar from '../../../components/ProgressBar';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 import { InferencePhase } from '../../../constants/taskPhases';
 import {
+  getACTTD3CriticWarmupStatus,
   getFlowSDEPPOValueWarmupStatus,
   getImitationLearningStatus,
+  getOfflineRLDatasetInfo,
   getOfflineRLStatus,
+  startACTTD3CriticWarmup,
   startFlowSDEPPOValueWarmup,
   startImitationLearningTraining,
   startOfflineRLTraining,
+  stopACTTD3CriticWarmup,
   stopFlowSDEPPOValueWarmup,
   stopImitationLearningTraining,
   stopOfflineRLTraining,
@@ -44,17 +48,41 @@ import {
 import ACTArchitectureDiagram, {
   DEFAULT_ACT_TRAINABLE_GROUPS,
 } from './ACTArchitectureDiagram';
+import ACTTD3TrainingLoop, {
+  ImitationLearningCard,
+  PolicyTrainingLoopLayout,
+} from './ACTTD3TrainingLoop';
 import FlowSDEPPOArchitectureDiagram from './FlowSDEPPOArchitectureDiagram';
 import GrootArchitectureDiagram from './GrootArchitectureDiagram';
 import MultiTaskDiTArchitectureDiagram from './MultiTaskDiTArchitectureDiagram';
 import PI05ArchitectureDiagram from './PI05ArchitectureDiagram';
+import RLTArchitectureDiagram, {
+  DEFAULT_RLT_TRAINABLE_GROUPS,
+} from './RLTArchitectureDiagram';
 import TD3ArchitectureDiagram from './TD3ArchitectureDiagram';
+import TrainingLossChart from './TrainingLossChart';
 
 const POLL_INTERVAL_MS = 2000;
+const DEFAULT_ACT_CRITIC_WARMUP_UPDATES = 5000;
 const IMITATION_ACTION_CHUNK_SIZES = Object.freeze({
   act: 30,
   multi_task_dit: 16,
 });
+const DEFAULT_ALGORITHM_BY_POLICY = Object.freeze({
+  act: 'td3',
+  multi_task_dit: 'flow_sde_ppo',
+  groot: 'rlt',
+  pi05: 'rlt',
+});
+
+export const resolveTrainingPolicyModel = (taskInfo = {}) => {
+  const serviceType = String(taskInfo.serviceType || '').trim().toLowerCase();
+  const policyType = String(taskInfo.policyType || '').trim().toLowerCase();
+  if (serviceType === 'groot') return 'groot';
+  if (serviceType !== 'lerobot') return null;
+  if (['act', 'multi_task_dit', 'pi05'].includes(policyType)) return policyType;
+  return null;
+};
 const RUNNING_STATUSES = new Set(['starting', 'running']);
 const COMPLETE_STATUSES = new Set(['complete', 'completed']);
 const INFERENCE_PHASE_NAMES = {
@@ -68,6 +96,8 @@ const DETERMINISTIC_ACT_GROUPS = new Set([
   'transformer_encoder',
   'action_decoder',
 ]);
+const ACT_TD3_ALGORITHMS = new Set(['td3']);
+const TD3_ACTOR_OBJECTIVES = new Set(['td3', 'td3_bc']);
 
 export const validateActorTrainableGroups = (groups) => {
   if (!Array.isArray(groups) || groups.length === 0) {
@@ -93,10 +123,52 @@ const statusValue = (status, ...keys) => {
   return undefined;
 };
 
+const optionalFiniteNumber = (value) => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeLossHistory = (history) => {
+  const actor = [];
+  const critic = [];
+  (Array.isArray(history) ? history : []).forEach((point) => {
+    const step = optionalFiniteNumber(point?.step);
+    if (step === null) return;
+    const actorLoss = optionalFiniteNumber(point?.actor_loss);
+    const criticLoss = optionalFiniteNumber(point?.critic_loss);
+    if (actorLoss !== null) actor.push({ step, loss: actorLoss });
+    if (criticLoss !== null) critic.push({ step, loss: criticLoss });
+  });
+  return { actor, critic };
+};
+
+const appendLossSample = (series, point) => {
+  if (!point || !Number.isFinite(point.step) || !Number.isFinite(point.loss)) return series;
+  const next = [...series];
+  const last = next[next.length - 1];
+  if (last?.step === point.step) next[next.length - 1] = point;
+  else next.push(point);
+  return next.slice(-500);
+};
+
 const normalizeContractPath = (value) => {
   const normalized = String(value || '').trim();
   if (normalized === '/') return normalized;
   return normalized.replace(/\/+$/, '');
+};
+
+const actPolicyPathsEquivalent = (left, right) => {
+  const selected = normalizeContractPath(left);
+  const reported = normalizeContractPath(right);
+  if (!selected || !reported) return false;
+  return (
+    selected === reported ||
+    `${selected}/pretrained_model` === reported ||
+    selected === `${reported}/pretrained_model`
+  );
 };
 
 const shortWarmupSource = (status, bundlePath) => {
@@ -197,9 +269,6 @@ const inactiveChoiceClass = 'h-7 rounded-md px-3 text-[10px] font-semibold text-
 const disabledChoiceClass = 'h-7 cursor-not-allowed rounded-md px-3 text-[10px] font-semibold text-[#aaa295] opacity-70';
 
 function CriticWarmupPanel({
-  enabled,
-  onEnabledChange,
-  toggleDisabled,
   controlsDisabled,
   steps,
   setSteps,
@@ -219,56 +288,62 @@ function CriticWarmupPanel({
   sourceKind,
   sourceLabel,
   sourceReadyLabel,
-  onStart,
-  onStop,
-  startDisabled,
-  stopDisabled,
-  isStarting,
-  isStopping,
 }) {
   return (
     <div
-      className="mt-3 shrink-0 rounded-xl border border-[#d9d2c5] bg-white p-2.5"
-      data-testid="flow-sde-ppo-critic-warmup"
+      className="flex h-full min-h-0 flex-col rounded-2xl border border-[#decfc3] bg-white p-4 shadow-[0_8px_24px_rgba(75,66,51,0.07)]"
+      data-testid="diffusion-critic-warmup-card"
+      role="region"
+      aria-label="Diffusion Policy critic warm-up"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-[10px] font-semibold text-[#514b42]">
-            Offline value critic warm-up
+          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#aa795f]">
+            Value initialization
           </div>
-          <div className="text-[8px] text-[#91897d]">
-            Checked Step 3 replay · Success + Fail required
+          <div className="mt-0.5 text-[14px] font-semibold text-[#38342e]">
+            Critic Warm-up
+          </div>
+          <div className="mt-1 text-[10px] text-[#8b8378]">
+            Pretrain Diffusion state values before policy optimization
           </div>
         </div>
+        <span className="shrink-0 rounded-full bg-[#f5e9df] px-2.5 py-1 text-[9px] font-bold text-[#9b6245]">
+          Critic
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-[0.8fr_auto_1.2fr] items-stretch gap-2">
         <div
-          className="flex items-center gap-0.5 rounded-lg border border-[#d9d2c5] bg-[#f1ede4] p-0.5"
-          role="group"
-          aria-label="Critic warm-up"
+          className="rounded-xl border border-[#ded9d1] bg-[#f4f2ee] p-3 text-[#777068]"
+          aria-label="Diffusion policy: Frozen; no gradients"
         >
-          <button
-            type="button"
-            aria-pressed={!enabled}
-            disabled={toggleDisabled}
-            onClick={() => onEnabledChange(false)}
-            className={!enabled ? activeChoiceClass : inactiveChoiceClass}
+          <div className="text-[8px] font-bold uppercase tracking-[0.12em]">Actor</div>
+          <div className="mt-1 text-[12px] font-semibold">Diffusion Policy</div>
+          <output
+            aria-label="Critic warm-up Diffusion policy mode"
+            className="mt-1 inline-flex rounded-full bg-[#dedbd5] px-2 py-0.5 text-[8px] font-bold text-[#756e66]"
           >
-            No
-          </button>
-          <button
-            type="button"
-            aria-pressed={enabled}
-            disabled={toggleDisabled}
-            onClick={() => onEnabledChange(true)}
-            className={enabled ? activeChoiceClass : inactiveChoiceClass}
-          >
-            Yes
-          </button>
+            Frozen
+          </output>
+        </div>
+        <div className="flex items-center text-[14px] font-semibold text-[#aaa196]" aria-hidden="true">
+          →
+        </div>
+        <div className="rounded-xl border border-[#e1bca4] bg-[#fbede3] p-3 text-[#754832]">
+          <div className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#ad7251]">
+            Value function
+          </div>
+          <div className="mt-1 text-[12px] font-semibold">Value Critic Network</div>
+          <div className="mt-0.5 text-[8px] text-[#9a674d]">State value V(s) · offline targets</div>
+          <span className="mt-1 inline-flex rounded-full bg-[#d9895f] px-2 py-0.5 text-[8px] font-bold text-white">
+            Trainable
+          </span>
         </div>
       </div>
 
-      {enabled && (
-        <div className="mt-2" data-testid="critic-warmup-settings">
-          <div className="grid grid-cols-2 gap-1.5 xl:grid-cols-4">
+      <div className="mt-3 flex min-h-0 flex-1 flex-col" data-testid="critic-warmup-settings">
+          <div className="grid grid-cols-2 gap-2">
             <label className="text-[8px] font-semibold text-[#777064]">
               Steps
               <input
@@ -280,7 +355,7 @@ function CriticWarmupPanel({
                 value={steps}
                 onChange={(event) => setSteps(event.target.value)}
                 disabled={controlsDisabled}
-                className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
+                className="mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 text-[10px] font-semibold text-[#4a4038] outline-none transition focus:border-[#bd8564] focus:ring-2 focus:ring-[#ead7ca] disabled:cursor-not-allowed disabled:bg-[#eeeae4] disabled:text-[#999187]"
               />
             </label>
             <label className="text-[8px] font-semibold text-[#777064]">
@@ -294,7 +369,7 @@ function CriticWarmupPanel({
                 value={batchSize}
                 onChange={(event) => setBatchSize(event.target.value)}
                 disabled={controlsDisabled}
-                className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
+                className="mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 text-[10px] font-semibold text-[#4a4038] outline-none transition focus:border-[#bd8564] focus:ring-2 focus:ring-[#ead7ca] disabled:cursor-not-allowed disabled:bg-[#eeeae4] disabled:text-[#999187]"
               />
             </label>
             <label className="text-[8px] font-semibold text-[#777064]">
@@ -308,7 +383,7 @@ function CriticWarmupPanel({
                 value={valueLearningRate}
                 onChange={(event) => setValueLearningRate(event.target.value)}
                 disabled={controlsDisabled}
-                className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
+                className="mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 text-[10px] font-semibold text-[#4a4038] outline-none transition focus:border-[#bd8564] focus:ring-2 focus:ring-[#ead7ca] disabled:cursor-not-allowed disabled:bg-[#eeeae4] disabled:text-[#999187]"
               />
             </label>
             <label className="text-[8px] font-semibold text-[#777064]">
@@ -322,7 +397,7 @@ function CriticWarmupPanel({
                 value={discount}
                 onChange={(event) => setDiscount(event.target.value)}
                 disabled={controlsDisabled}
-                className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
+                className="mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 text-[10px] font-semibold text-[#4a4038] outline-none transition focus:border-[#bd8564] focus:ring-2 focus:ring-[#ead7ca] disabled:cursor-not-allowed disabled:bg-[#eeeae4] disabled:text-[#999187]"
               />
             </label>
           </div>
@@ -334,7 +409,7 @@ function CriticWarmupPanel({
             </span>
             <span>
               Step {formatCount(statusValue(status, 'step', 'completed_steps'))}/
-              {formatCount(statusValue(status, 'total_steps', 'steps'))} · Value loss{' '}
+              {formatCount(statusValue(status, 'total_steps', 'steps'))} · Critic loss{' '}
               {formatLoss(statusValue(status, 'value_loss', 'loss'))}
             </span>
           </div>
@@ -352,40 +427,18 @@ function CriticWarmupPanel({
             />
           </div>
 
-          <div className="mt-2 grid grid-cols-[minmax(0,1fr)_92px_72px] gap-1.5">
+          <div
+            className="mt-3 rounded-xl border border-[#ebe3da] bg-[#faf8f4] px-3 py-2 text-[9px]"
+            aria-label="Diffusion critic warm-up checkpoint"
+          >
+            <div className="font-semibold text-[#645b52]">Critic bundle</div>
             <output
               aria-label="Critic warm-up bundle path"
               title={bundlePath || 'Created after critic warm-up completes'}
-              className="flex h-7 min-w-0 items-center truncate rounded-md border border-[#d9d2c5] bg-[#f5f2eb] px-2 text-[9px] text-[#6f685d]"
+              className="mt-1 block truncate font-mono text-[8px] text-[#998f85]"
             >
               {bundlePath || 'Bundle path · pending'}
             </output>
-            <button
-              type="button"
-              onClick={onStart}
-              disabled={startDisabled}
-              className={clsx(
-                'h-7 rounded-md border text-[9px] font-semibold',
-                startDisabled
-                  ? 'cursor-not-allowed border-[#d9d2c5] bg-[#e9e5dc] text-[#9b9387]'
-                  : 'border-[#5f7965] bg-[#69866f] text-white hover:bg-[#5f7965]'
-              )}
-            >
-              {isStarting ? 'Starting…' : 'Train Critic'}
-            </button>
-            <button
-              type="button"
-              onClick={onStop}
-              disabled={stopDisabled}
-              className={clsx(
-                'h-7 rounded-md border text-[9px] font-semibold',
-                stopDisabled
-                  ? 'cursor-not-allowed border-[#d9d2c5] bg-[#eeeae2] text-[#aaa296]'
-                  : 'border-[#b77a70] bg-[#fff7f5] text-[#a45f55] hover:bg-[#f7e4df]'
-              )}
-            >
-              {isStopping ? 'Stopping…' : 'Stop'}
-            </button>
           </div>
           {integrationReady ? (
             <p
@@ -400,7 +453,6 @@ function CriticWarmupPanel({
             </p>
           )}
         </div>
-      )}
     </div>
   );
 }
@@ -412,10 +464,13 @@ function WorkflowTrainingView({
   onPolicyModelChange,
   algorithm,
   onAlgorithmChange,
+  td3ActorObjective,
+  onTD3ActorObjectiveChange,
   flowSdePpoReady,
   flowInferenceBlockedReason,
-  criticWarmupEnabled,
-  onCriticWarmupEnabledChange,
+  flowTaskInstruction,
+  ppoResumeReady,
+  compatibleWarmupReady,
   warmupSteps,
   setWarmupSteps,
   warmupBatchSize,
@@ -424,26 +479,12 @@ function WorkflowTrainingView({
   setWarmupValueLearningRate,
   warmupDiscount,
   setWarmupDiscount,
-  warmupStatus,
-  warmupStatusReady,
-  warmupStatusLabel,
-  warmupProgress,
-  warmupBundlePath,
-  warmupIntegrationReady,
-  warmupIntegrationMessage,
-  warmupSourceKind,
-  warmupSourceLabel,
-  warmupSourceReadyLabel,
-  handleWarmupStart,
-  handleWarmupStop,
-  warmupStartDisabled,
-  warmupStopDisabled,
-  isWarmupStarting,
-  isWarmupStopping,
-  warmupIsRunning,
   actorTrainableGroups,
   setActorTrainableGroups,
+  rltTrainableGroups,
+  setRltTrainableGroups,
   browserDisabled,
+  selectionDisabled,
   criticEpochs,
   setCriticEpochs,
   actorEquivalentEpochs,
@@ -456,12 +497,17 @@ function WorkflowTrainingView({
   setImitationBatchSize,
   imitationSaveFreq,
   setImitationSaveFreq,
+  imitationActionChunkSize,
+  setImitationActionChunkSize,
+  criticWarmupUpdates,
+  setCriticWarmupUpdates,
   statusLabel,
   displayProgress,
   jobStatus,
   modelPath,
   currentPolicyEpoch,
   datasetSelections,
+  trainingReplayDatasets,
   actCheckpoint,
   robotType,
   handleStart,
@@ -476,28 +522,174 @@ function WorkflowTrainingView({
   statusReady,
   isConversionRunning,
   trainabilityError,
+  onCompactLayoutChange,
 }) {
+  const isReinforcementLearning = trainingMethod === 'reinforcement';
   const isImitationLearning = trainingMethod === 'imitation';
+  const isCriticWarmup = trainingMethod === 'critic';
   const isActSelected = selectedPolicyModel === 'act';
   const isMultiTaskDiTSelected = selectedPolicyModel === 'multi_task_dit';
+  const isRltPolicySelected = ['groot', 'pi05'].includes(selectedPolicyModel);
+  const isDiffusionCriticWarmup = isCriticWarmup && isMultiTaskDiTSelected;
+  const criticModelUnsupported = (
+    isCriticWarmup && !isActSelected && !isMultiTaskDiTSelected
+  );
   const isFlowSdePpo = (
-    !isImitationLearning &&
+    isReinforcementLearning &&
     isMultiTaskDiTSelected &&
     algorithm === 'flow_sde_ppo'
   );
-  const imitationActionChunkSize = (
-    IMITATION_ACTION_CHUNK_SIZES[selectedPolicyModel] ||
-    IMITATION_ACTION_CHUNK_SIZES.act
+  const td3Available = isReinforcementLearning && isActSelected && !browserDisabled;
+  const isActTD3 = (
+    isReinforcementLearning &&
+    isActSelected &&
+    ACT_TD3_ALGORITHMS.has(algorithm)
   );
-  const imitationPolicyName = isMultiTaskDiTSelected
-    ? 'Diffusion Transformer'
-    : 'ACT';
+  const isActTrainingLoop = (
+    isActSelected &&
+    (isImitationLearning || isCriticWarmup || isActTD3)
+  );
+  const [sampledLossHistory, setSampledLossHistory] = useState({
+    jobId: '',
+    actor: [],
+    critic: [],
+  });
+  const persistedLossHistory = useMemo(
+    () => normalizeLossHistory(jobStatus?.loss_history),
+    [jobStatus?.loss_history]
+  );
+  useEffect(() => {
+    if (!isActTD3 || persistedLossHistory.actor.length || persistedLossHistory.critic.length) {
+      return;
+    }
+    const jobId = String(jobStatus?.job_id || 'pending');
+    const stepCandidates = [
+      jobStatus?.completed_critic_updates,
+      jobStatus?.completed_epochs,
+      jobStatus?.percentage,
+    ].map(optionalFiniteNumber);
+    const step = stepCandidates.find((value) => value !== null);
+    if (step === undefined) return;
+    const actorLoss = optionalFiniteNumber(jobStatus?.actor_loss);
+    const criticLoss = optionalFiniteNumber(jobStatus?.critic_loss);
+    if (actorLoss === null && criticLoss === null) return;
+
+    setSampledLossHistory((current) => {
+      const base = current.jobId === jobId
+        ? current
+        : { jobId, actor: [], critic: [] };
+      return {
+        jobId,
+        actor: appendLossSample(
+          base.actor,
+          actorLoss !== null ? { step, loss: actorLoss } : null
+        ),
+        critic: appendLossSample(
+          base.critic,
+          criticLoss !== null ? { step, loss: criticLoss } : null
+        ),
+      };
+    });
+  }, [
+    isActTD3,
+    jobStatus?.actor_loss,
+    jobStatus?.completed_critic_updates,
+    jobStatus?.completed_epochs,
+    jobStatus?.critic_loss,
+    jobStatus?.job_id,
+    jobStatus?.percentage,
+    persistedLossHistory.actor.length,
+    persistedLossHistory.critic.length,
+  ]);
+  const actorLossHistory = persistedLossHistory.actor.length
+    ? persistedLossHistory.actor
+    : sampledLossHistory.actor;
+  const criticLossHistory = persistedLossHistory.critic.length
+    ? persistedLossHistory.critic
+    : sampledLossHistory.critic;
+  const isPureTD3 = isActTD3 && td3ActorObjective === 'td3';
+  const flowSdePpoAvailable = (
+    isReinforcementLearning &&
+    isMultiTaskDiTSelected &&
+    !browserDisabled
+  );
+  const rltAvailable = (
+    isReinforcementLearning &&
+    isRltPolicySelected &&
+    !browserDisabled
+  );
+  const isRltLayout = (
+    isReinforcementLearning &&
+    isRltPolicySelected &&
+    algorithm === 'rlt'
+  );
+  const isRlt = rltAvailable && algorithm === 'rlt';
+  const isCompactWorkflowLayout = (
+    isRltLayout ||
+    isActTrainingLoop ||
+    isImitationLearning ||
+    (
+      isMultiTaskDiTSelected &&
+      (isDiffusionCriticWarmup || isFlowSdePpo)
+    )
+  );
+
+  useEffect(() => {
+    onCompactLayoutChange?.(isCompactWorkflowLayout);
+    return () => onCompactLayoutChange?.(false);
+  }, [isCompactWorkflowLayout, onCompactLayoutChange]);
+  const displayedImitationActionChunkSize = isMultiTaskDiTSelected
+    ? IMITATION_ACTION_CHUNK_SIZES.multi_task_dit
+    : imitationActionChunkSize;
+  const imitationPolicyName = {
+    act: 'ACT',
+    multi_task_dit: 'Diffusion Transformer',
+    groot: 'GR00T',
+    pi05: 'Pi0.5',
+  }[selectedPolicyModel] || selectedPolicyModel;
+  const imitationCardPresentation = {
+    multi_task_dit: {
+      title: 'Diffusion Transformer imitation learning',
+      description: 'Supervised flow-matching · no reward or outcome labels required',
+      objectiveEyebrow: 'Diffusion objective',
+      objectiveTitle: 'Flow-Matching Reconstruction',
+      objectiveDetail: 'Noise-conditioned velocity regression over demonstrated action chunks',
+      actionChunkDisabled: true,
+      actionChunkTitle: 'Diffusion Transformer horizon is fixed by its model contract',
+    },
+    groot: {
+      title: 'GR00T imitation learning',
+      description: 'Supervised GR00T action-chunk fine-tuning preview',
+      objectiveEyebrow: 'GR00T objective',
+      objectiveTitle: 'Flow-Matching Action Reconstruction',
+      objectiveDetail: 'Supervised action-flow matching over demonstrated action chunks',
+      actionChunkDisabled: false,
+      actionChunkTitle: 'GR00T action horizon preview',
+    },
+    pi05: {
+      title: 'Pi0.5 imitation learning',
+      description: 'Supervised Pi0.5 action-chunk fine-tuning preview',
+      objectiveEyebrow: 'Pi0.5 objective',
+      objectiveTitle: 'Flow-Matching Action Reconstruction',
+      objectiveDetail: 'Supervised action-flow matching over demonstrated action chunks',
+      actionChunkDisabled: false,
+      actionChunkTitle: 'Pi0.5 action horizon preview',
+    },
+  }[selectedPolicyModel] || {
+    title: `${imitationPolicyName} imitation learning`,
+    description: `Fit ${imitationPolicyName} action chunks to recorded demonstrations`,
+    objectiveEyebrow: `${imitationPolicyName} objective`,
+    objectiveTitle: 'Action Chunk Reconstruction',
+    objectiveDetail: 'Supervised reconstruction of demonstrated action chunks',
+    actionChunkDisabled: false,
+    actionChunkTitle: '',
+  };
   const isSupportedPolicy = isActSelected || isMultiTaskDiTSelected;
   const parsedRoundIndex = Number(jobStatus?.round_index);
   const targetPolicyEpoch = (
-    !isImitationLearning &&
+    isReinforcementLearning &&
     isActSelected &&
-    algorithm === 'td3' &&
+    ACT_TD3_ALGORITHMS.has(algorithm) &&
     Number.isInteger(parsedRoundIndex) &&
     parsedRoundIndex >= 1
   ) ? parsedRoundIndex : Number(currentPolicyEpoch) + 1;
@@ -507,51 +699,225 @@ function WorkflowTrainingView({
     groot: 'GR00T',
     pi05: 'Pi0.5',
   }[selectedPolicyModel] || selectedPolicyModel;
+  const sharedLoopReplayStep = isImitationLearning
+    ? 'Replay Buffer → IL'
+    : (isCriticWarmup
+      ? 'Replay Buffer → Critic'
+      : (isRlt
+        ? 'Replay Buffer → RLT'
+        : (isFlowSdePpo ? 'Rollout Buffer → PPO' : 'Replay Buffer → Training')));
+  const sharedLoopRegionLabel = `${selectedPolicyLabel} ${
+    isImitationLearning
+      ? 'imitation'
+      : (isCriticWarmup ? 'critic warm-up' : (isRlt ? 'RLT' : 'reinforcement'))
+  } training loop`;
   const workflowStartDisabled = (
     startDisabled ||
     !isSupportedPolicy ||
-    (isFlowSdePpo && (
-      !flowSdePpoReady ||
-      (criticWarmupEnabled && !warmupIntegrationReady)
-    ))
+    criticModelUnsupported ||
+    (isFlowSdePpo && !flowSdePpoReady)
   );
   const invalidDatasetVersion = datasetSelections.find(
     (selection) => selection.version && selection.version !== 'v3.0'
   )?.version;
-
+  const reportedCriticCheckpointPath = String(
+    statusValue(jobStatus, 'checkpoint_path') || ''
+  ).trim();
+  const reportedCriticActCheckpoint = String(jobStatus?.act_checkpoint || '').trim();
+  const criticCheckpointMatchesPolicy = Boolean(
+    reportedCriticCheckpointPath &&
+    actPolicyPathsEquivalent(actCheckpoint, reportedCriticActCheckpoint)
+  );
+  const criticCheckpointPath = criticCheckpointMatchesPolicy
+    ? reportedCriticCheckpointPath
+    : '';
+  const criticCheckpointGuidance = reportedCriticCheckpointPath && !criticCheckpointMatchesPolicy
+    ? 'Saved critic belongs to a different or unverified ACT policy'
+    : (actCheckpoint
+      ? 'Resolved by backend under selected ACT policy/critic/latest.pt'
+      : 'Select an ACT policy');
+  const configuredCriticWarmupUpdates = Number(criticWarmupUpdates);
+  const criticWarmupTotalUpdates = statusValue(
+    jobStatus,
+    'total_critic_updates'
+  ) ?? (
+    Number.isInteger(configuredCriticWarmupUpdates) && configuredCriticWarmupUpdates > 0
+      ? configuredCriticWarmupUpdates
+      : DEFAULT_ACT_CRITIC_WARMUP_UPDATES
+  );
   const handleWorkflowStart = () => {
     if (
       !isSupportedPolicy ||
-      (isFlowSdePpo && (
-        !flowSdePpoReady ||
-        (criticWarmupEnabled && !warmupIntegrationReady)
-      ))
+      criticModelUnsupported ||
+      (isFlowSdePpo && !flowSdePpoReady)
     ) return;
     handleStart();
   };
 
+  const progressMetrics = isImitationLearning ? (isMultiTaskDiTSelected ? [
+    {
+      label: 'Flow loss',
+      value: formatLoss(statusValue(jobStatus, 'loss', 'flow_loss')),
+      tone: 'actor',
+    },
+    {
+      label: 'Step',
+      value: formatCount(statusValue(jobStatus, 'step', 'completed_steps')),
+      tone: 'neutral',
+    },
+    {
+      label: 'Policy',
+      value: modelPath ? 'Ready' : '—',
+      tone: 'neutral',
+    },
+  ] : [
+    {
+      label: 'Total loss',
+      value: formatLoss(statusValue(jobStatus, 'loss', 'total_loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'L1 loss',
+      value: formatLoss(statusValue(jobStatus, 'l1_loss')),
+      tone: 'actor',
+    },
+    {
+      label: 'KLD loss',
+      value: formatLoss(statusValue(jobStatus, 'kld_loss')),
+      tone: 'neutral',
+    },
+  ]) : isCriticWarmup ? (isDiffusionCriticWarmup ? [
+    {
+      label: 'Critic loss',
+      value: formatLoss(statusValue(jobStatus, 'value_loss', 'loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Step',
+      value: formatCount(statusValue(jobStatus, 'step', 'completed_steps')),
+      tone: 'neutral',
+    },
+    { label: 'Policy', value: 'Frozen', tone: 'neutral' },
+  ] : [
+    {
+      label: 'Critic loss',
+      value: formatLoss(statusValue(jobStatus, 'critic_loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Target mean',
+      value: formatLoss(statusValue(jobStatus, 'target_mean')),
+      tone: 'neutral',
+    },
+    {
+      label: 'Actor',
+      value: statusValue(jobStatus, 'actor_exactly_unchanged') === false
+        ? 'Changed'
+        : (statusValue(jobStatus, 'actor_exactly_unchanged') === true
+          ? 'Unchanged'
+          : 'Frozen'),
+      tone: 'actor',
+    },
+  ]) : isRlt ? [
+    {
+      label: 'Critic loss',
+      value: formatLoss(statusValue(jobStatus, 'critic_loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Action MLP loss',
+      value: formatLoss(statusValue(jobStatus, 'actor_loss')),
+      tone: 'actor',
+    },
+  ] : isMultiTaskDiTSelected ? [
+    {
+      label: 'Actor loss',
+      value: formatLoss(statusValue(jobStatus, 'actor_loss', 'policy_loss')),
+      tone: 'actor',
+    },
+    {
+      label: 'Critic loss',
+      value: formatLoss(statusValue(jobStatus, 'value_loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Approx. KL',
+      value: formatLoss(statusValue(jobStatus, 'approx_kl', 'kl')),
+      tone: 'neutral',
+    },
+  ] : [
+    {
+      label: 'Critic loss',
+      value: formatLoss(statusValue(jobStatus, 'critic_loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Actor loss',
+      value: formatLoss(statusValue(jobStatus, 'actor_loss')),
+      tone: 'actor',
+    },
+    {
+      label: 'Policy',
+      value: modelPath ? 'Ready' : '—',
+      tone: 'neutral',
+    },
+  ];
+  const progressDetailLabel = isActTD3
+    ? `Critic replay ${formatCount(statusValue(jobStatus, 'completed_epochs'))}/${formatCount(statusValue(jobStatus, 'total_epochs'))}`
+    : (isImitationLearning
+      ? `Step ${formatCount(statusValue(jobStatus, 'step', 'completed_steps'))}/${formatCount(statusValue(jobStatus, 'total_steps'))}`
+      : (isCriticWarmup
+        ? (isDiffusionCriticWarmup
+          ? `Step ${formatCount(statusValue(jobStatus, 'step', 'completed_steps'))}/${formatCount(statusValue(jobStatus, 'total_steps', 'steps'))}`
+          : `Update ${formatCount(statusValue(jobStatus, 'completed_critic_updates'))}/${formatCount(criticWarmupTotalUpdates)}`)
+        : ''));
+  const progressAriaLabel = isActTD3
+    ? 'Training loss progress'
+    : (isImitationLearning
+      ? 'Imitation Learning training progress'
+      : (isCriticWarmup
+        ? `${isDiffusionCriticWarmup ? 'Diffusion' : 'ACT'} critic warm-up progress`
+        : (isRlt
+          ? 'RLT training progress'
+          : (isMultiTaskDiTSelected
+            ? 'Flow-SDE PPO training progress'
+            : 'Offline RL training progress'))));
+
   const renderPolicyDiagram = () => {
-    if (selectedPolicyModel === 'groot') return <GrootArchitectureDiagram />;
+    if (selectedPolicyModel === 'groot') {
+      return <GrootArchitectureDiagram mode={isRlt ? 'rlt' : 'finetune'} />;
+    }
     if (selectedPolicyModel === 'multi_task_dit') {
-      return <MultiTaskDiTArchitectureDiagram />;
+      return <MultiTaskDiTArchitectureDiagram criticOnly={isDiffusionCriticWarmup} />;
     }
     if (selectedPolicyModel === 'pi05') {
       return <PI05ArchitectureDiagram disabled={browserDisabled} />;
     }
     return (
       <ACTArchitectureDiagram
-        trainableGroups={isImitationLearning
-          ? DEFAULT_ACT_TRAINABLE_GROUPS
-          : actorTrainableGroups}
-        onChange={setActorTrainableGroups}
-        disabled={browserDisabled || isImitationLearning}
+        trainableGroups={isCriticWarmup
+          ? []
+          : (isPureTD3
+            ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder')
+            : actorTrainableGroups)}
+        onChange={(groups) => setActorTrainableGroups(
+          isPureTD3
+            ? groups.filter((group) => group !== 'cvae_encoder')
+            : groups
+        )}
+        disabled={browserDisabled || isCriticWarmup}
       />
     );
   };
 
   return (
     <div
-      className="mt-3 flex min-h-0 min-w-0 flex-1 flex-col"
+      className={clsx(
+        'mt-3 grid min-h-0 min-w-0 overflow-hidden',
+        isCompactWorkflowLayout
+          ? 'flex-none grid-rows-[auto_auto_auto]'
+          : 'flex-1 grid-rows-[auto_minmax(0,1fr)_auto]'
+      )}
       data-testid="offline-rl-workflow-training"
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -559,7 +925,7 @@ function WorkflowTrainingView({
           <button
             type="button"
             aria-pressed={selectedPolicyModel === 'act'}
-            disabled={browserDisabled}
+            disabled={selectionDisabled}
             onClick={() => onPolicyModelChange('act')}
             className={selectedPolicyModel === 'act' ? activeChoiceClass : inactiveChoiceClass}
           >
@@ -567,7 +933,7 @@ function WorkflowTrainingView({
           </button>
           <button
             type="button"
-            disabled={browserDisabled}
+            disabled={selectionDisabled}
             aria-pressed={selectedPolicyModel === 'multi_task_dit'}
             onClick={() => onPolicyModelChange('multi_task_dit')}
             className={selectedPolicyModel === 'multi_task_dit'
@@ -578,19 +944,23 @@ function WorkflowTrainingView({
           </button>
           <button
             type="button"
-            disabled={browserDisabled || isImitationLearning}
+            disabled={selectionDisabled}
             aria-pressed={selectedPolicyModel === 'groot'}
             onClick={() => onPolicyModelChange('groot')}
-            className={selectedPolicyModel === 'groot' ? activeChoiceClass : inactiveChoiceClass}
+            className={selectedPolicyModel === 'groot'
+              ? activeChoiceClass
+              : inactiveChoiceClass}
           >
             GR00T
           </button>
           <button
             type="button"
-            disabled={browserDisabled || isImitationLearning}
+            disabled={selectionDisabled}
             aria-pressed={selectedPolicyModel === 'pi05'}
             onClick={() => onPolicyModelChange('pi05')}
-            className={selectedPolicyModel === 'pi05' ? activeChoiceClass : inactiveChoiceClass}
+            className={selectedPolicyModel === 'pi05'
+              ? activeChoiceClass
+              : inactiveChoiceClass}
           >
             Pi0.5
           </button>
@@ -600,217 +970,259 @@ function WorkflowTrainingView({
           <WorkflowChoiceGroup label="Training method">
             <button
               type="button"
-              aria-pressed={!isImitationLearning}
-              disabled={browserDisabled}
-              onClick={() => onTrainingMethodChange('reinforcement')}
-              className={!isImitationLearning ? activeChoiceClass : inactiveChoiceClass}
-            >
-              Reinforcement Learning
-            </button>
-            <button
-              type="button"
+              aria-label="Imitation Learning"
               aria-pressed={isImitationLearning}
-              disabled={browserDisabled}
+              disabled={selectionDisabled}
               onClick={() => onTrainingMethodChange('imitation')}
               className={isImitationLearning ? activeChoiceClass : inactiveChoiceClass}
             >
-              Imitation Learning
+              IL
+            </button>
+            <button
+              type="button"
+              aria-label="Critic Warm-up"
+              aria-pressed={isCriticWarmup}
+              disabled={selectionDisabled || (
+                !isActSelected && !isMultiTaskDiTSelected && !isCriticWarmup
+              )}
+              onClick={() => onTrainingMethodChange('critic')}
+              className={isCriticWarmup ? activeChoiceClass : inactiveChoiceClass}
+              title={isActSelected
+                ? 'Warm up ACT-TD3 critics with the ACT actor frozen'
+                : (isMultiTaskDiTSelected
+                  ? 'Warm up the Flow-SDE value critic with the Diffusion policy frozen'
+                  : 'Select ACT or Diffusion Transformer to run critic warm-up')}
+            >
+              Critic
+            </button>
+            <button
+              type="button"
+              aria-label="Reinforcement Learning"
+              aria-pressed={isReinforcementLearning}
+              disabled={selectionDisabled}
+              onClick={() => onTrainingMethodChange('reinforcement')}
+              className={isReinforcementLearning ? activeChoiceClass : inactiveChoiceClass}
+            >
+              RL
             </button>
           </WorkflowChoiceGroup>
 
-          <WorkflowChoiceGroup label="RL algorithm">
-            <button
-              type="button"
-              disabled={isImitationLearning || browserDisabled}
-              aria-pressed={!isImitationLearning && algorithm === 'td3'}
-              onClick={() => onAlgorithmChange('td3')}
-              className={!isImitationLearning && algorithm === 'td3'
-                ? activeChoiceClass
-                : (isImitationLearning ? disabledChoiceClass : inactiveChoiceClass)}
-            >
-              TD3
-            </button>
-            <button
-              type="button"
-              disabled={isImitationLearning || browserDisabled}
-              aria-pressed={!isImitationLearning && algorithm === 'flow_sde_ppo'}
-              onClick={() => onAlgorithmChange('flow_sde_ppo')}
-              className={!isImitationLearning && algorithm === 'flow_sde_ppo'
-                ? activeChoiceClass
-                : (isImitationLearning ? disabledChoiceClass : inactiveChoiceClass)}
-              title="PPO over Flow-SDE action-chunk trajectories"
-            >
-              PPO
-              <span className="ml-1 rounded-full bg-white/25 px-1.5 py-0.5 text-[8px]">
-                Flow-SDE
-              </span>
-            </button>
-            <button
-              type="button"
-              disabled
-              aria-pressed="false"
-              title="SAC training backend is coming soon"
-              className={disabledChoiceClass}
-            >
-              SAC
-            </button>
-          </WorkflowChoiceGroup>
+          <div className="flex flex-col gap-2">
+            <WorkflowChoiceGroup label="RL algorithm">
+              <button
+                type="button"
+                disabled={!td3Available}
+                aria-pressed={isReinforcementLearning && algorithm === 'td3'}
+                onClick={() => onAlgorithmChange('td3')}
+                className={isReinforcementLearning && algorithm === 'td3'
+                  ? activeChoiceClass
+                  : (!td3Available ? disabledChoiceClass : inactiveChoiceClass)}
+              >
+                TD3
+              </button>
+              <button
+                type="button"
+                disabled={!flowSdePpoAvailable}
+                aria-pressed={isReinforcementLearning && algorithm === 'flow_sde_ppo'}
+                onClick={() => onAlgorithmChange('flow_sde_ppo')}
+                className={isReinforcementLearning && algorithm === 'flow_sde_ppo'
+                  ? activeChoiceClass
+                  : (!flowSdePpoAvailable ? disabledChoiceClass : inactiveChoiceClass)}
+                title="PPO over Flow-SDE action-chunk trajectories"
+              >
+                PPO
+                <span className="ml-1 rounded-full bg-white/25 px-1.5 py-0.5 text-[8px]">
+                  Flow-SDE
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={!rltAvailable}
+                aria-pressed={isReinforcementLearning && algorithm === 'rlt'}
+                onClick={() => onAlgorithmChange('rlt')}
+                className={isReinforcementLearning && algorithm === 'rlt'
+                  ? activeChoiceClass
+                  : (!rltAvailable ? disabledChoiceClass : inactiveChoiceClass)}
+                title="RL Token Transformer with a lightweight Action MLP"
+              >
+                RLT
+              </button>
+              <button
+                type="button"
+                disabled
+                aria-pressed="false"
+                title="SAC training backend is coming soon"
+                className={disabledChoiceClass}
+              >
+                SAC
+              </button>
+            </WorkflowChoiceGroup>
+
+          </div>
         </div>
       </div>
 
       <div
-        className="mt-2 grid min-h-0 flex-1 items-stretch gap-2 lg:grid-cols-[minmax(0,1.25fr)_minmax(210px,0.75fr)]"
+        className="mt-2 grid min-h-0 flex-1 items-stretch gap-2 overflow-y-auto overscroll-contain pr-1"
         data-testid="offline-rl-training-architecture"
       >
-        {renderPolicyDiagram()}
-
-        <div className="flex h-full min-h-0 flex-col rounded-xl border border-[#e0d9ce] bg-[#f5f1e9] p-3">
-          {isImitationLearning ? (
-            <>
-              <div
-                className="flex min-h-0 flex-1 flex-col"
-                data-testid="act-imitation-learning-diagram"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <div className="text-[13px] font-semibold text-[#39352e]">
-                      {imitationPolicyName} imitation learning
-                    </div>
-                    <div className="text-[9px] text-[#8d8579]">
-                      {isMultiTaskDiTSelected
-                        ? 'Supervised flow-matching · no reward or outcome labels required'
-                        : 'Full CVAE behavior cloning · all ACT blocks trainable'}
-                    </div>
-                  </div>
-                  <span className="rounded-full bg-[#e8ebef] px-2.5 py-1 text-[9px] font-semibold text-[#65707e]">
-                    IL
-                  </span>
-                </div>
-                <div className="mt-3 grid min-h-0 flex-1 grid-rows-[1fr_auto_1fr_auto_1fr] gap-1 text-center text-[10px] font-semibold text-[#514b42]">
-                  <div className="flex items-center justify-center rounded-lg border border-[#d9d2c5] bg-white px-2">
-                    3 images + robot state
-                  </div>
-                  <div className="text-[#aaa295]">↓</div>
-                  <div className="flex items-center justify-center rounded-lg border border-[#9faf9f] bg-[#edf3ec] px-2 text-[#344a38]">
-                    {isMultiTaskDiTSelected
-                      ? 'Diffusion Transformer · flow-matching training'
-                      : 'ACT CVAE policy · full training'}
-                  </div>
-                  <div className="text-[#aaa295]">↓</div>
-                  <div className="flex items-center justify-center rounded-lg border border-[#d9d2c5] bg-white px-2">
-                    {imitationActionChunkSize}-step action chunk
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-3 grid shrink-0 grid-cols-4 gap-1.5">
-                <label className="text-[8px] font-semibold text-[#777064]">
-                  Steps
-                  <input
-                    aria-label="Imitation steps"
-                    type="number"
-                    min={1}
-                    max={1000000}
-                    step={1000}
-                    value={imitationSteps}
-                    onChange={(event) => setImitationSteps(event.target.value)}
-                    disabled={browserDisabled}
-                    className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
-                  />
-                </label>
-                <label className="text-[8px] font-semibold text-[#777064]">
-                  Batch size
-                  <input
-                    aria-label="Imitation batch size"
-                    type="number"
-                    min={1}
-                    max={64}
-                    step={1}
-                    value={imitationBatchSize}
-                    onChange={(event) => setImitationBatchSize(event.target.value)}
-                    disabled={browserDisabled}
-                    className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
-                  />
-                </label>
-                <label className="text-[8px] font-semibold text-[#777064]">
-                  Save frequency
-                  <input
-                    aria-label="Imitation save frequency"
-                    type="number"
-                    min={1}
-                    step={1000}
-                    value={imitationSaveFreq}
-                    onChange={(event) => setImitationSaveFreq(event.target.value)}
-                    disabled={browserDisabled}
-                    className="mt-1 h-7 w-full rounded-md border border-[#d9d2c5] bg-white px-2 text-[10px] text-[#403b34] outline-none disabled:cursor-not-allowed disabled:bg-[#ece8df]"
-                  />
-                </label>
-                <div className="text-[8px] font-semibold text-[#777064]">
-                  Action chunk
-                  <output
-                    aria-label="Imitation action chunk"
-                    className="mt-1 flex h-7 w-full items-center rounded-md border border-[#d9d2c5] bg-[#ece8df] px-2 text-[10px] text-[#403b34]"
-                  >
-                    {imitationActionChunkSize}
-                  </output>
-                </div>
-              </div>
-            </>
-          ) : isMultiTaskDiTSelected ? (
-            <>
-              <CriticWarmupPanel
-                enabled={criticWarmupEnabled}
-                onEnabledChange={onCriticWarmupEnabledChange}
-                toggleDisabled={browserDisabled || warmupIsRunning}
-                controlsDisabled={browserDisabled || warmupIsRunning}
-                steps={warmupSteps}
-                setSteps={setWarmupSteps}
-                batchSize={warmupBatchSize}
-                setBatchSize={setWarmupBatchSize}
-                valueLearningRate={warmupValueLearningRate}
-                setValueLearningRate={setWarmupValueLearningRate}
-                discount={warmupDiscount}
-                setDiscount={setWarmupDiscount}
-                statusReady={warmupStatusReady}
-                statusLabel={warmupStatusLabel}
-                progress={warmupProgress}
-                status={warmupStatus}
-                bundlePath={warmupBundlePath}
-                integrationReady={warmupIntegrationReady}
-                integrationMessage={warmupIntegrationMessage}
-                sourceKind={warmupSourceKind}
-                sourceLabel={warmupSourceLabel}
-                sourceReadyLabel={warmupSourceReadyLabel}
-                onStart={handleWarmupStart}
-                onStop={handleWarmupStop}
-                startDisabled={warmupStartDisabled}
-                stopDisabled={warmupStopDisabled}
-                isStarting={isWarmupStarting}
-                isStopping={isWarmupStopping}
+        {isActTrainingLoop ? (
+          <ACTTD3TrainingLoop
+            mode={trainingMethod}
+            trainableGroups={isCriticWarmup
+              ? []
+              : (isPureTD3
+                ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder')
+                : actorTrainableGroups)}
+            onTrainableGroupsChange={(groups) => {
+              if (isCriticWarmup) return;
+              setActorTrainableGroups(
+                isPureTD3
+                  ? groups.filter((group) => group !== 'cvae_encoder')
+                  : groups
+              );
+            }}
+            lockedGroups={isPureTD3 ? ['cvae_encoder'] : []}
+            datasets={trainingReplayDatasets}
+            actorObjective={td3ActorObjective}
+            onActorObjectiveChange={onTD3ActorObjectiveChange}
+            criticEpochs={criticEpochs}
+            onCriticEpochsChange={setCriticEpochs}
+            actorEpochs={actorEquivalentEpochs}
+            onActorEpochsChange={setActorEquivalentEpochs}
+            batchSize={batchSize}
+            onBatchSizeChange={setBatchSize}
+            imitationSteps={imitationSteps}
+            onImitationStepsChange={setImitationSteps}
+            imitationBatchSize={imitationBatchSize}
+            onImitationBatchSizeChange={setImitationBatchSize}
+            imitationSaveFreq={imitationSaveFreq}
+            onImitationSaveFreqChange={setImitationSaveFreq}
+            imitationActionChunkSize={displayedImitationActionChunkSize}
+            onImitationActionChunkSizeChange={setImitationActionChunkSize}
+            criticWarmupBatchSize={batchSize}
+            onCriticWarmupBatchSizeChange={setBatchSize}
+            criticWarmupUpdates={criticWarmupUpdates}
+            onCriticWarmupUpdatesChange={setCriticWarmupUpdates}
+            criticCheckpointPath={criticCheckpointPath}
+            criticGuidance={criticCheckpointGuidance}
+            policyDisabled={browserDisabled || isCriticWarmup}
+            disabled={browserDisabled}
+            fitContent={isCompactWorkflowLayout}
+            updated={Boolean(
+              !isCriticWarmup &&
+              modelPath &&
+              COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase())
+            )}
+          />
+        ) : (
+          <PolicyTrainingLoopLayout
+            regionLabel={sharedLoopRegionLabel}
+            testId="policy-training-loop"
+            trainingMode={trainingMethod}
+            policyModel={selectedPolicyModel}
+            policyLabel={selectedPolicyLabel}
+            policyTestId="training-policy-stage"
+            policyNode={renderPolicyDiagram()}
+            datasets={trainingReplayDatasets}
+            trainingNode={isImitationLearning ? (
+              <ImitationLearningCard
+                policyLabel={imitationPolicyName}
+                title={imitationCardPresentation.title}
+                description={imitationCardPresentation.description}
+                objectiveEyebrow={imitationCardPresentation.objectiveEyebrow}
+                objectiveTitle={imitationCardPresentation.objectiveTitle}
+                objectiveDetail={imitationCardPresentation.objectiveDetail}
+                titleId={`${selectedPolicyModel}-imitation-algorithm-title`}
+                testId={`${selectedPolicyModel}-imitation-algorithm-card`}
+                steps={imitationSteps}
+                onStepsChange={setImitationSteps}
+                batchSize={imitationBatchSize}
+                onBatchSizeChange={setImitationBatchSize}
+                saveFreq={imitationSaveFreq}
+                onSaveFreqChange={setImitationSaveFreq}
+                actionChunkSize={displayedImitationActionChunkSize}
+                onActionChunkSizeChange={setImitationActionChunkSize}
+                actionChunkDisabled={imitationCardPresentation.actionChunkDisabled}
+                actionChunkTitle={imitationCardPresentation.actionChunkTitle}
+                disabled={browserDisabled}
               />
-
-              <FlowSDEPPOArchitectureDiagram backendReady={flowSdePpoReady} />
-
-              <div className="mt-3 grid shrink-0 grid-cols-3 gap-1.5 text-center">
-                {[
-                  ['Rollout', 'Online'],
-                  ['Action chunk', '16 × 22D'],
-                  ['Obs encoder', 'Frozen'],
-                ].map(([label, value]) => (
-                  <div
-                    key={label}
-                    className="rounded-lg border border-[#d9d2c5] bg-white px-2 py-1.5"
-                  >
-                    <div className="text-[8px] font-semibold text-[#8d8579]">{label}</div>
-                    <div className="mt-0.5 text-[10px] font-semibold text-[#514b42]">{value}</div>
-                  </div>
-                ))}
+            ) : (
+              <div
+                className={clsx(
+                  'flex min-h-0 flex-col rounded-2xl border border-[#decfc3] bg-white p-4 shadow-[0_8px_24px_rgba(75,66,51,0.07)]',
+                  isCompactWorkflowLayout ? 'h-fit' : 'h-full'
+                )}
+                data-testid="training-algorithm-card"
+              >
+          {isDiffusionCriticWarmup ? (
+            <CriticWarmupPanel
+              controlsDisabled={browserDisabled}
+              steps={warmupSteps}
+              setSteps={setWarmupSteps}
+              batchSize={warmupBatchSize}
+              setBatchSize={setWarmupBatchSize}
+              valueLearningRate={warmupValueLearningRate}
+              setValueLearningRate={setWarmupValueLearningRate}
+              discount={warmupDiscount}
+              setDiscount={setWarmupDiscount}
+              statusReady={statusReady}
+              statusLabel={statusLabel}
+              progress={displayProgress}
+              status={jobStatus}
+              bundlePath={String(statusValue(jobStatus, 'bundle_path') || '').trim()}
+              integrationReady={Boolean(
+                COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase()) &&
+                String(statusValue(jobStatus, 'bundle_path') || '').trim()
+              )}
+              integrationMessage="The completed bundle is saved with the frozen Diffusion policy and value critic."
+              sourceKind="Warm-up"
+              sourceLabel={shortWarmupSource(
+                jobStatus,
+                String(statusValue(jobStatus, 'bundle_path') || '').trim()
+              )}
+              sourceReadyLabel="Ready for online PPO"
+            />
+          ) : isCriticWarmup ? (
+            <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-[#d9d2c5] bg-[#f8f5ef] px-5 text-center">
+              <div>
+                <div className="text-[13px] font-semibold text-[#655e54]">
+                  No compatible critic workflow
+                </div>
+                <div className="mt-1 text-[10px] text-[#8d8579]">
+                  Select ACT or Diffusion Transformer.
+                </div>
               </div>
-
-            </>
+            </div>
+          ) : isRlt ? (
+            <RLTArchitectureDiagram
+              policyLabel={selectedPolicyLabel}
+              trainableGroups={rltTrainableGroups}
+              onChange={setRltTrainableGroups}
+              disabled={browserDisabled}
+            />
+          ) : isFlowSdePpo ? (
+            <FlowSDEPPOArchitectureDiagram backendReady={flowSdePpoReady} />
           ) : isActSelected ? (
             <>
-              <TD3ArchitectureDiagram />
+              <TD3ArchitectureDiagram actorObjective={td3ActorObjective} />
+
+              <div
+                className="mt-2 rounded-lg border border-[#d9d2c5] bg-white px-2.5 py-2 text-[9px] text-[#6f685d]"
+                aria-label="ACT TD3 actor objective"
+              >
+                <span className="font-semibold text-[#514b42]">
+                  {isPureTD3 ? 'Pure TD3 actor' : 'TD3+BC actor'}
+                </span>
+                <span className="float-right font-mono font-semibold text-[#5f7664]">
+                  {isPureTD3 ? '-Q1' : '-Q1 + CVAE/BC'}
+                </span>
+                <div className="mt-1 clear-both text-[8px] text-[#8d8579]">
+                  {isPureTD3
+                    ? 'All replay rows train the critics; CVAE encoder is frozen.'
+                    : 'Critics use all rows; CVAE and deterministic BC use success rows only.'}
+                </div>
+              </div>
 
               <div className="mt-3 grid shrink-0 grid-cols-3 gap-1.5">
                 <label className="text-[8px] font-semibold text-[#777064]">
@@ -855,6 +1267,7 @@ function WorkflowTrainingView({
                   />
                 </label>
               </div>
+
             </>
           ) : (
             <div className="flex min-h-0 flex-1 items-center justify-center text-center">
@@ -868,18 +1281,35 @@ function WorkflowTrainingView({
               </div>
             </div>
           )}
-        </div>
+              </div>
+            )}
+            replayStep={sharedLoopReplayStep}
+            returnStep="Policy update → next cycle"
+            connectorTestId="policy-training-loop-connectors"
+            fitContent={isCompactWorkflowLayout}
+            updated={Boolean(
+              modelPath &&
+              COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase())
+            )}
+          />
+        )}
       </div>
 
       <div
-        className="mt-auto grid shrink-0 gap-2 border-t border-[#e2dcd1] pt-3 lg:grid-cols-[minmax(0,1fr)_250px]"
+        className={clsx(
+          'grid shrink-0 items-stretch gap-2 border-t border-[#e2dcd1] pt-3 xl:grid-cols-[minmax(0,1fr)_220px]',
+          isCompactWorkflowLayout ? 'mt-3' : 'mt-auto'
+        )}
         data-testid="offline-rl-training-footer"
       >
-        <div className="rounded-xl border border-[#e2dcd1] bg-white p-2.5">
+        <div
+          className="rounded-xl border border-[#e2dcd1] bg-[#f8f5ef] p-2.5"
+          data-testid="offline-rl-training-progress-card"
+        >
           <div className="flex items-center justify-between gap-2 text-[10px]">
             <span className="flex min-w-0 items-center gap-2 font-semibold text-[#514b42]">
-              <span>Training progress</span>
-              {!isImitationLearning && isActSelected && algorithm === 'td3' && (
+              <span>{isCriticWarmup ? 'Critic warm-up progress' : 'Training progress'}</span>
+              {isActTD3 && (
                 <span
                   className="shrink-0 rounded-md border border-[#cfd8cd] bg-[#e8eee6] px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#58705d]"
                   aria-label={`ACT-TD3 policy RL Epoch ${currentPolicyEpoch} to ${targetPolicyEpoch}`}
@@ -888,59 +1318,22 @@ function WorkflowTrainingView({
                 </span>
               )}
             </span>
-            <span className="text-[#91897d]">
-              {statusLabel} · {displayProgress}%
-              {isImitationLearning && (
-                <> · Step {formatCount(statusValue(jobStatus, 'step', 'completed_steps'))}
-                  /{formatCount(statusValue(jobStatus, 'total_steps'))}</>
-              )}
-              {' '}· ETA {formatEta(statusValue(jobStatus, 'eta_seconds'))}
-              {!isImitationLearning && isActSelected && algorithm === 'td3' && (
-                <> · Critic replay {formatCount(statusValue(jobStatus, 'completed_epochs'))}
-                  /{formatCount(statusValue(jobStatus, 'total_epochs'))}</>
-              )}
-            </span>
           </div>
-          <div
-            className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#ebe6dd]"
-            role="progressbar"
-            aria-label={isImitationLearning
-              ? 'Imitation Learning training progress'
-              : (isMultiTaskDiTSelected
-                ? 'Flow-SDE PPO training progress'
-                : 'Offline RL training progress')}
-            aria-valuemin="0"
-            aria-valuemax="100"
-            aria-valuenow={displayProgress}
-          >
-            <div
-              className="h-full rounded-full bg-[#69866f] transition-[width]"
-              style={{ width: `${displayProgress}%` }}
+          <div className="mt-2">
+            <TrainingLossChart
+              actorLossHistory={actorLossHistory}
+              criticLossHistory={criticLossHistory}
+              metrics={isActTD3 ? null : progressMetrics}
+              percentage={displayProgress}
+              status={jobStatus?.status || 'idle'}
+              displayStatus={statusLabel}
+              etaSeconds={Number(statusValue(jobStatus, 'eta_seconds'))}
+              showEta
+              detailLabel={progressDetailLabel}
+              progressLabel={progressAriaLabel}
+              expandable={isReinforcementLearning}
+              rlMetricHistory={jobStatus?.rl_metric_history}
             />
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-            {(isImitationLearning ? (isMultiTaskDiTSelected ? [
-              ['Flow loss', formatLoss(statusValue(jobStatus, 'loss', 'flow_loss'))],
-              ['Step', formatCount(statusValue(jobStatus, 'step', 'completed_steps'))],
-              ['Policy', modelPath ? 'Ready' : '—'],
-            ] : [
-              ['Total loss', formatLoss(statusValue(jobStatus, 'loss', 'total_loss'))],
-              ['L1 loss', formatLoss(statusValue(jobStatus, 'l1_loss'))],
-              ['KLD loss', formatLoss(statusValue(jobStatus, 'kld_loss'))],
-            ]) : isMultiTaskDiTSelected ? [
-              ['Actor loss', formatLoss(statusValue(jobStatus, 'actor_loss', 'policy_loss'))],
-              ['Value loss', formatLoss(statusValue(jobStatus, 'value_loss'))],
-              ['Approx. KL', formatLoss(statusValue(jobStatus, 'approx_kl', 'kl'))],
-            ] : [
-              ['Critic loss', formatLoss(statusValue(jobStatus, 'critic_loss'))],
-              ['Actor loss', formatLoss(statusValue(jobStatus, 'actor_loss'))],
-              ['Policy', modelPath ? 'Ready' : '—'],
-            ]).map(([label, value]) => (
-              <div key={label} className="rounded-lg bg-[#f5f2eb] px-2 py-1.5">
-                <div className="text-[9px] text-[#999185]">{label}</div>
-                <div className="mt-0.5 truncate text-[11px] font-semibold text-[#4c473f]">{value}</div>
-              </div>
-            ))}
           </div>
         </div>
 
@@ -949,14 +1342,27 @@ function WorkflowTrainingView({
             <div className="flex items-center gap-1.5 text-[10px] font-semibold text-[#575147]">
               <MdDataObject size={13} /> Training action
             </div>
-            {!isSupportedPolicy ? (
+            {isCriticWarmup && !isActSelected && !isMultiTaskDiTSelected ? (
+              <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
+                {selectedPolicyLabel} critic warm-up is not connected. Select ACT or Diffusion
+                {' '}Transformer; the selected model remains available for inspection.
+              </p>
+            ) : isImitationLearning && ['groot', 'pi05'].includes(selectedPolicyModel) ? (
+              <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
+                {selectedPolicyLabel} imitation-learning preview is available, but its training backend is not
+                {' '}connected yet. Start Training remains disabled.
+              </p>
+            ) : isRlt ? (
+              <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
+                {selectedPolicyModel === 'pi05'
+                  ? 'Pi0.5 + RLT architecture is available, but a Pi0.5-compatible RLT checkpoint is required. The current showroom RLT artifact is GR00T-only.'
+                  : 'GR00T + RLT architecture is configured for shadow verification.'}
+                {' '}The training backend is not connected yet, so Start Training remains disabled.
+              </p>
+            ) : !isSupportedPolicy ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
                 {selectedPolicyLabel} diagram preview only. Offline RL training backend is not connected.
                 {' '}Training is available for ACT and Diffusion Transformer.
-              </p>
-            ) : isFlowSdePpo && criticWarmupEnabled && !warmupIntegrationReady ? (
-              <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
-                {warmupIntegrationMessage}
               </p>
             ) : isFlowSdePpo && !flowSdePpoReady ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
@@ -971,10 +1377,12 @@ function WorkflowTrainingView({
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
                 {isImitationLearning
                   ? `${imitationPolicyName} imitation learning`
-                  : 'TD3'} requires LeRobot v3.0.
+                  : (isCriticWarmup
+                    ? `${isDiffusionCriticWarmup ? 'Diffusion' : 'ACT'} critic warm-up`
+                    : 'TD3')} requires LeRobot v3.0.
                 {' '}The selected {invalidDatasetVersion} dataset is view only.
               </p>
-            ) : !isImitationLearning && isActSelected && trainabilityError ? (
+            ) : isActSelected && (isReinforcementLearning || isImitationLearning) && trainabilityError ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
                 {trainabilityError}
               </p>
@@ -982,16 +1390,30 @@ function WorkflowTrainingView({
               <p className="mt-1 text-[9px] leading-relaxed text-[#948c80]">
                 {isImitationLearning
                   ? (datasetSelections.length
-                    ? `${imitationPolicyName} imitation learning ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · ${imitationSteps} steps · batch ${imitationBatchSize} · ${imitationActionChunkSize}-step chunk · no reward or Success/Fail labels required`
+                    ? `${imitationPolicyName} imitation learning ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · ${imitationSteps} steps · batch ${imitationBatchSize} · ${displayedImitationActionChunkSize}-step chunk${isActSelected ? ` · ${actorTrainableGroups.length} trainable blocks` : ''} · no reward or Success/Fail labels required`
                     : `Include at least one LeRobot v3.0 Data Epoch in Step 3. No base ${imitationPolicyName} checkpoint, reward, or Success/Fail label is required.`)
+                  : isCriticWarmup
+                    ? (isDiffusionCriticWarmup
+                      ? (datasetSelections.length && actCheckpoint && flowTaskInstruction
+                        ? `Diffusion value critic ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · ${warmupSteps} steps · batch ${warmupBatchSize} · policy frozen · Success + Fail required`
+                        : 'Include LeRobot v3.0 Success + Fail replay, select a MultiTaskDiT policy, and enter a task instruction.')
+                      : (datasetSelections.length && actCheckpoint
+                        ? `ACT critic warm-up ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · batch ${batchSize} · ACT actor frozen · Success + Fail required`
+                        : 'Include at least one LeRobot v3.0 Data Epoch in Step 3 and select an ACT policy. The critic is saved under that policy.'))
                   : isMultiTaskDiTSelected
                     ? (actCheckpoint && robotType
-                      ? 'Diffusion Transformer + Flow-SDE PPO ready · live on-policy rollout · frozen observation encoder'
+                      ? `Diffusion Transformer + Flow-SDE PPO ready · ${ppoResumeReady
+                        ? 'continuing the compatible PPO critic'
+                        : (compatibleWarmupReady
+                          ? 'compatible offline critic bundle attached automatically'
+                          : 'fresh value critic initialization')} · frozen observation encoder`
                       : 'Select a MultiTaskDiT model in Workspace Paths and a robot type on Home. No LeRobot dataset is required.')
                     : (datasetSelections.length && actCheckpoint
-                      ? `ACT-TD3 ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · batch ${batchSize} · ${actorTrainableGroups.length} trainable blocks`
+                      ? `ACT-${isPureTD3 ? 'TD3' : 'TD3+BC'} ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · batch ${batchSize} · ${isPureTD3 ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder').length : actorTrainableGroups.length} trainable blocks`
                       : 'Include at least one LeRobot v3.0 Data Epoch in Step 3 and select an ACT model in Workspace Paths.')}
-                {!isImitationLearning && <> Robot: {robotType || 'Not selected'}</>}
+                {!isImitationLearning && !isDiffusionCriticWarmup && (
+                  <> Robot: {robotType || 'Not selected'}</>
+                )}
               </p>
             )}
             {isConversionRunning && !isFlowSdePpo && (
@@ -1013,7 +1435,11 @@ function WorkflowTrainingView({
               )}
             >
               <MdPlayArrow size={14} />
-              {!statusReady ? 'Checking…' : isRunning ? 'Training…' : 'Start Training'}
+              {!statusReady
+                ? 'Checking…'
+                : (isRunning
+                  ? (isCriticWarmup ? 'Warming Critic…' : 'Training…')
+                  : (isCriticWarmup ? 'Start Critic Warm-up' : 'Start Training'))}
             </button>
             <button
               type="button"
@@ -1027,7 +1453,9 @@ function WorkflowTrainingView({
               )}
             >
               <MdStop size={14} />
-              {isStopping ? 'Stopping…' : 'Stop Training'}
+              {isStopping
+                ? 'Stopping…'
+                : (isCriticWarmup ? 'Stop Critic Warm-up' : 'Stop Training')}
             </button>
           </div>
           {isFlowSdePpo && isRunning && (
@@ -1083,6 +1511,7 @@ export default function OfflineRLTrainingSection({
   inferencePhase = InferencePhase.READY,
   onRunningChange,
   onDeploymentStateChange,
+  onTrainingMethodStateChange,
   currentPolicyEpoch = 0,
   forceFreshLineage = false,
   onFreshLineageConsumed,
@@ -1091,6 +1520,7 @@ export default function OfflineRLTrainingSection({
   onStartFlowSDEPPO,
   onStopFlowSDEPPO,
   onSubmitFlowSDEPPOOutcome,
+  onCompactLayoutChange,
   variant = 'default',
 }) {
   const dispatch = useDispatch();
@@ -1100,14 +1530,27 @@ export default function OfflineRLTrainingSection({
   const datasetSelections = useSelector(selectOfflineRLDatasetSelections, shallowEqual);
   const parentCheckpoint = useSelector(selectOfflineRLCheckpointPath);
   const actCheckpoint = inferenceTaskInfo.policyPath || '';
+  const inferencePolicyModel = resolveTrainingPolicyModel(inferenceTaskInfo);
+  const inferenceModelKey = [
+    String(inferenceTaskInfo.serviceType || '').trim(),
+    String(inferenceTaskInfo.policyType || '').trim(),
+  ].join(':');
   const conversionStatus = useSelector(
     (state) => state.editDataset?.conversionStatus?.status || 'idle'
   );
   const [trainingMethod, setTrainingMethod] = useState('reinforcement');
-  const [algorithm, setAlgorithm] = useState('td3');
-  const [selectedPolicyModel, setSelectedPolicyModel] = useState('act');
+  const [selectedPolicyModel, setSelectedPolicyModel] = useState(
+    () => inferencePolicyModel || 'act'
+  );
+  const [algorithm, setAlgorithm] = useState(
+    () => DEFAULT_ALGORITHM_BY_POLICY[inferencePolicyModel || 'act'] || ''
+  );
+  const [td3ActorObjective, setTD3ActorObjective] = useState('td3_bc');
   const [actorTrainableGroups, setActorTrainableGroups] = useState(
     DEFAULT_ACT_TRAINABLE_GROUPS
+  );
+  const [rltTrainableGroups, setRltTrainableGroups] = useState(
+    DEFAULT_RLT_TRAINABLE_GROUPS
   );
   const [criticEpochs, setCriticEpochs] = useState('10');
   const [actorEquivalentEpochs, setActorEquivalentEpochs] = useState('5');
@@ -1115,16 +1558,20 @@ export default function OfflineRLTrainingSection({
   const [imitationSteps, setImitationSteps] = useState('80000');
   const [imitationBatchSize, setImitationBatchSize] = useState('8');
   const [imitationSaveFreq, setImitationSaveFreq] = useState('10000');
-  const [criticWarmupEnabled, setCriticWarmupEnabled] = useState(false);
+  const [imitationActionChunkSize, setImitationActionChunkSize] = useState(
+    String(IMITATION_ACTION_CHUNK_SIZES.act)
+  );
+  const [criticWarmupUpdates, setCriticWarmupUpdates] = useState(
+    String(DEFAULT_ACT_CRITIC_WARMUP_UPDATES)
+  );
   const [warmupSteps, setWarmupSteps] = useState('2000');
   const [warmupBatchSize, setWarmupBatchSize] = useState('8');
   const [warmupValueLearningRate, setWarmupValueLearningRate] = useState('0.0001');
   const [warmupDiscount, setWarmupDiscount] = useState('0.99');
   const [warmupStatus, setWarmupStatus] = useState({ status: 'idle' });
   const [warmupStatusReady, setWarmupStatusReady] = useState(false);
-  const [isWarmupStarting, setIsWarmupStarting] = useState(false);
-  const [isWarmupStopping, setIsWarmupStopping] = useState(false);
   const [jobStatus, setJobStatus] = useState({ status: 'idle' });
+  const [trainingReplayDatasets, setTrainingReplayDatasets] = useState([]);
   const [statusReady, setStatusReady] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -1138,12 +1585,55 @@ export default function OfflineRLTrainingSection({
   const isStartingRef = useRef(false);
   const isStoppingRef = useRef(false);
   const actorTrainabilityHydratedRef = useRef(false);
+  const td3ObjectiveHydratedJobRef = useRef('');
+  const td3ObjectiveUserSelectedRef = useRef(false);
   const batchSizeHydratedRef = useRef(false);
   const imitationConfigHydratedRef = useRef(false);
+  const criticWarmupConfigHydratedRef = useRef(false);
   const warmupStatusRequestSequence = useRef(0);
   const activeWarmupStatusRequest = useRef(null);
-  const isWarmupStartingRef = useRef(false);
-  const isWarmupStoppingRef = useRef(false);
+  const lastObservedInferenceModelKeyRef = useRef(inferenceModelKey);
+
+  useEffect(() => {
+    onTrainingMethodStateChange?.(trainingMethod);
+  }, [onTrainingMethodStateChange, trainingMethod]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const selected = datasetSelections
+      .map((selection) => ({
+        ...selection,
+        path: String(selection?.path || '').trim(),
+      }))
+      .filter((selection) => selection.path);
+
+    // Render the selected roots immediately, then replace each row with the
+    // existing read-only dataset summary. Counts are never guessed while the
+    // metadata request is pending or unavailable.
+    setTrainingReplayDatasets(selected);
+    if (!selected.length) return () => {
+      cancelled = true;
+    };
+
+    Promise.all(selected.map(async (selection) => {
+      try {
+        const summary = await getOfflineRLDatasetInfo(selection.path);
+        return {
+          ...selection,
+          ...(summary || {}),
+          path: selection.path,
+        };
+      } catch {
+        return selection;
+      }
+    })).then((summaries) => {
+      if (!cancelled) setTrainingReplayDatasets(summaries);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetSelections]);
 
   const requestStatus = useCallback(async ({ isCancelled = () => false } = {}) => {
     if (
@@ -1157,11 +1647,25 @@ export default function OfflineRLTrainingSection({
     const requestSequence = ++statusRequestSequence.current;
     activeStatusRequest.current = requestSequence;
     try {
+      const backendSupported = trainingMethod === 'critic'
+        ? ['act', 'multi_task_dit'].includes(selectedPolicyModel)
+        : ['act', 'multi_task_dit'].includes(selectedPolicyModel);
+      if (!backendSupported) {
+        if (!isCancelled() && requestSequence === statusRequestSequence.current) {
+          setJobStatus({ status: 'idle' });
+          setStatusReady(true);
+        }
+        return { status: 'idle' };
+      }
       const status = trainingMethod === 'imitation'
         ? await getImitationLearningStatus()
-        : (selectedPolicyModel === 'multi_task_dit' && getFlowSDEPPOStatus
-          ? await getFlowSDEPPOStatus()
-          : await getOfflineRLStatus());
+        : (trainingMethod === 'critic'
+          ? (selectedPolicyModel === 'multi_task_dit'
+            ? await getFlowSDEPPOValueWarmupStatus()
+            : await getACTTD3CriticWarmupStatus())
+          : (selectedPolicyModel === 'multi_task_dit' && getFlowSDEPPOStatus
+            ? await getFlowSDEPPOStatus()
+            : await getOfflineRLStatus()));
       if (
         isCancelled() ||
         isStartingRef.current ||
@@ -1172,6 +1676,10 @@ export default function OfflineRLTrainingSection({
       }
       setJobStatus(status || { status: 'idle' });
       setStatusReady(true);
+      if (trainingMethod === 'critic' && selectedPolicyModel === 'multi_task_dit') {
+        setWarmupStatus(status || { status: 'idle' });
+        setWarmupStatusReady(true);
+      }
       return status;
     } catch {
       if (
@@ -1191,11 +1699,7 @@ export default function OfflineRLTrainingSection({
   }, [getFlowSDEPPOStatus, selectedPolicyModel, trainingMethod]);
 
   const requestWarmupStatus = useCallback(async ({ isCancelled = () => false } = {}) => {
-    if (
-      isWarmupStartingRef.current ||
-      isWarmupStoppingRef.current ||
-      activeWarmupStatusRequest.current !== null
-    ) {
+    if (activeWarmupStatusRequest.current !== null) {
       return null;
     }
 
@@ -1205,8 +1709,6 @@ export default function OfflineRLTrainingSection({
       const status = await getFlowSDEPPOValueWarmupStatus();
       if (
         isCancelled() ||
-        isWarmupStartingRef.current ||
-        isWarmupStoppingRef.current ||
         requestSequence !== warmupStatusRequestSequence.current
       ) {
         return null;
@@ -1217,8 +1719,6 @@ export default function OfflineRLTrainingSection({
     } catch {
       if (
         !isCancelled() &&
-        !isWarmupStartingRef.current &&
-        !isWarmupStoppingRef.current &&
         requestSequence === warmupStatusRequestSequence.current
       ) {
         setWarmupStatusReady(false);
@@ -1284,16 +1784,27 @@ export default function OfflineRLTrainingSection({
   const isFailed = normalizedStatus === 'failed' || normalizedStatus === 'error';
   const isConversionRunning = conversionStatus === 'running';
   const interactionLocked = !statusReady || isRunning;
+  const isReinforcementLearning = trainingMethod === 'reinforcement';
   const isImitationLearning = trainingMethod === 'imitation';
+  const isCriticWarmup = trainingMethod === 'critic';
+  const isDiffusionCriticWarmup = (
+    isCriticWarmup && selectedPolicyModel === 'multi_task_dit'
+  );
+  const isActCriticWarmup = isCriticWarmup && selectedPolicyModel === 'act';
+  const selectedPolicyBackendSupported = ['act', 'multi_task_dit'].includes(
+    selectedPolicyModel
+  );
   const isFlowSdePpo = (
-    !isImitationLearning &&
+    isReinforcementLearning &&
     selectedPolicyModel === 'multi_task_dit' &&
     algorithm === 'flow_sde_ppo'
   );
   const imitationPolicyType = selectedPolicyModel === 'multi_task_dit'
     ? 'multi_task_dit'
     : 'act';
-  const imitationActionChunkSize = IMITATION_ACTION_CHUNK_SIZES[imitationPolicyType];
+  const effectiveImitationActionChunkSize = imitationPolicyType === 'multi_task_dit'
+    ? IMITATION_ACTION_CHUNK_SIZES.multi_task_dit
+    : Number(imitationActionChunkSize);
   const flowInferenceReady = inferencePhase === InferencePhase.READY;
   const flowInferenceBlockedReason = flowInferenceReady
     ? ''
@@ -1301,7 +1812,7 @@ export default function OfflineRLTrainingSection({
       INFERENCE_PHASE_NAMES[inferencePhase] || 'UNKNOWN'
     }).`;
   useEffect(() => {
-    if (!isActive || !isFlowSdePpo || !criticWarmupEnabled) {
+    if (!isActive || !isFlowSdePpo) {
       warmupStatusRequestSequence.current += 1;
       activeWarmupStatusRequest.current = null;
       setWarmupStatusReady(false);
@@ -1315,10 +1826,6 @@ export default function OfflineRLTrainingSection({
     };
     async function poll() {
       if (cancelled) return;
-      if (isWarmupStartingRef.current || isWarmupStoppingRef.current) {
-        scheduleNextPoll();
-        return;
-      }
       try {
         await requestWarmupStatus({ isCancelled: () => cancelled });
       } finally {
@@ -1332,36 +1839,28 @@ export default function OfflineRLTrainingSection({
       activeWarmupStatusRequest.current = null;
       if (nextPollTimer !== null) clearTimeout(nextPollTimer);
     };
-  }, [criticWarmupEnabled, isActive, isFlowSdePpo, requestWarmupStatus]);
+  }, [isActive, isFlowSdePpo, requestWarmupStatus]);
 
   const normalizedWarmupStatus = String(warmupStatus?.status || 'idle').toLowerCase();
-  const warmupIsRunning = (
-    isWarmupStarting || RUNNING_STATUSES.has(normalizedWarmupStatus)
+  const warmupIsRunning = Boolean(
+    isFlowSdePpo && RUNNING_STATUSES.has(normalizedWarmupStatus)
   );
+  // A status channel can be temporarily unavailable after changing methods.
+  // Keep configuration and Start locked until it recovers, but never trap the
+  // user in that method. Only a confirmed launch may lock method/model tabs.
+  const selectionLocked = isRunning || warmupIsRunning || !isActive;
   const warmupIsComplete = COMPLETE_STATUSES.has(normalizedWarmupStatus);
-  const warmupProgress = Number(boundedPercentage(
-    statusValue(warmupStatus, 'percentage', 'progress_percentage', 'progress')
-  ).toFixed(1));
   const warmupBundlePath = String(
     statusValue(warmupStatus, 'bundle_path') || ''
   ).trim();
-  const warmupStatusLabel = !warmupStatusReady
-    ? 'Checking'
-    : (isWarmupStarting
-      ? 'Starting'
-      : (normalizedWarmupStatus === 'running'
-        ? 'Training critic'
-        : (warmupIsComplete
-          ? 'Complete'
-          : (['failed', 'error'].includes(normalizedWarmupStatus)
-            ? 'Failed'
-            : (normalizedWarmupStatus === 'stopped' ? 'Stopped' : 'Ready')))));
   const parsedCriticEpochs = Number(criticEpochs);
   const parsedActorEquivalentEpochs = Number(actorEquivalentEpochs);
   const parsedBatchSize = Number(batchSize);
   const parsedImitationSteps = Number(imitationSteps);
   const parsedImitationBatchSize = Number(imitationBatchSize);
   const parsedImitationSaveFreq = Number(imitationSaveFreq);
+  const parsedImitationActionChunkSize = Number(imitationActionChunkSize);
+  const parsedCriticWarmupUpdates = Number(criticWarmupUpdates);
   const parsedWarmupSteps = Number(warmupSteps);
   const parsedWarmupBatchSize = Number(warmupBatchSize);
   const parsedWarmupValueLearningRate = Number(warmupValueLearningRate);
@@ -1392,6 +1891,18 @@ export default function OfflineRLTrainingSection({
     parsedImitationSaveFreq >= 1 &&
     parsedImitationSaveFreq <= parsedImitationSteps
   );
+  const imitationActionChunkSizeValid = (
+    imitationPolicyType === 'multi_task_dit' || (
+      Number.isInteger(parsedImitationActionChunkSize) &&
+      parsedImitationActionChunkSize >= 1 &&
+      parsedImitationActionChunkSize <= 100
+    )
+  );
+  const criticWarmupUpdatesValid = (
+    Number.isInteger(parsedCriticWarmupUpdates) &&
+    parsedCriticWarmupUpdates >= 1 &&
+    parsedCriticWarmupUpdates <= 1000000
+  );
   const warmupConfigValid = (
     Number.isInteger(parsedWarmupSteps) &&
     parsedWarmupSteps >= 1 &&
@@ -1406,7 +1917,15 @@ export default function OfflineRLTrainingSection({
     parsedWarmupDiscount > 0 &&
     parsedWarmupDiscount <= 1
   );
-  const trainabilityError = validateActorTrainableGroups(actorTrainableGroups);
+  const effectiveActorTrainableGroups = (
+    isReinforcementLearning &&
+    selectedPolicyModel === 'act' &&
+    algorithm === 'td3' &&
+    td3ActorObjective === 'td3'
+  )
+    ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder')
+    : actorTrainableGroups;
+  const trainabilityError = validateActorTrainableGroups(effectiveActorTrainableGroups);
   const trainabilityValid = trainabilityError === '';
   const datasetPaths = useMemo(
     () => datasetSelections.map((selection) => String(selection.path || '').trim()).filter(Boolean),
@@ -1470,95 +1989,134 @@ export default function OfflineRLTrainingSection({
   const ppoResumeReady = Boolean(
     resumeContractPresent && resumePolicyMatches && resumeTaskMatches
   );
-  const ppoResumeMismatch = Boolean(
-    resumeContractPresent && (!resumePolicyMatches || !resumeTaskMatches)
-  );
   // A compatible completed PPO trainer state is newer than an offline warm-up
   // and therefore takes precedence. An unrelated recovered PPO job must not
   // shadow a compatible warm-up for the currently selected policy and task.
-  const warmupIntegrationReady = Boolean(
-    ppoResumeReady || compatibleWarmupReady
-  );
-  const warmupSourceKind = ppoResumeReady ? 'PPO' : 'Warm-up';
-  const warmupSourceLabel = ppoResumeReady
-    ? shortWarmupSource(jobStatus, resumeCheckpointPath)
-    : shortWarmupSource(warmupStatus, warmupBundlePath);
-  const warmupSourceReadyLabel = ppoResumeReady
-    ? 'Ready to continue'
-    : 'Ready for online PPO';
-  const warmupIntegrationMessage = ppoResumeMismatch && !compatibleWarmupReady
-    ? (!resumePolicyMatches
-      ? 'Completed PPO checkpoint belongs to a different policy lineage.'
-      : 'Completed PPO checkpoint belongs to a different task instruction.')
-    : (!warmupStatusReady
-      ? 'Checking for a compatible completed critic warm-up.'
-      : (warmupIsRunning
-        ? 'Critic warm-up is running. Online PPO starts after it completes.'
-        : (!warmupIsComplete
-          ? 'Train the critic to completion, or select No to start PPO with a new critic.'
-          : (!warmupBundlePath
-            ? 'Completed critic warm-up has no verified bundle path.'
-            : (!warmupPolicyMatches
-              ? 'Completed critic warm-up belongs to a different policy checkpoint.'
-              : (!warmupTaskMatches
-                ? 'Completed critic warm-up belongs to a different task instruction.'
-                : 'Completed critic warm-up is not ready for online PPO.'))))));
 
-  const resetStatusChannel = () => {
+  const resetStatusChannel = useCallback(() => {
     statusRequestSequence.current += 1;
     activeStatusRequest.current = null;
     actorTrainabilityHydratedRef.current = false;
     batchSizeHydratedRef.current = false;
     imitationConfigHydratedRef.current = false;
+    criticWarmupConfigHydratedRef.current = false;
     lastAnnouncedStatus.current = 'idle';
     setJobStatus({ status: 'idle' });
     setStatusReady(false);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (lastObservedInferenceModelKeyRef.current === inferenceModelKey) return;
+    if (selectionLocked) return;
+
+    lastObservedInferenceModelKeyRef.current = inferenceModelKey;
+    if (!inferencePolicyModel) return;
+
+    resetStatusChannel();
+    td3ObjectiveHydratedJobRef.current = '';
+    td3ObjectiveUserSelectedRef.current = false;
+    setSelectedPolicyModel(inferencePolicyModel);
+    setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[inferencePolicyModel] || '');
+    if (
+      trainingMethod === 'imitation' &&
+      !['act', 'multi_task_dit', 'groot', 'pi05'].includes(inferencePolicyModel)
+    ) {
+      setTrainingMethod('reinforcement');
+    }
+  }, [
+    inferenceModelKey,
+    inferencePolicyModel,
+    resetStatusChannel,
+    selectionLocked,
+    trainingMethod,
+  ]);
 
   const handleTrainingMethodChange = (nextMethod) => {
-    if (interactionLocked || nextMethod === trainingMethod) return;
+    if (selectionLocked || nextMethod === trainingMethod) return;
     resetStatusChannel();
     if (nextMethod === 'reinforcement') {
-      setAlgorithm(selectedPolicyModel === 'multi_task_dit' ? 'flow_sde_ppo' : 'td3');
+      setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[selectedPolicyModel] || '');
     }
     setTrainingMethod(nextMethod);
   };
 
   const handlePolicyModelChange = (nextPolicyModel) => {
-    if (interactionLocked || nextPolicyModel === selectedPolicyModel) return;
     if (
-      nextPolicyModel === 'multi_task_dit' ||
-      selectedPolicyModel === 'multi_task_dit'
-    ) {
-      resetStatusChannel();
-    }
+      selectionLocked ||
+      nextPolicyModel === selectedPolicyModel
+    ) return;
+    resetStatusChannel();
+    td3ObjectiveHydratedJobRef.current = '';
+    td3ObjectiveUserSelectedRef.current = false;
     setSelectedPolicyModel(nextPolicyModel);
-    if (nextPolicyModel === 'act') {
-      setAlgorithm('td3');
-      return;
-    }
-    if (nextPolicyModel === 'multi_task_dit') {
-      setAlgorithm('flow_sde_ppo');
-      return;
-    }
-    setAlgorithm('');
-    if (trainingMethod === 'imitation') setTrainingMethod('reinforcement');
+    setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[nextPolicyModel] || '');
   };
 
   const handleAlgorithmChange = (nextAlgorithm) => {
-    if (interactionLocked || nextAlgorithm === algorithm) return;
-    const nextPolicyModel = nextAlgorithm === 'flow_sde_ppo' ? 'multi_task_dit' : 'act';
+    if (!isReinforcementLearning || interactionLocked || nextAlgorithm === algorithm) return;
+    const compatible = (
+      (ACT_TD3_ALGORITHMS.has(nextAlgorithm) && selectedPolicyModel === 'act') ||
+      (nextAlgorithm === 'flow_sde_ppo' && selectedPolicyModel === 'multi_task_dit') ||
+      (nextAlgorithm === 'rlt' && ['groot', 'pi05'].includes(selectedPolicyModel))
+    );
+    if (!compatible) return;
     resetStatusChannel();
-    setTrainingMethod('reinforcement');
-    setSelectedPolicyModel(nextPolicyModel);
     setAlgorithm(nextAlgorithm);
   };
 
+  const handleTD3ActorObjectiveChange = (nextObjective) => {
+    if (
+      !isReinforcementLearning ||
+      selectedPolicyModel !== 'act' ||
+      algorithm !== 'td3' ||
+      interactionLocked ||
+      !TD3_ACTOR_OBJECTIVES.has(nextObjective) ||
+      nextObjective === td3ActorObjective
+    ) return;
+    td3ObjectiveUserSelectedRef.current = true;
+    setTD3ActorObjective(nextObjective);
+  };
+
   useEffect(() => {
-    if (isImitationLearning || actorTrainabilityHydratedRef.current || normalizedStatus === 'idle') {
+    const reportedObjective = String(jobStatus?.actor_objective || '').trim().toLowerCase();
+    if (
+      !isReinforcementLearning ||
+      selectedPolicyModel !== 'act' ||
+      algorithm !== 'td3' ||
+      normalizedStatus === 'idle' ||
+      !TD3_ACTOR_OBJECTIVES.has(reportedObjective) ||
+      td3ObjectiveUserSelectedRef.current
+    ) return;
+
+    const statusIdentity = [
+      String(jobStatus?.job_id || 'status'),
+      reportedObjective,
+      String(jobStatus?.act_checkpoint || ''),
+    ].join(':');
+    if (td3ObjectiveHydratedJobRef.current === statusIdentity) return;
+
+    setTD3ActorObjective(reportedObjective);
+    td3ObjectiveHydratedJobRef.current = statusIdentity;
+  }, [
+    algorithm,
+    isReinforcementLearning,
+    jobStatus?.act_checkpoint,
+    jobStatus?.actor_objective,
+    jobStatus?.job_id,
+    normalizedStatus,
+    selectedPolicyModel,
+  ]);
+
+  useEffect(() => {
+    const supportsActorTrainability = (
+      isReinforcementLearning || (isImitationLearning && selectedPolicyModel === 'act')
+    );
+    if (!supportsActorTrainability || actorTrainabilityHydratedRef.current || normalizedStatus === 'idle') {
       return;
     }
-    const reportedGroups = jobStatus?.actor_trainable_groups;
+    const reportedGroups = isImitationLearning
+      ? jobStatus?.trainable_groups
+      : jobStatus?.actor_trainable_groups;
     if (!Array.isArray(reportedGroups)) return;
     const reportedSet = new Set(reportedGroups);
     const canonicalGroups = DEFAULT_ACT_TRAINABLE_GROUPS.filter((group) => (
@@ -1567,7 +2125,14 @@ export default function OfflineRLTrainingSection({
     if (validateActorTrainableGroups(canonicalGroups)) return;
     setActorTrainableGroups(canonicalGroups);
     actorTrainabilityHydratedRef.current = true;
-  }, [isImitationLearning, jobStatus?.actor_trainable_groups, normalizedStatus]);
+  }, [
+    isImitationLearning,
+    isReinforcementLearning,
+    jobStatus?.actor_trainable_groups,
+    jobStatus?.trainable_groups,
+    normalizedStatus,
+    selectedPolicyModel,
+  ]);
 
   useEffect(() => {
     if (isImitationLearning || batchSizeHydratedRef.current || normalizedStatus === 'idle') return;
@@ -1586,6 +2151,7 @@ export default function OfflineRLTrainingSection({
     const reportedSteps = Number(statusValue(jobStatus, 'total_steps', 'steps'));
     const reportedBatchSize = Number(jobStatus?.batch_size);
     const reportedSaveFreq = Number(jobStatus?.save_freq);
+    const reportedChunkSize = Number(jobStatus?.chunk_size);
     if (Number.isInteger(reportedSteps) && reportedSteps >= 1 && reportedSteps <= 1000000) {
       setImitationSteps(String(reportedSteps));
     }
@@ -1595,12 +2161,60 @@ export default function OfflineRLTrainingSection({
     if (Number.isInteger(reportedSaveFreq) && reportedSaveFreq >= 1) {
       setImitationSaveFreq(String(reportedSaveFreq));
     }
+    if (
+      imitationPolicyType === 'act' &&
+      Number.isInteger(reportedChunkSize) &&
+      reportedChunkSize >= 1 &&
+      reportedChunkSize <= 100
+    ) {
+      setImitationActionChunkSize(String(reportedChunkSize));
+    }
     imitationConfigHydratedRef.current = true;
   }, [
     isImitationLearning,
+    imitationPolicyType,
     jobStatus,
     normalizedStatus,
   ]);
+
+  useEffect(() => {
+    if (!isCriticWarmup || criticWarmupConfigHydratedRef.current || normalizedStatus === 'idle') {
+      return;
+    }
+    if (isDiffusionCriticWarmup) {
+      const reportedSteps = Number(statusValue(jobStatus, 'total_steps', 'steps'));
+      const reportedBatchSize = Number(jobStatus?.batch_size);
+      const reportedValueLearningRate = Number(jobStatus?.value_learning_rate);
+      const reportedDiscount = Number(jobStatus?.discount);
+      if (Number.isInteger(reportedSteps) && reportedSteps >= 1 && reportedSteps <= 1000000) {
+        setWarmupSteps(String(reportedSteps));
+      }
+      if (
+        Number.isInteger(reportedBatchSize) &&
+        reportedBatchSize >= 1 &&
+        reportedBatchSize <= 256
+      ) {
+        setWarmupBatchSize(String(reportedBatchSize));
+      }
+      if (Number.isFinite(reportedValueLearningRate) && reportedValueLearningRate > 0) {
+        setWarmupValueLearningRate(String(reportedValueLearningRate));
+      }
+      if (Number.isFinite(reportedDiscount) && reportedDiscount > 0 && reportedDiscount <= 1) {
+        setWarmupDiscount(String(reportedDiscount));
+      }
+      criticWarmupConfigHydratedRef.current = true;
+      return;
+    }
+    const reportedUpdates = Number(jobStatus?.total_critic_updates);
+    if (
+      Number.isInteger(reportedUpdates) &&
+      reportedUpdates >= 1 &&
+      reportedUpdates <= 1000000
+    ) {
+      setCriticWarmupUpdates(String(reportedUpdates));
+      criticWarmupConfigHydratedRef.current = true;
+    }
+  }, [isCriticWarmup, isDiffusionCriticWarmup, jobStatus, normalizedStatus]);
 
   useEffect(() => {
     if (!RUNNING_STATUSES.has(normalizedStatus)) setIsStopping(false);
@@ -1612,7 +2226,9 @@ export default function OfflineRLTrainingSection({
 
   useEffect(() => {
     if (normalizedStatus === lastAnnouncedStatus.current) return;
-    const methodLabel = isImitationLearning ? 'Imitation Learning' : 'Offline RL';
+    const methodLabel = isImitationLearning
+      ? 'Imitation Learning'
+      : (isCriticWarmup ? 'Critic Warm-up' : 'Offline RL');
     if (isComplete) toast.success(`${methodLabel} training completed`);
     if (isFailed) {
       toast.error(jobStatus?.message || `${methodLabel} training failed`);
@@ -1621,7 +2237,7 @@ export default function OfflineRLTrainingSection({
       toast.success(`${methodLabel} training stopped`);
     }
     lastAnnouncedStatus.current = normalizedStatus;
-  }, [isComplete, isFailed, isImitationLearning, jobStatus?.message, normalizedStatus]);
+  }, [isComplete, isCriticWarmup, isFailed, isImitationLearning, jobStatus?.message, normalizedStatus]);
 
   const progress = boundedPercentage(
     statusValue(jobStatus, 'percentage', 'progress_percentage', 'progress')
@@ -1636,33 +2252,51 @@ export default function OfflineRLTrainingSection({
 
   useEffect(() => {
     if (!onDeploymentStateChange) return;
+    if (isCriticWarmup) {
+      onDeploymentStateChange({
+        ready: false,
+        modelPath: '',
+        serviceType: 'lerobot',
+        policyType: selectedPolicyModel,
+        rlEpoch: Number(currentPolicyEpoch),
+        lineageMode: 'unchanged',
+      });
+      return;
+    }
     const reportedPolicyType = ['act', 'multi_task_dit'].includes(jobStatus?.policy_type)
       ? jobStatus.policy_type
       : selectedPolicyModel;
     const reportedRoundIndex = Number(jobStatus?.round_index);
-    const deployedRLEpoch = (
-      !isImitationLearning &&
-      selectedPolicyModel === 'act' &&
-      algorithm === 'td3' &&
-      Number.isInteger(reportedRoundIndex) &&
-      reportedRoundIndex >= 1
-    ) ? reportedRoundIndex : Number(currentPolicyEpoch);
+    const deployedRLEpoch = isImitationLearning
+      ? 0
+      : (
+        selectedPolicyModel === 'act' &&
+        ACT_TD3_ALGORITHMS.has(algorithm) &&
+        Number.isInteger(reportedRoundIndex) &&
+        reportedRoundIndex >= 1
+      ) ? reportedRoundIndex : Number(currentPolicyEpoch) + 1;
+    const lineageMode = isImitationLearning
+      ? 'new'
+      : 'advance';
     onDeploymentStateChange({
-      ready: statusReady && isComplete && Boolean(modelPath.trim()),
+      ready: selectedPolicyBackendSupported && statusReady && isComplete && Boolean(modelPath.trim()),
       modelPath: isComplete ? modelPath.trim() : '',
       serviceType: 'lerobot',
       policyType: reportedPolicyType,
       rlEpoch: deployedRLEpoch,
+      lineageMode,
     });
   }, [
     algorithm,
     currentPolicyEpoch,
     isComplete,
+    isCriticWarmup,
     isImitationLearning,
     jobStatus?.round_index,
     jobStatus?.policy_type,
     modelPath,
     onDeploymentStateChange,
+    selectedPolicyBackendSupported,
     selectedPolicyModel,
     statusReady,
   ]);
@@ -1670,24 +2304,36 @@ export default function OfflineRLTrainingSection({
   const statusLabel = useMemo(() => {
     if (!statusReady) return 'Checking';
     if (isStarting || normalizedStatus === 'starting') return 'Starting';
-    if (normalizedStatus === 'running') return 'Training';
+    if (normalizedStatus === 'running') {
+      return isCriticWarmup ? 'Training critic' : 'Training';
+    }
     if (isComplete) return 'Complete';
     if (isFailed) return 'Failed';
     if (normalizedStatus === 'stopped') return 'Stopped';
     return 'Ready';
-  }, [isComplete, isFailed, isStarting, normalizedStatus, statusReady]);
+  }, [isComplete, isCriticWarmup, isFailed, isStarting, normalizedStatus, statusReady]);
 
   const validateRequest = () => {
     if (!statusReady) return 'Wait for training status to load';
+    if (
+      isCriticWarmup &&
+      !['act', 'multi_task_dit'].includes(selectedPolicyModel)
+    ) {
+      return 'Critic warm-up is available for ACT and Diffusion Transformer';
+    }
+    if (
+      !isCriticWarmup &&
+      !['act', 'multi_task_dit'].includes(selectedPolicyModel)
+    ) {
+      const policyLabel = selectedPolicyModel === 'pi05' ? 'Pi0.5' : 'GR00T';
+      return `${policyLabel} training backend is not connected`;
+    }
     if (isFlowSdePpo) {
       if (!actCheckpoint.trim()) return 'Select the MultiTaskDiT checkpoint';
       if (!robotType?.trim()) return 'Select a robot type on the Home page first';
       if (!flowInferenceReady) return flowInferenceBlockedReason;
       if (!flowSdePpoReady || typeof onStartFlowSDEPPO !== 'function') {
         return 'Flow-SDE PPO backend is not ready';
-      }
-      if (criticWarmupEnabled && !warmupIntegrationReady) {
-        return warmupIntegrationMessage;
       }
       return '';
     }
@@ -1696,8 +2342,32 @@ export default function OfflineRLTrainingSection({
     if (selectedDatasetVersionInvalid) {
       const trainingLabel = isImitationLearning
         ? `${imitationPolicyType === 'multi_task_dit' ? 'Diffusion Transformer' : 'ACT'} imitation learning`
-        : 'TD3';
+        : (isCriticWarmup
+          ? `${isDiffusionCriticWarmup ? 'Diffusion' : 'ACT'} critic warm-up`
+          : 'TD3');
       return `${trainingLabel} requires LeRobot v3.0`;
+    }
+    if (isCriticWarmup) {
+      if (isDiffusionCriticWarmup) {
+        if (!actCheckpoint.trim()) return 'Select the MultiTaskDiT checkpoint';
+        if (!flowTaskInstruction) return 'Enter a task instruction for critic warm-up';
+        if (!warmupConfigValid) {
+          return 'Warm-up settings require valid steps, batch size, value LR, and discount';
+        }
+        return '';
+      }
+      if (!isActCriticWarmup) {
+        return 'Critic warm-up is available for ACT and Diffusion Transformer';
+      }
+      if (!actCheckpoint.trim()) return 'Select the ACT policy checkpoint';
+      if (!robotType?.trim()) return 'Select a robot type on the Home page first';
+      if (!batchSizeValid) {
+        return 'Critic warm-up batch size must be an integer from 1 to 64';
+      }
+      if (!criticWarmupUpdatesValid) {
+        return 'Critic warm-up updates must be an integer from 1 to 1,000,000';
+      }
+      return '';
     }
     if (isImitationLearning) {
       if (!imitationStepsValid) return 'Imitation steps must be an integer from 1 to 1,000,000';
@@ -1705,6 +2375,10 @@ export default function OfflineRLTrainingSection({
       if (!imitationSaveFreqValid) {
         return 'Imitation save frequency must be an integer from 1 through the total steps';
       }
+      if (!imitationActionChunkSizeValid) {
+        return 'ACT imitation action chunk must be an integer from 1 to 100';
+      }
+      if (imitationPolicyType === 'act' && trainabilityError) return trainabilityError;
       return '';
     }
     if (!actCheckpoint.trim()) {
@@ -1713,103 +2387,18 @@ export default function OfflineRLTrainingSection({
         : 'Select the original ACT checkpoint';
     }
     if (!robotType?.trim()) return 'Select a robot type on the Home page first';
-    if (algorithm !== 'td3') return 'Only TD3 is available';
+    if (!ACT_TD3_ALGORITHMS.has(algorithm)) {
+      return 'Select TD3 for ACT';
+    }
+    if (!TD3_ACTOR_OBJECTIVES.has(td3ActorObjective)) {
+      return 'Select a valid TD3 loss option';
+    }
     if (trainabilityError) return trainabilityError;
     if (!batchSizeValid) return 'Batch size must be an integer from 1 to 64';
     if (!scheduleValid) {
       return 'TD3 requires Critic epochs = 2 × Actor equivalent epochs';
     }
     return '';
-  };
-
-  const validateWarmupRequest = () => {
-    if (!isFlowSdePpo || !criticWarmupEnabled) {
-      return 'Select Diffusion Transformer + Flow-SDE PPO and enable Critic warm-up';
-    }
-    if (!warmupStatusReady) return 'Wait for critic warm-up status to load';
-    if (isConversionRunning) return 'Wait for dataset conversion to finish';
-    if (!datasetPaths.length) return 'Include at least one checked LeRobot v3.0 Data Epoch';
-    if (selectedDatasetVersionInvalid) return 'Critic warm-up requires LeRobot v3.0';
-    if (!actCheckpoint.trim()) return 'Select the MultiTaskDiT checkpoint';
-    if (!flowTaskInstruction) return 'Enter a task instruction for critic warm-up';
-    if (!warmupConfigValid) {
-      return 'Warm-up settings require valid steps, batch size, value LR, and discount';
-    }
-    if (!flowSdePpoReady) return 'Flow-SDE PPO backend is not ready';
-    return '';
-  };
-
-  const handleCriticWarmupEnabledChange = (enabled) => {
-    if (warmupIsRunning || Boolean(enabled) === criticWarmupEnabled) return;
-    warmupStatusRequestSequence.current += 1;
-    activeWarmupStatusRequest.current = null;
-    setWarmupStatusReady(false);
-    setCriticWarmupEnabled(Boolean(enabled));
-  };
-
-  const handleWarmupStart = async () => {
-    const validationError = validateWarmupRequest();
-    if (validationError) {
-      toast.error(validationError);
-      return;
-    }
-
-    isWarmupStartingRef.current = true;
-    warmupStatusRequestSequence.current += 1;
-    activeWarmupStatusRequest.current = null;
-    setIsWarmupStarting(true);
-    try {
-      const result = await startFlowSDEPPOValueWarmup({
-        policy_checkpoint: actCheckpoint.trim(),
-        dataset_paths: datasetPaths,
-        policy_type: 'multi_task_dit',
-        task_instruction: flowTaskInstruction,
-        steps: parsedWarmupSteps,
-        batch_size: parsedWarmupBatchSize,
-        value_learning_rate: parsedWarmupValueLearningRate,
-        discount: parsedWarmupDiscount,
-      });
-      setWarmupStatus(result || { status: 'running' });
-      setWarmupStatusReady(true);
-      toast.success('Value critic warm-up started');
-    } catch (error) {
-      toast.error(`Value critic warm-up start failed: ${error.message}`);
-      setWarmupStatusReady(false);
-      isWarmupStartingRef.current = false;
-      setIsWarmupStarting(false);
-      await requestWarmupStatus();
-      return;
-    }
-    isWarmupStartingRef.current = false;
-    setIsWarmupStarting(false);
-  };
-
-  const handleWarmupStop = async () => {
-    const jobId = String(warmupStatus?.job_id || '').trim();
-    if (!jobId || !RUNNING_STATUSES.has(normalizedWarmupStatus) || isWarmupStopping) return;
-    if (!window.confirm(
-      'Stop the current value critic warm-up job?\n\n' +
-      'The backend will stop at a safe boundary; any completed bundle remains on disk.'
-    )) return;
-
-    isWarmupStoppingRef.current = true;
-    warmupStatusRequestSequence.current += 1;
-    activeWarmupStatusRequest.current = null;
-    setIsWarmupStopping(true);
-    try {
-      const result = await stopFlowSDEPPOValueWarmup(jobId);
-      setWarmupStatus(result || { ...warmupStatus, status: 'running' });
-      toast.success('Value critic warm-up stop requested');
-    } catch (error) {
-      toast.error(`Value critic warm-up stop failed: ${error.message}`);
-      setWarmupStatusReady(false);
-      isWarmupStoppingRef.current = false;
-      setIsWarmupStopping(false);
-      await requestWarmupStatus();
-      return;
-    }
-    isWarmupStoppingRef.current = false;
-    setIsWarmupStopping(false);
   };
 
   const completedDatasetPaths = Array.isArray(jobStatus?.dataset_paths) &&
@@ -1829,12 +2418,15 @@ export default function OfflineRLTrainingSection({
   );
   const canAutoResumeWorkflow = (
     variant === 'workflow' &&
+    isReinforcementLearning &&
     !forceFreshLineage &&
     isComplete &&
     Boolean(checkpointPath.trim()) &&
     Boolean(completedBaseActCheckpoint) &&
     selectedReplayExtendsCompletedReplay &&
-    selectedModelMatchesCompletedLineage
+    selectedModelMatchesCompletedLineage &&
+    jobStatus?.algorithm === algorithm &&
+    jobStatus?.actor_objective === td3ActorObjective
   );
 
   const handleStart = async () => {
@@ -1858,24 +2450,47 @@ export default function OfflineRLTrainingSection({
           steps: parsedImitationSteps,
           batch_size: parsedImitationBatchSize,
           save_freq: parsedImitationSaveFreq,
-          chunk_size: imitationActionChunkSize,
+          chunk_size: effectiveImitationActionChunkSize,
+          ...(imitationPolicyType === 'act'
+            ? { trainable_groups: actorTrainableGroups }
+            : {}),
           ...(imitationPolicyType === 'multi_task_dit' && flowTaskInstruction
             ? { task_instruction: flowTaskInstruction }
             : {}),
         })
+        : isCriticWarmup
+          ? (isDiffusionCriticWarmup
+            ? await startFlowSDEPPOValueWarmup({
+              policy_checkpoint: selectedActCheckpoint,
+              dataset_paths: datasetPaths,
+              policy_type: 'multi_task_dit',
+              task_instruction: flowTaskInstruction,
+              steps: parsedWarmupSteps,
+              batch_size: parsedWarmupBatchSize,
+              value_learning_rate: parsedWarmupValueLearningRate,
+              discount: parsedWarmupDiscount,
+            })
+            : await startACTTD3CriticWarmup({
+              dataset_path: datasetPaths[0],
+              dataset_paths: datasetPaths,
+              act_checkpoint: selectedActCheckpoint,
+              robot_type: robotType.trim(),
+              batch_size: parsedBatchSize,
+              critic_updates: parsedCriticWarmupUpdates,
+            }))
         : isFlowSdePpo
           ? await onStartFlowSDEPPO({
             policy_type: 'multi_task_dit',
-            policy_checkpoint: criticWarmupEnabled && ppoResumeReady
+            policy_checkpoint: ppoResumeReady
               ? resumeModelPath
               : selectedActCheckpoint,
             algorithm: 'flow_sde_ppo',
             robot_type: robotType.trim(),
-            ...(criticWarmupEnabled
-              ? (ppoResumeReady
-                ? { resume_checkpoint: resumeCheckpointPath }
-                : { value_warmup_bundle: warmupBundlePath })
-              : {}),
+            ...(ppoResumeReady
+              ? { resume_checkpoint: resumeCheckpointPath }
+              : (compatibleWarmupReady
+                ? { value_warmup_bundle: warmupBundlePath }
+                : {})),
             ...(flowTaskInstruction
               ? { task_instruction: flowTaskInstruction }
               : {}),
@@ -1895,29 +2510,42 @@ export default function OfflineRLTrainingSection({
           parent_checkpoint: variant === 'workflow'
             ? (canAutoResumeWorkflow ? checkpointPath.trim() : '')
             : parentCheckpoint.trim(),
-          algorithm,
+          algorithm: 'td3',
+          actor_objective: td3ActorObjective,
           robot_type: robotType.trim(),
           critic_epochs: parsedCriticEpochs,
           actor_equivalent_epochs: parsedActorEquivalentEpochs,
           batch_size: parsedBatchSize,
-          actor_trainable_groups: actorTrainableGroups,
+          actor_trainable_groups: (
+            td3ActorObjective === 'td3'
+              ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder')
+              : actorTrainableGroups
+          ),
         });
       setJobStatus(result || { status: 'starting' });
+      if (isDiffusionCriticWarmup) {
+        setWarmupStatus(result || { status: 'starting' });
+        setWarmupStatusReady(true);
+      }
       if (
         forceFreshLineage &&
-        !isImitationLearning &&
+        isReinforcementLearning &&
         !isFlowSdePpo
       ) {
         onFreshLineageConsumed?.();
       }
       const methodLabel = isImitationLearning
         ? 'Imitation Learning'
-        : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL');
+        : (isCriticWarmup
+          ? 'Critic Warm-up'
+          : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL'));
       toast.success(`${methodLabel} training started`);
     } catch (error) {
       const methodLabel = isImitationLearning
         ? 'Imitation Learning'
-        : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL');
+        : (isCriticWarmup
+          ? 'Critic Warm-up'
+          : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL'));
       toast.error(`${methodLabel} start failed: ${error.message}`);
       setStatusReady(false);
       isStartingRef.current = false;
@@ -1933,8 +2561,11 @@ export default function OfflineRLTrainingSection({
     const jobId = String(jobStatus?.job_id || '').trim();
     if (!jobId || !RUNNING_STATUSES.has(normalizedStatus) || isStopping) return;
     if (isFlowSdePpo && typeof onStopFlowSDEPPO !== 'function') return;
+    const methodLabel = isImitationLearning
+      ? 'Imitation Learning'
+      : (isCriticWarmup ? 'Critic Warm-up' : 'Offline RL');
     if (!window.confirm(
-      `Stop the current ${isImitationLearning ? 'Imitation Learning' : 'Offline RL'} training job?\n\n` +
+      `Stop the current ${methodLabel} training job?\n\n` +
       'The current job will stop at a safe boundary and will not export a deployable policy.'
     )) return;
 
@@ -1945,13 +2576,21 @@ export default function OfflineRLTrainingSection({
     try {
       const result = isImitationLearning
         ? await stopImitationLearningTraining(jobId)
-        : (isFlowSdePpo
-          ? await onStopFlowSDEPPO(jobId)
-          : await stopOfflineRLTraining(jobId));
+        : (isCriticWarmup
+          ? (isDiffusionCriticWarmup
+            ? await stopFlowSDEPPOValueWarmup(jobId)
+            : await stopACTTD3CriticWarmup(jobId))
+          : (isFlowSdePpo
+            ? await onStopFlowSDEPPO(jobId)
+            : await stopOfflineRLTraining(jobId)));
       setJobStatus(result || { ...jobStatus, status: 'running' });
-      toast.success(`${isImitationLearning ? 'Imitation Learning' : 'Offline RL'} stop requested`);
+      if (isDiffusionCriticWarmup) {
+        setWarmupStatus(result || { ...jobStatus, status: 'running' });
+        setWarmupStatusReady(true);
+      }
+      toast.success(`${methodLabel} stop requested`);
     } catch (error) {
-      toast.error(`${isImitationLearning ? 'Imitation Learning' : 'Offline RL'} stop failed: ${error.message}`);
+      toast.error(`${methodLabel} stop failed: ${error.message}`);
       setStatusReady(false);
       isStoppingRef.current = false;
       setIsStopping(false);
@@ -1985,8 +2624,26 @@ export default function OfflineRLTrainingSection({
 
   const browserDisabled = interactionLocked || warmupIsRunning || !isActive;
   const selectedTrainingConfigurationValid = isImitationLearning
-    ? imitationStepsValid && imitationBatchSizeValid && imitationSaveFreqValid
-    : (isFlowSdePpo
+    ? imitationStepsValid && imitationBatchSizeValid && imitationSaveFreqValid &&
+      imitationActionChunkSizeValid &&
+      (imitationPolicyType !== 'act' || trainabilityValid)
+    : (isCriticWarmup
+      ? (isDiffusionCriticWarmup
+        ? (
+          warmupConfigValid &&
+          Boolean(datasetPaths.length) &&
+          Boolean(actCheckpoint.trim()) &&
+          Boolean(flowTaskInstruction)
+        )
+        : (
+          isActCriticWarmup &&
+          batchSizeValid &&
+          criticWarmupUpdatesValid &&
+          Boolean(datasetPaths.length) &&
+          Boolean(actCheckpoint.trim()) &&
+          Boolean(robotType?.trim())
+        ))
+      : (isFlowSdePpo
       ? (
         flowSdePpoReady &&
         typeof onStartFlowSDEPPO === 'function' &&
@@ -1994,11 +2651,11 @@ export default function OfflineRLTrainingSection({
         Boolean(robotType?.trim()) &&
         flowInferenceReady
       )
-      : scheduleValid && batchSizeValid && trainabilityValid);
+      : scheduleValid && batchSizeValid && trainabilityValid));
   const startDisabled = (
     interactionLocked ||
     (!isFlowSdePpo && isConversionRunning) ||
-    (isFlowSdePpo && criticWarmupEnabled && !warmupIntegrationReady) ||
+    (isFlowSdePpo && (!warmupStatusReady || warmupIsRunning)) ||
     !selectedTrainingConfigurationValid ||
     (!isFlowSdePpo && selectedDatasetVersionInvalid) ||
     !isActive
@@ -2020,30 +2677,6 @@ export default function OfflineRLTrainingSection({
     typeof onSubmitFlowSDEPPOOutcome !== 'function' ||
     isSubmittingOutcome
   );
-  const warmupStartDisabled = (
-    !isActive ||
-    !isFlowSdePpo ||
-    !criticWarmupEnabled ||
-    !warmupStatusReady ||
-    warmupIsRunning ||
-    isRunning ||
-    isConversionRunning ||
-    !flowSdePpoReady ||
-    !datasetPaths.length ||
-    selectedDatasetVersionInvalid ||
-    !actCheckpoint.trim() ||
-    !flowTaskInstruction ||
-    !warmupConfigValid
-  );
-  const warmupStopDisabled = (
-    !isActive ||
-    !criticWarmupEnabled ||
-    !warmupStatusReady ||
-    !RUNNING_STATUSES.has(normalizedWarmupStatus) ||
-    !String(warmupStatus?.job_id || '').trim() ||
-    isWarmupStopping
-  );
-
   if (variant === 'workflow') {
     return (
       <WorkflowTrainingView
@@ -2053,10 +2686,13 @@ export default function OfflineRLTrainingSection({
         onPolicyModelChange={handlePolicyModelChange}
         algorithm={algorithm}
         onAlgorithmChange={handleAlgorithmChange}
+        td3ActorObjective={td3ActorObjective}
+        onTD3ActorObjectiveChange={handleTD3ActorObjectiveChange}
         flowSdePpoReady={flowSdePpoReady}
         flowInferenceBlockedReason={flowInferenceBlockedReason}
-        criticWarmupEnabled={criticWarmupEnabled}
-        onCriticWarmupEnabledChange={handleCriticWarmupEnabledChange}
+        flowTaskInstruction={flowTaskInstruction}
+        ppoResumeReady={ppoResumeReady}
+        compatibleWarmupReady={compatibleWarmupReady}
         warmupSteps={warmupSteps}
         setWarmupSteps={setWarmupSteps}
         warmupBatchSize={warmupBatchSize}
@@ -2065,26 +2701,12 @@ export default function OfflineRLTrainingSection({
         setWarmupValueLearningRate={setWarmupValueLearningRate}
         warmupDiscount={warmupDiscount}
         setWarmupDiscount={setWarmupDiscount}
-        warmupStatus={warmupStatus}
-        warmupStatusReady={warmupStatusReady}
-        warmupStatusLabel={warmupStatusLabel}
-        warmupProgress={warmupProgress}
-        warmupBundlePath={warmupBundlePath}
-        warmupIntegrationReady={warmupIntegrationReady}
-        warmupIntegrationMessage={warmupIntegrationMessage}
-        warmupSourceKind={warmupSourceKind}
-        warmupSourceLabel={warmupSourceLabel}
-        warmupSourceReadyLabel={warmupSourceReadyLabel}
-        handleWarmupStart={handleWarmupStart}
-        handleWarmupStop={handleWarmupStop}
-        warmupStartDisabled={warmupStartDisabled}
-        warmupStopDisabled={warmupStopDisabled}
-        isWarmupStarting={isWarmupStarting}
-        isWarmupStopping={isWarmupStopping}
-        warmupIsRunning={warmupIsRunning}
         actorTrainableGroups={actorTrainableGroups}
         setActorTrainableGroups={setActorTrainableGroups}
+        rltTrainableGroups={rltTrainableGroups}
+        setRltTrainableGroups={setRltTrainableGroups}
         browserDisabled={browserDisabled}
+        selectionDisabled={selectionLocked}
         criticEpochs={criticEpochs}
         setCriticEpochs={setCriticEpochs}
         actorEquivalentEpochs={actorEquivalentEpochs}
@@ -2097,12 +2719,17 @@ export default function OfflineRLTrainingSection({
         setImitationBatchSize={setImitationBatchSize}
         imitationSaveFreq={imitationSaveFreq}
         setImitationSaveFreq={setImitationSaveFreq}
+        imitationActionChunkSize={imitationActionChunkSize}
+        setImitationActionChunkSize={setImitationActionChunkSize}
+        criticWarmupUpdates={criticWarmupUpdates}
+        setCriticWarmupUpdates={setCriticWarmupUpdates}
         statusLabel={statusLabel}
         displayProgress={displayProgress}
         jobStatus={jobStatus}
         modelPath={modelPath}
         currentPolicyEpoch={currentPolicyEpoch}
         datasetSelections={datasetSelections}
+        trainingReplayDatasets={trainingReplayDatasets}
         actCheckpoint={actCheckpoint}
         robotType={robotType}
         handleStart={handleStart}
@@ -2117,6 +2744,7 @@ export default function OfflineRLTrainingSection({
         statusReady={statusReady}
         isConversionRunning={isConversionRunning}
         trainabilityError={trainabilityError}
+        onCompactLayoutChange={onCompactLayoutChange}
       />
     );
   }
@@ -2176,6 +2804,22 @@ export default function OfflineRLTrainingSection({
               <option value="td3">TD3 (ACT-TD3)</option>
               <option value="sac" disabled>SAC — Coming soon</option>
               <option value="rlt" disabled>RLT — Coming soon</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="offline-rl-td3-loss-option" className="text-sm font-medium text-gray-600">
+              Loss option
+            </label>
+            <select
+              id="offline-rl-td3-loss-option"
+              value={td3ActorObjective}
+              onChange={(event) => handleTD3ActorObjectiveChange(event.target.value)}
+              disabled={browserDisabled || algorithm !== 'td3'}
+              className="h-10 rounded-md border border-gray-300 bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+            >
+              <option value="td3">TD3</option>
+              <option value="td3_bc">TD3-BC</option>
             </select>
           </div>
 

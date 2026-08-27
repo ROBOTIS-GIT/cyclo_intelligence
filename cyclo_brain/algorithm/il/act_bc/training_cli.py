@@ -96,7 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--chunk-size",
         type=_positive,
         default=ACT_CHUNK_SIZE,
-        help=f"ACT chunk and execution horizon; current Cyclo contract requires {ACT_CHUNK_SIZE}.",
+        help=(
+            "ACT prediction and execution horizon. "
+            f"Defaults to {ACT_CHUNK_SIZE}; the supervisor accepts 1 through 100."
+        ),
     )
     parser.add_argument("--progress-interval", type=_positive, default=10)
     parser.add_argument("--learning-rate", type=_positive_float, default=1e-5)

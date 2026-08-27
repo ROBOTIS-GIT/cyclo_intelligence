@@ -41,6 +41,10 @@ const renderModal = (props = {}) => {
       <OfflineRLWorkspaceStatusModal
         isOpen={props.isOpen ?? true}
         onClose={onClose}
+        workspaceMode={props.workspaceMode || 'inference'}
+        settingsContent={props.settingsContent || (
+          <div data-testid="workspace-settings-content">Settings content</div>
+        )}
       />
     </Provider>
   );
@@ -60,6 +64,8 @@ describe('OfflineRLWorkspaceStatusModal', () => {
     expect(screen.getByRole('dialog', {
       name: 'Inference Workspace Status',
     })).toBeInTheDocument();
+    expect(screen.getByRole('dialog')
+      .querySelector('[data-robot-lab-icon="true"]')).toBeInTheDocument();
     expect(screen.getByText('ffw_sg2_rev1')).toBeInTheDocument();
     expect(screen.getByTestId('inline-system-status')).toHaveTextContent(
       'CPU RAM Storage'
@@ -67,9 +73,36 @@ describe('OfflineRLWorkspaceStatusModal', () => {
     expect(screen.getByTestId('record-topic-monitor'))
       .toHaveAttribute('data-show-when-empty', 'true');
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Robot Status' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Settings' }))
+      .toHaveAttribute('aria-selected', 'false');
     expect(screen.getByRole('button', {
       name: 'Back to Offline RL workspace',
     })).toHaveFocus();
+  });
+
+  test('shows mode-specific settings in the Settings tab', () => {
+    renderModal({
+      workspaceMode: 'recording',
+      settingsContent: (
+        <div data-testid="recording-settings-content">Recording controls</div>
+      ),
+    });
+
+    expect(screen.getByRole('dialog', {
+      name: 'Recording Workspace Status',
+    })).toBeInTheDocument();
+    expect(screen.getByTestId('recording-settings-content')).not.toBeVisible();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+
+    expect(screen.getByRole('tab', { name: 'Settings' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Recording Settings')).toBeInTheDocument();
+    expect(screen.getByTestId('recording-settings-content'))
+      .toHaveTextContent('Recording controls');
+    expect(screen.getByTestId('record-topic-monitor')).not.toBeVisible();
   });
 
   test('closes with Back and Escape', () => {

@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from cyclo_brain.algorithm.rl.act_td3 import ACTTD3Config
+from cyclo_brain.algorithm.rl.act_td3 import RLMetricHistoryPoint
 from cyclo_brain.algorithm.rl.act_td3 import offline_training_cli as cli
 
 
@@ -76,6 +77,7 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
         self.assertEqual(args.actor_equivalent_epochs, 5)
         self.assertFalse(args.allow_partial_round)
         self.assertIsNone(args.actor_trainable_groups)
+        self.assertEqual(args.actor_objective, "td3_bc")
 
         multiple = parser.parse_args(
             [*required, "--dataset-root", "/dataset_epoch_0001"]
@@ -122,6 +124,11 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
             ).actor_trainable_groups,
             ("visual_backbone", "action_decoder"),
         )
+
+        pure_td3 = parser.parse_args([*required, "--actor-objective", "td3"])
+        self.assertEqual(pure_td3.actor_objective, "td3")
+        with self.assertRaises(SystemExit):
+            parser.parse_args([*required, "--actor-objective", "sac"])
 
         with self.assertRaises(SystemExit):
             parser.parse_args(
@@ -184,6 +191,20 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
             eta_seconds=None,
             durable_critic_updates=11,
             checkpoint_path="/output/training_state/act_td3.pt",
+            rl_metric_history=(
+                RLMetricHistoryPoint(
+                    rl_epoch=1,
+                    actor_loss_mean=-0.2,
+                    critic_loss_mean=0.3,
+                    replay_average_reward=0.75,
+                ),
+                RLMetricHistoryPoint(
+                    rl_epoch=2,
+                    actor_loss_mean=0.2,
+                    critic_loss_mean=0.1,
+                    replay_average_reward=0.8,
+                ),
+            ),
         )
         identity = SimpleNamespace(
             identity="sha256:identity",
@@ -199,10 +220,126 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
             identity=identity,
             model_directory=None,
             batch_size=8,
+            critic_source="parent_checkpoint",
+            critic_checkpoint=Path("/output/parent.pt"),
         )
         self.assertEqual(result_manifest["batch_size"], 8)
+        self.assertEqual(result_manifest["algorithm"], "td3")
+        self.assertEqual(result_manifest["actor_objective"], "td3_bc")
         self.assertEqual(result_manifest["status"], "stopped")
         self.assertIsNone(result_manifest["model_path"])
+        self.assertEqual(result_manifest["critic_source"], "parent_checkpoint")
+        self.assertEqual(
+            result_manifest["critic_checkpoint"],
+            "/output/parent.pt",
+        )
+        self.assertEqual(
+            result_manifest["rl_metric_history"],
+            (
+                {
+                    "rl_epoch": 1,
+                    "actor_loss_mean": -0.2,
+                    "critic_loss_mean": 0.3,
+                    "replay_average_reward": 0.75,
+                },
+                {
+                    "rl_epoch": 2,
+                    "actor_loss_mean": 0.2,
+                    "critic_loss_mean": 0.1,
+                    "replay_average_reward": 0.8,
+                },
+            ),
+        )
+        with mock.patch.object(cli, "_json_line") as emit:
+            cli._progress_line(progress)  # noqa: SLF001
+        emitted = emit.call_args.args[0]
+        self.assertEqual(emitted["event"], "progress")
+        self.assertEqual(
+            emitted["rl_metric_history"],
+            result_manifest["rl_metric_history"],
+        )
+
+    def test_full_td3_continuation_wins_without_inspecting_policy_warmup(self) -> None:
+        parent = Path("/output/parent.pt")
+        with mock.patch.object(
+            cli,
+            "load_policy_local_warmup_critic",
+        ) as warm_loader:
+            source, checkpoint = cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=parent,
+                continuation_source="parent_checkpoint",
+            )
+        self.assertEqual(source, "parent_checkpoint")
+        self.assertEqual(checkpoint, parent)
+        warm_loader.assert_not_called()
+
+    def test_policy_warmup_then_random_critic_source_priority(self) -> None:
+        latest = Path("/actor/critic/latest.pt")
+        with mock.patch.object(
+            cli,
+            "load_policy_local_warmup_critic",
+            side_effect=(latest, None),
+        ) as warm_loader:
+            warm = cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=None,
+                continuation_source=None,
+            )
+            random = cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=None,
+                continuation_source=None,
+            )
+        self.assertEqual(warm, ("policy_warmup", latest))
+        self.assertEqual(random, ("random", None))
+        self.assertEqual(warm_loader.call_count, 2)
+
+    def test_same_round_resume_has_distinct_critic_source(self) -> None:
+        checkpoint_path = Path("/output/training_state/act_td3.pt")
+        with mock.patch.object(
+            cli,
+            "load_policy_local_warmup_critic",
+        ) as warm_loader:
+            source = cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=checkpoint_path,
+                continuation_source="resume_checkpoint",
+            )
+        self.assertEqual(source, ("resume_checkpoint", checkpoint_path))
+        warm_loader.assert_not_called()
+
+    def test_continuation_source_requires_a_matching_checkpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "has no checkpoint"):
+            cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=None,
+                continuation_source="parent_checkpoint",
+            )
+        with self.assertRaisesRegex(ValueError, "source is invalid"):
+            cli._initialize_critic_source(  # noqa: SLF001
+                learner=object(),
+                replay=object(),
+                identity=object(),
+                act_checkpoint=Path("/actor"),
+                resume_from=Path("/output/state.pt"),
+                continuation_source="policy_warmup",
+            )
 
     def test_main_turns_sigint_into_cooperative_stop_request(self) -> None:
         installed: dict[int, object] = {}

@@ -39,6 +39,8 @@ class InferenceRequesterTests(unittest.TestCase):
             "model_path": "/models/policy",
             "acceleration_mode": "tensorrt_dit",
             "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
+            "rlt_enabled": True,
+            "rlt_bundle_path": "/models/rlt",
         })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
@@ -47,6 +49,8 @@ class InferenceRequesterTests(unittest.TestCase):
             client.calls[0][0].acceleration_engine_path,
             "/models/policy/dit_model_bf16.trt",
         )
+        self.assertTrue(client.calls[0][0].rlt_enabled)
+        self.assertEqual(client.calls[0][0].rlt_bundle_path, "/models/rlt")
 
     def test_get_action_uses_monotonic_seq_id(self) -> None:
         client = FakeEngineClient(
@@ -62,13 +66,14 @@ class InferenceRequesterTests(unittest.TestCase):
         )
         requester = InferenceRequester(client, get_action_timeout_s=2.5)
 
-        response = requester.get_action("open drawer")
+        response = requester.get_action("open drawer", action_policy_mode="rlt")
 
         self.assertTrue(response.success)
         self.assertEqual(response.seq_id, 1)
         request, timeout_s = client.calls[0]
         self.assertEqual(request.seq_id, 1)
         self.assertEqual(request.task_instruction, "open drawer")
+        self.assertEqual(request.action_policy_mode, "rlt")
         self.assertEqual(timeout_s, 2.5)
         self.assertFalse(requester.has_pending_get_action())
 

@@ -15,6 +15,7 @@ import taskReducer, {
   setInferenceRecordingUiPhase,
   setInferenceStatus,
   setRecordStatus,
+  receiveServerRecordTaskInfo,
 } from '../features/tasks/taskSlice';
 import rosReducer from '../features/ros/rosSlice';
 import { InferencePhase, RecordPhase } from '../constants/taskPhases';
@@ -131,6 +132,25 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(await screen.findByRole('dialog', { name: /real robot deploy/i }))
       .toBeInTheDocument();
     expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('explains the approved RLT override and base-policy start in the robot warning', async () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      taskOverrides: {
+        rltEnabled: true,
+        rltRobotOverride: true,
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: /real robot deploy/i });
+    expect(within(dialog).getByText('RLT experimental override approved.'))
+      .toBeInTheDocument();
+    expect(within(dialog).getByText(
+      'This session starts with GR00T. RLT activates only after you press Use RLT Action.'
+    )).toBeInTheDocument();
   });
 
   test('starts robot deploy only after explicit confirmation', async () => {
@@ -348,6 +368,207 @@ describe('InferenceControlPanel deploy safety', () => {
         inferenceMode: 'simulation',
         taskSource: 'inference',
       });
+    });
+  });
+
+  test('starts with a preloaded RLT bundle and resets routing to base GR00T', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        taskInstruction: ['pick up the jelly bag'],
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+        actionPolicyMode: 'rlt',
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /start inference/i,
+    }));
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+        inferenceMode: 'simulation',
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+        .toBe('base');
+    });
+  });
+
+  test('requires an RLT bundle path before starting preload', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        taskInstruction: ['pick up the jelly bag'],
+        rltEnabled: true,
+        rltBundlePath: '',
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Missing required fields: RLT Bundle Path'
+      );
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  test('hot-switches between preloaded GR00T and RLT actions without stopping', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        taskInstruction: ['pick up the jelly bag'],
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+        actionPolicyMode: 'base',
+      },
+    });
+
+    const baseButton = screen.getByRole('button', { name: 'Use GR00T Action' });
+    const rltButton = screen.getByRole('button', { name: 'Use RLT Action' });
+    expect(baseButton).toHaveAttribute('aria-pressed', 'true');
+    expect(baseButton).toBeDisabled();
+    expect(rltButton).toBeEnabled();
+
+    fireEvent.click(rltButton);
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('set_action_policy', {
+        actionPolicyMode: 'rlt',
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+        .toBe('rlt');
+    });
+
+    // /data/recording/status still carries the TaskInfo snapshot captured at
+    // inference start. It must not revert the live RLT route back to base.
+    act(() => {
+      store.dispatch(receiveServerRecordTaskInfo({
+        taskType: 'inference',
+        actionPolicyMode: 'base',
+      }));
+    });
+    expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+      .toBe('rlt');
+
+    const updatedBaseButton = screen.getByRole('button', { name: 'Use GR00T Action' });
+    expect(updatedBaseButton).toBeEnabled();
+    fireEvent.click(updatedBaseButton);
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('set_action_policy', {
+        actionPolicyMode: 'base',
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+        .toBe('base');
+    });
+    expect(sendRecordCommand).not.toHaveBeenCalledWith(
+      'stop_inference',
+      expect.anything()
+    );
+  });
+
+  test('asks for explicit confirmation before an unapproved Real Robot RLT switch', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+      },
+    });
+
+    const rltButton = screen.getByRole('button', { name: 'Use RLT Action' });
+    expect(rltButton).toBeEnabled();
+    expect(rltButton).toHaveAttribute(
+      'title',
+      expect.stringContaining('requires explicit safety confirmation')
+    );
+    expect(screen.getByTestId('real-robot-rlt-approval-status'))
+      .toHaveTextContent('requires safety confirmation');
+    fireEvent.click(rltButton);
+
+    expect(await screen.findByRole('dialog', { name: 'Enable RLT on Real Robot' }))
+      .toBeInTheDocument();
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Enable RLT on Real Robot' }))
+      .not.toBeInTheDocument();
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('approves and applies an unapproved Real Robot RLT switch', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+        actionPolicyMode: 'base',
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use RLT Action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm RLT Action' }));
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('set_action_policy', {
+        actionPolicyMode: 'rlt',
+        rltRobotOverride: true,
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.rltRobotOverride).toBe(true);
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode).toBe('rlt');
+    });
+  });
+
+  test('allows Real Robot RLT hot-switch after explicit opt-in', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+        rltRobotOverride: true,
+        actionPolicyMode: 'base',
+      },
+    });
+
+    const rltButton = screen.getByRole('button', { name: 'Use RLT Action' });
+    expect(rltButton).toBeEnabled();
+    expect(rltButton).toHaveAttribute(
+      'title',
+      expect.stringContaining('safety override approved')
+    );
+    expect(screen.getByTestId('real-robot-rlt-approval-status'))
+      .toHaveTextContent('safety override approved');
+
+    fireEvent.click(rltButton);
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('set_action_policy', {
+        actionPolicyMode: 'rlt',
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+        .toBe('rlt');
     });
   });
 });

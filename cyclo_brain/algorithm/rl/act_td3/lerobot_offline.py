@@ -122,6 +122,7 @@ class LeRobotACTTD3Transition:
     rewards: Tensor
     executed_mask: Tensor
     step_durations_s: Tensor
+    episode_success: bool
     terminated: bool
     truncated: bool
     next_observation_valid: bool
@@ -167,6 +168,8 @@ class LeRobotACTTD3Transition:
             raise ValueError("raw padded durations must be exactly zero")
         if bool((self.step_durations_s[self.executed_mask] <= 0.0).any()):
             raise ValueError("raw executed durations must be positive")
+        if not isinstance(self.episode_success, bool):
+            raise TypeError("raw episode_success must be boolean")
         if length < horizon and not (self.terminated or self.truncated):
             raise ValueError("raw partial chunks must terminate or truncate")
         if self.bootstrap_allowed and (self.terminated or not self.next_observation_valid):
@@ -451,6 +454,7 @@ class FixedHorizonLeRobotACTTD3Dataset(torch.utils.data.Dataset):
             rewards=rewards,
             executed_mask=mask,
             step_durations_s=durations,
+            episode_success=block.successful,
             terminated=terminated,
             truncated=False,
             next_observation_valid=next_valid,
@@ -580,6 +584,12 @@ class VirtualCumulativeLeRobotACTTD3Dataset(torch.utils.data.Dataset):
 
         return self._root_episode_ranges
 
+    @property
+    def root_transition_counts(self) -> tuple[int, ...]:
+        """Return each immutable root's macro-transition count in root order."""
+
+        return tuple(len(dataset) for dataset in self._datasets)
+
     def __len__(self) -> int:
         return len(self._transition_map)
 
@@ -698,6 +708,9 @@ class ACTTD3LeRobotCollator:
             executed_mask=mask,
             step_durations_s=floats(
                 [transition.step_durations_s for transition in transitions]
+            ),
+            episode_success=booleans(
+                [transition.episode_success for transition in transitions]
             ),
             terminated=booleans([transition.terminated for transition in transitions]),
             truncated=booleans([transition.truncated for transition in transitions]),

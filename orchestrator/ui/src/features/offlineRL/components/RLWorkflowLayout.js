@@ -3,19 +3,15 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import {
-  MdArrowForward,
   MdCloudUpload,
-  MdKeyboardDoubleArrowLeft,
-  MdKeyboardDoubleArrowRight,
-  MdMemory,
+  MdDns,
   MdModelTraining,
   MdOutlineDataset,
   MdRestartAlt,
-  MdStorage,
   MdSwapHoriz,
   MdUndo,
 } from 'react-icons/md';
@@ -24,8 +20,13 @@ import OfflineRLReplayBuffer from './OfflineRLReplayBuffer';
 import OfflineRLDatasetConversion from './OfflineRLDatasetConversion';
 import OfflineRLLeRobotDataset from './OfflineRLLeRobotDataset';
 import OfflineRLTrainingSection from './OfflineRLTrainingSection';
-import OfflineRLWorkspaceStatusModal from './OfflineRLWorkspaceStatusModal';
+import OfflineRLDataConversionGuideModal from './OfflineRLDataConversionGuideModal';
+import OfflineRLTrainingGuideModal from './OfflineRLTrainingGuideModal';
+import RLFrameworkRail from './RLFrameworkRail';
+import PanelToggleGlyph from './PanelToggleGlyph';
+import RobotLabIcon from './RobotLabIcon';
 import { InferencePhase, RecordPhase } from '../../../constants/taskPhases';
+import PageType from '../../../constants/pageType';
 import {
   getFlowSDEPPOStatus,
   startFlowSDEPPOTraining,
@@ -37,6 +38,7 @@ import {
   selectInferenceRecordingControl,
   setInferenceTaskInfo,
 } from '../../tasks/taskSlice';
+import { moveToPage } from '../../ui/uiSlice';
 import {
   advanceOfflineRLLineage,
   createOfflineRLLineage,
@@ -104,19 +106,27 @@ function SectionHeader({
   );
 }
 
-function FlowArrow() {
+function PipelineCard({
+  icon: Icon,
+  step,
+  title,
+  children,
+  onIconClick = null,
+  iconButtonLabel = '',
+}) {
   return (
-    <div className="flex items-center justify-center py-1 text-[#aaa295] lg:py-0">
-      <MdArrowForward className="rotate-90 lg:rotate-0" size={19} aria-hidden="true" />
-    </div>
-  );
-}
-
-function PipelineCard({ icon: Icon, step, title, children }) {
-  return (
-    <section className={`${SURFACE_CLASS} flex h-full min-h-[260px] flex-col p-4`}>
-      <SectionHeader icon={Icon} eyebrow={`Step ${step}`} title={title} />
-      <div className="mt-3 flex min-h-0 flex-1 flex-col">{children}</div>
+    <section
+      className={`${SURFACE_CLASS} flex min-h-0 w-full shrink-0 flex-col p-3`}
+      data-testid={`offline-rl-pipeline-step-${step}`}
+    >
+      <SectionHeader
+        icon={Icon}
+        eyebrow={`Step ${step}`}
+        title={title}
+        onIconClick={onIconClick}
+        iconButtonLabel={iconButtonLabel}
+      />
+      <div className="mt-2 flex min-h-0 flex-1 flex-col">{children}</div>
     </section>
   );
 }
@@ -140,9 +150,16 @@ export default function RLWorkflowLayout({ isActive = true }) {
     (state) => String(state.tasks.inferenceTaskInfo.policyType || '').trim()
   );
   const [showWorkspaceStatus, setShowWorkspaceStatus] = useState(false);
-  const [isWorkflowPanelCollapsed, setIsWorkflowPanelCollapsed] = useState(false);
+  const [showDataConversionGuide, setShowDataConversionGuide] = useState(false);
+  const [showTrainingGuide, setShowTrainingGuide] = useState(false);
+  const [activeFrameworkSection, setActiveFrameworkSection] = useState('environment');
+  const [isFrameworkRailCollapsed, setIsFrameworkRailCollapsed] = useState(false);
+  const replayDrawerCloseButtonRef = useRef(null);
+  const trainingDrawerCloseButtonRef = useRef(null);
   const [workspaceMode, setWorkspaceMode] = useState('inference');
   const [trainingInteractionLocked, setTrainingInteractionLocked] = useState(true);
+  const [trainingMethod, setTrainingMethod] = useState('reinforcement');
+  const [isTrainingCompact, setIsTrainingCompact] = useState(false);
   const [rlLineage, setRLLineage] = useState(() => resolveOfflineRLLineageState());
   const [deploymentState, setDeploymentState] = useState({
     ready: false,
@@ -150,6 +167,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
     serviceType: 'lerobot',
     policyType: 'act',
     rlEpoch: 0,
+    lineageMode: 'unchanged',
   });
   const [activeDeployment, setActiveDeployment] = useState({
     modelPath: '',
@@ -172,6 +190,9 @@ export default function RLWorkflowLayout({ isActive = true }) {
       rlEpoch: Number.isInteger(Number(nextState?.rlEpoch)) && Number(nextState.rlEpoch) >= 0
         ? Number(nextState.rlEpoch)
         : rlLineage.policyEpoch,
+      lineageMode: ['new', 'advance'].includes(nextState?.lineageMode)
+        ? nextState.lineageMode
+        : 'unchanged',
     });
   }, [rlLineage.policyEpoch]);
 
@@ -194,10 +215,14 @@ export default function RLWorkflowLayout({ isActive = true }) {
       policyType: deploymentState.policyType,
     }));
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
-    setRLLineage((current) => advanceOfflineRLLineage(current, {
-      policyEpoch: deploymentState.rlEpoch,
-      policyPath: deploymentState.modelPath,
-    }));
+    setRLLineage((current) => (
+      deploymentState.lineageMode === 'new'
+        ? createOfflineRLLineage(deploymentState.modelPath)
+        : advanceOfflineRLLineage(current, {
+          policyEpoch: deploymentState.rlEpoch,
+          policyPath: deploymentState.modelPath,
+        })
+    ));
     toast.success('Trained policy selected for inference');
   }, [
     deploymentState,
@@ -268,6 +293,8 @@ export default function RLWorkflowLayout({ isActive = true }) {
     recordingControl.lifecycleLocked
   );
   const isRecordingWorkspace = workspaceMode === 'recording';
+  const isReplayDrawerOpen = isActive && activeFrameworkSection === 'replay';
+  const isTrainingDrawerOpen = isActive && activeFrameworkSection === 'training';
 
   const lineageResetDisabled = (
     workspaceModeSwitchLocked ||
@@ -290,6 +317,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
       serviceType: 'lerobot',
       policyType: 'act',
       rlEpoch: 0,
+      lineageMode: 'unchanged',
     });
     setActiveDeployment({
       modelPath: '',
@@ -327,29 +355,138 @@ export default function RLWorkflowLayout({ isActive = true }) {
     setShowWorkspaceStatus(false);
   }, []);
 
+  const closeTrainingGuide = useCallback(() => {
+    setShowTrainingGuide(false);
+  }, []);
+
+  const closeDataConversionGuide = useCallback(() => {
+    setShowDataConversionGuide(false);
+  }, []);
+
   useEffect(() => {
-    if (!isActive) closeWorkspaceStatus();
-  }, [closeWorkspaceStatus, isActive]);
+    if (!isActive) {
+      closeWorkspaceStatus();
+      closeDataConversionGuide();
+      closeTrainingGuide();
+    }
+  }, [closeDataConversionGuide, closeTrainingGuide, closeWorkspaceStatus, isActive]);
+
+  const closeReplayDrawer = useCallback(() => {
+    setActiveFrameworkSection('environment');
+    if (typeof document !== 'undefined') {
+      document.getElementById('rl-framework-section-replay')?.focus();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isReplayDrawerOpen) replayDrawerCloseButtonRef.current?.focus();
+  }, [isReplayDrawerOpen]);
+
+  useEffect(() => {
+    if (
+      !isReplayDrawerOpen ||
+      showWorkspaceStatus ||
+      showDataConversionGuide ||
+      typeof document === 'undefined'
+    ) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeReplayDrawer();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [
+    closeReplayDrawer,
+    isReplayDrawerOpen,
+    showDataConversionGuide,
+    showWorkspaceStatus,
+  ]);
+
+  useEffect(() => {
+    if (!isReplayDrawerOpen) closeDataConversionGuide();
+  }, [closeDataConversionGuide, isReplayDrawerOpen]);
+
+  const closeTrainingDrawer = useCallback(() => {
+    setActiveFrameworkSection('environment');
+    if (typeof document !== 'undefined') {
+      document.getElementById('rl-framework-section-training')?.focus();
+    }
+  }, []);
+
+  const handleFrameworkSectionChange = useCallback((nextSection) => {
+    setActiveFrameworkSection((currentSection) => (
+      currentSection === nextSection && nextSection !== 'environment'
+        ? 'environment'
+        : nextSection
+    ));
+  }, []);
+
+  useEffect(() => {
+    if (isTrainingDrawerOpen) trainingDrawerCloseButtonRef.current?.focus();
+  }, [isTrainingDrawerOpen]);
+
+  useEffect(() => {
+    if (
+      !isTrainingDrawerOpen ||
+      showWorkspaceStatus ||
+      showTrainingGuide ||
+      typeof document === 'undefined'
+    ) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeTrainingDrawer();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [
+    closeTrainingDrawer,
+    isTrainingDrawerOpen,
+    showTrainingGuide,
+    showWorkspaceStatus,
+  ]);
+
+  useEffect(() => {
+    if (!isTrainingDrawerOpen) closeTrainingGuide();
+  }, [closeTrainingGuide, isTrainingDrawerOpen]);
 
   return (
     <div
-      className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#f3f0e8] text-[#302d27]"
+      className="flex h-full min-h-0 w-full overflow-hidden bg-[#f3f0e8] text-[#302d27]"
       style={{ fontFamily: "'Pretendard Variable', sans-serif" }}
     >
-      <main className="min-h-0 w-full min-w-0 flex-1 overflow-y-auto p-4 lg:p-5 2xl:p-6">
-        <div className="flex min-h-full rounded-2xl border border-[#ded9cf] bg-[#eeebe3] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]">
+      <RLFrameworkRail
+        activeSection={activeFrameworkSection}
+        collapsed={isFrameworkRailCollapsed}
+        onBack={() => dispatch(moveToPage(PageType.HOME))}
+        onSectionChange={handleFrameworkSectionChange}
+        onToggleCollapsed={() => setIsFrameworkRailCollapsed((collapsed) => !collapsed)}
+        sectionControls={{
+          replay: 'offline-rl-replay-drawer',
+          training: 'offline-rl-training-drawer',
+        }}
+      />
+      <main
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden p-4 lg:p-5 2xl:p-6"
+        data-testid="offline-rl-main"
+      >
+        <div
+          className="relative flex h-full min-h-0 w-full rounded-2xl border border-[#ded9cf] bg-[#eeebe3] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
+          data-testid="offline-rl-workflow-grid"
+          data-layout="environment-canvas"
+          data-active-section={activeFrameworkSection}
+        >
           <div
-            className={`grid w-full flex-1 gap-4 ${
-              isWorkflowPanelCollapsed
-                ? 'xl:grid-cols-[minmax(0,1fr)]'
-                : 'xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'
-            }`}
-            data-testid="offline-rl-workflow-grid"
-            data-workflow-panel-collapsed={String(isWorkflowPanelCollapsed)}
+            className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-y-auto overscroll-contain"
+            data-testid="offline-rl-environment-canvas"
           >
-            <section className={`${SURFACE_CLASS} flex min-h-[570px] min-w-0 flex-col p-4`}>
+            <section
+              className={`${SURFACE_CLASS} flex min-h-[570px] w-full min-w-0 flex-col p-4`}
+              data-testid="offline-rl-environment-stage"
+            >
               <SectionHeader
-                icon={MdMemory}
+                icon={RobotLabIcon}
                 eyebrow="Environment"
                 title={isRecordingWorkspace
                   ? 'Recording Workspace'
@@ -390,24 +527,6 @@ export default function RLWorkflowLayout({ isActive = true }) {
                         );
                       })}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsWorkflowPanelCollapsed((collapsed) => !collapsed)}
-                      aria-label={isWorkflowPanelCollapsed
-                        ? 'Show workflow panel'
-                        : 'Hide workflow panel'}
-                      aria-expanded={!isWorkflowPanelCollapsed}
-                      title={isWorkflowPanelCollapsed
-                        ? 'Show workflow panel'
-                        : 'Hide workflow panel'}
-                      className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-[#d4ccbf] bg-[#f5f2eb] text-[#6f685d] shadow-sm transition-colors hover:bg-[#e7e1d6] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
-                    >
-                      {isWorkflowPanelCollapsed ? (
-                        <MdKeyboardDoubleArrowLeft size={19} aria-hidden="true" />
-                      ) : (
-                        <MdKeyboardDoubleArrowRight size={19} aria-hidden="true" />
-                      )}
-                    </button>
                   </div>
                 )}
               />
@@ -415,50 +534,178 @@ export default function RLWorkflowLayout({ isActive = true }) {
                 isActive={isActive}
                 workspaceMode={workspaceMode}
                 policyEpoch={rlLineage.policyEpoch}
+                workspaceStatusOpen={showWorkspaceStatus}
+                onCloseWorkspaceStatus={closeWorkspaceStatus}
               />
             </section>
+          </div>
 
-            <div
-              className={`${
-                isWorkflowPanelCollapsed ? 'hidden' : 'grid'
-              } min-h-0 min-w-0 content-start gap-4 xl:grid-rows-[minmax(260px,2fr)_minmax(390px,3fr)_auto]`}
-              data-testid="offline-rl-workflow-steps"
-              aria-hidden={isWorkflowPanelCollapsed}
+          <div
+            className="pointer-events-none absolute inset-0 z-20 overflow-hidden"
+            data-testid="offline-rl-workflow-steps"
+            data-panel-state={activeFrameworkSection}
+          >
+            <aside
+              id="offline-rl-replay-drawer"
+              aria-labelledby="offline-rl-replay-drawer-title"
+              aria-hidden={!isReplayDrawerOpen}
+              className={`absolute inset-y-4 left-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none lg:w-1/2 ${
+                isReplayDrawerOpen
+                  ? 'visible translate-x-0 opacity-100 pointer-events-auto'
+                  : 'invisible -translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
+              }`}
+              data-testid="offline-rl-replay-drawer"
+              data-panel-state={isReplayDrawerOpen ? 'open' : 'closed'}
+              inert={!isReplayDrawerOpen}
             >
               <div
-                className="grid h-full min-h-[260px] items-stretch gap-2 lg:grid-cols-[minmax(0,1fr)_28px_minmax(0,1fr)_28px_minmax(0,1fr)]"
+                className="flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
+                data-testid="offline-rl-replay-drawer-header"
+              >
+                <button
+                  ref={replayDrawerCloseButtonRef}
+                  type="button"
+                  onClick={closeReplayDrawer}
+                  aria-label="Close Replay Buffer panel"
+                  title="Close Replay Buffer panel"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-transparent bg-[#f3f0e8] text-[#6f685d] transition-colors hover:bg-[#e7e1d6] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
+                >
+                  <PanelToggleGlyph
+                    glyphTestId="replay-drawer-toggle-glyph"
+                    accentTestId="replay-drawer-toggle-accent"
+                  />
+                </button>
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[#ddd5c7] bg-[#ece8df] text-[#555046]">
+                    <MdDns size={17} aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
+                      Data Workflow
+                    </p>
+                    <h2
+                      id="offline-rl-replay-drawer-title"
+                      className="truncate text-sm font-semibold text-[#292720]"
+                    >
+                      Replay Buffer
+                    </h2>
+                  </div>
+                </div>
+              </div>
+              <div
+                className="flex min-h-0 w-full flex-1 flex-col justify-between gap-3 overflow-y-auto overscroll-contain p-4"
                 data-testid="offline-rl-dataset-pipeline"
               >
-                <PipelineCard icon={MdStorage} step="01" title="Replay Buffer">
+                <PipelineCard
+                  icon={MdDns}
+                  step="01"
+                  title="Data Collection"
+                  onIconClick={() => setShowDataConversionGuide(true)}
+                  iconButtonLabel="Open Data Conversion Guide"
+                >
                   <OfflineRLReplayBuffer isActive={isActive} />
                 </PipelineCard>
-
-                <FlowArrow />
 
                 <PipelineCard icon={MdSwapHoriz} step="02" title="Dataset Conversion">
                   <OfflineRLDatasetConversion isActive={isActive} />
                 </PipelineCard>
 
-                <FlowArrow />
-
                 <PipelineCard icon={MdOutlineDataset} step="03" title="LeRobot Dataset">
                   <OfflineRLLeRobotDataset isActive={isActive} />
                 </PipelineCard>
               </div>
+            </aside>
 
-              <section className={`${SURFACE_CLASS} flex min-h-0 min-w-0 flex-col p-3.5`}>
-                <SectionHeader
+            <aside
+              id="offline-rl-training-drawer"
+              aria-labelledby="offline-rl-training-drawer-title"
+              aria-hidden={!isTrainingDrawerOpen}
+              className={`absolute inset-y-4 right-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none lg:w-1/2 ${
+                isTrainingDrawerOpen
+                  ? 'visible translate-x-0 opacity-100 pointer-events-auto'
+                  : 'invisible translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
+              }`}
+              data-testid="offline-rl-training-drawer"
+              data-panel-state={isTrainingDrawerOpen ? 'open' : 'closed'}
+              inert={!isTrainingDrawerOpen}
+            >
+              <div
+                className="flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
+                data-testid="offline-rl-training-drawer-header"
+              >
+                <button
+                  ref={trainingDrawerCloseButtonRef}
+                  type="button"
+                  onClick={closeTrainingDrawer}
+                  aria-label="Close Training panel"
+                  title="Close Training panel"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-transparent bg-[#f3f0e8] text-[#6f685d] transition-colors hover:bg-[#e7e1d6] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
+                >
+                  <PanelToggleGlyph
+                    glyphTestId="training-drawer-toggle-glyph"
+                    accentTestId="training-drawer-toggle-accent"
+                    accentSide="right"
+                  />
+                </button>
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[#ddd5c7] bg-[#ece8df] text-[#555046]">
+                    <MdModelTraining size={17} aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
+                      Policy Workflow
+                    </p>
+                    <h2
+                      id="offline-rl-training-drawer-title"
+                      className="truncate text-sm font-semibold text-[#292720]"
+                    >
+                      Training Pipeline
+                    </h2>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                className="flex min-h-0 w-full flex-1 flex-col gap-3 overflow-y-auto overscroll-contain p-4"
+                data-testid="offline-rl-training-content"
+              >
+                <section
+                  className={`${SURFACE_CLASS} flex w-full min-w-0 shrink-0 flex-col p-4 ${
+                    isTrainingCompact ? 'min-h-0' : 'h-full min-h-[640px]'
+                  }`}
+                  data-testid="offline-rl-training-stage"
+                  data-compact-layout={isTrainingCompact ? 'true' : 'false'}
+                >
+                  <SectionHeader
                   icon={MdModelTraining}
                   eyebrow="Step 04"
                   title="Training"
+                  onIconClick={() => setShowTrainingGuide(true)}
+                  iconButtonLabel="Open Training Guide"
                   actions={(
                     <div className="flex shrink-0 items-center gap-1.5">
-                      <span
-                        className="rounded-full border border-[#cfd8cd] bg-[#e8eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#58705d]"
-                        aria-label={`Training policy RL Epoch ${rlLineage.policyEpoch} to ${rlLineage.policyEpoch + 1}`}
-                      >
-                        RL Epoch {formatRLEpoch(rlLineage.policyEpoch)} → {formatRLEpoch(rlLineage.policyEpoch + 1)}
-                      </span>
+                      {trainingMethod === 'imitation' ? (
+                        <span
+                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#746c61]"
+                          aria-label="Imitation Learning base policy RL Epoch 0"
+                        >
+                          Base Policy {formatRLEpoch(0)}
+                        </span>
+                      ) : trainingMethod === 'critic' ? (
+                        <span
+                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#746c61]"
+                          aria-label={`Critic Warm-up policy RL Epoch ${rlLineage.policyEpoch} unchanged`}
+                        >
+                          Critic · {formatRLEpoch(rlLineage.policyEpoch)}
+                        </span>
+                      ) : (
+                        <span
+                          className="rounded-full border border-[#cfd8cd] bg-[#e8eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#58705d]"
+                          aria-label={`Training policy RL Epoch ${rlLineage.policyEpoch} to ${rlLineage.policyEpoch + 1}`}
+                        >
+                          RL Epoch {formatRLEpoch(rlLineage.policyEpoch)} → {formatRLEpoch(rlLineage.policyEpoch + 1)}
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={handleNewRLLineage}
@@ -474,8 +721,8 @@ export default function RLWorkflowLayout({ isActive = true }) {
                       </button>
                     </div>
                   )}
-                />
-                <OfflineRLTrainingSection
+                  />
+                  <OfflineRLTrainingSection
                   isActive={isActive}
                   variant="workflow"
                   inferencePhase={inferencePhase}
@@ -483,59 +730,69 @@ export default function RLWorkflowLayout({ isActive = true }) {
                   forceFreshLineage={rlLineage.forceFresh}
                   onFreshLineageConsumed={handleFreshLineageConsumed}
                   onRunningChange={setTrainingInteractionLocked}
+                  onTrainingMethodStateChange={setTrainingMethod}
                   flowSdePpoReady
                   getFlowSDEPPOStatus={getFlowSDEPPOStatus}
                   onStartFlowSDEPPO={startFlowSDEPPOTraining}
                   onStopFlowSDEPPO={stopFlowSDEPPOTraining}
                   onSubmitFlowSDEPPOOutcome={submitFlowSDEPPOOutcome}
                   onDeploymentStateChange={handleDeploymentStateChange}
-                />
-              </section>
+                  onCompactLayoutChange={setIsTrainingCompact}
+                  />
+                </section>
 
-              <section className={`${SURFACE_CLASS} flex items-center justify-between gap-4 p-4`}>
-                <div className="flex min-w-0 items-center gap-3">
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#eeebe3] text-[#6f685d]">
-                    <MdCloudUpload size={18} />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
-                      Step 05 · Deployment
-                    </div>
-                    <div className="truncate text-[11px] font-semibold text-[#403b34]">
-                      Policy Deploy
+                <section
+                  className={`${SURFACE_CLASS} flex w-full shrink-0 items-center justify-between gap-4 p-4`}
+                  data-testid="offline-rl-deployment"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#eeebe3] text-[#6f685d]">
+                      <MdCloudUpload size={18} />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
+                        Step 05 · Deployment
+                      </div>
+                      <div className="truncate text-[11px] font-semibold text-[#403b34]">
+                        Policy Deploy
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleDiscardPolicy}
-                    disabled={discardDisabled}
-                    className={discardDisabled
-                      ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
-                      : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#a86b68] bg-[#a86b68] px-4 text-[10px] font-semibold text-white hover:bg-[#965d5a]'}
-                  >
-                    <MdUndo size={14} /> Discard Policy
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDeployPolicy}
-                    disabled={deployDisabled}
-                    className={deployDisabled
-                      ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
-                      : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#5f7965] bg-[#69866f] px-4 text-[10px] font-semibold text-white hover:bg-[#5f7965]'}
-                  >
-                    <MdCloudUpload size={14} /> Deploy Policy
-                  </button>
-                </div>
-              </section>
-            </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDiscardPolicy}
+                      disabled={discardDisabled}
+                      className={discardDisabled
+                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
+                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#a86b68] bg-[#a86b68] px-4 text-[10px] font-semibold text-white hover:bg-[#965d5a]'}
+                    >
+                      <MdUndo size={14} /> Discard Policy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDeployPolicy}
+                      disabled={deployDisabled}
+                      className={deployDisabled
+                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
+                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#5f7965] bg-[#69866f] px-4 text-[10px] font-semibold text-white hover:bg-[#5f7965]'}
+                    >
+                      <MdCloudUpload size={14} /> Deploy Policy
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </aside>
           </div>
         </div>
       </main>
-      <OfflineRLWorkspaceStatusModal
-        isOpen={isActive && showWorkspaceStatus}
-        onClose={closeWorkspaceStatus}
+      <OfflineRLTrainingGuideModal
+        open={showTrainingGuide}
+        onBack={closeTrainingGuide}
+      />
+      <OfflineRLDataConversionGuideModal
+        open={showDataConversionGuide}
+        onBack={closeDataConversionGuide}
       />
     </div>
   );

@@ -235,9 +235,12 @@ class GR00TInference:
     def __init__(self):
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
+        self._rlt_adapter = None
         self._loaded_model_path: Optional[str] = None  # track cached policy path
         self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
         self._loaded_acceleration_engine_path: str = ""
+        self._loaded_rlt_enabled: bool = False
+        self._loaded_rlt_bundle_path: str = ""
         self.policy_info: dict = {
             "video": [],       # e.g. ["cam_left_head", "cam_left_wrist", ...]
             "state": [],       # e.g. ["arm_left", "arm_right"]
@@ -265,6 +268,14 @@ class GR00TInference:
         robot_type = request.robot_type
 
         try:
+            rlt_enabled = bool(getattr(request, "rlt_enabled", False))
+            rlt_bundle_path = str(
+                getattr(request, "rlt_bundle_path", "") or ""
+            ).strip()
+            if rlt_enabled and not rlt_bundle_path:
+                raise RuntimeError("RLT preload requires rlt_bundle_path")
+            if not rlt_enabled:
+                rlt_bundle_path = ""
             acceleration_mode, acceleration_engine_path, strict_acceleration = (
                 self._resolve_acceleration_request(request, model_path)
             )
@@ -281,6 +292,8 @@ class GR00TInference:
                 and self._loaded_model_path == model_path
                 and self._loaded_acceleration_mode == acceleration_mode
                 and self._loaded_acceleration_engine_path == acceleration_engine_path
+                and self._loaded_rlt_enabled == rlt_enabled
+                and self._loaded_rlt_bundle_path == rlt_bundle_path
             ):
                 self.logger.info(
                     "Reusing cached policy: %s (acceleration=%s)",
@@ -295,7 +308,7 @@ class GR00TInference:
                 self.robot.wait_for_ready(timeout=10.0)
                 return {
                     "success": True,
-                    "message": "GR00T inference restarted (policy cached)",
+                    "message": self._load_success_message(cached=True),
                     "action_keys": list(self.policy_info["action"]),
                 }
 
@@ -310,9 +323,12 @@ class GR00TInference:
                     self.robot.close()
                     self.robot = None
                 self.policy = None
+                self._rlt_adapter = None
                 self._loaded_model_path = None
                 self._loaded_acceleration_mode = ACCELERATION_PYTORCH
                 self._loaded_acceleration_engine_path = ""
+                self._loaded_rlt_enabled = False
+                self._loaded_rlt_bundle_path = ""
 
             self.logger.info(
                 "Loading GR00T policy from: %s (acceleration=%s)",
@@ -345,22 +361,60 @@ class GR00TInference:
                     "TensorRT acceleration disabled by request; using PyTorch Eager"
                 )
 
+            if rlt_enabled:
+                # Imported lazily so the normal GR00T-only image contract remains
+                # unchanged when RLT is not requested.
+                from runtime.rlt_adapter import GR00TRLTInferenceAdapter
+
+                self.logger.info("Preloading RLT bundle: %s", rlt_bundle_path)
+                self._rlt_adapter = GR00TRLTInferenceAdapter.load(
+                    self.policy,
+                    rlt_bundle_path,
+                    model_path,
+                )
+                qualification = self._rlt_adapter.qualification
+                if self._rlt_adapter.deployment_qualified:
+                    self.logger.info(
+                        "RLT bundle loaded with qualification=%s; deployment "
+                        "qualification is present",
+                        qualification,
+                    )
+                else:
+                    self.logger.warning(
+                        "RLT bundle loaded with qualification=%s; real-robot "
+                        "routing requires explicit operator override",
+                        qualification,
+                    )
+            else:
+                self._rlt_adapter = None
+
             self._loaded_model_path = model_path
             self._loaded_acceleration_mode = acceleration_mode
             self._loaded_acceleration_engine_path = acceleration_engine_path
+            self._loaded_rlt_enabled = rlt_enabled
+            self._loaded_rlt_bundle_path = rlt_bundle_path
 
             return {
                 "success": True,
-                "message": "GR00T inference started",
+                "message": self._load_success_message(cached=False),
                 "action_keys": list(self.policy_info["action"]),
             }
         except Exception as e:
             self._loaded_model_path = None
             self._loaded_acceleration_mode = ACCELERATION_PYTORCH
             self._loaded_acceleration_engine_path = ""
+            self._loaded_rlt_enabled = False
+            self._loaded_rlt_bundle_path = ""
+            self._rlt_adapter = None
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
             return self.fail(message)
+
+    def _load_success_message(self, *, cached: bool) -> str:
+        state = "restarted (policy cached)" if cached else "started"
+        if self._loaded_rlt_enabled or self._rlt_adapter is not None:
+            return f"GR00T inference {state}; RLT bundle preloaded, base action active"
+        return f"GR00T inference {state}"
 
     @staticmethod
     def _normalize_acceleration_mode(value: str) -> str:
@@ -730,10 +784,29 @@ class GR00TInference:
             if "success" in observation:
                 return observation
 
+            action_policy_mode = str(
+                getattr(request, "action_policy_mode", "base") or "base"
+            ).strip().lower()
+            if action_policy_mode not in {"base", "rlt"}:
+                return self.fail(
+                    "Unsupported action_policy_mode; expected 'base' or 'rlt'"
+                )
+            if action_policy_mode == "rlt" and self._rlt_adapter is None:
+                return self.fail(
+                    "RLT action requested without a preloaded RLT bundle"
+                )
+
             t0 = time.monotonic()
-            self.logger.info("Running GR00T inference...")
-            action, info = self.policy.get_action(observation)
-            self.logger.info("GR00T inference completed in %.3fs", time.monotonic() - t0)
+            self.logger.info("Running GR00T inference (action=%s)...", action_policy_mode)
+            if action_policy_mode == "rlt":
+                action = self._rlt_adapter.get_action(observation)
+            else:
+                action, _info = self.policy.get_action(observation)
+            self.logger.info(
+                "GR00T inference completed in %.3fs (action=%s)",
+                time.monotonic() - t0,
+                action_policy_mode,
+            )
             return self.postprocess_action(action)
 
         except Exception as e:

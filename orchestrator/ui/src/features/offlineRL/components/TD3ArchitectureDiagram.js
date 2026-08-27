@@ -59,7 +59,11 @@ const TargetNode = ({ label, detail }) => (
  * Critic and target trainability are deliberately fixed: only ACT policy
  * blocks are user-configurable in the neighboring policy graph.
  */
-export default function TD3ArchitectureDiagram() {
+export default function TD3ArchitectureDiagram({
+  criticOnly = false,
+  actorObjective = 'td3_bc',
+}) {
+  const pureTD3 = actorObjective === 'td3';
   return (
     <div
       className="flex min-h-0 flex-1 flex-col"
@@ -67,11 +71,17 @@ export default function TD3ArchitectureDiagram() {
     >
       <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
         <div>
-          <div className="text-[13px] font-semibold text-[#39352e]">TD3 critic architecture</div>
-          <div className="text-[10px] text-[#8d8579]">Independent chunk Q-functions · fixed contract</div>
+          <div className="text-[13px] font-semibold text-[#39352e]">
+            {criticOnly ? 'TD3 critic warm-up' : 'TD3 critic architecture'}
+          </div>
+          <div className="text-[10px] text-[#8d8579]">
+            {criticOnly
+              ? 'Independent chunk Q-functions · ACT actor frozen'
+              : 'Independent chunk Q-functions · fixed contract'}
+          </div>
         </div>
         <span className="rounded-full bg-[#e6ece6] px-2.5 py-1 text-[10px] font-semibold text-[#5f7664]">
-          RL algorithm
+          {criticOnly ? 'Critic only' : 'RL algorithm'}
         </span>
       </div>
 
@@ -93,13 +103,28 @@ export default function TD3ArchitectureDiagram() {
           <CriticNode label="Q2 critic" />
         </div>
 
-        <div className="rounded-lg border border-[#cdd8ce] bg-white px-2.5 py-2 text-[10px] text-[#536958]">
-          <span className="font-semibold">Actor gradient</span>
-          <span className="float-right font-semibold">ACT ← maximize Q1</span>
-          <div className="mt-1 clear-both text-[9px] text-[#859087]">
-            Delayed Q gradient alongside the ACT behavior-cloning anchor
+        {criticOnly ? (
+          <div
+            aria-label="ACT actor: Frozen; no gradients"
+            className="rounded-lg border border-[#d9d2c5] bg-[#f1eee7] px-2.5 py-2 text-[10px] text-[#655e54]"
+          >
+            <span className="font-semibold">ACT actor</span>
+            <span className="float-right font-semibold">Frozen · no gradients</span>
+            <div className="mt-1 clear-both text-[9px] text-[#8b8377]">
+              Only Q1, Q2, and their Polyak targets are updated
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="rounded-lg border border-[#cdd8ce] bg-white px-2.5 py-2 text-[10px] text-[#536958]">
+            <span className="font-semibold">Actor gradient</span>
+            <span className="float-right font-semibold">ACT ← maximize Q1</span>
+            <div className="mt-1 clear-both text-[9px] text-[#859087]">
+              {pureTD3
+                ? 'Delayed pure -Q gradient · no behavior-cloning term'
+                : 'Delayed Q gradient + success-only ACT CVAE/BC anchors'}
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.06em] text-[#999185]">
           <span className="h-px flex-1 bg-[#ddd6ca]" /> Target networks <span className="h-px flex-1 bg-[#ddd6ca]" />

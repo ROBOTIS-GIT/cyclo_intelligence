@@ -17,6 +17,7 @@ jest.mock('../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: jest.fn(),
 }));
 jest.mock('./FileBrowserModal', () => function MockFileBrowserModal(props) {
+  const isRltBundle = props.title === 'Select RLT bundle folder';
   return (
     <>
       <span data-testid="file-browser-modal" data-title={props.title} />
@@ -25,8 +26,12 @@ jest.mock('./FileBrowserModal', () => function MockFileBrowserModal(props) {
           type="button"
           onClick={() => props.onFileSelect({
             is_directory: true,
-            name: 'Task_existing_inference_MCAP',
-            full_path: '/workspace/rosbag2/Task_existing_inference_MCAP',
+            name: isRltBundle
+              ? 'showroom_groot_bundle'
+              : 'Task_existing_inference_MCAP',
+            full_path: isRltBundle
+              ? '/workspace/checkpoint/rlt/showroom_groot_bundle'
+              : '/workspace/rosbag2/Task_existing_inference_MCAP',
           })}
         >
           Choose {props.title}
@@ -57,6 +62,9 @@ const renderPanel = ({
   serviceType = 'lerobot',
   policyType = 'act',
   accelerationMode = 'pytorch',
+  rltEnabled = false,
+  rltBundlePath = '',
+  rltRobotOverride = false,
   taskInstruction = ['Pick up the object'],
   panelProps = {},
 } = {}) => {
@@ -82,6 +90,9 @@ const renderPanel = ({
           serviceType,
           policyType,
           accelerationMode,
+          rltEnabled,
+          rltBundlePath,
+          rltRobotOverride,
           taskInstruction,
         },
         inferenceStatus: {
@@ -269,6 +280,93 @@ describe('InferencePanel RL Recording', () => {
     expect(within(backendCard).getByTestId('trt-control')).toBeInTheDocument();
     expect(within(actionTimingCard).queryByText('TensorRT'))
       .not.toBeInTheDocument();
+  });
+
+  test('configures RLT preload and explicit Real Robot opt-in for GR00T N1.7', () => {
+    const { store } = renderPanel({
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      panelProps: {
+        embedded: true,
+        variant: 'offlineRL',
+      },
+    });
+
+    const rltToggle = screen.getByRole('checkbox', { name: 'Enable RLT' });
+    const bundlePath = screen.getByRole('textbox', { name: 'RLT Bundle Path' });
+    const bundleBrowser = screen.getByRole('button', {
+      name: 'Browse RLT Bundle Path',
+    });
+    const robotOverride = screen.getByRole('checkbox', {
+      name: 'Allow RLT on Real Robot',
+    });
+
+    expect(rltToggle).not.toBeChecked();
+    expect(bundlePath).toBeDisabled();
+    expect(bundleBrowser).toBeDisabled();
+    expect(robotOverride).not.toBeChecked();
+    expect(robotOverride).toBeDisabled();
+
+    fireEvent.click(rltToggle);
+
+    expect(store.getState().tasks.inferenceTaskInfo.rltEnabled).toBe(true);
+    expect(store.getState().tasks.inferenceTaskInfo.accelerationMode)
+      .toBe('tensorrt_dit');
+    expect(bundlePath).toBeEnabled();
+    expect(bundleBrowser).toBeEnabled();
+    expect(robotOverride).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
+      .toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
+      .toBeChecked();
+
+    fireEvent.click(bundleBrowser);
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Choose Select RLT bundle folder',
+    }));
+    expect(store.getState().tasks.inferenceTaskInfo.rltBundlePath).toBe(
+      '/workspace/checkpoint/rlt/showroom_groot_bundle'
+    );
+
+    fireEvent.click(robotOverride);
+    expect(store.getState().tasks.inferenceTaskInfo.rltRobotOverride).toBe(true);
+
+    fireEvent.click(rltToggle);
+    expect(store.getState().tasks.inferenceTaskInfo.rltEnabled).toBe(false);
+    expect(store.getState().tasks.inferenceTaskInfo.rltRobotOverride).toBe(false);
+  });
+
+  test.each([
+    ['ACT', 'lerobot', 'act'],
+    ['Pi0.5', 'lerobot', 'pi05'],
+    ['another GR00T policy', 'groot', 'future'],
+  ])('hides RLT controls for %s', (_label, serviceType, policyType) => {
+    renderPanel({ serviceType, policyType });
+
+    expect(screen.queryByRole('checkbox', { name: 'Enable RLT' }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'RLT Bundle Path' }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Allow RLT on Real Robot' }))
+      .not.toBeInTheDocument();
+  });
+
+  test('locks RLT settings while inference is running', () => {
+    renderPanel({
+      serviceType: 'groot',
+      policyType: 'n17',
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+      inferencePhase: InferencePhase.INFERENCING,
+    });
+
+    expect(screen.getByRole('checkbox', { name: 'Enable RLT' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'RLT Bundle Path' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Browse RLT Bundle Path' }))
+      .toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Allow RLT on Real Robot' }))
+      .toBeDisabled();
   });
 
   test('places Pi instruction inside Deploy Target without TensorRT', () => {

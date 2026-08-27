@@ -111,6 +111,7 @@ class FixedHorizonLeRobotACTTD3DatasetTest(unittest.TestCase):
         first = self.dataset[0]
         self.assertEqual((first.episode_index, first.start_frame_index), (0, 0))
         self.assertFalse(first.terminated)
+        self.assertTrue(first.episode_success)
         self.assertFalse(first.truncated)
         self.assertTrue(first.next_observation_valid)
         self.assertTrue(first.bootstrap_allowed)
@@ -129,6 +130,7 @@ class FixedHorizonLeRobotACTTD3DatasetTest(unittest.TestCase):
             (final_success.episode_index, final_success.start_frame_index), (0, 3)
         )
         self.assertTrue(final_success.terminated)
+        self.assertTrue(final_success.episode_success)
         self.assertFalse(final_success.truncated)
         self.assertFalse(final_success.next_observation_valid)
         self.assertFalse(final_success.bootstrap_allowed)
@@ -150,6 +152,7 @@ class FixedHorizonLeRobotACTTD3DatasetTest(unittest.TestCase):
         full_failure = self.dataset[2]
         self.assertEqual((full_failure.episode_index, full_failure.start_frame_index), (1, 0))
         self.assertTrue(full_failure.terminated)
+        self.assertFalse(full_failure.episode_success)
         self.assertFalse(full_failure.next_observation_valid)
         self.assertTrue(torch.equal(full_failure.executed_mask, torch.ones(3, dtype=torch.bool)))
         torch.testing.assert_close(full_failure.rewards, torch.zeros(3))
@@ -176,6 +179,9 @@ class FixedHorizonLeRobotACTTD3DatasetTest(unittest.TestCase):
         )
         self.assertTrue(
             torch.equal(batch.terminated, torch.tensor([False, True, True]))
+        )
+        self.assertTrue(
+            torch.equal(batch.episode_success, torch.tensor([True, True, False]))
         )
         self.assertTrue(
             torch.equal(batch.next_observation_valid, torch.tensor([True, False, False]))

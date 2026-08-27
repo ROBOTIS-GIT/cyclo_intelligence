@@ -11,7 +11,7 @@ cv_bridge_module.CvBridge = Mock
 sys.modules.setdefault('cv_bridge', cv_bridge_module)
 
 from interfaces.msg import TaskInfo
-from interfaces.srv import RecordingCommand
+from interfaces.srv import RecordingCommand, SendCommand
 
 from orchestrator.orchestrator_node import OrchestratorNode
 
@@ -180,3 +180,72 @@ def test_inference_joystick_does_not_control_recording():
     node.handle_joystick_trigger('left')
 
     node._forward_recording.assert_not_called()
+
+
+def test_copy_task_info_preserves_rlt_runtime_fields():
+    task_info = _task_info('groot')
+    task_info.rlt_enabled = True
+    task_info.rlt_bundle_path = '/workspace/checkpoint/rlt/bundle'
+    task_info.action_policy_mode = 'rlt'
+    task_info.rlt_robot_override = True
+
+    copied = OrchestratorNode._copy_task_info(task_info)
+
+    assert copied.rlt_enabled is True
+    assert copied.rlt_bundle_path == '/workspace/checkpoint/rlt/bundle'
+    assert copied.action_policy_mode == 'rlt'
+    assert copied.rlt_robot_override is True
+
+
+def test_action_policy_switch_is_forwarded_for_active_rlt_session():
+    node = _node()
+    client = SimpleNamespace(
+        inference_command=Mock(
+            return_value=SimpleNamespace(
+                success=True,
+                message='policy switched',
+            )
+        )
+    )
+    node.container_service_client = client
+    node._loaded_inference_rlt_enabled = True
+    node._loaded_inference_action_policy_mode = 'base'
+    task_info = _task_info('groot')
+    task_info.action_policy_mode = 'rlt'
+    task_info.rlt_robot_override = True
+    request = SimpleNamespace(
+        command=SendCommand.Request.SET_ACTION_POLICY,
+        task_info=task_info,
+    )
+    response = SimpleNamespace(success=False, message='')
+
+    result = node.user_interaction_callback(request, response)
+
+    assert result.success is True
+    assert result.message == 'policy switched'
+    client.inference_command.assert_called_once_with(
+        7,
+        action_policy_mode='rlt',
+        rlt_robot_override=True,
+    )
+    assert node._loaded_inference_action_policy_mode == 'rlt'
+
+
+def test_action_policy_switch_rejects_rlt_without_preloaded_bundle():
+    node = _node()
+    client = SimpleNamespace(inference_command=Mock())
+    node.container_service_client = client
+    node._loaded_inference_rlt_enabled = False
+    task_info = _task_info('groot')
+    task_info.action_policy_mode = 'rlt'
+    request = SimpleNamespace(
+        command=SendCommand.Request.SET_ACTION_POLICY,
+        task_info=task_info,
+    )
+    response = SimpleNamespace(success=False, message='')
+
+    result = node.user_interaction_callback(request, response)
+
+    assert result.success is False
+    assert 'no RLT bundle was preloaded' in result.message
+    client.inference_command.assert_not_called()

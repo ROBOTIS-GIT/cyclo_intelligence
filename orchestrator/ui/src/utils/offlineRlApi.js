@@ -52,6 +52,31 @@ export async function stopOfflineRLTraining(jobId) {
   return requireOk(response, 'Offline RL stop');
 }
 
+export async function startACTTD3CriticWarmup(request) {
+  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return requireOk(response, 'ACT-TD3 critic warm-up start');
+}
+
+export async function getACTTD3CriticWarmupStatus() {
+  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/status`, {
+    cache: 'no-store',
+  });
+  return requireOk(response, 'ACT-TD3 critic warm-up status');
+}
+
+export async function stopACTTD3CriticWarmup(jobId) {
+  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+  return requireOk(response, 'ACT-TD3 critic warm-up stop');
+}
+
 export async function startImitationLearningTraining(request) {
   const response = await fetch(`${IMITATION_LEARNING_API_BASE}/start`, {
     method: 'POST',
@@ -142,6 +167,18 @@ export async function getOfflineRLDatasetInfo(datasetPath) {
     cache: 'no-store',
   });
   return requireOk(response, 'LeRobot dataset inspection');
+}
+
+export async function getOfflineRLDatasetEpisodeData(datasetPath, episodeIndex) {
+  const query = new URLSearchParams({
+    dataset_path: datasetPath,
+    episode_index: String(episodeIndex),
+  });
+  const response = await fetch(
+    `${OFFLINE_RL_API_BASE}/dataset/episode-data?${query}`,
+    { cache: 'no-store' }
+  );
+  return requireOk(response, 'LeRobot episode data');
 }
 
 export async function getOfflineRLDatasets(rootPath = '') {

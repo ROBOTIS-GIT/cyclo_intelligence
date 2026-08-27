@@ -13,6 +13,7 @@ from typing import List, Optional
 
 CMD_LOAD, CMD_START, CMD_PAUSE, CMD_RESUME, CMD_STOP, CMD_UNLOAD = 0, 1, 2, 3, 4, 5
 CMD_UPDATE_INSTRUCTION = 6
+CMD_SET_ACTION_POLICY = 7
 
 
 class ServiceHandler:
@@ -39,6 +40,8 @@ class ServiceHandler:
                 return self._unload()
             if cmd == CMD_UPDATE_INSTRUCTION:
                 return self._update_instruction(request)
+            if cmd == CMD_SET_ACTION_POLICY:
+                return self._set_action_policy(request)
             return self._make_response(False, f"Unknown command: {cmd}")
         except Exception as e:
             return self._make_response(False, str(e))
@@ -67,6 +70,7 @@ class ServiceHandler:
             action_keys=action_keys,
             publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             action_request_mode=getattr(request, "action_request_mode", "async"),
+            rlt_enabled=bool(getattr(request, "rlt_enabled", False)),
         )
         return self._make_response(True, response.message or "loaded", action_keys)
 
@@ -114,6 +118,21 @@ class ServiceHandler:
         self._session.task_instruction = new_instruction
         self._control_loop.set_task_instruction(new_instruction)
         return self._make_response(True, f'instruction updated: "{new_instruction}"')
+
+    def _set_action_policy(self, request):
+        if not self._session.loaded:
+            return self._make_response(False, "LOAD first")
+        if not self._session.running:
+            return self._make_response(False, "not running - START first")
+        mode = str(getattr(request, "action_policy_mode", "") or "").strip().lower()
+        success, message = self._control_loop.set_action_policy(
+            mode,
+            allow_robot_rlt=bool(
+                getattr(request, "rlt_robot_override", False)
+            ),
+            timeout_s=5.0,
+        )
+        return self._make_response(success, message)
 
     def _make_response(
         self,

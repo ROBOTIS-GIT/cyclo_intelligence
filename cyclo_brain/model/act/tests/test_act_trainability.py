@@ -81,6 +81,18 @@ class ACTTrainabilityTest(unittest.TestCase):
                 msg=name,
             )
 
+        optimizer_parameter_ids = {
+            id(parameter)
+            for group in policy.get_optim_params()
+            for parameter in group["params"]
+        }
+        trainable_parameter_ids = {
+            id(parameter)
+            for parameter in policy.parameters()
+            if parameter.requires_grad
+        }
+        self.assertEqual(optimizer_parameter_ids, trainable_parameter_ids)
+
     def test_invalid_and_non_deployed_selections_are_rejected(self) -> None:
         for groups, message in (
             ((), "cannot be empty"),

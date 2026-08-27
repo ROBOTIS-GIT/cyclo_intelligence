@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree, MdModelTraining, MdNavigation } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree, MdNavigation } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
 import toast from 'react-hot-toast';
@@ -37,6 +37,7 @@ import { moveToPage, persistCurrentPage } from './features/ui/uiSlice';
 import { persistRobotType } from './features/tasks/taskSlice';
 import PageType from './constants/pageType';
 import { BT_UNSUPPORTED_ROBOT_MESSAGE, isBtRobotSupported } from './constants/btSupport';
+import RobotLabIcon from './features/offlineRL/components/RobotLabIcon';
 
 const NavigationPage = React.lazy(() => import('./pages/NavigationPage'));
 
@@ -333,7 +334,11 @@ function App() {
 
   return (
     <div className="flex min-h-screen w-screen bg-white text-gray-900 dark:bg-slate-950 dark:text-slate-100">
-      <aside className="w-30 min-w-28 bg-gray-100 dark:bg-slate-900 min-h-screen flex flex-col items-center gap-4 shadow-[inset_0_0_2px_rgba(0,0,0,0.1)] dark:shadow-[inset_0_0_0_1px_rgba(148,163,184,0.12)]">
+      {page !== PageType.OFFLINE_RL && (
+      <aside
+        data-testid="global-navigation-sidebar"
+        className="w-30 min-w-28 bg-gray-100 dark:bg-slate-900 min-h-screen flex flex-col items-center gap-4 shadow-[inset_0_0_2px_rgba(0,0,0,0.1)] dark:shadow-[inset_0_0_0_1px_rgba(148,163,184,0.12)]"
+      >
         <div className="w-full h-screen flex flex-col gap-2 items-center overflow-y-auto scrollbar-thin">
           <div className="w-full px-2 pt-3 pb-2 flex flex-col gap-2 border-b border-gray-200 dark:border-slate-800">
             <ThemeToggle />
@@ -433,7 +438,7 @@ function App() {
           {/* Divider line */}
           <div className="w-24 h-1 border-t-2 rounded-full border-gray-200 dark:border-slate-800 mt-3"></div>
 
-          {/* RL Framework page button */}
+          {/* PLAYGROUND page button */}
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.OFFLINE_RL,
@@ -441,8 +446,8 @@ function App() {
             })}
             onClick={handleOfflineRLPageNavigation}
           >
-            <MdModelTraining size={30} className="mb-2" />
-            <span className="mt-1 text-sm whitespace-nowrap">RL Framework</span>
+            <RobotLabIcon size={32} className="mb-2" aria-hidden="true" />
+            <span className="mt-1 text-sm whitespace-nowrap">PLAYGROUND</span>
           </button>
 
           {/* Edit dataset page button */}
@@ -471,6 +476,7 @@ function App() {
 
         </div>
       </aside>
+      )}
       <main className="flex-1 flex flex-col h-screen bg-white dark:bg-slate-950">
         {page === PageType.HOME ? (
           <HomePage />

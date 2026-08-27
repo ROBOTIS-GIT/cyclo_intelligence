@@ -37,6 +37,10 @@ uint8 FINISH_EPISODE = 21
 uint8 DISCARD_EPISODE = 22
 uint8 SET_TASK_INFO = 23
 uint8 CANCEL_SEGMENT = 24
+# Switch the already-loaded inference session between the base VLA action and
+# the preloaded RLT Action MLP. task_info.action_policy_mode carries "base" or
+# "rlt". No checkpoint reload is performed.
+uint8 SET_ACTION_POLICY = 25
 
 # Episode outcome for STOP_INFERENCE_RECORD. General recording commands use
 # UNSPECIFIED so their existing save behavior remains unchanged.

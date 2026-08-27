@@ -70,6 +70,7 @@ def _learner(
     *,
     n_action_steps: int = 3,
     action_dim: int = 2,
+    actor_objective: str = "td3_bc",
     actor_trainable_groups: tuple[str, ...] | None = None,
 ) -> ACTTD3Learner:
     torch.manual_seed(101)
@@ -82,7 +83,10 @@ def _learner(
         action_feature_dim=8,
         hidden_dims=(16, 8),
     )
-    algorithm_config = _algorithm_config()
+    algorithm_config = replace(
+        _algorithm_config(),
+        actor_objective=actor_objective,
+    )
     if actor_trainable_groups is not None:
         algorithm_config = replace(
             algorithm_config,
@@ -119,6 +123,7 @@ def _batch() -> ACTTD3Batch:
         step_durations_s=torch.tensor(
             [[0.1, 0.1, 0.1], [0.1, 0.1, 0.0]]
         ),
+        episode_success=torch.tensor([True, False]),
         terminated=torch.tensor([False, True]),
         truncated=torch.tensor([False, False]),
         next_observation_valid=torch.tensor([True, False]),
@@ -145,6 +150,7 @@ def _short_execution_batch() -> ACTTD3Batch:
         rewards=torch.tensor([[0.1, 0.2], [1.0, 0.0]]),
         executed_mask=torch.tensor([[True, True], [True, False]]),
         step_durations_s=torch.tensor([[0.1, 0.1], [0.1, 0.0]]),
+        episode_success=torch.tensor([True, False]),
         terminated=torch.tensor([False, True]),
         truncated=torch.tensor([False, False]),
         next_observation_valid=torch.tensor([True, False]),
@@ -173,14 +179,6 @@ def _changed(before: dict[str, torch.Tensor], module: torch.nn.Module) -> bool:
         not torch.equal(before[name], value)
         for name, value in module.state_dict().items()
     )
-
-
-def _legacy_v3_state(learner: ACTTD3Learner) -> dict[str, object]:
-    state = learner.state_dict()
-    state["format"] = learner.LEGACY_ALL_TRAINABLE_STATE_FORMAT
-    del state["contract"]["actor_trainable_groups"]
-    del state["config"]["actor_trainable_groups"]
-    return state
 
 
 class ACTTD3LearnerTest(unittest.TestCase):
@@ -227,14 +225,14 @@ class ACTTD3LearnerTest(unittest.TestCase):
         self.assertTrue(bool((captured["actions"] > 2.0).all()))
 
     def test_actor_q_gradient_reaches_all_22_outputs_including_mobile(self) -> None:
-        learner = _learner(action_dim=22)
-        learner.completed_actor_updates = 1
+        learner = _learner(action_dim=22, actor_objective="td3")
         before = learner.actor.model.action_head.bias.detach().clone()
         behavior = before.view(1, 1, -1).expand(2, 3, -1).clone()
         behavior[1, 2] = 0.0
         batch = replace(
             _zero_action_batch(22),
             behavior_action_chunks=behavior,
+            episode_success=torch.tensor([False, False]),
         )
 
         def actor_chunk(actor, observations):
@@ -244,9 +242,6 @@ class ACTTD3LearnerTest(unittest.TestCase):
                 actor.config.chunk_size,
                 -1,
             )
-
-        def zero_bc(actor, _batch):
-            return next(actor.parameters()).sum() * 0.0, {}
 
         def sum_action_q(_observations, actions, _mask):
             return actions.sum(dim=(1, 2)).unsqueeze(-1)
@@ -260,7 +255,7 @@ class ACTTD3LearnerTest(unittest.TestCase):
             mock.patch.object(
                 learner_module,
                 "compute_act_bc_loss",
-                side_effect=zero_bc,
+                side_effect=AssertionError("pure TD3 must not call ACT BC"),
             ),
             mock.patch.object(
                 learner.critic.q1,
@@ -268,17 +263,84 @@ class ACTTD3LearnerTest(unittest.TestCase):
                 side_effect=sum_action_q,
             ),
         ):
-            learner._actor_step(batch)
+            actor_step = learner._actor_step(batch)
 
         after = learner.actor.model.action_head.bias.detach()
+        self.assertIsNone(actor_step[1])
+        self.assertIsNone(actor_step[2])
+        self.assertEqual(actor_step[4], 1.0)
         self.assertTrue(bool((after != before).all()))
         self.assertTrue(bool((after[-3:] != before[-3:]).all()))
+
+    def test_pure_td3_updates_from_failure_only_partial_prefixes_without_bc(self) -> None:
+        learner = _learner(n_action_steps=2, actor_objective="td3")
+        base = _short_execution_batch()
+        behavior = base.behavior_action_chunks.clone()
+        behavior[:, 1] = 0.0
+        rewards = base.rewards.clone()
+        rewards[:, 1] = 0.0
+        batch = replace(
+            base,
+            behavior_action_chunks=behavior,
+            rewards=rewards,
+            executed_mask=torch.tensor([[True, False], [True, False]]),
+            step_durations_s=torch.tensor([[0.1, 0.0], [0.1, 0.0]]),
+            episode_success=torch.tensor([False, False]),
+            truncated=torch.tensor([True, False]),
+        )
+        before = learner.actor.model.action_head.bias.detach().clone()
+        captured: dict[str, torch.Tensor] = {}
+
+        def actor_chunk(actor, observations):
+            bias = actor.model.action_head.bias
+            return bias.view(1, 1, -1).expand(
+                next(iter(observations.values())).shape[0],
+                actor.config.chunk_size,
+                -1,
+            )
+
+        def prefix_q(_observations, actions, mask):
+            captured["mask"] = mask.detach().clone()
+            return (actions * mask.unsqueeze(-1)).sum(dim=(1, 2)).unsqueeze(-1)
+
+        with (
+            mock.patch.object(
+                learner_module,
+                "differentiable_act_action_chunk",
+                side_effect=actor_chunk,
+            ),
+            mock.patch.object(
+                learner_module,
+                "compute_act_bc_loss",
+                side_effect=AssertionError("pure TD3 must not call ACT BC"),
+            ),
+            mock.patch.object(
+                learner.critic.q1,
+                "forward",
+                side_effect=prefix_q,
+            ),
+        ):
+            result = learner._actor_step(batch)
+
+        self.assertEqual(result[4], 1.0)
+        self.assertEqual(result[5], 0)
+        self.assertIsNone(result[1])
+        self.assertIsNone(result[2])
+        self.assertTrue(torch.equal(captured["mask"], batch.executed_mask))
+        self.assertFalse(
+            torch.equal(before, learner.actor.model.action_head.bias.detach())
+        )
 
     def test_checkpoint_declares_normalized_unbounded_action_contract(self) -> None:
         state = _learner(action_dim=22).state_dict()
 
-        self.assertEqual(state["format"], "cyclo_brain.act_td3_learner/v4")
+        self.assertEqual(state["format"], "cyclo_brain.act_td3_learner/v5")
         self.assertNotIn("action_projector", state)
+        self.assertEqual(state["contract"]["actor_objective"], "td3_bc")
+        self.assertEqual(
+            state["contract"]["bc_support"],
+            "successful_episode_executed_prefix_zero_padded_to_prediction_horizon",
+        )
         self.assertEqual(
             state["contract"]["action_domain"],
             "saved_act_preprocessor_mean_std_normalized",
@@ -290,6 +352,10 @@ class ACTTD3LearnerTest(unittest.TestCase):
         self.assertEqual(
             state["contract"]["actor_q_gradient"],
             "all_action_dimensions",
+        )
+        self.assertEqual(
+            state["contract"]["actor_q_support"],
+            "all_nonempty_executed_prefixes",
         )
         self.assertIs(state["contract"]["action_clamp"], False)
         self.assertEqual(
@@ -355,6 +421,26 @@ class ACTTD3LearnerTest(unittest.TestCase):
             ):
                 replace(_algorithm_config(), actor_trainable_groups=groups)
 
+    def test_config_uses_exact_objectives_and_removes_cvae_from_pure_td3(self) -> None:
+        pure = replace(_algorithm_config(), actor_objective="td3")
+
+        self.assertEqual(pure.actor_objective, "td3")
+        self.assertEqual(
+            pure.actor_trainable_groups,
+            ("visual_backbone", "transformer_encoder", "action_decoder"),
+        )
+        for invalid in ("TD3", "td3+bc", "", None):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                replace(_algorithm_config(), actor_objective=invalid)
+
+    def test_full_learner_resume_requires_exact_actor_objective(self) -> None:
+        state = _learner(actor_objective="td3_bc").state_dict()
+
+        with self.assertRaisesRegex(ValueError, "tensor contract"):
+            _learner(actor_objective="td3").load_state_dict(state)
+
     def test_checkpoint_rejects_different_trainable_group_contract(self) -> None:
         state = _learner(actor_trainable_groups=("action_decoder",)).state_dict()
         restored = _learner(actor_trainable_groups=("transformer_encoder",))
@@ -362,48 +448,19 @@ class ACTTD3LearnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tensor contract"):
             restored.load_state_dict(state)
 
-    def test_legacy_v3_checkpoint_resumes_with_default_all_groups(self) -> None:
+    def test_legacy_full_learner_checkpoints_cannot_resume_new_objective(self) -> None:
         source = _learner(seed=29, n_action_steps=2)
-        batch = _short_execution_batch()
-        for _ in range(4):
-            source.update(batch)
-        legacy = _legacy_v3_state(source)
-        restored = _learner(seed=29, n_action_steps=2)
-
-        restored.load_state_dict(legacy)
-
-        self.assertEqual(
-            legacy["format"],
+        for legacy_format in (
             source.LEGACY_ALL_TRAINABLE_STATE_FORMAT,
-        )
-        self.assertNotIn("actor_trainable_groups", legacy["contract"])
-        self.assertNotIn("actor_trainable_groups", legacy["config"])
-        self.assertEqual(source.update(batch), restored.update(batch))
-        for expected, actual in (
-            (source.actor, restored.actor),
-            (source.actor_target, restored.actor_target),
-            (source.critic, restored.critic),
-            (source.critic_target, restored.critic_target),
+            source.LEGACY_TD3_BC_STATE_FORMAT,
         ):
-            for name, value in expected.state_dict().items():
-                torch.testing.assert_close(
-                    value,
-                    actual.state_dict()[name],
-                    rtol=0.0,
-                    atol=0.0,
-                )
+            with self.subTest(legacy_format=legacy_format):
+                legacy = source.state_dict()
+                legacy["format"] = legacy_format
+                with self.assertRaisesRegex(ValueError, "objective contract changed"):
+                    _learner(seed=29, n_action_steps=2).load_state_dict(legacy)
 
-    def test_legacy_v3_checkpoint_rejects_partial_freeze_request(self) -> None:
-        legacy = _legacy_v3_state(_learner())
-        restored = _learner(actor_trainable_groups=("action_decoder",))
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "only with all ACT actor trainable groups",
-        ):
-            restored.load_state_dict(legacy)
-
-    def test_v4_checkpoint_does_not_normalize_missing_group_contract(self) -> None:
+    def test_v5_checkpoint_does_not_normalize_missing_group_contract(self) -> None:
         state = _learner().state_dict()
         del state["contract"]["actor_trainable_groups"]
 
@@ -466,7 +523,7 @@ class ACTTD3LearnerTest(unittest.TestCase):
                 target_standard_normal_noise=torch.zeros(1, 3, 2),
             )
 
-    def test_cvae_bc_receives_executed_prefix_and_padded_suffix(self) -> None:
+    def test_td3_bc_uses_only_successful_rows_with_padded_prediction_suffix(self) -> None:
         learner = _learner(n_action_steps=2)
         batch = _short_execution_batch()
         noise = torch.zeros(1, 2, 2)
@@ -474,33 +531,56 @@ class ACTTD3LearnerTest(unittest.TestCase):
             learner.update(batch, target_standard_normal_noise=noise)
         captured: dict[str, torch.Tensor] = {}
         original_compute_bc = learner_module.compute_act_bc_loss
+        original_deterministic_bc = learner_module.masked_deterministic_bc_l1
 
         def capture_bc(actor, bc_batch):
             captured[ACTION] = bc_batch[ACTION].detach().clone()
             captured["action_is_pad"] = bc_batch["action_is_pad"].detach().clone()
             return original_compute_bc(actor, bc_batch)
 
-        with mock.patch.object(
-            learner_module,
-            "compute_act_bc_loss",
-            side_effect=capture_bc,
+        def capture_deterministic(policy, behavior, mask):
+            captured["deterministic_behavior"] = behavior.detach().clone()
+            captured["deterministic_mask"] = mask.detach().clone()
+            return original_deterministic_bc(policy, behavior, mask)
+
+        with (
+            mock.patch.object(
+                learner_module,
+                "compute_act_bc_loss",
+                side_effect=capture_bc,
+            ),
+            mock.patch.object(
+                learner_module,
+                "masked_deterministic_bc_l1",
+                side_effect=capture_deterministic,
+            ),
         ):
             result = learner.update(batch, target_standard_normal_noise=noise)
 
         self.assertTrue(result.actor_updated)
-        self.assertEqual(captured[ACTION].shape, (2, 3, 2))
+        self.assertEqual(captured[ACTION].shape, (1, 3, 2))
         torch.testing.assert_close(
             captured[ACTION][:, :2],
-            batch.behavior_action_chunks,
+            batch.behavior_action_chunks[:1],
             rtol=0.0,
             atol=0.0,
         )
         self.assertEqual(torch.count_nonzero(captured[ACTION][:, 2:]).item(), 0)
         self.assertTrue(torch.equal(
             captured["action_is_pad"][:, :2],
-            ~batch.executed_mask,
+            ~batch.executed_mask[:1],
         ))
         self.assertTrue(bool(captured["action_is_pad"][:, 2:].all()))
+        torch.testing.assert_close(
+            captured["deterministic_behavior"],
+            batch.behavior_action_chunks[:1],
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertTrue(torch.equal(
+            captured["deterministic_mask"],
+            batch.executed_mask[:1],
+        ))
 
     def test_warmup_delays_actor_and_updates_target_critic(self) -> None:
         learner = _learner()

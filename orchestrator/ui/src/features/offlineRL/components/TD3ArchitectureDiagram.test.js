@@ -36,6 +36,16 @@ describe('TD3ArchitectureDiagram', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
+  test('shows the ACT actor as frozen in critic-only warm-up mode', () => {
+    render(<TD3ArchitectureDiagram criticOnly />);
+
+    expect(screen.getByText('TD3 critic warm-up')).toBeInTheDocument();
+    expect(screen.getByLabelText('ACT actor: Frozen; no gradients')).toBeInTheDocument();
+    expect(screen.queryByText('ACT ← maximize Q1')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Q1 critic: Fire; Trainable; fixed')).toBeInTheDocument();
+    expect(screen.getByLabelText('Q2 critic: Fire; Trainable; fixed')).toBeInTheDocument();
+  });
+
   test('fills the training column with enlarged architecture labels', () => {
     render(<TD3ArchitectureDiagram />);
 

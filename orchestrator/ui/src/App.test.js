@@ -108,9 +108,37 @@ test('renders the Cyclo Intelligence shell navigation', () => {
     .toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Inference/i }))
     .toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /RL Framework/i }))
+  const robotisLabButton = screen.getByRole('button', { name: /PLAYGROUND/i });
+  expect(robotisLabButton).toBeInTheDocument();
+  expect(robotisLabButton.querySelector('[data-robot-lab-icon="true"]'))
     .toBeInTheDocument();
   expect(screen.getByText('Home Page')).toBeInTheDocument();
+});
+
+test('replaces the global navigation shell on the RL Framework page', () => {
+  const view = render(
+    <Provider store={store}>
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
+    </Provider>
+  );
+
+  expect(screen.getByTestId('global-navigation-sidebar')).toBeInTheDocument();
+
+  act(() => {
+    store.dispatch(moveToPage(PageType.OFFLINE_RL));
+  });
+
+  expect(screen.queryByTestId('global-navigation-sidebar')).not.toBeInTheDocument();
+  expect(screen.getByText('Offline RL Page')).toBeInTheDocument();
+
+  act(() => {
+    store.dispatch(moveToPage(PageType.HOME));
+  });
+
+  expect(screen.getByTestId('global-navigation-sidebar')).toBeInTheDocument();
+  view.unmount();
 });
 
 test('stops Navigation after leaving the Nav page', async () => {

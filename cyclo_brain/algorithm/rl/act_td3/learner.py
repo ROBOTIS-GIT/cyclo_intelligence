@@ -13,7 +13,6 @@ from torch import Tensor, nn
 
 from cyclo_brain.algorithm.rl.td3.functional import critic_loss, polyak_update_
 from cyclo_brain.model.act import (
-    ACT_TRAINABLE_GROUPS,
     ACTTwinChunkCritic,
     apply_act_trainable_groups,
     compute_act_bc_loss,
@@ -153,13 +152,14 @@ def _cpu_clone_tree(value: Any) -> Any:
 
 
 class ACTTD3Learner:
-    """ACT+BC TD3 over the policy's actually executed action prefix.
+    """Selectable pure-TD3 or success-filtered TD3+BC over ACT chunks.
 
     ACT predicts ``chunk_size`` actions but the official deployed policy
     executes only the first ``n_action_steps`` before replanning. Replay,
     SMDP returns, target smoothing, and Q-functions therefore use the latter
-    execution horizon. Official CVAE BC still receives its configured full
-    prediction horizon, with the unexecuted suffix marked as padding.
+    execution horizon. Under ``td3_bc``, official CVAE BC still receives its
+    configured full prediction horizon, with the unexecuted suffix marked as
+    padding, but only successful episode rows contribute either BC term.
 
     Replay actions, deterministic actor actions, and target actor actions all
     remain in the normalized action coordinates produced by the immutable ACT
@@ -169,12 +169,14 @@ class ACTTD3Learner:
     maps deployed actions back to the robot's raw command coordinates.
     """
 
-    STATE_FORMAT = "cyclo_brain.act_td3_learner/v4"
+    STATE_FORMAT = "cyclo_brain.act_td3_learner/v5"
+    LEGACY_TD3_BC_STATE_FORMAT = "cyclo_brain.act_td3_learner/v4"
     LEGACY_ALL_TRAINABLE_STATE_FORMAT = "cyclo_brain.act_td3_learner/v3"
-    BC_SUPPORT = "executed_prefix_zero_padded_to_prediction_horizon"
+    BC_SUPPORT = "successful_episode_executed_prefix_zero_padded_to_prediction_horizon"
     ACTION_DOMAIN = "saved_act_preprocessor_mean_std_normalized"
     TARGET_POLICY_SMOOTHING = "clipped_noise_all_dimensions_no_action_clamp"
     ACTOR_Q_GRADIENT = "all_action_dimensions"
+    ACTOR_Q_SUPPORT = "all_nonempty_executed_prefixes"
 
     def __init__(
         self,
@@ -289,14 +291,20 @@ class ACTTD3Learner:
         """Return tensor semantics that model shapes alone cannot recover."""
 
         return {
+            "actor_objective": self.config.actor_objective,
             "prediction_horizon": self.prediction_horizon,
             "execution_horizon": self.execution_horizon,
             "action_dim": self.action_dim,
             "observation_keys": tuple(self.critic.observation_keys),
-            "bc_support": self.BC_SUPPORT,
+            "bc_support": (
+                self.BC_SUPPORT
+                if self.config.actor_objective == "td3_bc"
+                else "none"
+            ),
             "action_domain": self.ACTION_DOMAIN,
             "target_policy_smoothing": self.TARGET_POLICY_SMOOTHING,
             "actor_q_gradient": self.ACTOR_Q_GRADIENT,
+            "actor_q_support": self.ACTOR_Q_SUPPORT,
             "action_clamp": False,
             "actor_trainable_groups": self.config.actor_trainable_groups,
         }
@@ -398,32 +406,52 @@ class ACTTD3Learner:
     def _actor_step(
         self,
         batch: ACTTD3Batch,
-    ) -> tuple[Tensor, Tensor, Tensor, float, int]:
+    ) -> tuple[
+        Tensor,
+        Tensor | None,
+        Tensor | None,
+        float,
+        float,
+        int,
+    ]:
         self.actor_optimizer.zero_grad(set_to_none=True)
-        bc_batch = dict(batch.observations)
-        from lerobot.utils.constants import ACTION
+        success_indices = torch.nonzero(
+            batch.episode_success,
+            as_tuple=False,
+        ).flatten()
+        success_count = int(success_indices.numel())
+        use_bc = self.config.actor_objective == "td3_bc"
+        cvae_bc_loss_value: Tensor | None = None
+        if use_bc and success_count:
+            from lerobot.utils.constants import ACTION
 
-        bc_actions = batch.behavior_action_chunks.new_zeros(
-            batch.batch_size,
-            self.prediction_horizon,
-            self.action_dim,
-        )
-        bc_actions[:, : self.execution_horizon] = batch.behavior_action_chunks
-        action_is_pad = torch.ones(
-            (batch.batch_size, self.prediction_horizon),
-            dtype=torch.bool,
-            device=self.device,
-        )
-        action_is_pad[:, : self.execution_horizon] = ~batch.executed_mask
-        bc_batch[ACTION] = bc_actions
-        bc_batch["action_is_pad"] = action_is_pad
-        with _use_owned_torch_rng(self.actor_generator, self.device):
-            with _temporary_mode(self.actor, training=True):
-                cvae_bc_loss, _metrics = compute_act_bc_loss(self.actor, bc_batch)
-        weighted_cvae_bc_loss = self.config.cvae_bc_weight * cvae_bc_loss
-        weighted_cvae_bc_loss.backward()
-        cvae_bc_loss_value = cvae_bc_loss.detach()
-        del weighted_cvae_bc_loss, cvae_bc_loss, bc_batch
+            successful_behavior_actions = batch.behavior_action_chunks.index_select(
+                0,
+                success_indices,
+            )
+            successful_mask = batch.executed_mask.index_select(0, success_indices)
+            bc_batch = _index_observations(batch.observations, success_indices)
+            bc_actions = batch.behavior_action_chunks.new_zeros(
+                success_count,
+                self.prediction_horizon,
+                self.action_dim,
+            )
+            bc_actions[:, : self.execution_horizon] = successful_behavior_actions
+            action_is_pad = torch.ones(
+                (success_count, self.prediction_horizon),
+                dtype=torch.bool,
+                device=self.device,
+            )
+            action_is_pad[:, : self.execution_horizon] = ~successful_mask
+            bc_batch[ACTION] = bc_actions
+            bc_batch["action_is_pad"] = action_is_pad
+            with _use_owned_torch_rng(self.actor_generator, self.device):
+                with _temporary_mode(self.actor, training=True):
+                    cvae_bc_loss, _metrics = compute_act_bc_loss(self.actor, bc_batch)
+            weighted_cvae_bc_loss = self.config.cvae_bc_weight * cvae_bc_loss
+            weighted_cvae_bc_loss.backward()
+            cvae_bc_loss_value = cvae_bc_loss.detach()
+            del weighted_cvae_bc_loss, cvae_bc_loss, bc_batch
 
         # Release the stochastic CVAE graph before constructing the deployed
         # zero-latent graph. Gradients still accumulate into the same actor
@@ -434,70 +462,81 @@ class ACTTD3Learner:
                 batch.observations,
             )
         policy_execution_actions = policy_actions[:, : self.execution_horizon]
-        deterministic_bc_loss = masked_deterministic_bc_l1(
-            policy_execution_actions,
-            batch.behavior_action_chunks,
-            batch.executed_mask,
-        )
+        deterministic_bc_loss: Tensor | None = None
+        if use_bc and success_count:
+            deterministic_bc_loss = masked_deterministic_bc_l1(
+                policy_execution_actions.index_select(0, success_indices),
+                batch.behavior_action_chunks.index_select(0, success_indices),
+                batch.executed_mask.index_select(0, success_indices),
+            )
         full_indices = torch.nonzero(
             batch.lengths == self.execution_horizon,
             as_tuple=False,
         ).flatten()
         full_count = int(full_indices.numel())
-        q_weight = q_weight_for_actor_update(
-            self.completed_actor_updates + 1,
-            maximum=self.config.q_weight_max,
-            ramp_updates=self.config.q_weight_ramp_actor_updates,
+        q_weight = (
+            1.0
+            if self.config.actor_objective == "td3"
+            else q_weight_for_actor_update(
+                self.completed_actor_updates + 1,
+                maximum=self.config.q_weight_max,
+                ramp_updates=self.config.q_weight_ramp_actor_updates,
+            )
         )
         self.critic.zero_grad(set_to_none=True)
+        secondary_has_signal = False
         with _temporarily_freeze_parameters(self.critic):
-            if full_count:
-                full_observations = _index_observations(
-                    batch.observations,
-                    full_indices,
-                )
-                full_policy_actions = policy_execution_actions.index_select(
-                    0,
-                    full_indices,
-                )
-                full_mask = torch.ones(
-                    (full_count, self.execution_horizon),
-                    dtype=torch.bool,
-                    device=self.device,
-                )
-                q1_for_actor = self.critic.q1(
-                    full_observations,
-                    full_policy_actions,
-                    full_mask,
-                )
-                actor_q_loss = -q_weight * q1_for_actor.mean()
-            else:
-                actor_q_loss = policy_execution_actions.sum() * 0.0
-            actor_q_and_bc_loss = (
-                self.config.deterministic_bc_weight * deterministic_bc_loss
-                + actor_q_loss
+            q1_for_actor = self.critic.q1(
+                batch.observations,
+                policy_execution_actions,
+                batch.executed_mask,
             )
-            actor_q_and_bc_loss.backward()
+            if q1_for_actor.shape != (batch.batch_size, 1):
+                raise RuntimeError("ACT-TD3 actor critic returned an invalid Q shape")
+            actor_q_loss = -q_weight * q1_for_actor.mean()
+            secondary_has_signal = q_weight > 0.0
+            actor_q_and_bc_loss = actor_q_loss
+            if deterministic_bc_loss is not None:
+                actor_q_and_bc_loss = (
+                    actor_q_and_bc_loss
+                    + self.config.deterministic_bc_weight * deterministic_bc_loss
+                )
+                secondary_has_signal = True
+            if secondary_has_signal:
+                actor_q_and_bc_loss.backward()
         if any(parameter.grad is not None for parameter in self.critic.parameters()):
             raise RuntimeError("ACT-TD3 actor objective reached critic gradients")
-        _gradient_clip(
-            self.actor,
-            self.config.actor_gradient_clip_norm,
-            "actor",
-        )
-        self.actor_optimizer.step()
+        if cvae_bc_loss_value is not None or secondary_has_signal:
+            _gradient_clip(
+                self.actor,
+                self.config.actor_gradient_clip_norm,
+                "actor",
+            )
+            self.actor_optimizer.step()
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.actor.eval()
-        actor_loss = (
-            self.config.cvae_bc_weight * cvae_bc_loss_value
-            + self.config.deterministic_bc_weight * deterministic_bc_loss.detach()
-            + actor_q_loss.detach()
+        actor_loss = actor_q_loss.detach()
+        if cvae_bc_loss_value is not None:
+            actor_loss = (
+                actor_loss + self.config.cvae_bc_weight * cvae_bc_loss_value
+            )
+        deterministic_bc_loss_value = (
+            deterministic_bc_loss.detach()
+            if deterministic_bc_loss is not None
+            else None
         )
+        if deterministic_bc_loss_value is not None:
+            actor_loss = (
+                actor_loss
+                + self.config.deterministic_bc_weight
+                * deterministic_bc_loss_value
+            )
         return (
             actor_loss,
             cvae_bc_loss_value,
-            deterministic_bc_loss.detach(),
+            deterministic_bc_loss_value,
             float(actor_q_loss.detach()),
+            q_weight,
             full_count,
         )
 
@@ -536,14 +575,16 @@ class ACTTD3Learner:
             policy_update_period=self.config.policy_update_period,
         )
         target_critic_updated = False
-        actor_values: tuple[Tensor, Tensor, Tensor, float, int] | None = None
+        actor_values: tuple[
+            Tensor,
+            Tensor | None,
+            Tensor | None,
+            float,
+            float,
+            int,
+        ] | None = None
         q_weight: float | None = None
         if actor_due:
-            q_weight = q_weight_for_actor_update(
-                self.completed_actor_updates + 1,
-                maximum=self.config.q_weight_max,
-                ramp_updates=self.config.q_weight_ramp_actor_updates,
-            )
             actor_values = self._actor_step(batch)
             self.completed_actor_updates += 1
             polyak_update_(
@@ -575,12 +616,21 @@ class ACTTD3Learner:
             q_loss_value = None
             full_count = None
         else:
-            actor_loss, cvae_loss, deterministic_loss, q_loss, resolved_full_count = (
-                actor_values
-            )
+            (
+                actor_loss,
+                cvae_loss,
+                deterministic_loss,
+                q_loss,
+                q_weight,
+                resolved_full_count,
+            ) = actor_values
             actor_loss_value = float(actor_loss)
-            cvae_value = float(cvae_loss)
-            deterministic_value = float(deterministic_loss)
+            cvae_value = float(cvae_loss) if cvae_loss is not None else None
+            deterministic_value = (
+                float(deterministic_loss)
+                if deterministic_loss is not None
+                else None
+            )
             q_loss_value = q_loss
             full_count = resolved_full_count
         return ACTTD3UpdateResult(
@@ -621,7 +671,17 @@ class ACTTD3Learner:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         """Restore an exact update boundary without changing the action contract."""
 
-        state = self._normalize_legacy_all_trainable_state(state)
+        if not isinstance(state, Mapping):
+            raise ValueError("ACT-TD3 learner state format is invalid")
+        if state.get("format") in {
+            self.LEGACY_ALL_TRAINABLE_STATE_FORMAT,
+            self.LEGACY_TD3_BC_STATE_FORMAT,
+        }:
+            raise ValueError(
+                "Legacy ACT-TD3 learner checkpoints cannot resume because the "
+                "actor objective contract changed; use the exported ACT policy "
+                "as a new initialization"
+            )
         if state.get("format") != self.STATE_FORMAT:
             raise ValueError("ACT-TD3 learner state format is invalid")
         if state.get("contract") != self._state_contract():
@@ -663,41 +723,5 @@ class ACTTD3Learner:
         self.critic.train().requires_grad_(True)
         self.actor_target.eval().requires_grad_(False)
         self.critic_target.eval().requires_grad_(False)
-
-    def _normalize_legacy_all_trainable_state(
-        self,
-        state: Mapping[str, Any],
-    ) -> Mapping[str, Any]:
-        """Migrate v3 only when it retains its historical all-trainable meaning."""
-
-        if not isinstance(state, Mapping):
-            raise ValueError("ACT-TD3 learner state format is invalid")
-        if state.get("format") != self.LEGACY_ALL_TRAINABLE_STATE_FORMAT:
-            return state
-        if self.config.actor_trainable_groups != ACT_TRAINABLE_GROUPS:
-            raise ValueError(
-                "Legacy ACT-TD3 v3 checkpoints can resume only with all ACT "
-                "actor trainable groups"
-            )
-        legacy_contract = state.get("contract")
-        legacy_config = state.get("config")
-        if (
-            not isinstance(legacy_contract, Mapping)
-            or not isinstance(legacy_config, Mapping)
-            or "actor_trainable_groups" in legacy_contract
-            or "actor_trainable_groups" in legacy_config
-        ):
-            raise ValueError("ACT-TD3 legacy learner state contract is invalid")
-
-        normalized = dict(state)
-        normalized_contract = dict(legacy_contract)
-        normalized_contract["actor_trainable_groups"] = ACT_TRAINABLE_GROUPS
-        normalized_config = dict(legacy_config)
-        normalized_config["actor_trainable_groups"] = ACT_TRAINABLE_GROUPS
-        normalized["format"] = self.STATE_FORMAT
-        normalized["contract"] = normalized_contract
-        normalized["config"] = normalized_config
-        return normalized
-
 
 __all__ = ["ACTTD3Learner", "ACTTD3UpdateResult"]

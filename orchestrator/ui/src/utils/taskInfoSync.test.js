@@ -3,6 +3,7 @@ import PageType from '../constants/pageType';
 import {
   getInferenceTaskInfoKey,
   hasRosTaskInfoPayload,
+  rosTaskInfoToUiTaskInfo,
   shouldApplyServerTaskInfoToPage,
 } from './taskInfoSync';
 
@@ -99,6 +100,21 @@ describe('taskInfoSync echo routing', () => {
       controlHz: 100,
       inferenceHz: 15,
       chunkAlignWindowS: 0.3,
+    }));
+  });
+
+  test('hydrates RLT preload and runtime route fields from ROS task info', () => {
+    expect(rosTaskInfoToUiTaskInfo({
+      task_type: 'inference',
+      rlt_enabled: true,
+      rlt_bundle_path: '/workspace/checkpoint/rlt/showroom_bundle',
+      rlt_robot_override: true,
+      action_policy_mode: 'rlt',
+    })).toEqual(expect.objectContaining({
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/showroom_bundle',
+      rltRobotOverride: true,
+      actionPolicyMode: 'rlt',
     }));
   });
 });

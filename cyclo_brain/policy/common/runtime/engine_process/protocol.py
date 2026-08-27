@@ -38,6 +38,9 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+bool rlt_enabled
+string rlt_bundle_path
+string action_policy_mode
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -61,6 +64,9 @@ class EngineCommandRequest:
     task_instruction: str = ""
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
+    rlt_enabled: bool = False
+    rlt_bundle_path: str = ""
+    action_policy_mode: str = "base"
 
 
 @dataclass
@@ -86,6 +92,11 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         acceleration_mode=str(getattr(message, "acceleration_mode", "") or ""),
         acceleration_engine_path=str(
             getattr(message, "acceleration_engine_path", "") or ""
+        ),
+        rlt_enabled=bool(getattr(message, "rlt_enabled", False)),
+        rlt_bundle_path=str(getattr(message, "rlt_bundle_path", "") or ""),
+        action_policy_mode=str(
+            getattr(message, "action_policy_mode", "") or "base"
         ),
     )
 
@@ -129,6 +140,9 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "task_instruction": str(request.task_instruction),
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),
+        "rlt_enabled": bool(request.rlt_enabled),
+        "rlt_bundle_path": str(request.rlt_bundle_path),
+        "action_policy_mode": str(request.action_policy_mode),
     }
 
 

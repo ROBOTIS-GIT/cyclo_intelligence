@@ -154,10 +154,12 @@ class ACTBCTrainingConfig:
             raise ValueError("num_workers must be a non-negative integer")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
             raise ValueError("seed must be a non-negative integer")
-        if self.chunk_size != ACT_CHUNK_SIZE:
-            raise ValueError(
-                f"Cyclo ACT imitation learning requires chunk_size={ACT_CHUNK_SIZE}"
-            )
+        if (
+            isinstance(self.chunk_size, bool)
+            or not isinstance(self.chunk_size, int)
+            or not 1 <= self.chunk_size <= 100
+        ):
+            raise ValueError("ACT imitation-learning chunk_size must be in [1, 100]")
         if not math.isfinite(float(self.learning_rate)) or self.learning_rate <= 0:
             raise ValueError("learning_rate must be finite and positive")
         if not math.isfinite(float(self.grad_clip_norm)) or self.grad_clip_norm <= 0:

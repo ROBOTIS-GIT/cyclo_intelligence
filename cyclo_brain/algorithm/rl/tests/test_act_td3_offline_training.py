@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
+from unittest import mock
 
 import torch
 
 from cyclo_brain.algorithm.rl.act_td3 import (
     ACTTD3Learner,
     ACTTD3LeRobotCollator,
+    ACTTD3OfflineTrainingProgress,
     ACTTD3OfflineTrainingRunner,
     ACTTD3TrainingDataIdentity,
     ACTTD3UpdateResult,
     FixedHorizonLeRobotACTTD3Dataset,
     VirtualCumulativeLeRobotACTTD3Dataset,
 )
+from cyclo_brain.algorithm.rl.act_td3.offline_training import (
+    load_policy_local_warmup_critic,
+)
+from cyclo_brain.algorithm.rl.act_td3.offline_warmup import _module_sha256
 from cyclo_brain.algorithm.rl.tests.test_act_td3_lerobot_offline import (
     _FakeLeRobotDataset,
     _OffsetPreprocessor,
@@ -172,6 +181,123 @@ def _install_fast_update(learner: ACTTD3Learner) -> None:
     learner.update = update  # type: ignore[method-assign]
 
 
+def _write_policy_warmup_critic(
+    actor_root: Path,
+    learner: ACTTD3Learner,
+    replay: VirtualCumulativeLeRobotACTTD3Dataset,
+    identity: ACTTD3TrainingDataIdentity,
+) -> tuple[Path, Path]:
+    if not learner.critic_optimizer.state:
+        _seed_adam_state(learner)
+    critic_dir = actor_root / "critic"
+    critic_dir.mkdir(parents=True, exist_ok=True)
+    latest = critic_dir / "latest.pt"
+    actor_sha256 = _module_sha256(learner.actor)
+    warm_config = asdict(replace(
+        learner.config,
+        critic_warmup_updates=5000,
+    ))
+    learner_contract = {
+        "config": warm_config,
+        "prediction_horizon": learner.prediction_horizon,
+        "execution_horizon": learner.execution_horizon,
+        "action_dim": learner.action_dim,
+        "observation_keys": tuple(learner.critic.observation_keys),
+        "action_domain": learner.ACTION_DOMAIN,
+        "target_policy_smoothing": learner.TARGET_POLICY_SMOOTHING,
+        "actor_q_gradient": learner.ACTOR_Q_GRADIENT,
+        "action_clamp": False,
+        "device": str(learner.device),
+        "dtype": str(learner.dtype),
+    }
+    dataset_contract = {
+        "transition_count": len(replay),
+        "episode_count": replay.num_episodes,
+        "success_count": replay.num_successes,
+        "failure_count": replay.num_failures,
+        "fps": float(replay.fps),
+        "execution_horizon": replay.execution_horizon,
+        "action_dim": replay.action_dim,
+    }
+    artifact = {
+        "format": "cyclo_brain.act_td3_critic/v1",
+        "status": "complete",
+        "contract": {
+            "training_data_identity": identity.identity,
+            "sampling": "uniform_without_replacement_within_batch",
+            "sampling_seed": 19,
+            "batch_size": 2,
+            "dataset": dataset_contract,
+            "learner": learner_contract,
+        },
+        "actor_sha256": actor_sha256,
+        "actor_target_sha256": actor_sha256,
+        "critic": learner.critic.state_dict(),
+        "critic_target": learner.critic_target.state_dict(),
+        "critic_optimizer": learner.critic_optimizer.state_dict(),
+        "completed_critic_updates": 5000,
+        "completed_actor_updates": 0,
+    }
+    torch.save(artifact, latest)
+    checkpoint_bytes = latest.read_bytes()
+    roots = identity.virtual_contract["data_roots"]
+    manifest = {
+        "format": "cyclo_brain.act_td3_critic_manifest/v1",
+        "status": "complete",
+        "created_at": "2026-08-25T00:00:00+00:00",
+        "base_policy": {
+            "path": str(actor_root.resolve()),
+            "actor_sha256": actor_sha256,
+        },
+        "artifact": {
+            "format": "cyclo_brain.act_td3_critic/v1",
+            "checkpoint_path": "latest.pt",
+            "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
+            "byte_count": len(checkpoint_bytes),
+        },
+        "training_data": {
+            "identity": identity.identity,
+            "dataset_roots": [root["root"] for root in roots],
+            "file_count": identity.file_count,
+            "byte_count": identity.byte_count,
+            "component_sha256": identity.component_sha256,
+            "virtual_contract": identity.virtual_contract,
+        },
+        "dataset": dataset_contract,
+        "learner": json.loads(json.dumps(learner_contract)),
+        "completed_critic_updates": 5000,
+        "completed_actor_updates": 0,
+        "actor_exactly_unchanged": True,
+    }
+    manifest_path = critic_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return latest, manifest_path
+
+
+def _rewrite_policy_warmup_artifact(
+    latest: Path,
+    manifest_path: Path,
+    artifact: dict[str, object],
+    manifest: dict[str, object],
+) -> None:
+    torch.save(artifact, latest)
+    checkpoint_bytes = latest.read_bytes()
+    artifact_reference = manifest["artifact"]
+    assert isinstance(artifact_reference, dict)
+    artifact_reference["sha256"] = hashlib.sha256(checkpoint_bytes).hexdigest()
+    artifact_reference["byte_count"] = len(checkpoint_bytes)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _seed_adam_state(learner: ACTTD3Learner) -> None:
+    for index, parameter in enumerate(learner.critic.parameters(), start=1):
+        learner.critic_optimizer.state[parameter] = {
+            "step": torch.tensor(float(index)),
+            "exp_avg": torch.full_like(parameter, 0.01 * index),
+            "exp_avg_sq": torch.full_like(parameter, 0.001 * index),
+        }
+
+
 def _runner(
     checkpoint: Path,
     *,
@@ -300,24 +426,94 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
                 resumed_state["last_sampled_indices"],
             )
 
-    def test_legacy_v3_round_resumes_with_default_all_groups(self) -> None:
+    def test_rl_metric_history_uses_exact_round_means_and_replay_return(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "round_001.pt"
+            first = _runner(checkpoint)
+            partial = first.run(max_round_critic_updates=3)
+
+            self.assertEqual(len(partial.rl_metric_history), 1)
+            point = partial.rl_metric_history[0]
+            self.assertEqual(point.rl_epoch, 1)
+            self.assertEqual(point.critic_loss_mean, 2.0)
+            self.assertEqual(point.actor_loss_mean, 1.0)
+            self.assertEqual(point.replay_average_reward, 0.5)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            self.assertEqual(
+                state["current_round"]["telemetry"],
+                {
+                    "critic_loss_sum": 6.0,
+                    "critic_loss_count": 3,
+                    "actor_loss_sum": 1.0,
+                    "actor_loss_count": 1,
+                },
+            )
+
+            resumed = _runner(checkpoint, resume_from=checkpoint)
+            complete = resumed.run()
+            completed_point = complete.rl_metric_history[0]
+            self.assertEqual(completed_point.critic_loss_mean, 10.5)
+            self.assertEqual(completed_point.actor_loss_mean, 5.5)
+
+            grown = _dataset(((5, True), (3, False), (4, True)))
+            second = _runner(
+                Path(directory) / "round_002.pt",
+                dataset=grown,
+                resume_from=checkpoint,
+            )
+            running: list[ACTTD3OfflineTrainingProgress] = []
+            second.run(
+                max_round_critic_updates=1,
+                progress_callback=running.append,
+            )
+            self.assertEqual(len(running[0].rl_metric_history), 2)
+            self.assertEqual(running[0].rl_metric_history[0], completed_point)
+            self.assertEqual(running[0].rl_metric_history[1].rl_epoch, 2)
+            self.assertIsNone(running[0].rl_metric_history[1].critic_loss_mean)
+            self.assertIsNone(running[0].rl_metric_history[1].actor_loss_mean)
+            self.assertAlmostEqual(
+                running[0].rl_metric_history[1].replay_average_reward,
+                2.0 / 3.0,
+            )
+
+    def test_legacy_checkpoint_without_telemetry_remains_loadable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy_metrics.pt"
+            _runner(checkpoint).run(max_round_critic_updates=3)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            del state["current_round"]["telemetry"]
+            torch.save(state, checkpoint)
+
+            resumed = _runner(checkpoint, resume_from=checkpoint)
+            result = resumed.run(max_round_critic_updates=4)
+            self.assertEqual(result.rl_metric_history, ())
+            rewritten = torch.load(
+                checkpoint,
+                map_location="cpu",
+                weights_only=True,
+            )
+            self.assertNotIn("telemetry", rewritten["current_round"])
+
+    def test_checkpoint_rejects_inexact_round_metric_accumulators(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "bad_metrics.pt"
+            _runner(checkpoint).run(max_round_critic_updates=3)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            state["current_round"]["telemetry"]["critic_loss_count"] = 2
+            torch.save(state, checkpoint)
+
+            with self.assertRaisesRegex(ValueError, "round telemetry disagrees"):
+                _runner(checkpoint, resume_from=checkpoint)
+
+    def test_legacy_v3_round_cannot_resume_changed_actor_objective(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "legacy.pt"
             first = _runner(checkpoint)
             first.run(max_round_critic_updates=7)
-            legacy = _downgrade_round_checkpoint_to_legacy_v3(checkpoint)
+            _downgrade_round_checkpoint_to_legacy_v3(checkpoint)
 
-            resumed = _runner(checkpoint, resume_from=checkpoint)
-
-            self.assertEqual(resumed.learner.completed_critic_updates, 7)
-            self.assertEqual(resumed.learner.completed_actor_updates, 3)
-            self.assertEqual(resumed._completed_epochs, 3)  # noqa: SLF001
-            self.assertNotIn(
-                "actor_trainable_groups",
-                legacy["base_contract"]["learner"]["config"],
-            )
-            result = resumed.run(max_round_critic_updates=8)
-            self.assertEqual(result.completed_critic_updates, 8)
+            with self.assertRaisesRegex(ValueError, "objective contract changed"):
+                _runner(checkpoint, resume_from=checkpoint)
 
     def test_legacy_v3_round_rejects_partial_freeze_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -335,7 +531,7 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
                     actor_trainable_groups=("action_decoder",),
                 )
 
-    def test_legacy_v3_completed_parent_seeds_grown_replay_round(self) -> None:
+    def test_legacy_v3_completed_parent_cannot_seed_new_objective_round(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             parent = root / "legacy_parent.pt"
@@ -343,18 +539,14 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
             _downgrade_round_checkpoint_to_legacy_v3(parent)
             grown = _dataset(((5, True), (3, False), (4, True)))
 
-            child = _runner(
-                root / "round_002.pt",
-                dataset=grown,
-                resume_from=parent,
-            )
+            with self.assertRaisesRegex(ValueError, "objective contract changed"):
+                _runner(
+                    root / "round_002.pt",
+                    dataset=grown,
+                    resume_from=parent,
+                )
 
-            self.assertEqual(child.round_index, 2)
-            self.assertEqual(child.new_episode_count, 1)
-            self.assertEqual(child.learner.completed_critic_updates, 20)
-            self.assertEqual(child.learner.completed_actor_updates, 10)
-
-    def test_v4_round_does_not_normalize_missing_group_contract(self) -> None:
+    def test_v5_round_does_not_normalize_missing_group_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "v4.pt"
             _runner(checkpoint).run(max_round_critic_updates=1)
@@ -637,6 +829,280 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "1..200 episodes"):
                 _runner(Path(directory) / "too_many.pt", dataset=too_many)
+
+    def test_policy_warmup_loads_only_critic_and_accepts_appended_roots(self) -> None:
+        warm_replay = _virtual_dataset((((5, True), (3, False)),))
+        warm_identity = _multi_identity(
+            warm_replay,
+            root_names=("epoch_0000",),
+        )
+        grown_replay = _virtual_dataset(
+            (((5, True), (3, False)), ((4, True),))
+        )
+        grown_identity = _multi_identity(
+            grown_replay,
+            root_names=("epoch_0000", "epoch_0001"),
+        )
+        source = _learner()
+        _seed_adam_state(source)
+        with torch.no_grad():
+            for parameter in source.critic.parameters():
+                parameter.fill_(0.125)
+            for parameter in source.critic_target.parameters():
+                parameter.fill_(-0.25)
+
+        target = _learner(actor_trainable_groups=("action_decoder",))
+        actor_before = {
+            name: value.detach().clone()
+            for name, value in target.actor.state_dict().items()
+        }
+        actor_target_before = {
+            name: value.detach().clone()
+            for name, value in target.actor_target.state_dict().items()
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            latest, manifest_path = _write_policy_warmup_critic(
+                actor_root,
+                source,
+                warm_replay,
+                warm_identity,
+            )
+            # The directory may be copied/moved, and a critic warmed on one
+            # device may be consumed on another.  Path/device are provenance;
+            # actor/content hashes and tensor contracts remain authoritative.
+            artifact = torch.load(latest, map_location="cpu", weights_only=True)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact["contract"]["learner"]["device"] = "cuda:99"
+            manifest["learner"]["device"] = "cuda:99"
+            # Critic-only artifacts predate selectable actor objectives. Their
+            # weights remain reusable because no actor objective ran in warm-up.
+            del artifact["contract"]["learner"]["config"]["actor_objective"]
+            del manifest["learner"]["config"]["actor_objective"]
+            manifest["base_policy"]["path"] = "/original/copied-policy-location"
+            _rewrite_policy_warmup_artifact(
+                latest,
+                manifest_path,
+                artifact,
+                manifest,
+            )
+            loaded = load_policy_local_warmup_critic(
+                target,
+                grown_replay,
+                grown_identity,
+                act_checkpoint=actor_root,
+            )
+
+        self.assertEqual(loaded, latest)
+        _assert_tree_equal(self, source.critic.state_dict(), target.critic.state_dict())
+        _assert_tree_equal(
+            self,
+            source.critic_target.state_dict(),
+            target.critic_target.state_dict(),
+        )
+        _assert_tree_equal(
+            self,
+            source.critic_optimizer.state_dict(),
+            target.critic_optimizer.state_dict(),
+        )
+        _assert_tree_equal(self, actor_before, target.actor.state_dict())
+        _assert_tree_equal(self, actor_target_before, target.actor_target.state_dict())
+        self.assertEqual(target.completed_critic_updates, 0)
+        self.assertEqual(target.completed_actor_updates, 0)
+
+    def test_policy_warmup_missing_pair_is_random_but_partial_pair_fails(self) -> None:
+        replay = _virtual_dataset((((5, True), (3, False)),))
+        identity = _multi_identity(replay, root_names=("epoch_0000",))
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            runs = actor_root / "critic" / "runs"
+            runs.mkdir(parents=True)
+            (runs / "stopped.pt").write_bytes(b"uncommitted-run")
+            self.assertIsNone(load_policy_local_warmup_critic(
+                _learner(),
+                replay,
+                identity,
+                act_checkpoint=actor_root,
+            ))
+            critic_dir = actor_root / "critic"
+            (critic_dir / "latest.pt").write_bytes(b"unfinished")
+            with self.assertRaisesRegex(ValueError, "pair is incomplete"):
+                load_policy_local_warmup_critic(
+                    _learner(),
+                    replay,
+                    identity,
+                    act_checkpoint=actor_root,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            blocked = actor_root / "critic" / "latest.pt"
+            real_lstat = os.lstat
+
+            def denied(path):
+                if Path(path) == blocked:
+                    raise PermissionError("denied")
+                return real_lstat(path)
+
+            with mock.patch.object(os, "lstat", side_effect=denied):
+                with self.assertRaisesRegex(ValueError, "cannot be inspected safely"):
+                    load_policy_local_warmup_critic(
+                        _learner(),
+                        replay,
+                        identity,
+                        act_checkpoint=actor_root,
+                    )
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            critic_dir = actor_root / "critic"
+            critic_dir.mkdir(parents=True)
+            (critic_dir / "manifest.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "pair is incomplete"):
+                load_policy_local_warmup_critic(
+                    _learner(),
+                    replay,
+                    identity,
+                    act_checkpoint=actor_root,
+                )
+
+    def test_policy_warmup_rejects_sha_actor_and_replay_mismatches(self) -> None:
+        replay = _virtual_dataset((((5, True), (3, False)),))
+        identity = _multi_identity(replay, root_names=("epoch_0000",))
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            _latest, manifest_path = _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                replay,
+                identity,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifact"]["sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                load_policy_local_warmup_critic(
+                    _learner(), replay, identity, act_checkpoint=actor_root
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            latest, manifest_path = _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                replay,
+                identity,
+            )
+            artifact = torch.load(latest, map_location="cpu", weights_only=True)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact["critic_optimizer"]["param_groups"][0]["lr"] = 1.0
+            _rewrite_policy_warmup_artifact(
+                latest,
+                manifest_path,
+                artifact,
+                manifest,
+            )
+            with self.assertRaisesRegex(ValueError, "parameter groups disagree"):
+                load_policy_local_warmup_critic(
+                    _learner(), replay, identity, act_checkpoint=actor_root
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            latest, manifest_path = _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                replay,
+                identity,
+            )
+            artifact = torch.load(latest, map_location="cpu", weights_only=True)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact["contract"]["dataset"]["transition_count"] -= 1
+            manifest["dataset"]["transition_count"] -= 1
+            _rewrite_policy_warmup_artifact(
+                latest,
+                manifest_path,
+                artifact,
+                manifest,
+            )
+            with self.assertRaisesRegex(ValueError, "replay tensor contract"):
+                load_policy_local_warmup_critic(
+                    _learner(), replay, identity, act_checkpoint=actor_root
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            _latest, manifest_path = _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                replay,
+                identity,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["base_policy"]["actor_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "base actor identity"):
+                load_policy_local_warmup_critic(
+                    _learner(), replay, identity, act_checkpoint=actor_root
+                )
+
+        unrelated = _virtual_dataset((((5, True), (3, False)),))
+        unrelated_identity = _multi_identity(
+            unrelated,
+            root_names=("different_epoch",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                replay,
+                identity,
+            )
+            with self.assertRaisesRegex(ValueError, "immutable prefix"):
+                load_policy_local_warmup_critic(
+                    _learner(),
+                    unrelated,
+                    unrelated_identity,
+                    act_checkpoint=actor_root,
+                )
+
+        two_root_replay = _virtual_dataset(
+            (((5, True), (3, False)), ((4, True), (2, False)))
+        )
+        ordered_identity = _multi_identity(
+            two_root_replay,
+            root_names=("epoch_0000", "epoch_0001"),
+        )
+        reordered_identity = _multi_identity(
+            two_root_replay,
+            root_names=("epoch_0001", "epoch_0000"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            actor_root = Path(directory) / "actor"
+            actor_root.mkdir()
+            _write_policy_warmup_critic(
+                actor_root,
+                _learner(),
+                two_root_replay,
+                ordered_identity,
+            )
+            with self.assertRaisesRegex(ValueError, "immutable prefix"):
+                load_policy_local_warmup_critic(
+                    _learner(),
+                    two_root_replay,
+                    reordered_identity,
+                    act_checkpoint=actor_root,
+                )
 
 
 if __name__ == "__main__":

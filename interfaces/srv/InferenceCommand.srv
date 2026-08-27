@@ -19,6 +19,8 @@ uint8 UNLOAD             = 5   # Free GPU memory.
 uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
                                # Requires LOAD + START already issued. Touches
                                # task_instruction only — no lifecycle change.
+uint8 SET_ACTION_POLICY   = 7   # Queue base/RLT output switch at next buffer
+                               # boundary. Requires LOAD + START.
 
 uint8 command
 
@@ -43,6 +45,15 @@ string acceleration_mode
 # Optional engine file/directory. Empty lets the backend use its model-local
 # default path.
 string acceleration_engine_path
+# LOAD-only RLT preload contract. rlt_bundle_path is a bundle directory; the
+# backend resolves and validates its frozen RL-token encoder + Action MLP.
+bool rlt_enabled
+string rlt_bundle_path
+# SET_ACTION_POLICY target. "base" or "rlt"; ignored by other commands.
+string action_policy_mode
+# SET_ACTION_POLICY-only operator acknowledgement for an unqualified RLT
+# bundle on a physical robot. It is never inferred from publish_to_robot.
+bool rlt_robot_override
 ---
 bool success
 string message

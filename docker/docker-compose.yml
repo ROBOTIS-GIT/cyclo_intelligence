@@ -301,6 +301,9 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
+      # RLT bundle loader reuses Cyclo's frozen encoder and Action MLP without
+      # copying either implementation into the GR00T runtime image.
+      - PYTHONPATH=/cyclo_brain_src
 
     volumes:
       - /dev:/dev
@@ -313,6 +316,8 @@ services:
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
+      - ../cyclo_brain/algorithm:/cyclo_brain_src/cyclo_brain/algorithm:ro
+      - ../cyclo_brain/model:/cyclo_brain_src/cyclo_brain/model:ro
       # Common policy runtime shared with LeRobot.
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # GR00T keeps backend-local app services, while preserving the image's

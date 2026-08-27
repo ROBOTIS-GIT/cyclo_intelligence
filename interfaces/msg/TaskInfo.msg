@@ -39,3 +39,18 @@ string acceleration_mode
 # Optional TensorRT engine file/directory. Empty lets the backend pick the
 # model-local default, e.g. <model_path>/dit_model_bf16.trt for GR00T DiT-only.
 string acceleration_engine_path
+
+# Optional PI RLT side policy. Enabling this only preloads the bundle during
+# inference LOAD; action_policy_mode decides which candidate is executed.
+bool rlt_enabled
+string rlt_bundle_path
+
+# Runtime action router selection. "base" executes the frozen VLA reference
+# policy and "rlt" executes the RLT Action MLP. The runtime applies changes at
+# an action-buffer boundary, never in the middle of a committed chunk.
+string action_policy_mode
+
+# Explicit operator acknowledgement for routing an unqualified RLT action to a
+# physical robot. This is consumed only by SET_ACTION_POLICY; simulation and
+# the base action path do not require the override.
+bool rlt_robot_override

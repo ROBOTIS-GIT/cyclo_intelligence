@@ -35,6 +35,7 @@ export default function FileBrowserModal({
   homePath = null,
   defaultPath = null,
   multiSelect = false,
+  overlayZClass = 'z-50',
 }) {
   const [selectedItem, setSelectedItem] = useState(null);
   const [multiSelectedItems, setMultiSelectedItems] = useState([]);
@@ -99,7 +100,7 @@ export default function FileBrowserModal({
 
   if (!isOpen) return null;
 
-  const classOverlay = clsx('fixed', 'inset-0', 'z-50', 'overflow-y-auto');
+  const classOverlay = clsx('fixed', 'inset-0', overlayZClass, 'overflow-y-auto');
 
   const classBackdrop = clsx('fixed', 'inset-0', 'bg-black', 'bg-opacity-50', 'transition-opacity');
 

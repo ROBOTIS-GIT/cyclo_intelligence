@@ -16,6 +16,10 @@ const actionRequestModeOrDefault = (value) => (
   String(value ?? '').trim().toLowerCase() === 'sync' ? 'sync' : 'async'
 );
 
+const actionPolicyModeOrDefault = (value) => (
+  String(value ?? '').trim().toLowerCase() === 'rlt' ? 'rlt' : 'base'
+);
+
 export const normalizeRecordTaskInfo = (taskInfo = {}) => ({
   taskNum: String(taskInfo.taskNum ?? '').trim(),
   taskName: String(taskInfo.taskName ?? '').trim(),
@@ -48,6 +52,10 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
   accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
   accelerationEnginePath: String(taskInfo.accelerationEnginePath ?? '').trim(),
+  rltEnabled: Boolean(taskInfo.rltEnabled),
+  rltBundlePath: String(taskInfo.rltBundlePath ?? '').trim(),
+  rltRobotOverride: Boolean(taskInfo.rltRobotOverride),
+  actionPolicyMode: actionPolicyModeOrDefault(taskInfo.actionPolicyMode),
 });
 
 export const getRecordTaskInfoKey = (taskInfo = {}) =>
@@ -69,6 +77,10 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   actionRequestMode: actionRequestModeOrDefault(taskInfo.action_request_mode),
   accelerationMode: taskInfo.acceleration_mode || 'pytorch',
   accelerationEnginePath: taskInfo.acceleration_engine_path || '',
+  rltEnabled: Boolean(taskInfo.rlt_enabled),
+  rltBundlePath: taskInfo.rlt_bundle_path || '',
+  rltRobotOverride: Boolean(taskInfo.rlt_robot_override),
+  actionPolicyMode: actionPolicyModeOrDefault(taskInfo.action_policy_mode),
   userId: taskInfo.user_id || '',
   controlHz: taskInfo.control_hz || 100,
   inferenceHz: taskInfo.inference_hz || 15,
@@ -94,6 +106,8 @@ export const hasRosTaskInfoPayload = (taskInfo = {}) => {
     hasText(taskInfo.task_type) ||
     hasText(taskInfo.policy_path) ||
     hasText(taskInfo.service_type) ||
+    hasText(taskInfo.rlt_bundle_path) ||
+    hasText(taskInfo.action_policy_mode) ||
     hasTextArray(taskInfo.task_instruction) ||
     hasTextArray(taskInfo.subtask_instruction)
   );

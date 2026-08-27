@@ -166,6 +166,7 @@ class ACTBCTrainingTest(unittest.TestCase):
                 progress_interval=1,
                 num_workers=0,
                 device="cpu",
+                trainable_groups=("transformer_encoder", "action_decoder"),
             )
             progress = []
             result = run_training(
@@ -182,7 +183,11 @@ class ACTBCTrainingTest(unittest.TestCase):
                 Path(result.checkpoint_path), (expected / "training_state").resolve()
             )
             self.assertTrue((config.output_dir / "checkpoints" / "last").is_symlink())
-            self.assertTrue((config.output_dir / "manifest.json").is_file())
+            manifest = json.loads((config.output_dir / "manifest.json").read_text())
+            self.assertEqual(
+                manifest["trainable_groups"],
+                ["transformer_encoder", "action_decoder"],
+            )
             self.assertTrue((config.output_dir / "progress.json").is_file())
             persisted = json.loads((config.output_dir / "result.json").read_text())
             self.assertEqual(persisted["model_path"], result.model_path)
@@ -226,18 +231,27 @@ class ACTBCTrainingTest(unittest.TestCase):
             persisted = json.loads((config.output_dir / "result.json").read_text())
             self.assertEqual(persisted["status"], "stopped")
 
-    def test_config_fixes_chunk_size_and_rejects_output_dataset_overlap(self):
+    def test_config_accepts_bounded_chunk_size_and_rejects_output_dataset_overlap(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "dataset"
             selection = RootSelection(root, (0,))
-            with self.assertRaisesRegex(ValueError, "chunk_size=30"):
+            config = ACTBCTrainingConfig(
+                selections=(selection,),
+                output_dir=Path(temporary) / "output",
+                steps=1,
+                batch_size=1,
+                save_freq=1,
+                chunk_size=20,
+            )
+            self.assertEqual(config.chunk_size, 20)
+            with self.assertRaisesRegex(ValueError, r"chunk_size must be in \[1, 100\]"):
                 ACTBCTrainingConfig(
                     selections=(selection,),
-                    output_dir=Path(temporary) / "output",
+                    output_dir=Path(temporary) / "another-output",
                     steps=1,
                     batch_size=1,
                     save_freq=1,
-                    chunk_size=20,
+                    chunk_size=101,
                 )
             with self.assertRaisesRegex(ValueError, "must not contain"):
                 ACTBCTrainingConfig(

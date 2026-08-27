@@ -57,13 +57,21 @@ class InferenceRequester:
             acceleration_engine_path=str(
                 getattr(request, "acceleration_engine_path", "") or ""
             ),
+            rlt_enabled=bool(getattr(request, "rlt_enabled", False)),
+            rlt_bundle_path=str(getattr(request, "rlt_bundle_path", "") or ""),
+            action_policy_mode="base",
         )
         return self._call(
             engine_request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
-    def get_action(self, task_instruction: str, timeout_s: float | None = None) -> EngineCommandResponse:
+    def get_action(
+        self,
+        task_instruction: str,
+        action_policy_mode: str = "base",
+        timeout_s: float | None = None,
+    ) -> EngineCommandResponse:
         with self._lock:
             if self._get_action_in_flight:
                 return EngineCommandResponse(
@@ -77,6 +85,7 @@ class InferenceRequester:
             command=CMD_GET_ACTION,
             seq_id=seq_id,
             task_instruction=task_instruction or "",
+            action_policy_mode=str(action_policy_mode or "base"),
         )
         try:
             return self._call(

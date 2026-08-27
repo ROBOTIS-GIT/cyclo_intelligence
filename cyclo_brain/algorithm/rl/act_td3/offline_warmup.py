@@ -19,6 +19,7 @@ from .learner import ACTTD3Learner, ACTTD3UpdateResult
 from .lerobot_offline import (
     ACTTD3LeRobotCollator,
     FixedHorizonLeRobotACTTD3Dataset,
+    VirtualCumulativeLeRobotACTTD3Dataset,
 )
 
 
@@ -99,12 +100,16 @@ class ACTTD3CriticWarmupRunner:
     """
 
     STATE_FORMAT = "cyclo_brain.act_td3_critic_warmup/v2"
+    CRITIC_ARTIFACT_FORMAT = "cyclo_brain.act_td3_critic/v1"
     SAMPLING = "uniform_without_replacement_within_batch"
 
     def __init__(
         self,
         learner: ACTTD3Learner,
-        dataset: FixedHorizonLeRobotACTTD3Dataset,
+        dataset: (
+            FixedHorizonLeRobotACTTD3Dataset
+            | VirtualCumulativeLeRobotACTTD3Dataset
+        ),
         collator: ACTTD3LeRobotCollator,
         *,
         batch_size: int,
@@ -117,9 +122,15 @@ class ACTTD3CriticWarmupRunner:
     ) -> None:
         if not isinstance(learner, ACTTD3Learner):
             raise TypeError("ACT-TD3 warm-up requires ACTTD3Learner")
-        if not isinstance(dataset, FixedHorizonLeRobotACTTD3Dataset):
+        if not isinstance(
+            dataset,
+            (
+                FixedHorizonLeRobotACTTD3Dataset,
+                VirtualCumulativeLeRobotACTTD3Dataset,
+            ),
+        ):
             raise TypeError(
-                "ACT-TD3 warm-up requires FixedHorizonLeRobotACTTD3Dataset"
+                "ACT-TD3 warm-up requires fixed-horizon LeRobot replay"
             )
         if not isinstance(collator, ACTTD3LeRobotCollator):
             raise TypeError("ACT-TD3 warm-up requires ACTTD3LeRobotCollator")
@@ -183,6 +194,10 @@ class ACTTD3CriticWarmupRunner:
             )
 
         self._sampler = torch.Generator(device="cpu").manual_seed(sampling_seed)
+        # Warm-up is a critic-only training mode.  Disable actor autograd in
+        # addition to the update gate and exact tensor hash checks below.
+        learner.actor.requires_grad_(False)
+        learner.actor_target.requires_grad_(False)
         self._baseline_actor_sha256 = _module_sha256(learner.actor)
         self._baseline_target_actor_sha256 = _module_sha256(learner.actor_target)
         if self._baseline_actor_sha256 != self._baseline_target_actor_sha256:
@@ -235,6 +250,12 @@ class ACTTD3CriticWarmupRunner:
     def _assert_actor_invariant(self, *, exact: bool) -> None:
         if self.learner.completed_actor_updates != 0:
             raise RuntimeError("ACT-TD3 actor updated during critic warm-up")
+        if any(
+            parameter.requires_grad
+            for module in (self.learner.actor, self.learner.actor_target)
+            for parameter in module.parameters()
+        ):
+            raise RuntimeError("ACT-TD3 warm-up actors must have autograd disabled")
         if any(parameter.grad is not None for parameter in self.learner.actor.parameters()):
             raise RuntimeError("ACT-TD3 actor accumulated gradients during warm-up")
         if self.learner.actor.training or self.learner.actor_target.training:
@@ -268,6 +289,52 @@ class ACTTD3CriticWarmupRunner:
                 asdict(self._last_update) if self._last_update is not None else None
             ),
             "last_sampled_indices": self._last_sampled_indices,
+        }
+
+    def critic_artifact_state(self) -> dict[str, Any]:
+        """Return a portable, critic-only artifact at the completed boundary.
+
+        The resumable runner checkpoint intentionally retains the full learner
+        state.  The policy-local artifact does not: the selected ACT policy is
+        represented only by exact hashes, so loading a previous critic can
+        never silently replace the actor in a later training stage.
+        """
+
+        if self.learner.completed_critic_updates != self.total_critic_updates:
+            raise RuntimeError("ACT-TD3 critic artifact requires completed warm-up")
+        self._assert_actor_invariant(exact=True)
+        if self._durable_checkpoint_updates != self.total_critic_updates:
+            raise RuntimeError("ACT-TD3 critic artifact requires a durable boundary")
+
+        def clone_tree(value: Any) -> Any:
+            if isinstance(value, Tensor):
+                return value.detach().cpu().clone()
+            if isinstance(value, Mapping):
+                return {key: clone_tree(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [clone_tree(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(clone_tree(item) for item in value)
+            if value is None or isinstance(value, (str, int, float, bool)):
+                return value
+            raise TypeError(
+                "ACT-TD3 critic artifact contains unsupported value "
+                f"{type(value).__name__}"
+            )
+
+        return {
+            "format": self.CRITIC_ARTIFACT_FORMAT,
+            "status": "complete",
+            "contract": self._contract(),
+            "actor_sha256": self._baseline_actor_sha256,
+            "actor_target_sha256": self._baseline_target_actor_sha256,
+            "critic": clone_tree(self.learner.critic.state_dict()),
+            "critic_target": clone_tree(self.learner.critic_target.state_dict()),
+            "critic_optimizer": clone_tree(
+                self.learner.critic_optimizer.state_dict()
+            ),
+            "completed_critic_updates": self.learner.completed_critic_updates,
+            "completed_actor_updates": self.learner.completed_actor_updates,
         }
 
     def _save_checkpoint(self, elapsed_seconds: float) -> None:
@@ -368,6 +435,8 @@ class ACTTD3CriticWarmupRunner:
             ACTTD3UpdateResult(**dict(raw_update)) if raw_update is not None else None
         )
         self._durable_checkpoint_updates = self.learner.completed_critic_updates
+        self.learner.actor.requires_grad_(False)
+        self.learner.actor_target.requires_grad_(False)
         self._assert_actor_invariant(exact=True)
 
     def _progress(

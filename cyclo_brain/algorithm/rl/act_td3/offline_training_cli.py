@@ -34,6 +34,7 @@ from .lerobot_offline import (
 from .offline_training import (
     ACTTD3OfflineTrainingProgress,
     ACTTD3OfflineTrainingRunner,
+    load_policy_local_warmup_critic,
 )
 from .offline_warmup_cli import (
     _MAX_SEED,
@@ -80,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay permutation seed; defaults to seed + 2.",
     )
     parser.add_argument("--batch-size", required=True, type=_positive)
+    parser.add_argument(
+        "--actor-objective",
+        choices=("td3", "td3_bc"),
+        default="td3_bc",
+        help=(
+            "Actor objective: pure action-chunk TD3 (-Q), or TD3+BC with "
+            "success-only ACT CVAE/deterministic behavior-cloning anchors."
+        ),
+    )
     parser.add_argument(
         "--actor-trainable-group",
         action="append",
@@ -202,17 +212,57 @@ def _result_manifest(
     identity: Any,
     model_directory: Path | None,
     batch_size: int,
+    critic_source: str,
+    critic_checkpoint: Path | None,
+    actor_objective: str = "td3_bc",
 ) -> dict[str, Any]:
     return {
         "event": "result",
+        "algorithm": "td3",
         **asdict(result),
         "actor_trainable_groups": list(actor_trainable_groups),
+        "actor_objective": actor_objective,
         "batch_size": batch_size,
         "schedule": _schedule_manifest(runner),
         "round": _round_manifest(runner),
         "training_data": _training_identity_summary(identity),
+        "critic_source": critic_source,
+        "critic_checkpoint": (
+            str(critic_checkpoint) if critic_checkpoint is not None else None
+        ),
         "model_path": str(model_directory) if model_directory is not None else None,
     }
+
+
+def _initialize_critic_source(
+    learner: ACTTD3Learner,
+    replay: FixedHorizonLeRobotACTTD3Dataset | VirtualCumulativeLeRobotACTTD3Dataset,
+    identity: Any,
+    *,
+    act_checkpoint: Path,
+    resume_from: Path | None,
+    continuation_source: str | None,
+) -> tuple[str, Path | None]:
+    """Select exactly one critic lineage without weakening full TD3 resume."""
+
+    if resume_from is not None:
+        # The versioned round checkpoint restores actor, critics, optimizers,
+        # counters, and RNGs inside ACTTD3OfflineTrainingRunner. It always wins
+        # and policy-local warm artifacts are deliberately not inspected.
+        if continuation_source not in {"resume_checkpoint", "parent_checkpoint"}:
+            raise ValueError("ACT-TD3 continuation critic source is invalid")
+        return continuation_source, resume_from
+    if continuation_source is not None:
+        raise ValueError("ACT-TD3 continuation critic source has no checkpoint")
+    warm_checkpoint = load_policy_local_warmup_critic(
+        learner,
+        replay,
+        identity,
+        act_checkpoint=act_checkpoint,
+    )
+    if warm_checkpoint is not None:
+        return "policy_warmup", warm_checkpoint
+    return "random", None
 
 
 def _dataset_root_arguments(value: Any) -> tuple[Path, ...]:
@@ -487,8 +537,12 @@ def _run_from_args_unlocked(
     checkpoint = output_dir / "training_state" / "act_td3.pt"
     if args.resume:
         resume_from = checkpoint
+        continuation_source = "resume_checkpoint"
     else:
         resume_from = parent_checkpoint
+        continuation_source = (
+            "parent_checkpoint" if parent_checkpoint is not None else None
+        )
 
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -554,6 +608,7 @@ def _run_from_args_unlocked(
     config = ACTTD3Config(
         discount_reference_hz=float(replay.fps),
         critic_warmup_updates=0,
+        actor_objective=args.actor_objective,
         actor_trainable_groups=tuple(
             args.actor_trainable_groups or ACT_TRAINABLE_GROUPS
         ),
@@ -563,6 +618,14 @@ def _run_from_args_unlocked(
         critic,
         config,
         random_seed=args.seed,
+    )
+    critic_source, critic_checkpoint = _initialize_critic_source(
+        learner,
+        replay,
+        identity,
+        act_checkpoint=act_checkpoint,
+        resume_from=resume_from,
+        continuation_source=continuation_source,
     )
     runner = ACTTD3OfflineTrainingRunner(
         learner,
@@ -582,7 +645,8 @@ def _run_from_args_unlocked(
     _json_line(
         {
             "event": "manifest",
-            "algorithm": "ACT-TD3 cumulative replay",
+            "algorithm": "td3",
+            "actor_objective": config.actor_objective,
             "actor_trainable_groups": list(config.actor_trainable_groups),
             "schedule": _schedule_manifest(runner),
             "device": str(device),
@@ -592,6 +656,10 @@ def _run_from_args_unlocked(
             "output_dir": str(output_dir),
             "checkpoint": str(checkpoint),
             "resume_from": str(resume_from) if resume_from is not None else None,
+            "critic_source": critic_source,
+            "critic_checkpoint": (
+                str(critic_checkpoint) if critic_checkpoint is not None else None
+            ),
             "legacy_allow_partial_round": bool(args.allow_partial_round),
             "dataset": {
                 "roots": len(dataset_roots),
@@ -638,6 +706,9 @@ def _run_from_args_unlocked(
         identity=identity,
         model_directory=model_directory,
         batch_size=args.batch_size,
+        critic_source=critic_source,
+        critic_checkpoint=critic_checkpoint,
+        actor_objective=config.actor_objective,
     )
     _atomic_json_save(output_dir / "training_manifest.json", final)
     _json_line(final)

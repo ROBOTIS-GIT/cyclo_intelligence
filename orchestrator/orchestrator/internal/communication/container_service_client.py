@@ -128,6 +128,7 @@ class ContainerServiceClient:
     CMD_STOP = 4
     CMD_UNLOAD = 5
     CMD_UPDATE_INSTRUCTION = 6
+    CMD_SET_ACTION_POLICY = 7
 
     def __init__(
         self,
@@ -359,6 +360,10 @@ class ContainerServiceClient:
         action_request_mode: str = "async",
         acceleration_mode: str = "",
         acceleration_engine_path: str = "",
+        rlt_enabled: bool = False,
+        rlt_bundle_path: str = "",
+        action_policy_mode: str = "base",
+        rlt_robot_override: bool = False,
         timeout_sec: Optional[float] = None,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
@@ -391,6 +396,14 @@ class ContainerServiceClient:
             request.acceleration_mode = str(acceleration_mode or "")
         if hasattr(request, "acceleration_engine_path"):
             request.acceleration_engine_path = str(acceleration_engine_path or "")
+        if hasattr(request, "rlt_enabled"):
+            request.rlt_enabled = bool(rlt_enabled)
+        if hasattr(request, "rlt_bundle_path"):
+            request.rlt_bundle_path = str(rlt_bundle_path or "")
+        if hasattr(request, "action_policy_mode"):
+            request.action_policy_mode = str(action_policy_mode or "base")
+        if hasattr(request, "rlt_robot_override"):
+            request.rlt_robot_override = bool(rlt_robot_override)
 
         if timeout_sec is None:
             timeout_sec = (

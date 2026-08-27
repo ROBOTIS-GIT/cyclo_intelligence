@@ -26,6 +26,7 @@ import {
   MdPrecisionManufacturing,
   MdViewInAr,
   MdWarningAmber,
+  MdSwapHoriz,
 } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import Tooltip from './Tooltip';
@@ -37,9 +38,13 @@ import {
   selectInferenceTaskInfo,
   setInferenceMode,
   setRecordInferenceMode,
+  setInferenceTaskInfo,
   setInferenceStatus,
 } from '../features/tasks/taskSlice';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import {
+  requiresInstruction,
+  supportsRltInference,
+} from '../constants/policyCapabilities';
 import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
@@ -95,6 +100,8 @@ export default function InferenceControlPanel({
   const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
+  const [pendingActionPolicyMode, setPendingActionPolicyMode] = useState('');
+  const [pendingRobotRltApproval, setPendingRobotRltApproval] = useState(false);
 
   const { sendRecordCommand } = useRosServiceCaller();
 
@@ -121,7 +128,6 @@ export default function InferenceControlPanel({
   const isBackendStartBlocked = shouldCheckBackend && !backendReadiness.ready;
   const isBackendWarming = isBackendStartBlocked &&
     (backendReadiness.state === 'checking' || backendReadiness.state === 'warming');
-
   useEffect(() => {
     inferencePhaseRef.current = phase;
   }, [phase]);
@@ -162,6 +168,13 @@ export default function InferenceControlPanel({
       ) {
         missingFields.push(field.label);
       }
+    }
+    if (
+      taskInfo.rltEnabled &&
+      supportsRltInference(taskInfo.serviceType, taskInfo.policyType) &&
+      !String(taskInfo.rltBundlePath || '').trim()
+    ) {
+      missingFields.push('RLT Bundle Path');
     }
     return { isValid: missingFields.length === 0, missingFields };
   }, [taskInfo]);
@@ -269,10 +282,14 @@ export default function InferenceControlPanel({
     if (intent.policyPath) {
       setLastPolicyPath(intent.policyPath);
     }
-    await executeCommand(intent.commandName, intent.commandString, {
+    const result = await executeCommand(intent.commandName, intent.commandString, {
       inferenceMode,
     });
-  }, [executeCommand]);
+    if (result?.success && intent.commandString === 'start_inference') {
+      setPendingActionPolicyMode('');
+      dispatch(setInferenceTaskInfo({ actionPolicyMode: 'base' }));
+    }
+  }, [dispatch, executeCommand]);
 
   const handleStart = useCallback(async () => {
     let readiness = backendReadiness;
@@ -363,8 +380,81 @@ export default function InferenceControlPanel({
     const result = await executeCommand('Clear', 'finish');
     if (result?.success) {
       setLastPolicyPath('');
+      setPendingActionPolicyMode('');
+      dispatch(setInferenceTaskInfo({ actionPolicyMode: 'base' }));
     }
-  }, [executeCommand]);
+  }, [dispatch, executeCommand]);
+
+  const executeActionPolicySwitch = useCallback(async (
+    normalizedTarget,
+    options = {}
+  ) => {
+    setPendingActionPolicyMode(normalizedTarget);
+    try {
+      const result = await executeCommand(
+        normalizedTarget === 'rlt' ? 'Use RLT Action' : 'Use GR00T Action',
+        'set_action_policy',
+        { actionPolicyMode: normalizedTarget, ...options }
+      );
+      if (result?.success) {
+        dispatch(setInferenceTaskInfo({
+          actionPolicyMode: normalizedTarget,
+          ...(options.rltRobotOverride === true
+            ? { rltRobotOverride: true }
+            : {}),
+        }));
+      }
+    } finally {
+      setPendingActionPolicyMode('');
+    }
+  }, [
+    dispatch,
+    executeCommand,
+  ]);
+
+  const handleActionPolicySwitch = useCallback(async (targetMode) => {
+    const normalizedTarget = targetMode === 'rlt' ? 'rlt' : 'base';
+    const activeMode = taskInfo.actionPolicyMode === 'rlt' ? 'rlt' : 'base';
+    if (
+      !isInferencing ||
+      pendingActionPolicyMode ||
+      normalizedTarget === activeMode
+    ) {
+      return;
+    }
+    if (
+      normalizedTarget === 'rlt' &&
+      taskInfo.inferenceMode === 'robot' &&
+      !taskInfo.rltRobotOverride
+    ) {
+      setPendingRobotRltApproval(true);
+      return;
+    }
+    await executeActionPolicySwitch(normalizedTarget);
+  }, [
+    executeActionPolicySwitch,
+    isInferencing,
+    pendingActionPolicyMode,
+    taskInfo.actionPolicyMode,
+    taskInfo.inferenceMode,
+    taskInfo.rltRobotOverride,
+  ]);
+
+  const handleConfirmRobotRlt = useCallback(async () => {
+    setPendingRobotRltApproval(false);
+    const activeMode = taskInfo.actionPolicyMode === 'rlt' ? 'rlt' : 'base';
+    if (!isInferencing || pendingActionPolicyMode || activeMode === 'rlt') return;
+    await executeActionPolicySwitch('rlt', { rltRobotOverride: true });
+  }, [
+    executeActionPolicySwitch,
+    isInferencing,
+    pendingActionPolicyMode,
+    taskInfo.actionPolicyMode,
+  ]);
+
+  const handleCancelRobotRlt = useCallback(() => {
+    setPendingRobotRltApproval(false);
+  }, []);
 
   const startEnabled = shouldCheckBackend && backendReadiness.ready;
   const stopEnabled = isInferencing;
@@ -436,6 +526,19 @@ export default function InferenceControlPanel({
 
   const isOfflineRL = variant === 'offlineRL';
   const isOfflineRLCombined = isOfflineRL && showRecordingControls;
+  const activeActionPolicyMode = taskInfo.actionPolicyMode === 'rlt'
+    ? 'rlt'
+    : 'base';
+  const showActionPolicySwitcher = Boolean(
+    isInferencing &&
+    taskInfo.rltEnabled &&
+    String(taskInfo.rltBundlePath || '').trim() &&
+    supportsRltInference(taskInfo.serviceType, taskInfo.policyType)
+  );
+  const isRealRobotRltTarget = taskInfo.inferenceMode === 'robot';
+  const rltSwitchBlocked = Boolean(
+    isRealRobotRltTarget && !taskInfo.rltRobotOverride
+  );
 
   const classBody = clsx(
     'flex flex-row items-center border',
@@ -622,6 +725,140 @@ export default function InferenceControlPanel({
         </div>
       )}
 
+      {showActionPolicySwitcher && (
+        <div
+          className={clsx(
+            'mt-2 flex items-center gap-2 rounded-xl border px-2 py-2',
+            isOfflineRL
+              ? 'border-[#d9d2c5] bg-[#f6f3ec]'
+              : 'border-gray-200 bg-white shadow-sm'
+          )}
+          role="group"
+          aria-label="Action policy routing"
+        >
+          <MdSwapHoriz
+            size={18}
+            className={isOfflineRL ? 'text-[#71806b]' : 'text-blue-500'}
+          />
+          <span className={clsx(
+            'shrink-0 font-semibold',
+            isOfflineRL
+              ? 'text-[10px] uppercase tracking-[0.1em] text-[#766f64]'
+              : 'text-sm text-gray-600'
+          )}>
+            Action Output
+          </span>
+          {[
+            { mode: 'base', label: 'Use GR00T Action' },
+            { mode: 'rlt', label: 'Use RLT Action' },
+          ].map(({ mode, label }) => {
+            const active = activeActionPolicyMode === mode;
+            const pending = pendingActionPolicyMode === mode;
+            const disabled = Boolean(
+              pendingActionPolicyMode || active
+            );
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => handleActionPolicySwitch(mode)}
+                disabled={disabled}
+                aria-pressed={active}
+                aria-label={label}
+                title={
+                  mode === 'rlt' && rltSwitchBlocked
+                    ? 'Real Robot RLT requires explicit safety confirmation. Click to review and approve.'
+                    : mode === 'rlt' && isRealRobotRltTarget
+                      ? 'Real Robot RLT safety override approved. Switch after the current action buffer drains.'
+                      : 'Switch after the current action buffer drains'
+                }
+                className={clsx(
+                  'h-8 rounded-lg border px-3 text-[11px] font-semibold transition-colors',
+                  active
+                    ? 'border-[#69866f] bg-[#69866f] text-white'
+                    : 'border-[#d2cabd] bg-[#fffefa] text-[#514b42] hover:bg-[#ece7dd]',
+                  disabled && !active && 'cursor-not-allowed opacity-50'
+                )}
+              >
+                {pending ? 'Switching…' : label}
+              </button>
+            );
+          })}
+          {pendingActionPolicyMode && (
+            <span role="status" className="text-[10px] text-[#756e63]">
+              Waiting for action boundary…
+            </span>
+          )}
+          {isRealRobotRltTarget && !pendingActionPolicyMode && (
+            <span
+              className={clsx(
+                'text-[10px] leading-tight',
+                rltSwitchBlocked ? 'text-[#9a604f]' : 'text-[#5f7c65]'
+              )}
+              data-testid="real-robot-rlt-approval-status"
+            >
+              {rltSwitchBlocked
+                ? 'Real Robot RLT requires safety confirmation.'
+                : 'Real Robot RLT safety override approved.'}
+            </span>
+          )}
+        </div>
+      )}
+
+      {pendingRobotRltApproval && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="real-robot-rlt-title"
+            className="w-full max-w-md overflow-hidden rounded-lg border border-orange-200 bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-orange-200 bg-orange-50 px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <MdWarningAmber className="shrink-0 text-orange-600" size={22} />
+                <h2 id="real-robot-rlt-title" className="truncate text-base font-bold text-orange-900">
+                  Enable RLT on Real Robot
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={handleCancelRobotRlt}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-orange-700 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-orange-300"
+                aria-label="Close RLT safety confirmation"
+              >
+                <MdClose size={20} />
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-4 text-sm text-gray-700">
+              <p className="font-semibold text-gray-900">
+                RLT control on a physical robot is experimental.
+              </p>
+              <p>
+                Confirming switches action output after the current action buffer drains.
+                Keep people clear of the robot workspace before continuing.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 border-t border-gray-200 bg-gray-50 px-4 py-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={handleConfirmRobotRlt}
+                className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md bg-orange-600 font-semibold text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-300"
+              >
+                <MdPrecisionManufacturing size={18} />
+                Confirm RLT Action
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelRobotRlt}
+                className="h-10 flex-1 rounded-md border border-gray-300 bg-white font-semibold text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-gray-300"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pendingRobotDeployIntent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
           <div
@@ -654,6 +891,14 @@ export default function InferenceControlPanel({
                 Keep people clear of the robot workspace before continuing.
                 For first-time inference, test with 3D Sim Deploy before switching to Real Robot Deploy.
               </p>
+              {taskInfo.rltEnabled && taskInfo.rltRobotOverride && (
+                <div className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-orange-900">
+                  <p className="font-semibold">RLT experimental override approved.</p>
+                  <p className="mt-1">
+                    This session starts with GR00T. RLT activates only after you press Use RLT Action.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex flex-col sm:flex-row gap-2 px-4 py-3 bg-gray-50 border-t border-gray-200">
               <button

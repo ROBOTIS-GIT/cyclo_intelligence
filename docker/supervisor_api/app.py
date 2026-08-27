@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import importlib.util
 import json
 import logging
@@ -279,6 +280,13 @@ _OFFLINE_RL_ACTOR_TRAINABLE_GROUPS: tuple[str, ...] = (
     "transformer_encoder",
     "action_decoder",
 )
+_OFFLINE_RL_CRITIC_SOURCES: tuple[str, ...] = (
+    "resume_checkpoint",
+    "parent_checkpoint",
+    "policy_warmup",
+    "random",
+)
+_OFFLINE_RL_ACTOR_OBJECTIVES: tuple[str, ...] = ("td3", "td3_bc")
 
 
 class OfflineRLStartRequest(BaseModel):
@@ -289,7 +297,11 @@ class OfflineRLStartRequest(BaseModel):
     dataset_paths: List[str] = Field(default_factory=list)
     act_checkpoint: str
     parent_checkpoint: str = ""
+    # The optimizer family and its actor-loss contract are deliberately
+    # separate.  This keeps TD3 as one algorithm in the UI/API while allowing
+    # callers to choose pure Q maximization or the success-masked BC variant.
     algorithm: str = "td3"
+    actor_objective: Literal["td3", "td3_bc"] = "td3_bc"
     robot_type: str
     batch_size: StrictInt = Field(default=4, ge=1, le=64)
     critic_epochs: int = Field(default=10, ge=1, le=1000)
@@ -303,8 +315,27 @@ class OfflineRLStopRequest(BaseModel):
     job_id: str = Field(min_length=1, max_length=64)
 
 
+class OfflineRLLossPoint(BaseModel):
+    """One finite ACT-TD3 loss sample keyed by completed critic updates."""
+
+    step: StrictInt = Field(ge=0)
+    critic_loss: Optional[float] = None
+    actor_loss: Optional[float] = None
+
+
+class OfflineRLRLMetricPoint(BaseModel):
+    """One finite replay-round mean keyed by the public RL epoch."""
+
+    rl_epoch: StrictInt = Field(ge=1)
+    actor_loss_mean: Optional[float] = None
+    critic_loss_mean: Optional[float] = None
+    replay_average_reward: Optional[float] = None
+
+
 class OfflineRLStatus(BaseModel):
     status: Literal["idle", "running", "completed", "failed", "stopped"]
+    algorithm: Literal["td3"] = "td3"
+    actor_objective: Literal["td3", "td3_bc"] = "td3_bc"
     percentage: float = 0.0
     episode_count: int = 0
     round_index: int = 0
@@ -325,9 +356,19 @@ class OfflineRLStatus(BaseModel):
     total_actor_updates: int = 0
     critic_loss: Optional[float] = None
     actor_loss: Optional[float] = None
+    loss_history: List[OfflineRLLossPoint] = Field(default_factory=list)
+    rl_metric_history: List[OfflineRLRLMetricPoint] = Field(default_factory=list)
     eta_seconds: Optional[float] = None
     model_path: str = ""
     checkpoint_path: str = ""
+    critic_source: Literal[
+        "",
+        "resume_checkpoint",
+        "parent_checkpoint",
+        "policy_warmup",
+        "random",
+    ] = ""
+    critic_checkpoint: str = ""
     message: str = ""
     job_id: str = ""
     dataset_path: str = ""
@@ -335,6 +376,46 @@ class OfflineRLStatus(BaseModel):
     act_checkpoint: str = ""
     parent_checkpoint: str = ""
     output_dir: str = ""
+    returncode: Optional[int] = None
+    log_tail: List[str] = Field(default_factory=list)
+
+
+class ACTTD3CriticWarmupStartRequest(BaseModel):
+    """Warm up the critics attached to one selected ACT policy."""
+
+    dataset_path: str = ""
+    dataset_paths: List[str] = Field(default_factory=list)
+    act_checkpoint: str
+    robot_type: str
+    batch_size: StrictInt = Field(default=4, ge=1, le=64)
+    critic_updates: StrictInt = Field(default=5000, ge=1, le=1_000_000)
+
+
+class ACTTD3CriticWarmupStopRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=64)
+
+
+class ACTTD3CriticWarmupStatus(BaseModel):
+    status: Literal["idle", "running", "completed", "failed", "stopped"]
+    percentage: float = 0.0
+    completed_critic_updates: int = 0
+    total_critic_updates: int = 5000
+    durable_checkpoint_updates: int = 0
+    critic_loss: Optional[float] = None
+    target_mean: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    actor_exactly_unchanged: Optional[bool] = None
+    episode_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    batch_size: int = Field(default=4, ge=1, le=64)
+    checkpoint_path: str = ""
+    manifest_path: str = ""
+    message: str = ""
+    job_id: str = ""
+    dataset_path: str = ""
+    dataset_paths: List[str] = Field(default_factory=list)
+    act_checkpoint: str = ""
     returncode: Optional[int] = None
     log_tail: List[str] = Field(default_factory=list)
 
@@ -350,6 +431,7 @@ class ImitationLearningStartRequest(BaseModel):
     batch_size: StrictInt = Field(default=8, ge=1, le=64)
     save_freq: StrictInt = Field(default=10_000, ge=1, le=1_000_000)
     chunk_size: StrictInt = Field(default=30, ge=1, le=100)
+    trainable_groups: Optional[List[str]] = None
 
 
 class ImitationLearningStopRequest(BaseModel):
@@ -378,9 +460,31 @@ class ImitationLearningStatus(BaseModel):
     dataset_paths: List[str] = Field(default_factory=list)
     policy_type: Literal["act", "multi_task_dit"] = "act"
     task_instruction: str = ""
+    trainable_groups: List[str] = Field(
+        default_factory=lambda: list(_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS)
+    )
     output_dir: str = ""
     returncode: Optional[int] = None
     log_tail: List[str] = Field(default_factory=list)
+
+
+class OfflineRLDatasetEpisodeMedia(BaseModel):
+    camera_key: str
+    relative_path: str
+    from_s: Optional[float] = None
+    to_s: Optional[float] = None
+
+
+class OfflineRLDatasetEpisodeData(BaseModel):
+    """Replay-compatible state/action samples for one LeRobot episode."""
+
+    joint_timestamps: List[float] = Field(default_factory=list)
+    joint_names: List[str] = Field(default_factory=list)
+    joint_positions: List[float] = Field(default_factory=list)
+    action_timestamps: List[float] = Field(default_factory=list)
+    action_names: List[str] = Field(default_factory=list)
+    action_values: List[float] = Field(default_factory=list)
+    duration: float = Field(default=0.0, ge=0.0)
 
 
 class OfflineRLDatasetEpisode(BaseModel):
@@ -388,6 +492,7 @@ class OfflineRLDatasetEpisode(BaseModel):
     frames: int
     outcome: Literal["success", "failure", "unlabeled"]
     tasks: List[str] = Field(default_factory=list)
+    media: List[OfflineRLDatasetEpisodeMedia] = Field(default_factory=list)
 
 
 class OfflineRLDataEpochOutcomeCounts(BaseModel):
@@ -558,6 +663,11 @@ _OFFLINE_RL_CACHE_ROOT = "/tmp/cyclo_offline_rl_cache"
 _OFFLINE_RL_DATASET_LOCK_PATH = Path("/workspace/.cyclo_dataset.lock")
 _OFFLINE_RL_MAX_EPISODES = 200
 _OFFLINE_RL_MAX_NEW_EPISODES = 50
+_OFFLINE_RL_LOSS_HISTORY_POINTS = 500
+_OFFLINE_RL_METRIC_HISTORY_POINTS = 200
+_OFFLINE_RL_EPISODE_DATA_MAX_FRAMES = 20_000
+_OFFLINE_RL_EPISODE_DATA_MAX_FIELDS = 256
+_OFFLINE_RL_EPISODE_DATA_MAX_VALUES = 2_000_000
 _OFFLINE_RL_LOG_LINES = 100
 _OFFLINE_RL_DATA_EPOCH_FILE = "cyclo_data_epoch.json"
 _OFFLINE_RL_DATA_EPOCH_PATTERN = re.compile(r"^data_epoch_(\d{4,})$")
@@ -593,6 +703,8 @@ class _OfflineRLJob:
     output_dir: str
     episode_count: int
     log_path: str
+    algorithm: str = "td3"
+    actor_objective: str = "td3_bc"
     dataset_paths: List[str] = field(default_factory=list)
     round_index: int = 1
     round_episode_count: int = 0
@@ -614,9 +726,13 @@ class _OfflineRLJob:
     total_actor_updates: int = 0
     critic_loss: Optional[float] = None
     actor_loss: Optional[float] = None
+    loss_history: List[OfflineRLLossPoint] = field(default_factory=list)
+    rl_metric_history: List[OfflineRLRLMetricPoint] = field(default_factory=list)
     eta_seconds: Optional[float] = None
     model_path: str = ""
     checkpoint_path: str = ""
+    critic_source: str = ""
+    critic_checkpoint: str = ""
     message: str = "Starting ACT-TD3 offline training"
     process: Optional[subprocess.Popen] = None
     stop_requested: bool = False
@@ -638,6 +754,44 @@ _OFFLINE_RL_DATASET_EDIT_ACTIVE = False
 
 
 @dataclass
+class _ACTTD3CriticWarmupJob:
+    job_id: str
+    dataset_path: str
+    dataset_paths: List[str]
+    act_checkpoint: str
+    checkpoint_path: str
+    manifest_path: str
+    run_checkpoint_path: str
+    episode_count: int
+    success_count: int
+    failure_count: int
+    batch_size: int
+    log_path: str
+    status: str = "running"
+    percentage: float = 0.0
+    completed_critic_updates: int = 0
+    total_critic_updates: int = 5000
+    durable_checkpoint_updates: int = 0
+    critic_loss: Optional[float] = None
+    target_mean: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    actor_exactly_unchanged: Optional[bool] = None
+    message: str = "Starting ACT-TD3 critic warm-up"
+    process: Optional[subprocess.Popen] = None
+    stop_requested: bool = False
+    stop_confirmed: bool = False
+    result_complete: bool = False
+    artifact_reported: bool = False
+    contract_mismatch: bool = False
+    returncode: Optional[int] = None
+    log_tail: List[str] = field(default_factory=list)
+
+
+_ACT_TD3_CRITIC_WARMUP_JOB: Optional[_ACTTD3CriticWarmupJob] = None
+_ACT_TD3_CRITIC_WARMUP_LOCK = threading.Lock()
+
+
+@dataclass
 class _ImitationLearningJob:
     job_id: str
     dataset_path: str
@@ -653,6 +807,9 @@ class _ImitationLearningJob:
     chunk_size: int = 30
     policy_type: str = "act"
     task_instruction: str = ""
+    trainable_groups: List[str] = field(
+        default_factory=lambda: list(_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS)
+    )
     status: str = "running"
     percentage: float = 0.0
     completed_steps: int = 0
@@ -671,6 +828,7 @@ class _ImitationLearningJob:
 
     def __post_init__(self) -> None:
         if self.policy_type == "multi_task_dit":
+            self.trainable_groups = []
             normalized_instruction = self.task_instruction.strip()
             self.task_instruction = (
                 normalized_instruction
@@ -1440,6 +1598,688 @@ def _offline_rl_v21_episode_rows(
     return rows
 
 
+def _offline_rl_video_keys(info: dict) -> List[str]:
+    features = info.get("features")
+    if not isinstance(features, dict):
+        return []
+    return sorted(
+        str(key)
+        for key, feature in features.items()
+        if isinstance(feature, dict) and feature.get("dtype") == "video"
+    )
+
+
+def _offline_rl_safe_media_relative_path(
+    dataset: Path,
+    candidate: Path,
+    *,
+    label: str,
+) -> Optional[str]:
+    """Return one verified dataset-relative media path, or None if absent."""
+    try:
+        resolved = _offline_rl_input_path(
+            str(candidate),
+            root=dataset,
+            label=label,
+            expect_directory=False,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    return resolved.relative_to(dataset).as_posix()
+
+
+def _offline_rl_v3_video_path(
+    dataset: Path,
+    info: dict,
+    *,
+    video_key: str,
+    chunk_index: int,
+    file_index: int,
+) -> Path:
+    template = info.get("video_path") or (
+        "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+    )
+    if not isinstance(template, str) or not template.strip():
+        raise HTTPException(400, "Invalid LeRobot v3 video_path")
+    try:
+        relative = Path(template.format(
+            video_key=video_key,
+            chunk_index=chunk_index,
+            file_index=file_index,
+        ))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, "Invalid LeRobot v3 video_path template") from exc
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HTTPException(400, "Unsafe LeRobot v3 video_path")
+    return dataset / relative
+
+
+def _offline_rl_v21_episode_media(
+    dataset: Path,
+    info: dict,
+    episodes: List[OfflineRLDatasetEpisode],
+) -> Dict[int, List[OfflineRLDatasetEpisodeMedia]]:
+    media_by_episode: Dict[int, List[OfflineRLDatasetEpisodeMedia]] = {}
+    for episode in episodes:
+        media: List[OfflineRLDatasetEpisodeMedia] = []
+        for video_key in _offline_rl_video_keys(info):
+            path = _offline_rl_v21_episode_path(
+                dataset,
+                info,
+                template_name="video_path",
+                episode_index=episode.index,
+                video_key=video_key,
+            )
+            relative_path = _offline_rl_safe_media_relative_path(
+                dataset,
+                path,
+                label=f"LeRobot v2.1 episode {episode.index} video",
+            )
+            if relative_path is not None:
+                media.append(OfflineRLDatasetEpisodeMedia(
+                    camera_key=video_key,
+                    relative_path=relative_path,
+                ))
+        media_by_episode[episode.index] = media
+    return media_by_episode
+
+
+def _offline_rl_v3_episode_media(
+    dataset: Path,
+    info: dict,
+    episodes: List[OfflineRLDatasetEpisode],
+) -> Dict[int, List[OfflineRLDatasetEpisodeMedia]]:
+    video_keys = _offline_rl_video_keys(info)
+    if not video_keys:
+        return {}
+
+    # The normal v3 row reader has already validated this folder. Keeping this
+    # guard tolerant also lets callers inspect metadata-only test fixtures.
+    metadata_root = dataset / "meta" / "episodes"
+    if not metadata_root.exists():
+        return {}
+    safe_metadata_root = _offline_rl_input_path(
+        str(metadata_root),
+        root=dataset,
+        label="LeRobot v3 episode metadata",
+        expect_directory=True,
+    )
+    files = sorted(safe_metadata_root.glob("chunk-*/file-*.parquet"))
+    if not files:
+        return {}
+    try:
+        import pyarrow.parquet as parquet  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - production images pin pyarrow
+        raise HTTPException(503, "PyArrow is unavailable for media inspection") from exc
+
+    episode_indices = {episode.index for episode in episodes}
+    media_by_episode: Dict[int, List[OfflineRLDatasetEpisodeMedia]] = {
+        index: [] for index in episode_indices
+    }
+    seen: set[int] = set()
+    for path in files:
+        safe_path = _offline_rl_input_path(
+            str(path),
+            root=dataset,
+            label="LeRobot v3 episode metadata shard",
+            expect_directory=False,
+        )
+        try:
+            schema_names = set(parquet.ParquetFile(safe_path).schema_arrow.names)
+        except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+            raise HTTPException(400, f"Could not inspect LeRobot metadata: {path}") from exc
+        columns = ["episode_index"]
+        key_columns: Dict[str, tuple[str, str, Optional[str], Optional[str]]] = {}
+        for video_key in video_keys:
+            prefix = f"videos/{video_key}"
+            chunk_column = f"{prefix}/chunk_index"
+            file_column = f"{prefix}/file_index"
+            if chunk_column not in schema_names or file_column not in schema_names:
+                continue
+            from_column = f"{prefix}/from_timestamp"
+            to_column = f"{prefix}/to_timestamp"
+            has_from = from_column in schema_names
+            has_to = to_column in schema_names
+            if has_from != has_to:
+                raise HTTPException(
+                    400,
+                    f"Incomplete LeRobot v3 video timestamps for {video_key}",
+                )
+            key_columns[video_key] = (
+                chunk_column,
+                file_column,
+                from_column if has_from else None,
+                to_column if has_to else None,
+            )
+            columns.extend([chunk_column, file_column])
+            if has_from:
+                columns.extend([from_column, to_column])
+        try:
+            records = parquet.read_table(safe_path, columns=columns).to_pylist()
+        except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+            raise HTTPException(400, f"Could not read LeRobot metadata: {path}") from exc
+
+        for record in records:
+            try:
+                episode_index = int(record["episode_index"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(400, f"Invalid episode row in {path}") from exc
+            if episode_index not in episode_indices or episode_index in seen:
+                raise HTTPException(
+                    400,
+                    f"Invalid or duplicate LeRobot episode {episode_index}",
+                )
+            seen.add(episode_index)
+            for video_key, (
+                chunk_column,
+                file_column,
+                from_column,
+                to_column,
+            ) in key_columns.items():
+                try:
+                    raw_chunk = record[chunk_column]
+                    raw_file = record[file_column]
+                    if isinstance(raw_chunk, bool) or isinstance(raw_file, bool):
+                        raise ValueError("video indices must be integers")
+                    chunk_index = int(raw_chunk)
+                    file_index = int(raw_file)
+                    if chunk_index < 0 or file_index < 0:
+                        raise ValueError("video indices must be non-negative")
+                    from_s: Optional[float] = None
+                    to_s: Optional[float] = None
+                    if from_column is not None and to_column is not None:
+                        from_s = float(record[from_column])
+                        to_s = float(record[to_column])
+                        if (
+                            not math.isfinite(from_s)
+                            or not math.isfinite(to_s)
+                            or from_s < 0
+                            or to_s <= from_s
+                        ):
+                            raise ValueError("video timestamps are invalid")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        400,
+                        f"Invalid LeRobot v3 video metadata for episode {episode_index}",
+                    ) from exc
+                video_path = _offline_rl_v3_video_path(
+                    dataset,
+                    info,
+                    video_key=video_key,
+                    chunk_index=chunk_index,
+                    file_index=file_index,
+                )
+                relative_path = _offline_rl_safe_media_relative_path(
+                    dataset,
+                    video_path,
+                    label=f"LeRobot v3 episode {episode_index} video",
+                )
+                if relative_path is not None:
+                    media_by_episode[episode_index].append(
+                        OfflineRLDatasetEpisodeMedia(
+                            camera_key=video_key,
+                            relative_path=relative_path,
+                            from_s=from_s,
+                            to_s=to_s,
+                        )
+                    )
+    return media_by_episode
+
+
+def _offline_rl_attach_episode_media(
+    dataset: Path,
+    info: dict,
+    version: str,
+    episodes: List[OfflineRLDatasetEpisode],
+) -> List[OfflineRLDatasetEpisode]:
+    media_by_episode = (
+        _offline_rl_v3_episode_media(dataset, info, episodes)
+        if version == "v3.0"
+        else _offline_rl_v21_episode_media(dataset, info, episodes)
+    )
+    return [
+        episode.model_copy(update={"media": media_by_episode.get(episode.index, [])})
+        for episode in episodes
+    ]
+
+
+def _offline_rl_required_episode_index(info: dict, episode_index: int) -> int:
+    total_episodes = info.get("total_episodes")
+    if (
+        isinstance(total_episodes, bool)
+        or not isinstance(total_episodes, int)
+        or total_episodes < 1
+    ):
+        raise HTTPException(400, "LeRobot total_episodes must be a positive integer")
+    if episode_index < 0 or episode_index >= total_episodes:
+        raise HTTPException(404, f"LeRobot episode {episode_index} does not exist")
+    return total_episodes
+
+
+def _offline_rl_episode_feature_names(info: dict, feature_key: str) -> List[str]:
+    features = info.get("features")
+    feature = features.get(feature_key) if isinstance(features, dict) else None
+    if not isinstance(feature, dict):
+        raise HTTPException(400, f"LeRobot dataset is missing {feature_key}")
+    if feature.get("dtype") not in {"float16", "float32", "float64"}:
+        raise HTTPException(400, f"LeRobot {feature_key} must be floating point")
+
+    shape = feature.get("shape")
+    names = feature.get("names")
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 1
+        or isinstance(shape[0], bool)
+        or not isinstance(shape[0], int)
+        or shape[0] < 1
+        or not isinstance(names, list)
+        or len(names) != shape[0]
+    ):
+        raise HTTPException(400, f"LeRobot {feature_key} shape/names are invalid")
+    if any(not isinstance(name, str) for name in names):
+        raise HTTPException(400, f"LeRobot {feature_key} names must be strings")
+    normalized = [name.strip() for name in names]
+    if any(not name for name in normalized) or len(set(normalized)) != len(normalized):
+        raise HTTPException(400, f"LeRobot {feature_key} names must be unique")
+    if len(normalized) > _OFFLINE_RL_EPISODE_DATA_MAX_FIELDS:
+        raise HTTPException(413, f"LeRobot {feature_key} has too many fields")
+    return normalized
+
+
+def _offline_rl_v3_data_path(
+    dataset: Path,
+    info: dict,
+    *,
+    chunk_index: int,
+    file_index: int,
+) -> Path:
+    template = info.get("data_path") or (
+        "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+    )
+    if not isinstance(template, str) or not template.strip():
+        raise HTTPException(400, "Invalid LeRobot v3 data_path")
+    try:
+        relative = Path(template.format(
+            chunk_index=chunk_index,
+            file_index=file_index,
+        ))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, "Invalid LeRobot v3 data_path template") from exc
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HTTPException(400, "Unsafe LeRobot v3 data_path")
+    return dataset / relative
+
+
+def _offline_rl_metadata_integer(record: dict, name: str, *, episode_index: int) -> int:
+    value = record.get(name)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (
+            isinstance(value, float)
+            and (not math.isfinite(value) or not value.is_integer())
+        )
+    ):
+        raise HTTPException(
+            400,
+            f"Invalid {name} for LeRobot episode {episode_index}",
+        )
+    parsed = int(value)
+    if parsed < 0:
+        raise HTTPException(
+            400,
+            f"Invalid {name} for LeRobot episode {episode_index}",
+        )
+    return parsed
+
+
+def _offline_rl_v3_episode_data_location(
+    dataset: Path,
+    info: dict,
+    episode_index: int,
+    parquet,
+) -> tuple[Path, int, int, int, int]:
+    """Resolve one v3 frame range using only compact episode metadata."""
+    metadata_root = _offline_rl_input_path(
+        str(dataset / "meta" / "episodes"),
+        root=dataset,
+        label="LeRobot v3 episode metadata",
+        expect_directory=True,
+    )
+    files = sorted(metadata_root.glob("chunk-*/file-*.parquet"))
+    if not files:
+        raise HTTPException(400, "LeRobot v3 episode metadata has no parquet shards")
+    if len(files) > 10_000:
+        raise HTTPException(400, "LeRobot v3 episode metadata has too many shards")
+
+    columns = [
+        "episode_index",
+        "length",
+        "data/chunk_index",
+        "data/file_index",
+        "dataset_from_index",
+        "dataset_to_index",
+    ]
+    locations: List[dict] = []
+    seen: set[int] = set()
+    for path in files:
+        safe_path = _offline_rl_input_path(
+            str(path),
+            root=dataset,
+            label="LeRobot v3 episode metadata shard",
+            expect_directory=False,
+        )
+        try:
+            schema_names = set(parquet.ParquetFile(safe_path).schema_arrow.names)
+        except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+            raise HTTPException(400, f"Could not inspect LeRobot metadata: {path}") from exc
+        if not set(columns).issubset(schema_names):
+            raise HTTPException(400, f"Invalid LeRobot metadata shard: {path}")
+        try:
+            records = parquet.read_table(safe_path, columns=columns).to_pylist()
+        except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+            raise HTTPException(400, f"Could not read LeRobot metadata: {path}") from exc
+        for record in records:
+            index = _offline_rl_metadata_integer(
+                record,
+                "episode_index",
+                episode_index=episode_index,
+            )
+            if index in seen:
+                raise HTTPException(400, f"Duplicate LeRobot episode {index}")
+            seen.add(index)
+            length = _offline_rl_metadata_integer(
+                record,
+                "length",
+                episode_index=index,
+            )
+            chunk_index = _offline_rl_metadata_integer(
+                record,
+                "data/chunk_index",
+                episode_index=index,
+            )
+            file_index = _offline_rl_metadata_integer(
+                record,
+                "data/file_index",
+                episode_index=index,
+            )
+            from_index = _offline_rl_metadata_integer(
+                record,
+                "dataset_from_index",
+                episode_index=index,
+            )
+            to_index = _offline_rl_metadata_integer(
+                record,
+                "dataset_to_index",
+                episode_index=index,
+            )
+            if length < 1 or to_index <= from_index or to_index - from_index != length:
+                raise HTTPException(400, f"Invalid frame range for LeRobot episode {index}")
+            locations.append({
+                "episode_index": index,
+                "length": length,
+                "chunk_index": chunk_index,
+                "file_index": file_index,
+                "from_index": from_index,
+                "to_index": to_index,
+            })
+
+    selected = next(
+        (location for location in locations if location["episode_index"] == episode_index),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(404, f"LeRobot episode {episode_index} does not exist")
+
+    shard_locations = sorted(
+        (
+            location for location in locations
+            if location["chunk_index"] == selected["chunk_index"]
+            and location["file_index"] == selected["file_index"]
+        ),
+        key=lambda location: location["from_index"],
+    )
+    shard_start = shard_locations[0]["from_index"]
+    expected_from = shard_start
+    for location in shard_locations:
+        if location["from_index"] != expected_from:
+            raise HTTPException(400, "LeRobot v3 data shard ranges are not contiguous")
+        expected_from = location["to_index"]
+    shard_length = expected_from - shard_start
+
+    local_from = selected["from_index"] - shard_start
+    local_to = selected["to_index"] - shard_start
+    data_path = _offline_rl_v3_data_path(
+        dataset,
+        info,
+        chunk_index=selected["chunk_index"],
+        file_index=selected["file_index"],
+    )
+    safe_data_path = _offline_rl_input_path(
+        str(data_path),
+        root=dataset,
+        label=f"LeRobot v3 episode {episode_index} data",
+        expect_directory=False,
+    )
+    return safe_data_path, local_from, local_to, selected["length"], shard_length
+
+
+def _offline_rl_parquet_slice_records(
+    parquet,
+    path: Path,
+    *,
+    columns: List[str],
+    start: int,
+    stop: int,
+    expected_row_count: int,
+) -> List[dict]:
+    """Read one bounded row slice without materializing later shard rows."""
+    try:
+        parquet_file = parquet.ParquetFile(path)
+        schema_names = set(parquet_file.schema_arrow.names)
+        row_count = int(parquet_file.metadata.num_rows)
+    except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+        raise HTTPException(400, f"Could not inspect LeRobot episode data: {path}") from exc
+    if not set(columns).issubset(schema_names):
+        raise HTTPException(400, f"LeRobot episode parquet is missing required columns: {path}")
+    if row_count != expected_row_count:
+        raise HTTPException(400, f"LeRobot data shard row count is invalid: {path}")
+    if start < 0 or stop <= start or stop > row_count:
+        raise HTTPException(400, f"LeRobot episode frame slice is invalid: {path}")
+
+    rows: List[dict] = []
+    cursor = 0
+    try:
+        for batch in parquet_file.iter_batches(batch_size=2048, columns=columns):
+            batch_end = cursor + batch.num_rows
+            overlap_start = max(start, cursor)
+            overlap_end = min(stop, batch_end)
+            if overlap_start < overlap_end:
+                rows.extend(batch.slice(
+                    overlap_start - cursor,
+                    overlap_end - overlap_start,
+                ).to_pylist())
+            cursor = batch_end
+            if cursor >= stop:
+                break
+    except Exception as exc:  # noqa: BLE001 - PyArrow validation boundary
+        raise HTTPException(400, f"Could not read LeRobot episode data: {path}") from exc
+    if len(rows) != stop - start:
+        raise HTTPException(400, f"LeRobot episode frame slice is incomplete: {path}")
+    return rows
+
+
+def _offline_rl_v21_episode_length(dataset: Path, episode_index: int) -> int:
+    rows = _offline_rl_v21_jsonl(
+        dataset / "meta" / "episodes.jsonl",
+        dataset=dataset,
+        label="LeRobot v2.1 episode metadata",
+    )
+    matches = []
+    for row in rows:
+        try:
+            index = int(row.get("episode_index"))
+        except (TypeError, ValueError):
+            continue
+        if index == episode_index:
+            matches.append(row)
+    if len(matches) != 1:
+        raise HTTPException(400, f"Invalid LeRobot v2.1 episode {episode_index} metadata")
+    return _offline_rl_metadata_integer(
+        matches[0],
+        "length",
+        episode_index=episode_index,
+    )
+
+
+def _offline_rl_validate_episode_data_size(info: dict, episode_index: int, frames: int) -> None:
+    joint_names = _offline_rl_episode_feature_names(info, "observation.state")
+    action_names = _offline_rl_episode_feature_names(info, "action")
+    if frames < 1:
+        raise HTTPException(400, f"LeRobot episode {episode_index} frame count is invalid")
+    if frames > _OFFLINE_RL_EPISODE_DATA_MAX_FRAMES:
+        raise HTTPException(413, f"LeRobot episode {episode_index} is too long to preview")
+    if frames * (len(joint_names) + len(action_names)) > (
+        _OFFLINE_RL_EPISODE_DATA_MAX_VALUES
+    ):
+        raise HTTPException(413, f"LeRobot episode {episode_index} data is too large")
+
+
+def _offline_rl_episode_data_from_records(
+    info: dict,
+    episode_index: int,
+    records: List[dict],
+    *,
+    expected_frames: int,
+) -> OfflineRLDatasetEpisodeData:
+    joint_names = _offline_rl_episode_feature_names(info, "observation.state")
+    action_names = _offline_rl_episode_feature_names(info, "action")
+    _offline_rl_validate_episode_data_size(info, episode_index, expected_frames)
+    if len(records) != expected_frames:
+        raise HTTPException(400, f"LeRobot episode {episode_index} frame count is invalid")
+
+    timestamps: List[float] = []
+    joint_positions: List[float] = []
+    action_values: List[float] = []
+    previous_timestamp: Optional[float] = None
+    for record in records:
+        row_episode = _offline_rl_metadata_integer(
+            record,
+            "episode_index",
+            episode_index=episode_index,
+        )
+        if row_episode != episode_index:
+            raise HTTPException(400, f"LeRobot episode {episode_index} frame slice leaked")
+        try:
+            timestamp = float(_offline_rl_scalar(record.get("timestamp")))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"Invalid timestamp in episode {episode_index}") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise HTTPException(400, f"Invalid timestamp in episode {episode_index}")
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise HTTPException(400, f"Episode {episode_index} timestamps are not monotonic")
+        timestamps.append(timestamp)
+        previous_timestamp = timestamp
+
+        for key, names, destination in (
+            ("observation.state", joint_names, joint_positions),
+            ("action", action_names, action_values),
+        ):
+            values = record.get(key)
+            if not isinstance(values, (list, tuple)) or len(values) != len(names):
+                raise HTTPException(400, f"Invalid {key} shape in episode {episode_index}")
+            for value in values:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        400,
+                        f"Invalid {key} value in episode {episode_index}",
+                    ) from exc
+                if not math.isfinite(number):
+                    raise HTTPException(400, f"Invalid {key} value in episode {episode_index}")
+                destination.append(number)
+
+    origin = timestamps[0]
+    relative_timestamps = [timestamp - origin for timestamp in timestamps]
+    duration = relative_timestamps[-1] if len(relative_timestamps) > 1 else 0.0
+    return OfflineRLDatasetEpisodeData(
+        joint_timestamps=relative_timestamps,
+        joint_names=joint_names,
+        joint_positions=joint_positions,
+        action_timestamps=list(relative_timestamps),
+        action_names=action_names,
+        action_values=action_values,
+        duration=duration,
+    )
+
+
+def _offline_rl_dataset_episode_data(
+    raw_path: str,
+    episode_index: int,
+) -> OfflineRLDatasetEpisodeData:
+    dataset, info = _offline_rl_dataset_metadata(raw_path)
+    _offline_rl_required_episode_index(info, episode_index)
+    version = str(info.get("codebase_version") or "")
+    if version not in {"v2.1", "v3.0"}:
+        raise HTTPException(400, f"Unsupported LeRobot version: {version or 'unknown'}")
+
+    # Validate the feature contract before touching potentially large frame data.
+    _offline_rl_episode_feature_names(info, "observation.state")
+    _offline_rl_episode_feature_names(info, "action")
+    try:
+        import pyarrow.parquet as parquet  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - production images pin pyarrow
+        raise HTTPException(503, "PyArrow is unavailable for episode inspection") from exc
+
+    columns = ["episode_index", "timestamp", "observation.state", "action"]
+    if version == "v3.0":
+        data_path, local_from, local_to, expected_frames, shard_frames = (
+            _offline_rl_v3_episode_data_location(dataset, info, episode_index, parquet)
+        )
+        _offline_rl_validate_episode_data_size(info, episode_index, expected_frames)
+        records = _offline_rl_parquet_slice_records(
+            parquet,
+            data_path,
+            columns=columns,
+            start=local_from,
+            stop=local_to,
+            expected_row_count=shard_frames,
+        )
+    else:
+        expected_frames = _offline_rl_v21_episode_length(dataset, episode_index)
+        _offline_rl_validate_episode_data_size(info, episode_index, expected_frames)
+        data_path = _offline_rl_v21_episode_path(
+            dataset,
+            info,
+            template_name="data_path",
+            episode_index=episode_index,
+        )
+        safe_data_path = _offline_rl_input_path(
+            str(data_path),
+            root=dataset,
+            label=f"LeRobot v2.1 episode {episode_index} data",
+            expect_directory=False,
+        )
+        records = _offline_rl_parquet_slice_records(
+            parquet,
+            safe_data_path,
+            columns=columns,
+            start=0,
+            stop=expected_frames,
+            expected_row_count=expected_frames,
+        )
+
+    return _offline_rl_episode_data_from_records(
+        info,
+        episode_index,
+        records,
+        expected_frames=expected_frames,
+    )
+
+
 def _offline_rl_dataset_summary(raw_path: str) -> OfflineRLDatasetSummary:
     dataset, info = _offline_rl_dataset_metadata(raw_path)
     data_epoch_provenance = _offline_rl_dataset_data_epoch_provenance(dataset)
@@ -1472,6 +2312,7 @@ def _offline_rl_dataset_summary(raw_path: str) -> OfflineRLDatasetSummary:
         if version == "v3.0"
         else _offline_rl_v21_episode_rows(dataset, total_episodes)
     )
+    episodes = _offline_rl_attach_episode_media(dataset, info, version, episodes)
     success_count = sum(item.outcome == "success" for item in episodes)
     failure_count = sum(item.outcome == "failure" for item in episodes)
     unlabeled_count = len(episodes) - success_count - failure_count
@@ -2117,6 +2958,15 @@ def _offline_rl_delete_dataset_episodes(
         with _OFFLINE_RL_LOCK:
             if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
                 raise HTTPException(409, "Cannot edit a dataset while offline RL is running")
+        with _ACT_TD3_CRITIC_WARMUP_LOCK:
+            if (
+                _ACT_TD3_CRITIC_WARMUP_JOB is not None
+                and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+            ):
+                raise HTTPException(
+                    409,
+                    "Cannot edit a dataset while ACT-TD3 critic warm-up is running",
+                )
         with _OfflineRLDatasetOperationLock():
             dataset, info = _offline_rl_dataset_metadata(raw_path)
             version = info.get("codebase_version")
@@ -2270,7 +3120,11 @@ def _offline_rl_dataset(raw_path: str) -> tuple[Path, int]:
 
 
 def _offline_rl_requested_dataset_paths(
-    request: OfflineRLStartRequest | ImitationLearningStartRequest,
+    request: (
+        OfflineRLStartRequest
+        | ACTTD3CriticWarmupStartRequest
+        | ImitationLearningStartRequest
+    ),
 ) -> List[str]:
     """Normalize the new ordered-list request without breaking scalar clients."""
     legacy = request.dataset_path.strip()
@@ -2393,32 +3247,36 @@ def _offline_rl_schedule(
     return critic_epochs, actor_equivalent_epochs
 
 
-def _offline_rl_actor_trainable_groups(groups: List[str]) -> List[str]:
-    """Validate one actor trainability contract and return canonical order."""
+def _act_trainable_groups(
+    groups: List[str],
+    *,
+    field_name: str,
+) -> List[str]:
+    """Validate one ACT trainability contract and return canonical order."""
     if not isinstance(groups, list) or not groups:
         raise HTTPException(
             400,
-            "actor_trainable_groups must select at least one group; "
+            f"{field_name} must select at least one group; "
             "all-frozen actor training is not supported",
         )
 
     normalized: List[str] = []
     for value in groups:
         if not isinstance(value, str):
-            raise HTTPException(400, "actor_trainable_groups must contain strings")
+            raise HTTPException(400, f"{field_name} must contain strings")
         group = value.strip()
         if not group:
-            raise HTTPException(400, "actor_trainable_groups must not contain empty names")
+            raise HTTPException(400, f"{field_name} must not contain empty names")
         normalized.append(group)
 
     if len(set(normalized)) != len(normalized):
-        raise HTTPException(400, "actor_trainable_groups must not contain duplicates")
+        raise HTTPException(400, f"{field_name} must not contain duplicates")
 
     unknown = sorted(set(normalized) - set(_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS))
     if unknown:
         raise HTTPException(
             400,
-            "Unknown actor_trainable_groups: " + ", ".join(unknown),
+            f"Unknown {field_name}: " + ", ".join(unknown),
         )
 
     ordered = [
@@ -2428,10 +3286,91 @@ def _offline_rl_actor_trainable_groups(groups: List[str]) -> List[str]:
     if ordered == ["cvae_encoder"]:
         raise HTTPException(
             400,
-            "CVAE-only actor training is not supported because it does not "
+            f"CVAE-only {field_name} is not supported because it does not "
             "update the deployed action path",
         )
     return ordered
+
+
+def _offline_rl_actor_trainable_groups(groups: List[str]) -> List[str]:
+    """Validate one TD3 actor trainability contract and return canonical order."""
+    return _act_trainable_groups(
+        groups,
+        field_name="actor_trainable_groups",
+    )
+
+
+def _offline_rl_objective_trainable_groups(
+    actor_objective: str,
+    groups: List[str],
+) -> List[str]:
+    """Return the effective ACT actor mask for one objective.
+
+    Pure TD3 has no CVAE/behavior-cloning term, so its posterior encoder is
+    outside the deployed deterministic action path and must stay frozen.
+    """
+
+    normalized = _offline_rl_actor_trainable_groups(groups)
+    if actor_objective == "td3":
+        normalized = [group for group in normalized if group != "cvae_encoder"]
+        if not normalized:
+            raise HTTPException(
+                400,
+                "Pure TD3 requires at least one trainable deterministic ACT block",
+            )
+    return normalized
+
+
+def _offline_rl_algorithm_contract(
+    request: OfflineRLStartRequest,
+) -> tuple[str, str]:
+    """Normalize the TD3 family and actor loss without changing intent.
+
+    For backward compatibility, the short-lived API that encoded the actor
+    objective in ``algorithm`` is accepted when that mapping is unambiguous.
+    New clients send both fields.  An omitted ``actor_objective`` together
+    with an explicitly supplied legacy ``algorithm='td3'`` therefore means
+    pure TD3; when both fields are omitted the documented TD3+BC default is
+    retained.
+    """
+
+    algorithm = request.algorithm.strip().lower()
+    actor_objective = request.actor_objective.strip().lower()
+    fields_set = getattr(request, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(request, "__fields_set__", set())
+    objective_is_explicit = "actor_objective" in fields_set
+    algorithm_is_explicit = "algorithm" in fields_set
+
+    if algorithm == "td3_bc":
+        if objective_is_explicit and actor_objective != "td3_bc":
+            raise HTTPException(
+                400,
+                "Legacy algorithm='td3_bc' conflicts with actor_objective",
+            )
+        return "td3", "td3_bc"
+    if algorithm != "td3":
+        raise HTTPException(
+            400,
+            f"Offline RL algorithm '{request.algorithm}' is not implemented; "
+            "available algorithm is TD3",
+        )
+    if not objective_is_explicit and algorithm_is_explicit:
+        # Older clients used algorithm='td3' to request the pure actor loss.
+        actor_objective = "td3"
+    if actor_objective not in _OFFLINE_RL_ACTOR_OBJECTIVES:
+        raise HTTPException(400, "Unknown TD3 actor loss option")
+    return "td3", actor_objective
+
+
+def _imitation_learning_trainable_groups(
+    groups: Optional[List[str]],
+) -> List[str]:
+    """Resolve the default ACT-BC mask and reject unsafe empty selections."""
+    return _act_trainable_groups(
+        list(_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS) if groups is None else groups,
+        field_name="trainable_groups",
+    )
 
 
 def _offline_rl_parent_checkpoint(
@@ -2439,6 +3378,7 @@ def _offline_rl_parent_checkpoint(
     episode_count: int,
     actor_trainable_groups: Optional[List[str]] = None,
     batch_size: int = 4,
+    actor_objective: Optional[str] = None,
 ) -> tuple[Path | None, int, int]:
     value = (raw_path or "").strip()
     if not value:
@@ -2502,6 +3442,39 @@ def _offline_rl_parent_checkpoint(
             raise HTTPException(400, "parent training schedule is invalid") from exc
     else:
         raise HTTPException(400, "parent training schedule is invalid")
+
+    parent_objective = manifest.get("actor_objective")
+    if actor_objective is None:
+        # Internal compatibility path for callers that only validate the
+        # historical schedule/data contract. The public start route always
+        # passes an explicit objective.
+        pass
+    elif parent_objective is None:
+        # The legacy hybrid cloned failed behavior too, so it is not exactly
+        # either selectable objective. A new explicit lineage is required.
+        raise HTTPException(
+            400,
+            "Legacy parent checkpoints without actor_objective cannot resume; "
+            "start a fresh TD3 or TD3+BC lineage",
+        )
+    elif parent_objective not in _OFFLINE_RL_ACTOR_OBJECTIVES:
+        raise HTTPException(400, "parent actor_objective is invalid")
+    elif parent_objective != actor_objective:
+        raise HTTPException(
+            400,
+            "parent actor_objective does not match the requested loss option",
+        )
+    if actor_objective is not None:
+        parent_algorithm = manifest.get("algorithm")
+        legacy_algorithm = {
+            "td3": "ACT-TD3 cumulative replay",
+            "td3_bc": "ACT-TD3+BC cumulative replay",
+        }[actor_objective]
+        if parent_algorithm not in (None, "td3", legacy_algorithm):
+            raise HTTPException(
+                400,
+                "parent algorithm is not a compatible TD3 artifact",
+            )
 
     parent_trainable_groups = manifest.get("actor_trainable_groups")
     if parent_trainable_groups is not None:
@@ -2581,7 +3554,13 @@ def _offline_rl_robot_config(robot_type: str) -> str:
     return f"/orchestrator_config/{robot}_config.yaml"
 
 
-def _offline_rl_output_path(job_id: str, episode_count: int) -> Path:
+def _offline_rl_output_path(
+    job_id: str,
+    episode_count: int,
+    actor_objective: str = "td3_bc",
+) -> Path:
+    if actor_objective not in _OFFLINE_RL_ACTOR_OBJECTIVES:
+        raise HTTPException(400, "Unknown ACT-TD3 actor objective")
     model_root = _OFFLINE_RL_MODEL_ROOT.resolve(strict=True)
     if _OFFLINE_RL_OUTPUT_ROOT.exists():
         if _OFFLINE_RL_OUTPUT_ROOT.is_symlink():
@@ -2591,7 +3570,7 @@ def _offline_rl_output_path(job_id: str, episode_count: int) -> Path:
         except (OSError, ValueError) as exc:
             raise HTTPException(500, "Offline RL output root escapes the model root") from exc
     output = _OFFLINE_RL_OUTPUT_ROOT / (
-        f"td3_episodes_{episode_count:04d}_{job_id[:12]}"
+        f"{actor_objective}_episodes_{episode_count:04d}_{job_id[:12]}"
     )
     if output.exists():
         raise HTTPException(409, f"Offline RL output already exists: {output}")
@@ -2663,6 +3642,8 @@ def _offline_rl_command(
         "19",
         "--batch-size",
         str(job.batch_size),
+        "--actor-objective",
+        job.actor_objective,
         "--critic-epochs",
         str(job.critic_epochs),
         "--actor-equivalent-epochs",
@@ -2731,6 +3712,16 @@ def _offline_rl_append_log(job: _OfflineRLJob, line: str) -> None:
     del job.log_tail[:-_OFFLINE_RL_LOG_LINES]
 
 
+def _offline_rl_finite_float(value) -> Optional[float]:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        converted = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return converted if math.isfinite(converted) else None
+
+
 def _offline_rl_update_number(job: _OfflineRLJob, payload: dict, name: str) -> None:
     value = payload.get(name)
     current = getattr(job, name)
@@ -2740,14 +3731,180 @@ def _offline_rl_update_number(job: _OfflineRLJob, payload: dict, name: str) -> N
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             setattr(job, name, value)
         return
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        setattr(job, name, float(value))
+    finite_value = _offline_rl_finite_float(value)
+    if finite_value is not None:
+        setattr(job, name, finite_value)
+
+
+def _offline_rl_update_loss_history(job: _OfflineRLJob, payload: dict) -> None:
+    """Append or update one finite, monotonically ordered loss point."""
+
+    step = payload.get("completed_critic_updates")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        return
+
+    def finite_loss(name: str) -> Optional[float]:
+        return _offline_rl_finite_float(payload.get(name))
+
+    critic_loss = finite_loss("critic_loss")
+    actor_loss = finite_loss("actor_loss")
+    if critic_loss is None and actor_loss is None:
+        return
+
+    existing_index: Optional[int] = None
+    for index in range(len(job.loss_history) - 1, -1, -1):
+        existing_step = job.loss_history[index].step
+        if existing_step == step:
+            existing_index = index
+            break
+        if existing_step < step:
+            break
+
+    if existing_index is not None:
+        existing = job.loss_history[existing_index]
+        job.loss_history[existing_index] = OfflineRLLossPoint(
+            step=step,
+            critic_loss=(
+                critic_loss if critic_loss is not None else existing.critic_loss
+            ),
+            actor_loss=actor_loss if actor_loss is not None else existing.actor_loss,
+        )
+        return
+
+    if job.loss_history and step < job.loss_history[-1].step:
+        # Late output from an older update must not reorder the graph.
+        return
+    job.loss_history.append(OfflineRLLossPoint(
+        step=step,
+        critic_loss=critic_loss,
+        actor_loss=actor_loss,
+    ))
+    del job.loss_history[:-_OFFLINE_RL_LOSS_HISTORY_POINTS]
+
+
+def _offline_rl_update_metric_history(job: _OfflineRLJob, payload: dict) -> None:
+    """Consume the authoritative finite, ordered replay-round telemetry."""
+
+    if "rl_metric_history" not in payload:
+        return
+    raw_history = payload.get("rl_metric_history")
+    if not isinstance(raw_history, list):
+        raise ValueError("ACT-TD3 RL metric history must be a list")
+    if len(raw_history) > _OFFLINE_RL_METRIC_HISTORY_POINTS:
+        raise ValueError("ACT-TD3 RL metric history exceeds its bounded contract")
+
+    points: list[OfflineRLRLMetricPoint] = []
+    previous_epoch = 0
+    expected_fields = {
+        "rl_epoch",
+        "actor_loss_mean",
+        "critic_loss_mean",
+        "replay_average_reward",
+    }
+    for raw_point in raw_history:
+        if not isinstance(raw_point, dict) or set(raw_point) != expected_fields:
+            raise ValueError("ACT-TD3 RL metric history point fields disagree")
+        rl_epoch = raw_point.get("rl_epoch")
+        if (
+            isinstance(rl_epoch, bool)
+            or not isinstance(rl_epoch, int)
+            or rl_epoch < 1
+            or rl_epoch <= previous_epoch
+        ):
+            raise ValueError(
+                "ACT-TD3 RL metric history must be ordered and deduplicated"
+            )
+
+        values: dict[str, Optional[float]] = {}
+        for name in (
+            "actor_loss_mean",
+            "critic_loss_mean",
+            "replay_average_reward",
+        ):
+            raw_value = raw_point.get(name)
+            if raw_value is None:
+                values[name] = None
+                continue
+            finite_value = _offline_rl_finite_float(raw_value)
+            if finite_value is None:
+                raise ValueError("ACT-TD3 RL metric history contains a non-finite value")
+            values[name] = finite_value
+        reward = values["replay_average_reward"]
+        if reward is not None and not 0.0 <= reward <= 1.0:
+            raise ValueError("ACT-TD3 replay average reward is outside [0, 1]")
+        points.append(
+            OfflineRLRLMetricPoint(
+                rl_epoch=rl_epoch,
+                actor_loss_mean=values["actor_loss_mean"],
+                critic_loss_mean=values["critic_loss_mean"],
+                replay_average_reward=reward,
+            )
+        )
+        previous_epoch = rl_epoch
+
+    if (
+        job.rl_metric_history
+        and points
+        and points[-1].rl_epoch < job.rl_metric_history[-1].rl_epoch
+    ):
+        # Ignore late progress output from an older RL epoch.
+        return
+    job.rl_metric_history = points
+
+
+def _offline_rl_update_critic_source(job: _OfflineRLJob, payload: dict) -> None:
+    """Consume one complete, self-consistent critic-initialization contract."""
+
+    has_source = "critic_source" in payload
+    has_checkpoint = "critic_checkpoint" in payload
+    if not has_source and not has_checkpoint:
+        return
+    if has_source != has_checkpoint:
+        raise ValueError("ACT-TD3 critic telemetry fields are incomplete")
+
+    source = payload.get("critic_source")
+    checkpoint = payload.get("critic_checkpoint")
+    if source not in _OFFLINE_RL_CRITIC_SOURCES:
+        raise ValueError("ACT-TD3 critic telemetry source is invalid")
+    if source == "random":
+        if checkpoint not in (None, ""):
+            raise ValueError("Random ACT-TD3 critic must not name a checkpoint")
+        job.critic_source = source
+        job.critic_checkpoint = ""
+        return
+    if not isinstance(checkpoint, str) or not checkpoint or not os.path.isabs(checkpoint):
+        raise ValueError("ACT-TD3 critic checkpoint must be an absolute path")
+
+    normalized = os.path.normpath(checkpoint)
+    if source == "parent_checkpoint":
+        if not job.parent_checkpoint:
+            raise ValueError("ACT-TD3 parent critic source has no configured parent")
+        expected = os.path.normpath(job.parent_checkpoint)
+    elif source == "policy_warmup":
+        if not job.act_checkpoint:
+            raise ValueError("ACT-TD3 warm critic source has no configured policy")
+        expected = os.path.normpath(
+            str(Path(job.act_checkpoint) / "critic" / "latest.pt")
+        )
+    else:
+        if not job.checkpoint_path:
+            raise ValueError("ACT-TD3 resume critic source has no round checkpoint")
+        expected = os.path.normpath(job.checkpoint_path)
+    if normalized != expected:
+        raise ValueError("ACT-TD3 critic checkpoint disagrees with its source")
+    job.critic_source = source
+    job.critic_checkpoint = normalized
 
 
 def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
     """Apply one trusted CLI JSON event; return True for a complete result."""
     event = payload.get("event")
     if event == "manifest":
+        actor_objective = payload.get("actor_objective")
+        if actor_objective != job.actor_objective:
+            raise ValueError("ACT-TD3 actor objective telemetry disagrees")
+        if payload.get("algorithm") != job.algorithm:
+            raise ValueError("ACT-TD3 algorithm telemetry disagrees")
         dataset = payload.get("dataset") or {}
         round_info = payload.get("round") or {}
         schedule = payload.get("schedule") or {}
@@ -2785,6 +3942,7 @@ def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
         checkpoint = payload.get("checkpoint")
         if isinstance(checkpoint, str):
             job.checkpoint_path = checkpoint
+        _offline_rl_update_critic_source(job, payload)
         job.message = "ACT-TD3 training is running"
         return False
 
@@ -2802,9 +3960,12 @@ def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
             "eta_seconds",
         ):
             _offline_rl_update_number(job, payload, name)
+        _offline_rl_update_loss_history(job, payload)
+        _offline_rl_update_metric_history(job, payload)
         percentage = payload.get("percentage")
-        if isinstance(percentage, (int, float)) and not isinstance(percentage, bool):
-            job.percentage = max(0.0, min(100.0, float(percentage)))
+        finite_percentage = _offline_rl_finite_float(percentage)
+        if finite_percentage is not None:
+            job.percentage = max(0.0, min(100.0, finite_percentage))
         checkpoint = payload.get("checkpoint_path")
         if isinstance(checkpoint, str):
             job.checkpoint_path = checkpoint
@@ -2816,7 +3977,13 @@ def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
         return False
 
     if event == "result":
+        actor_objective = payload.get("actor_objective")
+        if actor_objective != job.actor_objective:
+            raise ValueError("ACT-TD3 actor objective result disagrees")
+        if payload.get("algorithm") != job.algorithm:
+            raise ValueError("ACT-TD3 algorithm result disagrees")
         _offline_rl_consume_event(job, {**payload, "event": "progress"})
+        _offline_rl_update_critic_source(job, payload)
         if payload.get("status") == "stopped":
             job.stop_confirmed = True
         model_path = payload.get("model_path")
@@ -2832,6 +3999,10 @@ def _offline_rl_consume_event(job: _OfflineRLJob, payload: dict) -> bool:
 
 
 def _offline_rl_verified_model(job: _OfflineRLJob) -> bool:
+    if job.critic_source not in _OFFLINE_RL_CRITIC_SOURCES:
+        return False
+    if (job.critic_source == "random") != (job.critic_checkpoint == ""):
+        return False
     expected = Path(job.output_dir) / "pretrained_model"
     if os.path.normpath(job.model_path) != str(expected):
         return False
@@ -2918,6 +4089,8 @@ def _offline_rl_status(job: Optional[_OfflineRLJob]) -> OfflineRLStatus:
         return OfflineRLStatus(status="idle", message="No offline RL job has been started")
     return OfflineRLStatus(
         status=job.status,
+        algorithm=job.algorithm,
+        actor_objective=job.actor_objective,
         percentage=job.percentage,
         episode_count=job.episode_count,
         round_index=job.round_index,
@@ -2936,9 +4109,13 @@ def _offline_rl_status(job: Optional[_OfflineRLJob]) -> OfflineRLStatus:
         total_actor_updates=job.total_actor_updates,
         critic_loss=job.critic_loss,
         actor_loss=job.actor_loss,
+        loss_history=list(job.loss_history),
+        rl_metric_history=list(job.rl_metric_history),
         eta_seconds=job.eta_seconds,
         model_path=job.model_path if job.status == "completed" else "",
         checkpoint_path=job.checkpoint_path,
+        critic_source=job.critic_source,
+        critic_checkpoint=job.critic_checkpoint,
         message=job.message,
         job_id=job.job_id,
         dataset_path=job.dataset_path,
@@ -2946,6 +4123,411 @@ def _offline_rl_status(job: Optional[_OfflineRLJob]) -> OfflineRLStatus:
         act_checkpoint=job.act_checkpoint,
         parent_checkpoint=job.parent_checkpoint,
         output_dir=job.output_dir,
+        returncode=job.returncode,
+        log_tail=list(job.log_tail),
+    )
+
+
+# -- ACT-TD3 critic warm-up ---------------------------------------------------
+
+
+def _act_td3_critic_warmup_paths(
+    act_checkpoint: Path,
+    job_id: str,
+) -> tuple[Path, Path, Path]:
+    """Return safe policy-local run, latest, and manifest artifact paths."""
+
+    critic_dir = act_checkpoint / "critic"
+    runs_dir = critic_dir / "runs"
+    for directory, label in (
+        (critic_dir, "critic directory"),
+        (runs_dir, "critic runs directory"),
+    ):
+        if directory.is_symlink():
+            raise HTTPException(400, f"ACT-TD3 {label} must not be a symbolic link")
+        if directory.exists() and not directory.is_dir():
+            raise HTTPException(400, f"ACT-TD3 {label} must be a directory")
+    run_checkpoint = runs_dir / f"{job_id}.pt"
+    latest = critic_dir / "latest.pt"
+    manifest = critic_dir / "manifest.json"
+    for path in (run_checkpoint, latest, manifest):
+        if path.is_symlink():
+            raise HTTPException(400, f"ACT-TD3 critic artifact must not be a symlink: {path}")
+        if path.exists() and not path.is_file():
+            raise HTTPException(
+                400,
+                f"ACT-TD3 critic artifact must be a regular file: {path}",
+            )
+    if run_checkpoint.exists():
+        raise HTTPException(409, "ACT-TD3 critic warm-up run checkpoint already exists")
+    return run_checkpoint, latest, manifest
+
+
+def _act_td3_critic_warmup_container_name(job: _ACTTD3CriticWarmupJob) -> str:
+    return f"cyclo_act_td3_critic_warmup_{job.job_id[:12]}"
+
+
+def _act_td3_critic_warmup_command(
+    *,
+    job: _ACTTD3CriticWarmupJob,
+    robot_type: str,
+    robot_config: str,
+) -> List[str]:
+    command = _compose_base_cmd() + [
+        "run",
+        "--rm",
+        "--no-deps",
+        "--pull",
+        "never",
+        "--name",
+        _act_td3_critic_warmup_container_name(job),
+        "--user",
+        "1000:1000",
+        "--workdir",
+        "/workspace",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        f"XDG_CACHE_HOME={_OFFLINE_RL_CACHE_ROOT}",
+        "--env",
+        f"HF_HOME={_OFFLINE_RL_CACHE_ROOT}/huggingface",
+        "--env",
+        f"HF_LEROBOT_HOME={_OFFLINE_RL_CACHE_ROOT}/huggingface/lerobot",
+        "--env",
+        f"TORCH_HOME={_OFFLINE_RL_CACHE_ROOT}/torch",
+        "--env",
+        f"TRITON_CACHE_DIR={_OFFLINE_RL_CACHE_ROOT}/triton",
+        "--env",
+        "HF_HUB_OFFLINE=1",
+        "--env",
+        "TRANSFORMERS_OFFLINE=1",
+        "--env",
+        "HF_DATASETS_OFFLINE=1",
+        "--entrypoint",
+        "/lerobot/.venv/bin/python",
+        "lerobot",
+        "-m",
+        "cyclo_brain.algorithm.rl.act_td3.offline_warmup_cli",
+    ]
+    for dataset_path in job.dataset_paths:
+        command.extend(["--dataset-root", dataset_path])
+    command.extend([
+        "--act-checkpoint",
+        job.act_checkpoint,
+        "--robot-config",
+        robot_config,
+        "--robot-type",
+        robot_type,
+        "--device",
+        "cuda:0",
+        "--seed",
+        "17",
+        "--sampling-seed",
+        "19",
+        "--batch-size",
+        str(job.batch_size),
+        "--critic-updates",
+        str(job.total_critic_updates),
+        "--checkpoint",
+        job.run_checkpoint_path,
+        "--publish-dir",
+        str(Path(job.act_checkpoint) / "critic"),
+        "--checkpoint-interval",
+        "500",
+        "--progress-interval",
+        "1",
+    ])
+    return command
+
+
+def _act_td3_critic_warmup_interrupt_job(job: _ACTTD3CriticWarmupJob) -> bool:
+    docker_error: Optional[Exception] = None
+    try:
+        container = _docker_client().containers.get(
+            _act_td3_critic_warmup_container_name(job)
+        )
+        container.kill(signal="SIGINT")
+        return True
+    except NotFound:
+        pass
+    except DockerException as exc:
+        docker_error = exc
+        logger.warning(
+            "Could not signal ACT-TD3 critic warm-up container %s: %s",
+            _act_td3_critic_warmup_container_name(job),
+            exc,
+        )
+
+    process = job.process
+    if process is None:
+        if docker_error is not None:
+            raise RuntimeError(str(docker_error)) from docker_error
+        return False
+    poll = getattr(process, "poll", None)
+    if callable(poll) and poll() is not None:
+        return False
+    try:
+        process.send_signal(signal.SIGINT)
+    except (OSError, ProcessLookupError) as exc:
+        if callable(poll) and poll() is not None:
+            return False
+        if docker_error is not None:
+            raise RuntimeError(f"{docker_error}; {exc}") from exc
+        raise
+    return True
+
+
+def _act_td3_critic_warmup_append_log(
+    job: _ACTTD3CriticWarmupJob,
+    line: str,
+) -> None:
+    if not line:
+        return
+    job.log_tail.append(line)
+    del job.log_tail[:-_OFFLINE_RL_LOG_LINES]
+
+
+def _act_td3_critic_warmup_update_number(
+    job: _ACTTD3CriticWarmupJob,
+    payload: dict,
+    name: str,
+) -> None:
+    value = payload.get(name)
+    if value is None:
+        return
+    current = getattr(job, name)
+    if isinstance(current, int) and not isinstance(current, bool):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            setattr(job, name, value)
+        return
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+        if math.isfinite(numeric):
+            setattr(job, name, numeric)
+
+
+def _act_td3_critic_warmup_consume_event(
+    job: _ACTTD3CriticWarmupJob,
+    payload: dict,
+) -> bool:
+    event = payload.get("event")
+    reported_total = payload.get("total_critic_updates")
+    total_matches = (
+        isinstance(reported_total, int)
+        and not isinstance(reported_total, bool)
+        and reported_total == job.total_critic_updates
+    )
+    if event in {"manifest", "progress", "result"} and not total_matches:
+        job.contract_mismatch = True
+        job.message = (
+            "ACT-TD3 critic warm-up reported a total update count that "
+            "disagrees with the requested contract"
+        )
+    if event == "manifest":
+        if total_matches:
+            job.message = "ACT-TD3 critic warm-up is running"
+        return False
+    if event in {"progress", "result"}:
+        for name in (
+            "completed_critic_updates",
+            "durable_checkpoint_updates",
+            "critic_loss",
+            "target_mean",
+            "eta_seconds",
+        ):
+            _act_td3_critic_warmup_update_number(job, payload, name)
+        percentage = payload.get("percentage")
+        if isinstance(percentage, (int, float)) and not isinstance(percentage, bool):
+            job.percentage = max(0.0, min(100.0, float(percentage)))
+        unchanged = payload.get("actor_exactly_unchanged")
+        if isinstance(unchanged, bool):
+            job.actor_exactly_unchanged = unchanged
+        if event == "result":
+            checkpoint = payload.get("checkpoint_path")
+            manifest = payload.get("manifest_path")
+            complete = payload.get("status") == "complete"
+            if complete and isinstance(checkpoint, str) and isinstance(manifest, str):
+                job.checkpoint_path = checkpoint
+                job.manifest_path = manifest
+                job.artifact_reported = True
+            if payload.get("status") == "stopped":
+                job.stop_confirmed = True
+                job.message = "ACT-TD3 critic warm-up stopped"
+            job.result_complete = complete
+            if complete and total_matches:
+                job.message = "Verifying the completed critic artifact"
+            return complete
+        if total_matches:
+            job.message = "ACT-TD3 critic warm-up is running"
+        return False
+    if event == "error":
+        error_type = payload.get("error_type") or "ACTTD3CriticWarmupError"
+        message = payload.get("message") or "ACT-TD3 critic warm-up failed"
+        job.message = f"{error_type}: {message}"
+    return False
+
+
+def _sha256_regular_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _act_td3_critic_warmup_verified_artifact(
+    job: _ACTTD3CriticWarmupJob,
+) -> bool:
+    expected_checkpoint = Path(job.act_checkpoint) / "critic" / "latest.pt"
+    expected_manifest = Path(job.act_checkpoint) / "critic" / "manifest.json"
+    if (
+        os.path.normpath(job.checkpoint_path) != str(expected_checkpoint)
+        or os.path.normpath(job.manifest_path) != str(expected_manifest)
+    ):
+        return False
+    try:
+        checkpoint = _offline_rl_input_path(
+            str(expected_checkpoint),
+            root=Path(job.act_checkpoint),
+            label="ACT-TD3 critic latest.pt",
+            expect_directory=False,
+        )
+        manifest_path = _offline_rl_input_path(
+            str(expected_manifest),
+            root=Path(job.act_checkpoint),
+            label="ACT-TD3 critic manifest.json",
+            expect_directory=False,
+        )
+        manifest = _offline_rl_json_file(
+            manifest_path,
+            label="ACT-TD3 critic manifest",
+        )
+        checkpoint_stat = checkpoint.stat(follow_symlinks=False)
+        artifact = manifest.get("artifact")
+        base_policy = manifest.get("base_policy")
+        training_data = manifest.get("training_data")
+        if (
+            manifest.get("format")
+            != "cyclo_brain.act_td3_critic_manifest/v1"
+            or manifest.get("status") != "complete"
+            or manifest.get("actor_exactly_unchanged") is not True
+            or manifest.get("completed_critic_updates") != job.total_critic_updates
+            or manifest.get("completed_actor_updates") != 0
+            or not isinstance(artifact, dict)
+            or artifact.get("format") != "cyclo_brain.act_td3_critic/v1"
+            or artifact.get("checkpoint_path") != "latest.pt"
+            or artifact.get("byte_count") != checkpoint_stat.st_size
+            or checkpoint_stat.st_size < 1
+            or not isinstance(base_policy, dict)
+            or os.path.normpath(str(base_policy.get("path", "")))
+            != job.act_checkpoint
+            or not isinstance(base_policy.get("actor_sha256"), str)
+            or not isinstance(training_data, dict)
+            or training_data.get("dataset_roots") != job.dataset_paths
+        ):
+            return False
+        expected_sha256 = artifact.get("sha256")
+        return (
+            isinstance(expected_sha256, str)
+            and len(expected_sha256) == 64
+            and _sha256_regular_file(checkpoint) == expected_sha256
+        )
+    except (HTTPException, OSError, ValueError, TypeError):
+        return False
+
+
+def _monitor_act_td3_critic_warmup_job(job: _ACTTD3CriticWarmupJob) -> None:
+    try:
+        _OFFLINE_RL_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(job.log_path, "a", encoding="utf-8") as log:
+            stdout = job.process.stdout if job.process is not None else None
+            if stdout is not None:
+                for raw_line in stdout:
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode(errors="replace")
+                    line = raw_line.rstrip("\r\n")
+                    log.write(line + "\n")
+                    log.flush()
+                    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+                        _act_td3_critic_warmup_append_log(job, line)
+                        try:
+                            payload = json.loads(line)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(payload, dict):
+                            _act_td3_critic_warmup_consume_event(job, payload)
+            returncode = job.process.wait() if job.process is not None else -1
+    except Exception as exc:  # pragma: no cover - defensive worker boundary
+        logger.error("ACT-TD3 critic warm-up monitor failed: %s", exc, exc_info=True)
+        returncode = -1
+        with _ACT_TD3_CRITIC_WARMUP_LOCK:
+            job.message = f"ACT-TD3 critic warm-up monitor failed: {exc}"
+
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        job.returncode = returncode
+        completion_contract = (
+            job.result_complete
+            and job.artifact_reported
+            and not job.contract_mismatch
+            and job.completed_critic_updates == job.total_critic_updates
+            and job.durable_checkpoint_updates == job.total_critic_updates
+            and job.percentage == 100.0
+            and job.actor_exactly_unchanged is True
+        )
+        if (
+            returncode == 0
+            and completion_contract
+            and _act_td3_critic_warmup_verified_artifact(job)
+        ):
+            job.status = "completed"
+            job.message = "ACT-TD3 critic warm-up completed"
+        elif returncode == 0 and job.stop_requested and job.stop_confirmed:
+            job.status = "stopped"
+            job.eta_seconds = None
+            job.message = "ACT-TD3 critic warm-up stopped"
+        else:
+            job.status = "failed"
+            if not job.message or job.message in {
+                "Starting ACT-TD3 critic warm-up",
+                "ACT-TD3 critic warm-up is running",
+                "Verifying the completed critic artifact",
+            }:
+                job.message = (
+                    f"ACT-TD3 critic warm-up exited with code {returncode}"
+                    if returncode != 0
+                    else "ACT-TD3 critic warm-up completion contract is invalid"
+                )
+
+
+def _act_td3_critic_warmup_status(
+    job: Optional[_ACTTD3CriticWarmupJob],
+) -> ACTTD3CriticWarmupStatus:
+    if job is None:
+        return ACTTD3CriticWarmupStatus(
+            status="idle",
+            message="No ACT-TD3 critic warm-up job has been started",
+        )
+    return ACTTD3CriticWarmupStatus(
+        status=job.status,
+        percentage=job.percentage,
+        completed_critic_updates=job.completed_critic_updates,
+        total_critic_updates=job.total_critic_updates,
+        durable_checkpoint_updates=job.durable_checkpoint_updates,
+        critic_loss=job.critic_loss,
+        target_mean=job.target_mean,
+        eta_seconds=job.eta_seconds,
+        actor_exactly_unchanged=job.actor_exactly_unchanged,
+        episode_count=job.episode_count,
+        success_count=job.success_count,
+        failure_count=job.failure_count,
+        batch_size=job.batch_size,
+        checkpoint_path=job.checkpoint_path if job.status == "completed" else "",
+        manifest_path=job.manifest_path if job.status == "completed" else "",
+        message=job.message,
+        job_id=job.job_id,
+        dataset_path=job.dataset_path,
+        dataset_paths=list(job.dataset_paths),
+        act_checkpoint=job.act_checkpoint,
         returncode=job.returncode,
         log_tail=list(job.log_tail),
     )
@@ -3131,6 +4713,9 @@ def _imitation_learning_command(job: _ImitationLearningJob) -> List[str]:
         ])
     if job.policy_type == "multi_task_dit":
         command.extend(["--task-instruction", job.task_instruction])
+    else:
+        for group in job.trainable_groups:
+            command.extend(["--trainable-group", group])
     command.extend([
         "--output-dir",
         job.output_dir,
@@ -3408,6 +4993,7 @@ def _imitation_learning_status(
         dataset_paths=list(job.dataset_paths),
         policy_type=job.policy_type,
         task_instruction=job.task_instruction,
+        trainable_groups=list(job.trainable_groups),
         output_dir=job.output_dir,
         returncode=job.returncode,
         log_tail=list(job.log_tail),
@@ -3947,6 +5533,12 @@ def _flow_sde_ppo_training_conflict() -> Optional[str]:
     with _OFFLINE_RL_LOCK:
         if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
             return "Stop the ACT-TD3 job before starting Flow-SDE PPO"
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            return "Stop ACT-TD3 critic warm-up before starting Flow-SDE PPO"
     with _IMITATION_LEARNING_LOCK:
         if (
             _IMITATION_LEARNING_JOB is not None
@@ -4029,6 +5621,22 @@ async def offline_rl_dataset(dataset_path: str) -> OfflineRLDatasetSummary:
     return await asyncio.to_thread(_offline_rl_dataset_summary, dataset_path)
 
 
+@app.get(
+    "/offline-rl/dataset/episode-data",
+    response_model=OfflineRLDatasetEpisodeData,
+)
+async def offline_rl_dataset_episode_data(
+    dataset_path: str,
+    episode_index: int,
+) -> OfflineRLDatasetEpisodeData:
+    """Return lazy, replay-compatible joint/action data for one episode."""
+    return await asyncio.to_thread(
+        _offline_rl_dataset_episode_data,
+        dataset_path,
+        episode_index,
+    )
+
+
 @app.post(
     "/offline-rl/data-epochs/reserve",
     response_model=OfflineRLDataEpochProvenance,
@@ -4079,19 +5687,14 @@ async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
     """Start one immutable ACT-TD3 cumulative-replay round."""
     global _OFFLINE_RL_JOB
 
-    algorithm = request.algorithm.strip().lower()
-    if algorithm != "td3":
-        raise HTTPException(
-            400,
-            f"Offline RL algorithm '{request.algorithm}' is not implemented; "
-            "only TD3 is currently available",
-        )
+    algorithm, actor_objective = _offline_rl_algorithm_contract(request)
     critic_epochs, actor_equivalent_epochs = _offline_rl_schedule(
         request.critic_epochs,
         request.actor_equivalent_epochs,
     )
-    actor_trainable_groups = _offline_rl_actor_trainable_groups(
-        request.actor_trainable_groups
+    actor_trainable_groups = _offline_rl_objective_trainable_groups(
+        actor_objective,
+        request.actor_trainable_groups,
     )
 
     with _OFFLINE_RL_DATASET_EDIT_LOCK:
@@ -4100,6 +5703,12 @@ async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
     with _OFFLINE_RL_LOCK:
         if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
             raise HTTPException(409, "An offline RL job is already running")
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            raise HTTPException(409, "An ACT-TD3 critic warm-up job is already running")
     with _IMITATION_LEARNING_LOCK:
         if (
             _IMITATION_LEARNING_JOB is not None
@@ -4119,12 +5728,13 @@ async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
             episode_count,
             actor_trainable_groups,
             request.batch_size,
+            actor_objective,
         )
     )
     robot_type = _validate_robot_type(request.robot_type)
     robot_config = _offline_rl_robot_config(robot_type)
     job_id = uuid.uuid4().hex
-    output_dir = _offline_rl_output_path(job_id, episode_count)
+    output_dir = _offline_rl_output_path(job_id, episode_count, actor_objective)
     log_path = _OFFLINE_RL_LOG_ROOT / f"{job_id}.log"
     job = _OfflineRLJob(
         job_id=job_id,
@@ -4137,6 +5747,8 @@ async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
         output_dir=str(output_dir),
         episode_count=episode_count,
         log_path=str(log_path),
+        algorithm=algorithm,
+        actor_objective=actor_objective,
         round_index=parent_round_index + 1,
         round_episode_count=episode_count - previous_episode_count,
         batch_size=request.batch_size,
@@ -4164,29 +5776,38 @@ async def offline_rl_start(request: OfflineRLStartRequest) -> OfflineRLStatus:
         with _OFFLINE_RL_LOCK:
             if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
                 raise HTTPException(409, "An offline RL job is already running")
-            with _IMITATION_LEARNING_LOCK:
+            with _ACT_TD3_CRITIC_WARMUP_LOCK:
                 if (
-                    _IMITATION_LEARNING_JOB is not None
-                    and _IMITATION_LEARNING_JOB.status == "running"
+                    _ACT_TD3_CRITIC_WARMUP_JOB is not None
+                    and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
                 ):
                     raise HTTPException(
                         409,
-                        "An imitation-learning job is already running",
+                        "An ACT-TD3 critic warm-up job is already running",
                     )
-                _reject_running_flow_sde_ppo()
-                try:
-                    process = subprocess.Popen(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        env=environment,
-                    )
-                except OSError as exc:
-                    raise HTTPException(503, f"Could not launch offline RL: {exc}") from exc
-                job.process = process
-                _OFFLINE_RL_JOB = job
+                with _IMITATION_LEARNING_LOCK:
+                    if (
+                        _IMITATION_LEARNING_JOB is not None
+                        and _IMITATION_LEARNING_JOB.status == "running"
+                    ):
+                        raise HTTPException(
+                            409,
+                            "An imitation-learning job is already running",
+                        )
+                    _reject_running_flow_sde_ppo()
+                    try:
+                        process = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            env=environment,
+                        )
+                    except OSError as exc:
+                        raise HTTPException(503, f"Could not launch offline RL: {exc}") from exc
+                    job.process = process
+                    _OFFLINE_RL_JOB = job
 
     thread = threading.Thread(
         target=_monitor_offline_rl_job,
@@ -4246,23 +5867,16 @@ async def offline_rl_stop(request: OfflineRLStopRequest) -> OfflineRLStatus:
         return _offline_rl_status(job)
 
 
-@app.post("/imitation-learning/start", response_model=ImitationLearningStatus)
-async def imitation_learning_start(
-    request: ImitationLearningStartRequest,
-) -> ImitationLearningStatus:
-    """Train an official LeRobot policy with behavior cloning on selected demos."""
-    global _IMITATION_LEARNING_JOB
+@app.post(
+    "/offline-rl/critic-warmup/start",
+    response_model=ACTTD3CriticWarmupStatus,
+)
+async def act_td3_critic_warmup_start(
+    request: ACTTD3CriticWarmupStartRequest,
+) -> ACTTD3CriticWarmupStatus:
+    """Start actor-frozen critic warm-up for one selected ACT policy."""
 
-    expected_chunk_size = _IMITATION_LEARNING_POLICY_CHUNK_SIZES[
-        request.policy_type
-    ]
-    if request.chunk_size != expected_chunk_size:
-        policy_label = _imitation_learning_policy_label(request.policy_type)
-        raise HTTPException(
-            400,
-            f"{policy_label} imitation learning requires "
-            f"chunk_size={expected_chunk_size}",
-        )
+    global _ACT_TD3_CRITIC_WARMUP_JOB
 
     with _OFFLINE_RL_DATASET_EDIT_LOCK:
         if _OFFLINE_RL_DATASET_EDIT_ACTIVE:
@@ -4270,6 +5884,218 @@ async def imitation_learning_start(
     with _OFFLINE_RL_LOCK:
         if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
             raise HTTPException(409, "An offline RL job is already running")
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            raise HTTPException(409, "An ACT-TD3 critic warm-up job is already running")
+    with _IMITATION_LEARNING_LOCK:
+        if (
+            _IMITATION_LEARNING_JOB is not None
+            and _IMITATION_LEARNING_JOB.status == "running"
+        ):
+            raise HTTPException(409, "An imitation-learning job is already running")
+    _reject_running_flow_sde_ppo()
+
+    requested_dataset_paths = _offline_rl_requested_dataset_paths(request)
+    datasets, episode_count, success_count, failure_count = _offline_rl_datasets(
+        requested_dataset_paths
+    )
+    act_checkpoint = _offline_rl_act_checkpoint(request.act_checkpoint)
+    robot_type = _validate_robot_type(request.robot_type)
+    robot_config = _offline_rl_robot_config(robot_type)
+    job_id = uuid.uuid4().hex
+    run_checkpoint, latest, manifest = _act_td3_critic_warmup_paths(
+        act_checkpoint,
+        job_id,
+    )
+    job = _ACTTD3CriticWarmupJob(
+        job_id=job_id,
+        dataset_path=str(datasets[0]),
+        dataset_paths=[str(dataset) for dataset in datasets],
+        act_checkpoint=str(act_checkpoint),
+        checkpoint_path=str(latest),
+        manifest_path=str(manifest),
+        run_checkpoint_path=str(run_checkpoint),
+        episode_count=episode_count,
+        success_count=success_count,
+        failure_count=failure_count,
+        batch_size=request.batch_size,
+        total_critic_updates=request.critic_updates,
+        log_path=str(_OFFLINE_RL_LOG_ROOT / f"critic_warmup_{job_id}.log"),
+    )
+    command = _act_td3_critic_warmup_command(
+        job=job,
+        robot_type=robot_type,
+        robot_config=robot_config,
+    )
+    try:
+        environment = _compose_env()
+    except Exception as exc:  # noqa: BLE001 - Docker mount discovery boundary
+        raise HTTPException(503, f"Could not resolve Docker workspace: {exc}") from exc
+
+    with _OFFLINE_RL_DATASET_EDIT_LOCK:
+        if _OFFLINE_RL_DATASET_EDIT_ACTIVE:
+            raise HTTPException(409, "A LeRobot dataset edit is already running")
+        with _OFFLINE_RL_LOCK:
+            if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+                raise HTTPException(409, "An offline RL job is already running")
+            with _ACT_TD3_CRITIC_WARMUP_LOCK:
+                if (
+                    _ACT_TD3_CRITIC_WARMUP_JOB is not None
+                    and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+                ):
+                    raise HTTPException(
+                        409,
+                        "An ACT-TD3 critic warm-up job is already running",
+                    )
+                with _IMITATION_LEARNING_LOCK:
+                    if (
+                        _IMITATION_LEARNING_JOB is not None
+                        and _IMITATION_LEARNING_JOB.status == "running"
+                    ):
+                        raise HTTPException(
+                            409,
+                            "An imitation-learning job is already running",
+                        )
+                    _reject_running_flow_sde_ppo()
+                    try:
+                        process = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            env=environment,
+                        )
+                    except OSError as exc:
+                        raise HTTPException(
+                            503,
+                            f"Could not launch ACT-TD3 critic warm-up: {exc}",
+                        ) from exc
+                    job.process = process
+                    _ACT_TD3_CRITIC_WARMUP_JOB = job
+
+    thread = threading.Thread(
+        target=_monitor_act_td3_critic_warmup_job,
+        args=(job,),
+        daemon=True,
+        name=f"act-td3-critic-warmup-{job_id[:12]}",
+    )
+    thread.start()
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        return _act_td3_critic_warmup_status(job)
+
+
+@app.get(
+    "/offline-rl/critic-warmup/status",
+    response_model=ACTTD3CriticWarmupStatus,
+)
+async def act_td3_critic_warmup_status() -> ACTTD3CriticWarmupStatus:
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        return _act_td3_critic_warmup_status(_ACT_TD3_CRITIC_WARMUP_JOB)
+
+
+@app.post(
+    "/offline-rl/critic-warmup/stop",
+    response_model=ACTTD3CriticWarmupStatus,
+)
+async def act_td3_critic_warmup_stop(
+    request: ACTTD3CriticWarmupStopRequest,
+) -> ACTTD3CriticWarmupStatus:
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        job = _ACT_TD3_CRITIC_WARMUP_JOB
+        requested_job_id = request.job_id.strip()
+        if job is None or requested_job_id != job.job_id:
+            raise HTTPException(
+                409,
+                "ACT-TD3 critic warm-up job_id is stale or no longer current",
+            )
+        if job.status == "stopped":
+            return _act_td3_critic_warmup_status(job)
+        if job.status != "running":
+            raise HTTPException(
+                409,
+                f"ACT-TD3 critic warm-up job is already {job.status}",
+            )
+        if job.stop_requested:
+            return _act_td3_critic_warmup_status(job)
+        job.stop_requested = True
+        job.message = "Stopping ACT-TD3 critic warm-up"
+
+    try:
+        interrupted = await asyncio.to_thread(
+            _act_td3_critic_warmup_interrupt_job,
+            job,
+        )
+    except Exception as exc:  # noqa: BLE001 - Docker/subprocess control boundary
+        with _ACT_TD3_CRITIC_WARMUP_LOCK:
+            if _ACT_TD3_CRITIC_WARMUP_JOB is job and job.status != "running":
+                return _act_td3_critic_warmup_status(job)
+            if _ACT_TD3_CRITIC_WARMUP_JOB is job:
+                job.stop_requested = False
+                job.message = "ACT-TD3 critic warm-up is running"
+        raise HTTPException(
+            503,
+            f"Could not stop ACT-TD3 critic warm-up: {exc}",
+        ) from exc
+
+    if not interrupted:
+        with _ACT_TD3_CRITIC_WARMUP_LOCK:
+            if _ACT_TD3_CRITIC_WARMUP_JOB is job and job.status != "running":
+                return _act_td3_critic_warmup_status(job)
+            if _ACT_TD3_CRITIC_WARMUP_JOB is job:
+                job.stop_requested = False
+                job.message = "ACT-TD3 critic warm-up is running"
+        raise HTTPException(
+            409,
+            "ACT-TD3 critic warm-up exited before it could be stopped",
+        )
+
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        return _act_td3_critic_warmup_status(job)
+
+
+@app.post("/imitation-learning/start", response_model=ImitationLearningStatus)
+async def imitation_learning_start(
+    request: ImitationLearningStartRequest,
+) -> ImitationLearningStatus:
+    """Train an official LeRobot policy with behavior cloning on selected demos."""
+    global _IMITATION_LEARNING_JOB
+
+    expected_chunk_size = _IMITATION_LEARNING_POLICY_CHUNK_SIZES[request.policy_type]
+    if request.policy_type == "multi_task_dit" and request.chunk_size != expected_chunk_size:
+        policy_label = _imitation_learning_policy_label(request.policy_type)
+        raise HTTPException(
+            400,
+            f"{policy_label} imitation learning requires "
+            f"chunk_size={expected_chunk_size}",
+        )
+    if request.policy_type == "act":
+        trainable_groups = _imitation_learning_trainable_groups(
+            request.trainable_groups
+        )
+    else:
+        if request.trainable_groups:
+            raise HTTPException(
+                400,
+                "trainable_groups is available only for ACT imitation learning",
+            )
+        trainable_groups = []
+
+    with _OFFLINE_RL_DATASET_EDIT_LOCK:
+        if _OFFLINE_RL_DATASET_EDIT_ACTIVE:
+            raise HTTPException(409, "A LeRobot dataset edit is already running")
+    with _OFFLINE_RL_LOCK:
+        if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+            raise HTTPException(409, "An offline RL job is already running")
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            raise HTTPException(409, "An ACT-TD3 critic warm-up job is already running")
     with _IMITATION_LEARNING_LOCK:
         if (
             _IMITATION_LEARNING_JOB is not None
@@ -4307,6 +6133,7 @@ async def imitation_learning_start(
         chunk_size=request.chunk_size,
         policy_type=request.policy_type,
         task_instruction=request.task_instruction,
+        trainable_groups=trainable_groups,
         message=_imitation_learning_starting_message(request.policy_type),
     )
     command = _imitation_learning_command(job)
@@ -4321,32 +6148,41 @@ async def imitation_learning_start(
         with _OFFLINE_RL_LOCK:
             if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
                 raise HTTPException(409, "An offline RL job is already running")
-            with _IMITATION_LEARNING_LOCK:
+            with _ACT_TD3_CRITIC_WARMUP_LOCK:
                 if (
-                    _IMITATION_LEARNING_JOB is not None
-                    and _IMITATION_LEARNING_JOB.status == "running"
+                    _ACT_TD3_CRITIC_WARMUP_JOB is not None
+                    and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
                 ):
                     raise HTTPException(
                         409,
-                        "An imitation-learning job is already running",
+                        "An ACT-TD3 critic warm-up job is already running",
                     )
-                _reject_running_flow_sde_ppo()
-                try:
-                    process = subprocess.Popen(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        env=environment,
-                    )
-                except OSError as exc:
-                    raise HTTPException(
-                        503,
-                        f"Could not launch imitation learning: {exc}",
-                    ) from exc
-                job.process = process
-                _IMITATION_LEARNING_JOB = job
+                with _IMITATION_LEARNING_LOCK:
+                    if (
+                        _IMITATION_LEARNING_JOB is not None
+                        and _IMITATION_LEARNING_JOB.status == "running"
+                    ):
+                        raise HTTPException(
+                            409,
+                            "An imitation-learning job is already running",
+                        )
+                    _reject_running_flow_sde_ppo()
+                    try:
+                        process = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            env=environment,
+                        )
+                    except OSError as exc:
+                        raise HTTPException(
+                            503,
+                            f"Could not launch imitation learning: {exc}",
+                        ) from exc
+                    job.process = process
+                    _IMITATION_LEARNING_JOB = job
 
     thread = threading.Thread(
         target=_monitor_imitation_learning_job,

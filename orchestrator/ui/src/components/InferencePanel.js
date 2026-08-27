@@ -48,7 +48,10 @@ import {
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import {
+  requiresInstruction,
+  supportsRltInference,
+} from '../constants/policyCapabilities';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
 import {
   getInferenceRecordingFolderName,
@@ -79,6 +82,7 @@ const InferencePanel = ({
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
   const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
   const [showPolicyBrowser, setShowPolicyBrowser] = useState(false);
+  const [showRltBundleBrowser, setShowRltBundleBrowser] = useState(false);
   const [showRecordingFolderBrowser, setShowRecordingFolderBrowser] = useState(false);
 
   // InferencePage's lock — only the inference-side phase matters here.
@@ -93,6 +97,10 @@ const InferencePanel = ({
       ? 'sync'
       : 'async';
   const isGrootModel = info.serviceType === 'groot';
+  const isRltCapableModel = supportsRltInference(
+    info.serviceType,
+    info.policyType
+  );
   const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
   const trtTaskInstruction = (info.taskInstruction?.[0] || '').trim();
   const isModeSwitchLocked =
@@ -281,6 +289,35 @@ const InferencePanel = ({
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     setShowRecordingFolderBrowser(false);
   }, [dispatch]);
+
+  const handleRltEnabledChange = useCallback((enabled) => {
+    if (!isEditable || !isRltCapableModel) return;
+    dispatch(setInferenceTaskInfo({
+      rltEnabled: Boolean(enabled),
+      rltRobotOverride: enabled ? Boolean(info.rltRobotOverride) : false,
+      actionPolicyMode: 'base',
+    }));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+  }, [dispatch, info.rltRobotOverride, isEditable, isRltCapableModel]);
+
+  const handleRltRobotOverrideChange = useCallback((enabled) => {
+    if (!isEditable || !isRltCapableModel || !info.rltEnabled) return;
+    dispatch(setInferenceTaskInfo({
+      rltRobotOverride: Boolean(enabled),
+      actionPolicyMode: 'base',
+    }));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+  }, [dispatch, info.rltEnabled, isEditable, isRltCapableModel]);
+
+  const handleRltBundleSelect = useCallback((item) => {
+    if (!isEditable || !isRltCapableModel || !info.rltEnabled) return;
+    const fullPath = String(item?.full_path || '').trim();
+    if (fullPath) {
+      dispatch(setInferenceTaskInfo({ rltBundlePath: fullPath }));
+      dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+    }
+    setShowRltBundleBrowser(false);
+  }, [dispatch, info.rltEnabled, isEditable, isRltCapableModel]);
 
   const clearRecordingFolder = useCallback(() => {
     dispatch(setInferenceTaskInfo({ recordingFolder: '' }));
@@ -529,6 +566,7 @@ const InferencePanel = ({
               e.target.checked ? 'tensorrt_dit' : 'pytorch'
             )}
             disabled={!isEditable}
+            aria-label="Enable TensorRT"
           />
           <span className={isOfflineRL ? 'text-[10px] text-[#756e63]' : 'text-gray-500'}>
             Enable
@@ -546,6 +584,120 @@ const InferencePanel = ({
           variant={variant}
         />
       )}
+    </div>
+  ) : null;
+
+  const rltControls = isRltCapableModel ? (
+    <div className={isOfflineRL ? 'mt-1 border-t border-[#e2dcd1] pt-2' : 'mb-2.5'}>
+      <div className="flex items-center mb-2.5">
+        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+          <Tooltip
+            content="Preload the RL Token Encoder and Action MLP alongside GR00T N1.7."
+            position="bottom"
+          >
+            <MdInfoOutline
+              className="cursor-help text-gray-400 hover:text-gray-600"
+              size={14}
+            />
+          </Tooltip>
+          <span>RLT Enabled</span>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className={clsx('h-4 w-4 accent-[#69866f]', {
+              'cursor-not-allowed opacity-50': !isEditable,
+              'cursor-pointer': isEditable,
+            })}
+            checked={Boolean(info.rltEnabled)}
+            onChange={(event) => handleRltEnabledChange(event.target.checked)}
+            disabled={!isEditable}
+            aria-label="Enable RLT"
+          />
+          <span className={isOfflineRL ? 'text-[10px] text-[#756e63]' : 'text-gray-500'}>
+            Enable
+          </span>
+        </label>
+      </div>
+
+      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
+        <span className={clsx(classLabel, 'pt-2')}>RLT Bundle Path</span>
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          <input
+            type="text"
+            className={clsx(classTextInput, 'min-w-0 flex-1')}
+            value={info.rltBundlePath || ''}
+            onChange={(event) => handleChange(
+              'rltBundlePath',
+              event.target.value
+            )}
+            disabled={!isEditable || !info.rltEnabled}
+            placeholder="/workspace/checkpoint/rlt/..."
+            aria-label="RLT Bundle Path"
+          />
+          <button
+            type="button"
+            onClick={() => setShowRltBundleBrowser(true)}
+            disabled={!isEditable || !info.rltEnabled}
+            className={clsx(
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border',
+              isOfflineRL
+                ? 'border-[#d9d2c5] bg-[#f5f2eb] text-[#625b50] hover:bg-[#ebe6dd]'
+                : 'border-gray-200 bg-gray-100 text-blue-500 hover:text-blue-700',
+              'disabled:cursor-not-allowed disabled:opacity-50'
+            )}
+            aria-label="Browse RLT Bundle Path"
+          >
+            <MdFolderOpen size={18} />
+          </button>
+        </div>
+      </div>
+
+      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
+        <div className={clsx(classLabel, 'flex items-center gap-1 pt-0.5')}>
+          <Tooltip
+            content="Explicit safety opt-in. Enable only after the RLT bundle has been validated for this physical robot."
+            position="bottom"
+          >
+            <MdInfoOutline
+              className="cursor-help text-[#a46f56] hover:text-[#86563f]"
+              size={14}
+            />
+          </Tooltip>
+          <span>Real Robot RLT</span>
+        </div>
+        <label className="flex min-w-0 flex-1 items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className={clsx('mt-0.5 h-4 w-4 shrink-0 accent-[#a86b52]', {
+              'cursor-not-allowed opacity-50': !isEditable || !info.rltEnabled,
+              'cursor-pointer': isEditable && info.rltEnabled,
+            })}
+            checked={Boolean(info.rltRobotOverride)}
+            onChange={(event) => handleRltRobotOverrideChange(
+              event.target.checked
+            )}
+            disabled={!isEditable || !info.rltEnabled}
+            aria-label="Allow RLT on Real Robot"
+          />
+          <span className={clsx(
+            'text-[10px] leading-relaxed',
+            isOfflineRL ? 'text-[#8a604c]' : 'text-amber-700'
+          )}>
+            Allow the preloaded RLT actor to control a physical robot. Keep off
+            until this bundle is deployment-qualified.
+          </span>
+        </label>
+      </div>
+
+      <div className={clsx(
+        'rounded-lg border px-2.5 py-2 text-[10px] leading-relaxed',
+        isOfflineRL
+          ? 'border-[#dbcdb9] bg-[#f4eee4] text-[#806f5c]'
+          : 'border-amber-200 bg-amber-50 text-amber-700'
+      )}>
+        The bundle is preloaded at Start. Switch between GR00T and RLT actions while inference is running. DiT TensorRT can remain enabled.
+      </div>
     </div>
   ) : null;
 
@@ -580,7 +732,12 @@ const InferencePanel = ({
           serviceType={info.serviceType}
           variant={variant}
         >
-          {isOfflineRL && tensorRtControls}
+          {isOfflineRL && (
+            <>
+              {tensorRtControls}
+              {rltControls}
+            </>
+          )}
         </PolicyBackendControl>
 
         <div className={clsx(
@@ -694,7 +851,12 @@ const InferencePanel = ({
         </div>
       )}
 
-      {!isOfflineRL && tensorRtControls}
+      {!isOfflineRL && (
+        <>
+          {tensorRtControls}
+          {rltControls}
+        </>
+      )}
 
       <div
         className={clsx(
@@ -898,6 +1060,20 @@ const InferencePanel = ({
           initialPath={DEFAULT_PATHS.ROSBAG2_PATH}
           defaultPath={DEFAULT_PATHS.ROSBAG2_PATH}
           homePath={DEFAULT_PATHS.ROSBAG2_PATH}
+        />
+      )}
+      {isRltCapableModel && (
+        <FileBrowserModal
+          isOpen={showRltBundleBrowser}
+          onClose={() => setShowRltBundleBrowser(false)}
+          onFileSelect={handleRltBundleSelect}
+          title="Select RLT bundle folder"
+          selectButtonText="Use Bundle"
+          allowDirectorySelect={true}
+          allowFileSelect={false}
+          initialPath={DEFAULT_PATHS.RLT_CHECKPOINTS_PATH}
+          defaultPath={DEFAULT_PATHS.RLT_CHECKPOINTS_PATH}
+          homePath={DEFAULT_PATHS.RLT_CHECKPOINTS_PATH}
         />
       )}
     </div>

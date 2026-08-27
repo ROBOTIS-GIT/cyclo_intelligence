@@ -1,5 +1,6 @@
 import {
   getEpisodeOutcomeForCommand,
+  getActionPolicyCommandFields,
   getCommandRecordingFolder,
   getConversionCommandFields,
   getRecordCommandServiceTimeoutMs,
@@ -54,6 +55,48 @@ describe('getRecordCommandServiceTimeoutMs', () => {
     expect(getRecordCommandServiceTimeoutMs('stop_segment', {
       serviceTimeoutMs: 45000,
     })).toBe(45000);
+  });
+});
+
+describe('RLT action-policy command fields', () => {
+  const taskInfo = {
+    rltEnabled: true,
+    rltBundlePath: ' /workspace/checkpoint/rlt/showroom_bundle ',
+    rltRobotOverride: true,
+    actionPolicyMode: 'rlt',
+  };
+
+  test('forces a fresh Start Inference request onto base GR00T', () => {
+    expect(getActionPolicyCommandFields(taskInfo, 'start_inference')).toEqual({
+      rlt_enabled: true,
+      rlt_bundle_path: '/workspace/checkpoint/rlt/showroom_bundle',
+      rlt_robot_override: true,
+      action_policy_mode: 'base',
+    });
+  });
+
+  test('serializes an explicit hot-switch target without changing preload fields', () => {
+    expect(getActionPolicyCommandFields(taskInfo, 'set_action_policy', {
+      actionPolicyMode: 'rlt',
+    })).toEqual({
+      rlt_enabled: true,
+      rlt_bundle_path: '/workspace/checkpoint/rlt/showroom_bundle',
+      rlt_robot_override: true,
+      action_policy_mode: 'rlt',
+    });
+  });
+
+  test('allows an explicit Real Robot approval to override the stored safety flag', () => {
+    expect(getActionPolicyCommandFields(
+      { ...taskInfo, rltRobotOverride: false },
+      'set_action_policy',
+      { actionPolicyMode: 'rlt', rltRobotOverride: true }
+    )).toEqual({
+      rlt_enabled: true,
+      rlt_bundle_path: '/workspace/checkpoint/rlt/showroom_bundle',
+      rlt_robot_override: true,
+      action_policy_mode: 'rlt',
+    });
   });
 });
 
