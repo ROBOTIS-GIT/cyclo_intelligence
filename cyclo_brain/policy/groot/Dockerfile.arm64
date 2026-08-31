@@ -6,7 +6,7 @@
 #
 # Build context: cyclo_intelligence/cyclo_brain/policy/groot/
 # Usage:
-#   docker build --network host -f Dockerfile.arm64 -t robotis/groot-zenoh:1.3.4-arm64 .
+#   docker build --network host -f Dockerfile.arm64 -t robotis/groot-zenoh:1.3.5-arm64 .
 
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${BASE_IMAGE}

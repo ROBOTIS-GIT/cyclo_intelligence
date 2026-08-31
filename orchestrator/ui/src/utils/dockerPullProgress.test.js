@@ -14,10 +14,10 @@ test('parses docker pull SSE data blocks', () => {
 
 test('parses docker pull SSE event names', () => {
   expect(parseDockerPullSseBlock(
-    'event: done\ndata: {"ok":true,"image":"robotis/groot-zenoh:1.3.4-arm64"}'
+    'event: done\ndata: {"ok":true,"image":"robotis/groot-zenoh:1.3.5-arm64"}'
   )).toEqual({
     event: 'done',
-    data: { ok: true, image: 'robotis/groot-zenoh:1.3.4-arm64' },
+    data: { ok: true, image: 'robotis/groot-zenoh:1.3.5-arm64' },
   });
 });
 

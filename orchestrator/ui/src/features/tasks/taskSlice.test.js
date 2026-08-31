@@ -47,6 +47,8 @@ describe('taskSlice task ownership', () => {
     expect(inferenceInfo.inferenceMode).toBe('simulation');
     expect(inferenceInfo.actionRequestMode).toBe('async');
     expect(inferenceInfo.accelerationMode).toBe('pytorch');
+    expect(inferenceInfo.initialPoseSync).toBe(false);
+    expect(inferenceInfo.initialPoseSyncDurationS).toBe(5.0);
   });
 
   test('sets inference mode without changing record identity', () => {
@@ -331,7 +333,7 @@ describe('taskSlice task ownership', () => {
     expect(next.inferenceTaskInfoSync.syncStatus).toBe('synced');
   });
 
-  test('matching inference echo accepts backend-normalized numeric defaults', () => {
+  test('backend defaults do not overwrite blank inference timing edits', () => {
     const edited = reducer(
       reducer(
         undefined,
@@ -360,11 +362,13 @@ describe('taskSlice task ownership', () => {
       })
     );
 
-    expect(selectInferenceTaskInfo({ tasks: next }).taskInstruction).toEqual([
-      'new prompt',
-    ]);
-    expect(next.inferenceTaskInfoSync.dirty).toBe(false);
-    expect(next.inferenceTaskInfoSync.syncStatus).toBe('synced');
+    expect(selectInferenceTaskInfo({ tasks: next })).toMatchObject({
+      taskInstruction: ['new prompt'],
+      controlHz: '',
+      inferenceHz: '',
+      chunkAlignWindowS: '',
+    });
+    expect(next.inferenceTaskInfoSync.dirty).toBe(true);
   });
 
   test('first stale record echo does not revert an inference-owned instruction edit', () => {

@@ -120,6 +120,8 @@ const inferenceTaskInfoInitialState = {
   actionRequestMode: 'async',
   accelerationMode: 'pytorch',
   accelerationEnginePath: '',
+  initialPoseSync: false,
+  initialPoseSyncDurationS: 5.0,
 };
 
 const stringArray = (items) => (
@@ -305,6 +307,13 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     accelerationEnginePath: String(
       taskInfo.accelerationEnginePath ?? state.inferenceTaskInfo.accelerationEnginePath ?? ''
     ),
+    initialPoseSync: Object.prototype.hasOwnProperty.call(taskInfo, 'initialPoseSync')
+      ? Boolean(taskInfo.initialPoseSync)
+      : Boolean(state.inferenceTaskInfo.initialPoseSync),
+    initialPoseSyncDurationS:
+      taskInfo.initialPoseSyncDurationS ??
+      state.inferenceTaskInfo.initialPoseSyncDurationS ??
+      5.0,
   };
   syncLegacyTaskInfo(state, 'inference');
 };

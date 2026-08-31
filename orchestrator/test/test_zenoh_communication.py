@@ -89,7 +89,7 @@ class TestContainerServiceClient(unittest.TestCase):
 
         client = ContainerServiceClient(node=None, service_prefix="/groot")
         self.assertIsNotNone(client)
-        self.assertEqual(client.timeout_sec, 30.0)
+        self.assertEqual(client.timeout_sec, 180.0)
         self.assertFalse(client._connected)
         print("PASS: ContainerServiceClient created with default parameters")
 
@@ -159,6 +159,110 @@ class TestContainerServiceClient(unittest.TestCase):
 
         print("PASS: Topic names correctly use configured prefix")
 
+    def test_10_inference_command_serializes_timing(self):
+        """Test that LOAD-time action processing rates reach the ROS request."""
+        from orchestrator.internal.communication.container_service_client import (
+            ContainerServiceClient,
+            ServiceResponse,
+        )
+
+        client = ContainerServiceClient(node=None, service_prefix="/lerobot")
+        captured = {}
+        expected = ServiceResponse(True, "ok", {}, "")
+
+        def capture_call(_client, request, _name, **_kwargs):
+            captured["request"] = request
+            return expected
+
+        client._call_service = capture_call
+        result = client.inference_command(
+            ContainerServiceClient.CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            control_hz=80,
+            inference_hz=20,
+            chunk_align_window_s=0.25,
+        )
+
+        request = captured["request"]
+        self.assertIs(result, expected)
+        self.assertEqual(request.control_hz, 80)
+        self.assertEqual(request.inference_hz, 20)
+        self.assertEqual(request.chunk_align_window_s, 0.25)
+
+    def test_11_inference_command_invalid_timing_uses_wire_defaults(self):
+        """Test invalid client inputs become policy-side fallback sentinels."""
+        from orchestrator.internal.communication.container_service_client import (
+            ContainerServiceClient,
+        )
+
+        client = ContainerServiceClient(node=None, service_prefix="/lerobot")
+        captured = {}
+
+        def capture_call(_client, request, _name, **_kwargs):
+            captured["request"] = request
+            return None
+
+        client._call_service = capture_call
+        client.inference_command(
+            ContainerServiceClient.CMD_LOAD,
+            control_hz=-1,
+            inference_hz=100000,
+            chunk_align_window_s=float("nan"),
+        )
+
+        request = captured["request"]
+        self.assertEqual(request.control_hz, 0)
+        self.assertEqual(request.inference_hz, 0)
+        self.assertEqual(request.chunk_align_window_s, 0.0)
+
+    def test_12_initial_pose_sync_fields_are_sent_on_load(self):
+        """Test LOAD forwards initial-pose synchronization settings."""
+        from orchestrator.internal.communication.container_service_client import (
+            ContainerServiceClient,
+            ServiceResponse,
+        )
+
+        client = ContainerServiceClient(node=None, service_prefix="/lerobot")
+        captured = {}
+
+        def capture_call(_client, request, _service_name, **_kwargs):
+            captured["request"] = request
+            return ServiceResponse(True, "ok", {}, "")
+
+        client._call_service = capture_call
+        result = client.inference_command(
+            ContainerServiceClient.CMD_LOAD,
+            initial_pose_sync=True,
+            initial_pose_sync_duration_s=7.5,
+        )
+
+        self.assertTrue(result.success)
+        self.assertTrue(captured["request"].initial_pose_sync)
+        self.assertEqual(
+            captured["request"].initial_pose_sync_duration_s,
+            7.5,
+        )
+
+    def test_13_start_and_resume_keep_ten_second_service_timeout(self):
+        """Initial Pose Sync does not extend the external START timeout."""
+        from orchestrator.internal.communication.container_service_client import (
+            ContainerServiceClient,
+            ServiceResponse,
+        )
+
+        client = ContainerServiceClient(node=None, service_prefix="/lerobot")
+        captured_timeouts = []
+
+        def capture_call(_client, _request, _service_name, **kwargs):
+            captured_timeouts.append(kwargs["timeout_sec"])
+            return ServiceResponse(True, "ok", {}, "")
+
+        client._call_service = capture_call
+        client.inference_command(ContainerServiceClient.CMD_START)
+        client.inference_command(ContainerServiceClient.CMD_RESUME)
+
+        self.assertEqual(captured_timeouts, [10.0, 10.0])
 
 
 class TestServiceResponse(unittest.TestCase):

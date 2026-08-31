@@ -67,35 +67,58 @@ class ServiceHandler:
             action_keys=action_keys,
             publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             action_request_mode=getattr(request, "action_request_mode", "async"),
+            control_hz=getattr(request, "control_hz", 0),
+            inference_hz=getattr(request, "inference_hz", 0),
+            chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
+            initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
+            initial_pose_sync_duration_s=(
+                float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
+            ),
         )
         return self._make_response(True, response.message or "loaded", action_keys)
 
     def _start(self, request):
-        self._session.mark_running()
-        self._control_loop.start(
+        if not self._session.loaded:
+            raise RuntimeError("LOAD first")
+        syncing = self._control_loop.start(
             publish_to_robot=bool(getattr(request, "publish_to_robot", False))
         )
-        return self._make_response(True, "running")
+        self._session.mark_running()
+        return self._make_response(True, "syncing" if syncing else "running")
 
     def _pause(self):
+        if not self._session.running:
+            raise RuntimeError("not running")
+        hold_ok = self._control_loop.pause()
+        if not hold_ok:
+            return self._make_response(False, "current-pose hold failed; retry STOP")
         self._session.mark_paused()
-        self._control_loop.pause()
         return self._make_response(True, "paused")
 
     def _resume(self, request):
-        self._session.mark_resumed(request.task_instruction or "")
-        self._control_loop.set_task_instruction(self._session.task_instruction)
-        self._control_loop.start(
+        if not self._session.running:
+            raise RuntimeError("not running")
+        task_instruction = request.task_instruction or self._session.task_instruction
+        self._control_loop.set_task_instruction(task_instruction)
+        syncing = self._control_loop.start(
             publish_to_robot=bool(getattr(request, "publish_to_robot", False))
         )
-        return self._make_response(True, "resumed")
+        self._session.mark_resumed(task_instruction)
+        return self._make_response(True, "syncing" if syncing else "resumed")
 
     def _stop(self):
+        hold_ok = self._control_loop.stop()
+        if not hold_ok:
+            return self._make_response(False, "current-pose hold failed; retry STOP")
         self._session.mark_stopped()
-        self._control_loop.stop()
         return self._make_response(True, "stopped")
 
     def _unload(self):
+        if self._control_loop.initial_pose_sync_hold_required():
+            return self._make_response(
+                False,
+                "current-pose hold is pending; retry STOP before UNLOAD",
+            )
         self._control_loop.deconfigure()
         response = self._requester.unload_policy()
         self._session.mark_unloaded()

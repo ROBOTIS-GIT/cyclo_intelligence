@@ -66,6 +66,7 @@ For LeRobot, user-trained models can be placed under
 | `POLICY_ENGINE_MODULE` | no | `${POLICY_BACKEND}_engine` | Engine process |
 | `POLICY_ENGINE_FACTORY` | no | `create_engine` | Engine process |
 | `GET_ACTION_TIMEOUT_S` | no | `5.0` | Main -> Engine request |
+| `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` | no | `1.0` | Maximum joint-state age allowed for initial pose sync and interruption hold |
 | `LOAD_POLICY_TIMEOUT_S` | no | `7200.0` | Main -> Engine request |
 | `INFERENCE_HZ` | no | `15.0` | Main action waypoint timing |
 | `CONTROL_HZ` | no | `100.0` | Main robot command loop |
@@ -78,6 +79,8 @@ For LeRobot, user-trained models can be placed under
 `main-runtime` and `engine-process` source `/root/.bashrc` before applying
 these defaults. Enter the policy container, edit the Cyclo ROS/Zenoh block near
 the top of `/root/.bashrc` when the robot's Zenoh router or ROS domain changes.
+Add an `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` export there only when the one-second
+joint-state freshness limit needs to be adjusted for the target robot.
 For a remote router, comment the local `ZENOH_CONFIG_OVERRIDE` line and uncomment
 the remote example with the router's IP, then restart the policy container so s6
 processes read the new values.

@@ -2,6 +2,14 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.1 (2026-08-26)
+------------------
+* Removed the fixed 45-second policy backend warm-up delay once all runtime services are running.
+* Added Initial Pose Sync controls and a ``SYNCING`` state with Stop and Clear available during the transition.
+* Preserved ``SYNCING`` and displayed the backend error when a current-pose hold fails, allowing Stop or Clear to be retried.
+* Renamed ``Inference Hz`` to ``Dataset FPS``, preserved blank timing inputs while editing, and added non-blocking warnings for unusual rates.
+* Contributors: Taehyeong Kim
+
 1.3.0 (2026-08-14)
 ------------------
 * Added MolmoAct2, VLA-JEPA, and FastWAM to inference and behavior-tree policy selection.

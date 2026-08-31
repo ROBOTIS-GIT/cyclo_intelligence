@@ -12,7 +12,7 @@
 #
 # Build context: cyclo_brain/policy/        (NOTE: parent of lerobot/)
 # Usage:         docker build -f lerobot/Dockerfile.amd64 \
-#                  -t robotis/lerobot-zenoh:1.4.0-amd64 .
+#                  -t robotis/lerobot-zenoh:1.4.1-amd64 .
 
 # NVIDIA PyTorch base image (Python 3.12 — required by upstream lerobot
 # pyproject.toml ``requires-python = ">=3.12"``).

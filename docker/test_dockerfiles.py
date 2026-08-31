@@ -294,3 +294,13 @@ def test_lerobot_images_install_new_policy_inference_extras():
         install_line = install_lines[0]
         for extra in ("molmoact2", "vla_jepa", "fastwam"):
             assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
+
+
+def test_groot_amd64_keeps_numpy_compatible_with_opencv():
+    dockerfile = (
+        REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.amd64"
+    )
+    contents = dockerfile.read_text()
+
+    assert contents.count('"numpy==1.26.4"') >= 3
+    assert contents.count('"ml_dtypes==0.5.4"') >= 2

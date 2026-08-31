@@ -84,7 +84,7 @@ describe('PolicyBackendControl', () => {
     global.fetch
       .mockResolvedValueOnce(mockResponse({
         name: 'groot',
-        image: 'robotis/groot-zenoh:1.3.4-arm64',
+        image: 'robotis/groot-zenoh:1.3.5-arm64',
         image_pulled: true,
         image_status: 'stale',
         container_state: 'exited',
@@ -94,7 +94,7 @@ describe('PolicyBackendControl', () => {
       .mockResolvedValueOnce(mockResponse({ ok: true, message: 'recreated' }))
       .mockResolvedValueOnce(mockResponse({
         name: 'groot',
-        image: 'robotis/groot-zenoh:1.3.4-arm64',
+        image: 'robotis/groot-zenoh:1.3.5-arm64',
         image_pulled: true,
         image_status: 'current',
         container_state: 'exited',
@@ -127,7 +127,7 @@ describe('PolicyBackendControl', () => {
   it('shows an explicit update action when the backend workspace mount is stale', async () => {
     global.fetch.mockResolvedValueOnce(mockResponse({
       name: 'lerobot',
-      image: 'robotis/lerobot-zenoh:1.4.0-arm64',
+      image: 'robotis/lerobot-zenoh:1.4.1-arm64',
       image_pulled: true,
       image_status: 'stale',
       container_state: 'exited',
@@ -153,7 +153,7 @@ describe('PolicyBackendControl', () => {
     mockRegisterHFUser.mockResolvedValue({ success: true });
     global.fetch.mockResolvedValueOnce(mockResponse({
       name: 'groot',
-      image: 'robotis/groot-zenoh:1.3.4-arm64',
+      image: 'robotis/groot-zenoh:1.3.5-arm64',
       image_pulled: true,
       image_status: 'current',
       container_state: 'running',

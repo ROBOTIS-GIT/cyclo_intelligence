@@ -27,6 +27,7 @@ import sys
 import time
 import threading
 import logging
+import math
 from pathlib import Path
 from typing import Optional, Union
 
@@ -204,6 +205,8 @@ class RobotClient:
         self._joint_velocities: dict[str, np.ndarray] = {}
         self._joint_efforts: dict[str, np.ndarray] = {}
         self._joint_timestamps: dict[str, float] = {}
+        self._joint_positions_by_name: dict[str, float] = {}
+        self._joint_position_timestamps_by_name: dict[str, float] = {}
         self._sensors: dict[str, dict] = {}
         self._sensor_timestamps: dict[str, float] = {}
         self._task_instruction: str = ""
@@ -222,6 +225,19 @@ class RobotClient:
             0.0,
             _float_env("CMD_VEL_ANGULAR_DEADBAND", 0.0),
         )
+        self._initial_pose_sync_state_max_age_s = _float_env(
+            "INITIAL_POSE_SYNC_STATE_MAX_AGE_S",
+            1.0,
+        )
+        if (
+            not math.isfinite(self._initial_pose_sync_state_max_age_s)
+            or self._initial_pose_sync_state_max_age_s <= 0.0
+        ):
+            logger.warning(
+                "INITIAL_POSE_SYNC_STATE_MAX_AGE_S must be positive and finite; "
+                "using 1.0"
+            )
+            self._initial_pose_sync_state_max_age_s = 1.0
         self._closed = False
 
         self._init_subscriptions()
@@ -377,9 +393,23 @@ class RobotClient:
             velocity = list(msg.velocity) if hasattr(msg.velocity, '__iter__') else []
             effort = list(msg.effort) if hasattr(msg.effort, '__iter__') else []
             now = time.time()
+            received_monotonic = time.monotonic()
             with self._lock:
                 if position:
                     self._joint_positions[group_name] = np.array(position, dtype=np.float32)
+                    if msg_names:
+                        self._joint_positions_by_name.update(
+                            {
+                                name: float(value)
+                                for name, value in zip(msg_names, position)
+                            }
+                        )
+                        self._joint_position_timestamps_by_name.update(
+                            {
+                                name: received_monotonic
+                                for name, _value in zip(msg_names, position)
+                            }
+                        )
                 if velocity:
                     self._joint_velocities[group_name] = np.array(velocity, dtype=np.float32)
                 if effort:
@@ -634,6 +664,192 @@ class RobotClient:
                 continue
             self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
 
+    def publish_initial_pose_sync(
+        self,
+        action: np.ndarray,
+        action_keys: Optional[list[str]] = None,
+        duration_s: float = 5.0,
+    ) -> None:
+        """Publish one validated action as a slow position-only transition.
+
+        Twist modalities are forced to zero. A complete current-position
+        snapshot is required before any target is published so an interrupted
+        transition can be replaced with a hold trajectory.
+        """
+        duration_s = float(duration_s)
+        if not math.isfinite(duration_s) or duration_s <= 0.0:
+            raise ValueError("duration_s must be a positive finite value")
+
+        segments = self._build_action_segments(action, action_keys)
+        hold_segments = self._build_current_position_segments(action_keys)
+        if not hold_segments:
+            raise ValueError("initial pose sync requires a position action group")
+
+        try:
+            for publisher, _joint_names, _values, msg_type in segments:
+                if msg_type == "geometry_msgs/msg/Twist":
+                    self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
+            for publisher, joint_names, values, msg_type in segments:
+                if msg_type != "geometry_msgs/msg/Twist":
+                    self._publish_joint_trajectory(
+                        publisher,
+                        joint_names,
+                        values,
+                        time_from_start_s=duration_s,
+                    )
+        except Exception:
+            try:
+                self._publish_position_segments(hold_segments, duration_s=0.1)
+                self.publish_idle_action(action_keys)
+            except Exception as hold_error:
+                logger.error(
+                    "failed to hold current pose after initial sync publish error: %s",
+                    hold_error,
+                )
+            raise
+
+    def publish_current_pose_hold(
+        self,
+        action_keys: Optional[list[str]] = None,
+        duration_s: float = 0.1,
+    ) -> None:
+        """Replace active position trajectories with the latest joint pose."""
+        duration_s = float(duration_s)
+        if not math.isfinite(duration_s) or duration_s <= 0.0:
+            raise ValueError("duration_s must be a positive finite value")
+        segments = self._build_current_position_segments(action_keys)
+        if not segments:
+            raise ValueError("current pose hold requires a position action group")
+        self.publish_idle_action(action_keys)
+        self._publish_position_segments(segments, duration_s)
+
+    def _build_action_segments(
+        self,
+        action: np.ndarray,
+        action_keys: Optional[list[str]],
+    ) -> list[tuple[ROS2Publisher, list[str], np.ndarray, str]]:
+        if not self._command_publishers:
+            raise RuntimeError("RobotClient command publishers are not enabled")
+
+        keys = list(action_keys) if action_keys else self._action_keys
+        values = np.asarray(action, dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("action contains non-finite values")
+
+        segments = []
+        offset = 0
+        resolved_keys: set[str] = set()
+        for action_key in keys:
+            publish_key = self._resolve_action_key(action_key)
+            if publish_key in resolved_keys:
+                raise ValueError(f"duplicate action key: {action_key}")
+            resolved_keys.add(publish_key)
+            cfg = self._action_groups.get(publish_key)
+            if cfg is None:
+                raise ValueError(f"unknown action key: {action_key}")
+            publisher_key = f"leader_{publish_key}"
+            publisher = self._command_publishers.get(publisher_key)
+            if publisher is None:
+                raise RuntimeError(f"publisher unavailable for action key: {action_key}")
+            msg_type = cfg["msg_type"]
+            joint_names = list(self._command_joint_names.get(publisher_key, []))
+            width = 3 if msg_type == "geometry_msgs/msg/Twist" else len(joint_names)
+            if width <= 0:
+                raise ValueError(f"action key has no configured dimensions: {action_key}")
+            segment = values[offset:offset + width]
+            if len(segment) != width:
+                raise ValueError(
+                    f"action dimension too small for {action_key}: "
+                    f"expected {width}, got {len(segment)}"
+                )
+            offset += width
+            segments.append((publisher, joint_names, segment.copy(), msg_type))
+
+        if offset != len(values):
+            raise ValueError(
+                f"action dimension mismatch: expected {offset}, got {len(values)}"
+            )
+        return segments
+
+    def _build_current_position_segments(
+        self,
+        action_keys: Optional[list[str]],
+    ) -> list[tuple[ROS2Publisher, list[str], np.ndarray]]:
+        keys = list(action_keys) if action_keys else self._action_keys
+        planned = []
+        missing = []
+        stale = []
+        now = time.monotonic()
+        with self._lock:
+            positions_by_name = dict(self._joint_positions_by_name)
+            timestamps_by_name = dict(self._joint_position_timestamps_by_name)
+            max_age_s = self._initial_pose_sync_state_max_age_s
+        for action_key in keys:
+            publish_key = self._resolve_action_key(action_key)
+            cfg = self._action_groups.get(publish_key)
+            if cfg is None:
+                raise ValueError(f"unknown action key: {action_key}")
+            if cfg["msg_type"] == "geometry_msgs/msg/Twist":
+                continue
+            publisher_key = f"leader_{publish_key}"
+            publisher = self._command_publishers.get(publisher_key)
+            if publisher is None:
+                raise RuntimeError(f"publisher unavailable for action key: {action_key}")
+            joint_names = list(self._command_joint_names.get(publisher_key, []))
+            group_missing = [
+                name
+                for name in joint_names
+                if name not in positions_by_name or name not in timestamps_by_name
+            ]
+            missing.extend(group_missing)
+            if group_missing:
+                continue
+            group_stale = [
+                (name, max(0.0, now - timestamps_by_name[name]))
+                for name in joint_names
+                if max(0.0, now - timestamps_by_name[name]) > max_age_s
+            ]
+            stale.extend(group_stale)
+            if group_stale:
+                continue
+            planned.append(
+                (
+                    publisher,
+                    joint_names,
+                    np.asarray(
+                        [positions_by_name[name] for name in joint_names],
+                        dtype=np.float64,
+                    ),
+                )
+            )
+        if missing:
+            missing_names = ", ".join(sorted(set(missing)))
+            raise RuntimeError(f"current joint state unavailable: {missing_names}")
+        if stale:
+            stale_by_name = {name: age for name, age in stale}
+            stale_details = ", ".join(
+                f"{name}={age:.3f}s"
+                for name, age in sorted(stale_by_name.items())
+            )
+            raise RuntimeError(
+                "current joint state stale: "
+                f"{stale_details} (max {max_age_s:.3f}s)"
+            )
+        return planned
+
+    def _publish_position_segments(
+        self,
+        segments: list[tuple[ROS2Publisher, list[str], np.ndarray]],
+        duration_s: float,
+    ) -> None:
+        for publisher, joint_names, values in segments:
+            self._publish_joint_trajectory(
+                publisher,
+                joint_names,
+                values,
+                time_from_start_s=duration_s,
+            )
+
     def build_action_preview(
         self,
         action: np.ndarray,
@@ -707,6 +923,7 @@ class RobotClient:
         publisher: ROS2Publisher,
         joint_names: list[str],
         values: np.ndarray,
+        time_from_start_s: float = 0.0,
     ) -> None:
         Header = get_message_class("std_msgs/msg/Header")
         Time = get_message_class("builtin_interfaces/msg/Time")
@@ -714,12 +931,20 @@ class RobotClient:
         JointTrajectoryPoint = get_message_class(
             "trajectory_msgs/msg/JointTrajectoryPoint"
         )
+        duration_s = float(time_from_start_s)
+        if not math.isfinite(duration_s) or duration_s < 0.0:
+            raise ValueError("time_from_start_s must be finite and non-negative")
+        duration_sec = int(math.floor(duration_s))
+        duration_nanosec = int(round((duration_s - duration_sec) * 1_000_000_000))
+        if duration_nanosec >= 1_000_000_000:
+            duration_sec += 1
+            duration_nanosec -= 1_000_000_000
         point = JointTrajectoryPoint(
             positions=np.asarray(values, dtype=np.float64),
             velocities=np.zeros(0, dtype=np.float64),
             accelerations=np.zeros(0, dtype=np.float64),
             effort=np.zeros(0, dtype=np.float64),
-            time_from_start=Duration(sec=0, nanosec=0),
+            time_from_start=Duration(sec=duration_sec, nanosec=duration_nanosec),
         )
         publisher.publish(
             header=Header(stamp=Time(sec=0, nanosec=0), frame_id=""),

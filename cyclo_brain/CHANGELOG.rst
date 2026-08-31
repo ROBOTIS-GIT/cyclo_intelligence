@@ -2,6 +2,18 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.1 (2026-08-26)
+------------------
+* Applied LOAD-time ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` values to the shared LeRobot and GR00T ``ActionChunkProcessor`` runtime.
+* Preserved policy-container environment and ``100 / 15 / 0.3`` defaults for missing or invalid timing values, with effective settings reported in runtime logs.
+* Kept the Robot Client SDK inference service definition synchronized with the ROS interface and added schema parity coverage.
+* Added Initial Pose Sync using the same 5-second action request timeout as normal inference.
+* Required complete joint positions newer than one second before sync or interruption hold commands, with ``INITIAL_POSE_SYNC_STATE_MAX_AGE_S`` available as a runtime override.
+* Made sync interruption hold failures retryable and blocked pause, stop, unload, and client teardown until a hold succeeds.
+* Pinned the GR00T AMD64 ONNX stack to NumPy 1.26.4-compatible dependencies for reproducible OpenCV imports.
+* Updated policy image support to ``robotis/lerobot-zenoh:1.4.1`` and ``robotis/groot-zenoh:1.3.5``.
+* Contributors: Taehyeong Kim
+
 1.3.0 (2026-08-14)
 ------------------
 * Updated the LeRobot fork to 0.6.1 and added MolmoAct2, VLA-JEPA, and FastWAM inference dependencies on AMD64 and ARM64.

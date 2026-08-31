@@ -28,6 +28,8 @@ Recording task configuration information.
 | `tags` | string[] | Dataset tags |
 | `record_rosbag2` | bool | ROSbag2 recording |
 | `use_optimized_save_mode` | bool | Optimized save mode |
+| `initial_pose_sync` | bool | Slowly align a real robot to the first predicted pose before inference |
+| `initial_pose_sync_duration_s` | float64 | Initial pose alignment duration in seconds |
 
 ---
 
@@ -86,6 +88,7 @@ Inference-side status (orchestrator → UI direct on `/task/inference_status`).
 | `LOADING` | 1 | Model loading |
 | `INFERENCING` | 2 | Inferencing |
 | `PAUSED` | 3 | Paused |
+| `SYNCING` | 4 | Synchronizing the initial real-robot pose |
 
 | Field | Type | Description |
 |-------|------|-------------|

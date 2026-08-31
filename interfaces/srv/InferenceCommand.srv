@@ -43,6 +43,15 @@ string acceleration_mode
 # Optional engine file/directory. Empty lets the backend use its model-local
 # default path.
 string acceleration_engine_path
+# Main-runtime timing configured at LOAD time. Zero values preserve the
+# policy container's environment/default settings.
+uint16 control_hz
+uint16 inference_hz
+float64 chunk_align_window_s
+# LOAD-time initial-pose synchronization settings. Ignored unless
+# publish_to_robot is true.
+bool initial_pose_sync
+float64 initial_pose_sync_duration_s
 ---
 bool success
 string message

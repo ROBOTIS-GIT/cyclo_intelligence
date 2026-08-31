@@ -2,6 +2,16 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.1 (2026-08-26)
+------------------
+* Forwarded UI ``Dataset FPS`` (service ``inference_hz``), ``Control Hz``, and ``Chunk Align Window`` settings from UI and behavior trees to the LeRobot and GR00T action-processing runtimes.
+* Added timing-aware policy reloads so changed action-processing settings cannot reuse stale runtime configuration.
+* Added optional Initial Pose Sync with a dedicated ``SYNCING`` phase, fresh-joint validation, and retryable current-pose hold before pause or teardown.
+* Renamed the UI timing label to ``Dataset FPS`` and added non-blocking warnings for unusual dataset or control rates.
+* Removed the fixed policy backend warm-up delay and made backend ON idempotent while keeping Restart explicit.
+* Updated image support to ``robotis/cyclo-intelligence:1.3.1``, ``robotis/lerobot-zenoh:1.4.1``, and ``robotis/groot-zenoh:1.3.5``. These images form one service-interface release set and cannot be mixed with older versions.
+* Contributors: Taehyeong Kim
+
 1.3.0 (2026-08-14)
 ------------------
 * Updated the LeRobot integration to 0.6.1 with MolmoAct2, VLA-JEPA, and FastWAM inference support.

@@ -39,3 +39,8 @@ string acceleration_mode
 # Optional TensorRT engine file/directory. Empty lets the backend pick the
 # model-local default, e.g. <model_path>/dit_model_bf16.trt for GR00T DiT-only.
 string acceleration_engine_path
+
+# Real-robot startup safety option. When enabled, inference uses the first
+# action of the first chunk as a slow initial pose target before normal control.
+bool initial_pose_sync
+float64 initial_pose_sync_duration_s

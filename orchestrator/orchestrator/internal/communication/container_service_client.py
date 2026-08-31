@@ -31,6 +31,7 @@ Supports both inference and training services:
 
 from dataclasses import dataclass
 import logging
+import math
 import os
 import threading
 import time
@@ -65,6 +66,22 @@ def _env_float(name: str, default: float) -> float:
         )
         return default
     return parsed if parsed > 0 else default
+
+
+def _uint16_or_zero(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if 0 < parsed <= 65535 else 0
+
+
+def _positive_float_or_zero(value: object) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if math.isfinite(parsed) and parsed > 0.0 else 0.0
 
 
 @dataclass
@@ -359,6 +376,11 @@ class ContainerServiceClient:
         action_request_mode: str = "async",
         acceleration_mode: str = "",
         acceleration_engine_path: str = "",
+        control_hz: int = 0,
+        inference_hz: int = 0,
+        chunk_align_window_s: float = 0.0,
+        initial_pose_sync: bool = False,
+        initial_pose_sync_duration_s: float = 5.0,
         timeout_sec: Optional[float] = None,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
@@ -372,6 +394,9 @@ class ContainerServiceClient:
         the policy Main runtime prefetches chunks ("async") or waits for the
         current buffer to drain ("sync"). ``acceleration_mode`` and
         ``acceleration_engine_path`` are LOAD-time runtime optimization knobs.
+        ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` configure
+        the Main runtime's action processing at LOAD time. Zero values keep
+        the policy container's environment/default settings.
 
         Timeout defaults to INFERENCE_LOAD_TIMEOUT_SEC for LOAD (CUDA init,
         weight load, and first-time gated backbone downloads) and 10 s for
@@ -391,6 +416,20 @@ class ContainerServiceClient:
             request.acceleration_mode = str(acceleration_mode or "")
         if hasattr(request, "acceleration_engine_path"):
             request.acceleration_engine_path = str(acceleration_engine_path or "")
+        if hasattr(request, "control_hz"):
+            request.control_hz = _uint16_or_zero(control_hz)
+        if hasattr(request, "inference_hz"):
+            request.inference_hz = _uint16_or_zero(inference_hz)
+        if hasattr(request, "chunk_align_window_s"):
+            request.chunk_align_window_s = _positive_float_or_zero(
+                chunk_align_window_s
+            )
+        if hasattr(request, "initial_pose_sync"):
+            request.initial_pose_sync = bool(initial_pose_sync)
+        if hasattr(request, "initial_pose_sync_duration_s"):
+            request.initial_pose_sync_duration_s = float(
+                initial_pose_sync_duration_s
+            )
 
         if timeout_sec is None:
             timeout_sec = (

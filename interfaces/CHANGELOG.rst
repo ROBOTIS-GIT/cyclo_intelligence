@@ -2,6 +2,13 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.1 (2026-08-26)
+------------------
+* Added ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` to the inference command LOAD request.
+* Added Initial Pose Sync settings to ``TaskInfo`` and the ``SYNCING`` inference phase.
+* ``TaskInfo`` changes also update the type hashes of ``SendCommand``, ``RecordingCommand``, and ``RecordingStatus``; all Cyclo 1.3.1 services must be upgraded together.
+* Contributors: Taehyeong Kim
+
 1.3.0 (2026-08-14)
 ------------------
 * None

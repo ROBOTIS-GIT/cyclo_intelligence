@@ -112,6 +112,15 @@ export function transformReplayDataResult(result = {}, bagPath = '') {
   };
 }
 
+export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
+  return {
+    initial_pose_sync: Boolean(taskInfo.initialPoseSync),
+    initial_pose_sync_duration_s: Number(
+      taskInfo.initialPoseSyncDurationS ?? 5.0
+    ),
+  };
+}
+
 export function useRosServiceCaller() {
   const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -395,6 +404,7 @@ export function useRosServiceCaller() {
             action_request_mode: actionRequestMode,
             acceleration_mode: accelerationMode || 'pytorch',
             acceleration_engine_path: accelerationEnginePath,
+            ...buildInitialPoseSyncTaskInfo(taskInfo),
           },
           command: Number(command_enum),
           segment_index: Number(options.segmentIndex || 0),

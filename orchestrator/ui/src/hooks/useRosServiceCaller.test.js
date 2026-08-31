@@ -1,7 +1,27 @@
 import {
+  buildInitialPoseSyncTaskInfo,
   getRecordCommandServiceTimeoutMs,
   transformReplayDataResult,
 } from './useRosServiceCaller';
+
+describe('buildInitialPoseSyncTaskInfo', () => {
+  test('converts UI settings to ROS task info fields', () => {
+    expect(buildInitialPoseSyncTaskInfo({
+      initialPoseSync: true,
+      initialPoseSyncDurationS: 7.5,
+    })).toEqual({
+      initial_pose_sync: true,
+      initial_pose_sync_duration_s: 7.5,
+    });
+  });
+
+  test('uses safe defaults for legacy UI state', () => {
+    expect(buildInitialPoseSyncTaskInfo()).toEqual({
+      initial_pose_sync: false,
+      initial_pose_sync_duration_s: 5.0,
+    });
+  });
+});
 
 describe('getRecordCommandServiceTimeoutMs', () => {
   test('does not time out recording save commands', () => {

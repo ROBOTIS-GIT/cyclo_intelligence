@@ -12,6 +12,10 @@ const numberOrDefault = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const editableNumberOrDefault = (value, fallback) => (
+  value === '' ? '' : numberOrDefault(value, fallback)
+);
+
 const actionRequestModeOrDefault = (value) => (
   String(value ?? '').trim().toLowerCase() === 'sync' ? 'sync' : 'async'
 );
@@ -38,15 +42,23 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   taskInstruction: stringArray(taskInfo.taskInstruction),
   policyPath: String(taskInfo.policyPath ?? '').trim(),
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
-  controlHz: numberOrDefault(taskInfo.controlHz ?? 100, 100),
-  inferenceHz: numberOrDefault(taskInfo.inferenceHz ?? 15, 15),
-  chunkAlignWindowS: numberOrDefault(taskInfo.chunkAlignWindowS ?? 0.3, 0.3),
+  controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
+  inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+  chunkAlignWindowS: editableNumberOrDefault(
+    taskInfo.chunkAlignWindowS ?? 0.3,
+    0.3
+  ),
   serviceType: String(taskInfo.serviceType ?? '').trim(),
   policyType: String(taskInfo.policyType ?? '').trim(),
   inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
   actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
   accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
   accelerationEnginePath: String(taskInfo.accelerationEnginePath ?? '').trim(),
+  initialPoseSync: Boolean(taskInfo.initialPoseSync),
+  initialPoseSyncDurationS: numberOrDefault(
+    taskInfo.initialPoseSyncDurationS ?? 5.0,
+    5.0
+  ),
 });
 
 export const getRecordTaskInfoKey = (taskInfo = {}) =>
@@ -68,6 +80,11 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   actionRequestMode: actionRequestModeOrDefault(taskInfo.action_request_mode),
   accelerationMode: taskInfo.acceleration_mode || 'pytorch',
   accelerationEnginePath: taskInfo.acceleration_engine_path || '',
+  initialPoseSync: Boolean(taskInfo.initial_pose_sync),
+  initialPoseSyncDurationS: numberOrDefault(
+    taskInfo.initial_pose_sync_duration_s,
+    5.0
+  ),
   userId: taskInfo.user_id || '',
   controlHz: taskInfo.control_hz || 100,
   inferenceHz: taskInfo.inference_hz || 15,

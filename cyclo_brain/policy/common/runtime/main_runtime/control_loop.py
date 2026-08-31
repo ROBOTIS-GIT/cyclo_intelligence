@@ -50,6 +50,16 @@ ACTION_REQUEST_MODE_SYNC = "sync"
 ACTION_REQUEST_MODES = {ACTION_REQUEST_MODE_ASYNC, ACTION_REQUEST_MODE_SYNC}
 
 
+def positive_finite_or_default(value: object, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        return float(default)
+    return parsed
+
+
 def normalize_action_request_mode(value: object) -> str:
     mode = str(value or "").strip().lower()
     if mode == ACTION_REQUEST_MODE_SYNC:
@@ -75,9 +85,14 @@ class ControlLoop:
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
     ) -> None:
         self._requester = requester
-        self._inference_hz = float(inference_hz)
-        self._control_hz = float(control_hz)
-        self._chunk_align_window_s = float(chunk_align_window_s)
+        self._default_inference_hz = positive_finite_or_default(inference_hz, 15.0)
+        self._default_control_hz = positive_finite_or_default(control_hz, 100.0)
+        self._default_chunk_align_window_s = positive_finite_or_default(
+            chunk_align_window_s, 0.3
+        )
+        self._inference_hz = self._default_inference_hz
+        self._control_hz = self._default_control_hz
+        self._chunk_align_window_s = self._default_chunk_align_window_s
         self._target_chunk_size = target_chunk_size
         self._postprocess_actions = bool(postprocess_actions)
         self._alignment_mode = alignment_mode
@@ -103,6 +118,12 @@ class ControlLoop:
         self._action_keys: list[str] = []
         self._publish_to_robot = False
         self._running = False
+        self._initial_pose_sync_enabled = False
+        self._initial_pose_sync_duration_s = 5.0
+        self._initial_pose_sync_in_progress = False
+        self._initial_pose_sync_completed = False
+        self._initial_pose_sync_deadline: Optional[float] = None
+        self._initial_pose_sync_hold_pending = False
         self._generation = 0
         self._shutdown = threading.Event()
         self._request_thread: Optional[threading.Thread] = None
@@ -115,9 +136,28 @@ class ControlLoop:
         action_keys: Optional[list[str]] = None,
         publish_to_robot: bool = False,
         action_request_mode: Optional[str] = None,
+        control_hz: Optional[float] = None,
+        inference_hz: Optional[float] = None,
+        chunk_align_window_s: Optional[float] = None,
+        initial_pose_sync: bool = False,
+        initial_pose_sync_duration_s: float = 5.0,
     ) -> None:
+        duration_s = float(initial_pose_sync_duration_s)
+        if not math.isfinite(duration_s) or not 1.0 <= duration_s <= 60.0:
+            raise ValueError(
+                "initial_pose_sync_duration_s must be between 1.0 and 60.0"
+            )
         with self._lock:
             self.deconfigure()
+            self._control_hz = positive_finite_or_default(
+                control_hz, self._default_control_hz
+            )
+            self._inference_hz = positive_finite_or_default(
+                inference_hz, self._default_inference_hz
+            )
+            self._chunk_align_window_s = positive_finite_or_default(
+                chunk_align_window_s, self._default_chunk_align_window_s
+            )
             self._action_request_mode = normalize_action_request_mode(
                 action_request_mode
                 if action_request_mode is not None
@@ -139,15 +179,32 @@ class ControlLoop:
             self._task_instruction = task_instruction or ""
             self._action_keys = list(action_keys or self._robot.action_keys)
             self._publish_to_robot = bool(publish_to_robot)
+            self._initial_pose_sync_enabled = bool(initial_pose_sync)
+            self._initial_pose_sync_duration_s = duration_s
+            self._initial_pose_sync_in_progress = False
+            self._initial_pose_sync_completed = False
+            self._initial_pose_sync_deadline = None
+            self._initial_pose_sync_hold_pending = False
             self._reset_request_latency_locked()
             self._generation += 1
-            logger.info(
+            config_message = (
                 "configured RobotClient command path for %s "
-                "(publish_to_robot=%s action_request_mode=%s)",
-                robot_type,
-                self._publish_to_robot,
-                self._action_request_mode,
+                "(publish_to_robot=%s action_request_mode=%s "
+                "control_hz=%g inference_hz=%g chunk_align_window_s=%g "
+                "initial_pose_sync=%s initial_pose_sync_duration_s=%g)"
+                % (
+                    robot_type,
+                    self._publish_to_robot,
+                    self._action_request_mode,
+                    self._control_hz,
+                    self._inference_hz,
+                    self._chunk_align_window_s,
+                    self._initial_pose_sync_enabled,
+                    self._initial_pose_sync_duration_s,
+                )
             )
+            logger.info(config_message)
+            print(f"[main-runtime] {config_message}", flush=True)
 
     def deconfigure(self) -> None:
         with self._lock:
@@ -156,6 +213,15 @@ class ControlLoop:
             self._action_keys = []
             self._publish_to_robot = False
             self._action_request_mode = self._default_action_request_mode
+            self._inference_hz = self._default_inference_hz
+            self._control_hz = self._default_control_hz
+            self._chunk_align_window_s = self._default_chunk_align_window_s
+            self._initial_pose_sync_enabled = False
+            self._initial_pose_sync_duration_s = 5.0
+            self._initial_pose_sync_in_progress = False
+            self._initial_pose_sync_completed = False
+            self._initial_pose_sync_deadline = None
+            self._initial_pose_sync_hold_pending = False
             self._processor = None
             self._generation += 1
             if self._robot is not None:
@@ -163,25 +229,122 @@ class ControlLoop:
                 self._robot = None
             self._reset_request_latency_locked()
 
-    def start(self, publish_to_robot: Optional[bool] = None) -> None:
+    def start(self, publish_to_robot: Optional[bool] = None) -> bool:
         with self._lock:
+            if self._initial_pose_sync_hold_pending:
+                raise RuntimeError(
+                    "initial pose sync hold is still pending - STOP again first"
+                )
             if publish_to_robot is not None:
                 self._set_publish_to_robot_locked(bool(publish_to_robot))
+            should_sync = (
+                self._initial_pose_sync_enabled
+                and self._publish_to_robot
+                and not self._initial_pose_sync_completed
+            )
+            if not should_sync:
+                self._running = True
+                return False
+            if self._robot is None or self._processor is None:
+                raise RuntimeError("LOAD first")
+            robot = self._robot
+            processor = self._processor
+            task_instruction = self._task_instruction
+            action_keys = list(self._action_keys)
+            duration_s = self._initial_pose_sync_duration_s
+            generation = self._generation
+            self._running = False
+            self._initial_pose_sync_in_progress = False
+            self._initial_pose_sync_deadline = None
+
+        started_at = time.monotonic()
+        response = self._requester.get_action(task_instruction)
+        latency_s = time.monotonic() - started_at
+        self._record_request_latency(latency_s)
+        chunk = self._decode_action_response(response)
+
+        with self._lock:
+            if (
+                generation != self._generation
+                or robot is not self._robot
+                or processor is not self._processor
+            ):
+                raise RuntimeError("initial pose sync cancelled")
+            processor.clear()
+            try:
+                robot.publish_initial_pose_sync(
+                    chunk[0],
+                    action_keys,
+                    duration_s=duration_s,
+                )
+            except Exception:
+                self._running = False
+                self._initial_pose_sync_in_progress = False
+                self._initial_pose_sync_deadline = None
+                raise
+            self._initial_pose_sync_in_progress = True
+            self._initial_pose_sync_deadline = time.monotonic() + duration_s
             self._running = True
+            logger.info(
+                "initial pose sync target published: duration=%.3fs; "
+                "discarded source chunk=%d",
+                duration_s,
+                response.chunk_size,
+            )
+            return True
 
-    def pause(self) -> None:
+    def pause(self) -> bool:
+        robot = None
+        action_keys: list[str] = []
         with self._lock:
+            should_hold = (
+                (
+                    self._initial_pose_sync_in_progress
+                    or self._initial_pose_sync_hold_pending
+                )
+                and self._publish_to_robot
+                and self._robot is not None
+            )
+            if should_hold:
+                robot = self._robot
+                action_keys = list(self._action_keys)
             self._running = False
             if self._processor is not None:
                 self._processor.clear()
+            self._initial_pose_sync_deadline = None
             self._generation += 1
+            if should_hold:
+                self._initial_pose_sync_hold_pending = True
+            else:
+                self._initial_pose_sync_in_progress = False
+                self._initial_pose_sync_hold_pending = False
+        if robot is not None:
+            try:
+                robot.publish_current_pose_hold(action_keys, duration_s=0.1)
+                logger.info("initial pose sync interrupted; current pose hold published")
+            except Exception as e:
+                with self._lock:
+                    if robot is self._robot:
+                        self._initial_pose_sync_in_progress = True
+                        self._initial_pose_sync_hold_pending = True
+                logger.error("failed to hold current pose during sync pause: %s", e)
+                return False
+            with self._lock:
+                if robot is not self._robot:
+                    return False
+                self._initial_pose_sync_in_progress = False
+                self._initial_pose_sync_hold_pending = False
+        return True
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        return self.pause()
+
+    def initial_pose_sync_hold_required(self) -> bool:
         with self._lock:
-            self._running = False
-            if self._processor is not None:
-                self._processor.clear()
-            self._generation += 1
+            return (
+                self._initial_pose_sync_in_progress
+                or self._initial_pose_sync_hold_pending
+            )
 
     def set_publish_to_robot(self, publish_to_robot: bool) -> None:
         with self._lock:
@@ -235,6 +398,27 @@ class ControlLoop:
             publish_to_robot = self._publish_to_robot
             action_request_mode = self._action_request_mode
 
+            if self._initial_pose_sync_in_progress:
+                deadline = self._initial_pose_sync_deadline
+                if deadline is not None and time.monotonic() < deadline:
+                    if publish_to_robot:
+                        idle = getattr(robot, "publish_idle_action", None)
+                        if callable(idle):
+                            try:
+                                idle(action_keys)
+                            except Exception as e:
+                                logger.error(
+                                    "failed to publish idle action during pose sync: %s",
+                                    e,
+                                )
+                    return
+                self._initial_pose_sync_in_progress = False
+                self._initial_pose_sync_completed = True
+                self._initial_pose_sync_deadline = None
+                logger.info(
+                    "initial pose sync complete; requesting a fresh action chunk"
+                )
+
             action = processor.pop_action()
             if action is not None:
                 preview = getattr(robot, "publish_action_preview", None)
@@ -283,22 +467,11 @@ class ControlLoop:
             return
         latency_s = time.monotonic() - started_at
         self._record_request_latency(latency_s)
-        if not response.success:
-            logger.warning("get_action failed: %s", response.message)
+        try:
+            chunk = self._decode_action_response(response)
+        except ValueError as e:
+            logger.warning("get_action response rejected: %s", e)
             return
-        if response.chunk_size <= 0 or response.action_dim <= 0:
-            logger.warning("get_action returned empty action list")
-            return
-        data = np.asarray(response.action_list, dtype=np.float64)
-        if data.size != response.chunk_size * response.action_dim:
-            logger.warning(
-                "action list size mismatch: %d != %d * %d",
-                data.size,
-                response.chunk_size,
-                response.action_dim,
-            )
-            return
-        chunk = data.reshape(response.chunk_size, response.action_dim)
         with self._lock:
             if (
                 generation == self._generation
@@ -309,6 +482,7 @@ class ControlLoop:
                     1.0,
                     self._processor.output_hz,
                 )
+
                 scheduled_start_delay_s = (
                     None
                     if action_request_mode == ACTION_REQUEST_MODE_SYNC
@@ -335,6 +509,23 @@ class ControlLoop:
                     buffer_delay_s,
                     scheduled_start_text,
                 )
+
+    @staticmethod
+    def _decode_action_response(response) -> np.ndarray:
+        if not response.success:
+            raise ValueError(response.message or "get_action failed")
+        if response.chunk_size <= 0 or response.action_dim <= 0:
+            raise ValueError("get_action returned empty action list")
+        data = np.asarray(response.action_list, dtype=np.float64)
+        expected_size = response.chunk_size * response.action_dim
+        if data.size != expected_size:
+            raise ValueError(
+                f"action list size mismatch: {data.size} != "
+                f"{response.chunk_size} * {response.action_dim}"
+            )
+        if not np.all(np.isfinite(data)):
+            raise ValueError("action list contains non-finite values")
+        return data.reshape(response.chunk_size, response.action_dim)
 
     def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
         if self._request_thread is not None and self._request_thread.is_alive():

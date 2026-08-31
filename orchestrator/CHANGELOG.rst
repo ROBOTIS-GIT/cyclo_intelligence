@@ -2,6 +2,15 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.3.1 (2026-08-26)
+------------------
+* Forwarded action-processing timing from UI and behavior-tree task information to policy LOAD requests.
+* Included timing in the loaded-policy runtime signature so changing any timing value forces reconfiguration instead of RESUME.
+* Added Initial Pose Sync status reporting and kept failed interruption holds in ``SYNCING`` without disconnecting or unloading the policy client.
+* Normalized disabled Initial Pose Sync duration in the runtime signature to avoid unnecessary policy reloads.
+* Required one verified policy STOP before Sync teardown, including the boundary where the UI Sync timer has just elapsed, without sending a duplicate STOP.
+* Contributors: Taehyeong Kim
+
 1.3.0 (2026-08-14)
 ------------------
 * Added MolmoAct2, VLA-JEPA, and FastWAM routing for inference commands, behavior trees, and training requests.

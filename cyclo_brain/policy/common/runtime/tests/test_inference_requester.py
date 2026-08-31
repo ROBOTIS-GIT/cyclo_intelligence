@@ -29,6 +29,16 @@ class FakeEngineClient:
 
 
 class InferenceRequesterTests(unittest.TestCase):
+    def test_get_action_default_timeout_is_five_seconds(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client)
+
+        requester.get_action("initial or regular inference")
+
+        self.assertEqual(client.calls[0][1], 5.0)
+
     def test_load_policy_default_timeout_is_long_enough_for_model_load(self) -> None:
         client = FakeEngineClient(
             [EngineCommandResponse(success=True, seq_id=1)]

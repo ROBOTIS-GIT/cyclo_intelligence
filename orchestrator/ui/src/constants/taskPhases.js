@@ -29,4 +29,5 @@ export const InferencePhase = {
   LOADING: 1,
   INFERENCING: 2,
   PAUSED: 3,
+  SYNCING: 4,
 };

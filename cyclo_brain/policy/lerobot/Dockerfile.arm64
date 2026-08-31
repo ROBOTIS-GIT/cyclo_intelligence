@@ -7,7 +7,7 @@
 #
 # Build context: cyclo_brain/policy/
 # Usage:         docker build -f lerobot/Dockerfile.arm64 \
-#                  -t robotis/lerobot-zenoh:1.4.0-arm64 .
+#                  -t robotis/lerobot-zenoh:1.4.1-arm64 .
 
 # Jetson LeRobot base image. This already carries Python 3.12 plus
 # CUDA-enabled PyTorch wheels built for JetPack 6.x. Do not install

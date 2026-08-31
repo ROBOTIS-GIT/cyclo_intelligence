@@ -168,3 +168,23 @@ def test_load_send_command_sets_action_request_mode():
 
     assert action.action_request_mode == 'sync'
     assert task_info.action_request_mode == 'sync'
+
+
+def test_load_send_command_sets_action_processing_timing():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {
+            'command': 'LOAD',
+            'control_hz': '80',
+            'inference_hz': '20',
+            'chunk_align_window_s': '0.25',
+        },
+    )
+    task_info = action._build_task_info()
+
+    assert task_info.control_hz == 80
+    assert task_info.inference_hz == 20
+    assert task_info.chunk_align_window_s == 0.25

@@ -51,6 +51,23 @@ class ActionChunkProcessorTests(unittest.TestCase):
 
                 self.assertEqual(produced, expected_count)
 
+    def test_dynamic_resampling_scales_with_inference_hz(self) -> None:
+        chunk = np.zeros((16, 2), dtype=np.float64)
+
+        slow_source = ActionChunkProcessor(
+            inference_hz=10.0,
+            control_hz=100.0,
+            alignment_mode="none",
+        )
+        fast_source = ActionChunkProcessor(
+            inference_hz=20.0,
+            control_hz=100.0,
+            alignment_mode="none",
+        )
+
+        self.assertEqual(slow_source.push_actions(chunk), 150)
+        self.assertEqual(fast_source.push_actions(chunk), 75)
+
     def test_fixed_target_chunk_size_remains_available(self) -> None:
         processor = ActionChunkProcessor(
             inference_hz=15.0,
