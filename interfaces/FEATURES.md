@@ -28,6 +28,7 @@ Recording task configuration information.
 | `tags` | string[] | Dataset tags |
 | `record_rosbag2` | bool | ROSbag2 recording |
 | `use_optimized_save_mode` | bool | Optimized save mode |
+| `max_failure_marks` | uint16 | Maximum FAILED marks per Record-page subtask take; 0 keeps legacy left-trigger cancel behavior |
 | `initial_pose_sync` | bool | Slowly align a real robot to the first predicted pose before inference |
 | `initial_pose_sync_duration_s` | float64 | Initial pose alignment duration in seconds |
 
@@ -56,6 +57,7 @@ Record-side status (cyclo_data → UI direct on `/data/recording/status`).
 | `current_task_instruction` | string | Current task instruction |
 | `current_subtask_index` | uint16 | Current subtask index |
 | `subtask_count` | uint16 | Subtask count |
+| `failure_event_count` | uint16 | FAILED marks in the active subtask take |
 | `current_subtask_instruction` | string | Current subtask instruction |
 | `subtask_instructions` | string[] | Subtask instruction list |
 | `saved_subtask_indices` | uint16[] | Saved subtask indices in the current full episode |
@@ -205,6 +207,7 @@ Recording/inference control commands.
 | `DISCARD_EPISODE` | 22 | Discard saved subtasks for current full episode |
 | `SET_TASK_INFO` | 23 | Cache/update task information |
 | `CANCEL_SEGMENT` | 24 | Cancel active subtask recording |
+| `MARK_FAILED` | 25 | Add a UI FAILED mark to the active subtask take |
 
 **Request**
 | Field | Type | Description |

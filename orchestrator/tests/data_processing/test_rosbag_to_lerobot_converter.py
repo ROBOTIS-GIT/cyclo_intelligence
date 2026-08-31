@@ -2675,10 +2675,408 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
             payload = json.load(f)
         self.assertEqual(payload["meta_data"]["task_duration"], 3)
         self.assertEqual(payload["meta_data"]["valid_duration"], [0, 3])
+        self.assertNotIn("failure_recovery_annotation", payload)
         self.assertEqual(
             payload["sub_task_annotation"][0]["frame_duration"],
             [0, 3],
         )
+
+    def test_failure_hint_uses_nearest_retained_grid_and_clamps(self):
+        episode = EpisodeData(
+            episode_index=0,
+            length=3,
+            grid_log_times_sec=[10.2, 10.3, 10.4],
+        )
+        info = {
+            "failure_recovery_annotation": {
+                "events": [
+                    {
+                        "event_id": "fr_000",
+                        "sub_task_idx": 0,
+                        "source_mark": {"source": "ui_failed", "time_sec": 0.31},
+                    },
+                    {
+                        "event_id": "fr_001",
+                        "sub_task_idx": 0,
+                        "source_mark": {"source": "left_button", "time_sec": 99.0},
+                    },
+                ]
+            }
+        }
+
+        annotation = self.converter._resolve_failure_annotation(
+            info,
+            episode,
+            recording_start_sec=10.0,
+        )
+
+        self.assertEqual(
+            [event["source_mark"]["hint_frame"] for event in annotation["events"]],
+            [1, 2],
+        )
+        self.assertEqual(annotation["events"][0]["event_id"], "fr_000")
+        self.assertIsNone(annotation["events"][0]["failure"]["frame_duration"])
+
+    def test_failure_hint_is_resolved_after_video_alignment_shortens_grid(self):
+        bag_path = Path(self.temp_dir) / "legacy_episode"
+        bag_path.mkdir()
+        (bag_path / "metadata.yaml").write_text(
+            base_converter.yaml.safe_dump({
+                "rosbag2_bagfile_information": {
+                    "starting_time": {"nanoseconds_since_epoch": 10_000_000_000},
+                }
+            }),
+            encoding="utf-8",
+        )
+        info = {
+            "task_instruction": "task",
+            "failure_recovery_annotation": {
+                "events": [{
+                    "event_id": "fr_000",
+                    "sub_task_idx": 0,
+                    "source_mark": {"source": "ui_failed", "time_sec": 0.2},
+                }]
+            },
+        }
+        extracted = EpisodeData(
+            episode_index=0,
+            timestamps=[0.0, 0.1, 0.2],
+            observation_state=[np.zeros(1)] * 3,
+            action=[np.zeros(1)] * 3,
+            grid_log_times_sec=[10.0, 10.1, 10.2],
+            length=3,
+        )
+
+        def shorten_grid(_bag_path, episode):
+            episode.timestamps = episode.timestamps[:2]
+            episode.observation_state = episode.observation_state[:2]
+            episode.action = episode.action[:2]
+            episode.grid_log_times_sec = episode.grid_log_times_sec[:2]
+            episode.length = 2
+            return episode
+
+        with patch.object(
+            self.converter, "_can_convert_transcode_state", return_value=True
+        ), patch.object(
+            self.converter._metadata_manager, "load_robot_config", return_value=None
+        ), patch.object(
+            self.converter._metadata_manager, "get_trim_points", return_value=None
+        ), patch.object(
+            self.converter._metadata_manager, "get_exclude_regions", return_value=[]
+        ), patch.object(
+            self.converter._metadata_manager, "load_episode_info", return_value=info
+        ), patch.object(
+            self.converter._metadata_manager, "get_task_markers", return_value=[]
+        ), patch.object(
+            self.converter, "_prepared_episode_cache_path", return_value=None
+        ), patch.object(
+            self.converter, "_is_archived_segment_episode", return_value=False
+        ), patch.object(
+            self.converter, "_extract_joint_data", return_value=extracted
+        ), patch.object(
+            self.converter, "_find_video_files", return_value={"cam": bag_path / "cam.mp4"}
+        ), patch.object(
+            self.converter, "_sync_videos_to_grid", side_effect=shorten_grid
+        ), patch.object(
+            self.converter, "_episode_has_sidecars", return_value=True
+        ):
+            episode = self.converter.convert_single_rosbag(bag_path, 0)
+
+        self.assertEqual(episode.length, 2)
+        self.assertEqual(
+            episode.failure_recovery_annotation["events"][0]["source_mark"]["hint_frame"],
+            1,
+        )
+
+    def test_single_retained_archived_segment_keeps_original_subtask_index(self):
+        bag_path = Path(self.temp_dir) / "0"
+        bag_path.mkdir()
+        mcaps = [bag_path / "0_0.mcap", bag_path / "0_1.mcap"]
+        for mcap in mcaps:
+            mcap.touch()
+        (bag_path / "metadata.yaml").write_text(
+            base_converter.yaml.safe_dump({
+                "rosbag2_bagfile_information": {
+                    "files": [
+                        {
+                            "path": "0_0.mcap",
+                            "starting_time": {
+                                "nanoseconds_since_epoch": 10_000_000_000,
+                            },
+                        },
+                        {
+                            "path": "0_1.mcap",
+                            "starting_time": {
+                                "nanoseconds_since_epoch": 20_000_000_000,
+                            },
+                        },
+                    ],
+                }
+            }),
+            encoding="utf-8",
+        )
+        info = {
+            "segments": [
+                {"sub_task_instruction": "first", "frame_duration": [0.0, 1.0]},
+                {"sub_task_instruction": "second", "frame_duration": [1.0, 2.0]},
+            ],
+            "failure_recovery_annotation": {
+                "events": [{
+                    "event_id": "fr_000",
+                    "sub_task_idx": 1,
+                    "source_mark": {"source": "left_button", "time_sec": 1.5},
+                }]
+            },
+        }
+        converter = RosbagToLerobotConverter(
+            ConversionConfig(
+                repo_id="test/partial",
+                output_dir=Path(self.temp_dir) / "partial",
+                use_videos=False,
+            )
+        )
+        retained = EpisodeData(
+            episode_index=0,
+            timestamps=[0.0, 0.5],
+            observation_state=[np.zeros(1)] * 2,
+            action=[np.zeros(1)] * 2,
+            grid_log_times_sec=[20.0, 20.5],
+            length=2,
+        )
+        with patch.object(
+            converter,
+            "_extract_joint_data",
+            side_effect=[None, retained],
+        ):
+            episode = converter._convert_archived_segment_episode(bag_path, 0, info)
+
+        self.assertEqual(episode.subtask_index, 1)
+        self.assertEqual(episode.subtask_indices, [1, 1])
+        self.assertEqual(episode.subtask_segments[0]["subtask_index"], 1)
+        self.assertEqual(
+            episode.failure_recovery_annotation["events"][0]["source_mark"]["hint_frame"],
+            1,
+        )
+
+    def test_failure_annotation_writer_is_optional(self):
+        empty = EpisodeData(episode_index=0, tasks=["task"], length=2)
+        failed = EpisodeData(
+            episode_index=1,
+            tasks=["task"],
+            length=2,
+            failure_recovery_annotation={
+                "schema_version": 1,
+                "review_status": "pending",
+                "events": [{
+                    "event_id": "fr_000",
+                    "sub_task_idx": 0,
+                    "annotation_status": "pending",
+                    "source_mark": {
+                        "source": "left_button",
+                        "time_sec": 0.0,
+                        "hint_frame": 0,
+                    },
+                    "failure": {"frame_duration": None},
+                    "recovery": {"frame_duration": None},
+                }],
+            },
+        )
+
+        self.converter._write_subtask_annotations(
+            Path(self.temp_dir),
+            [empty, failed],
+        )
+
+        empty_path = Path(self.temp_dir) / "annotations/chunk-000/episode_000000.json"
+        failed_path = Path(self.temp_dir) / "annotations/chunk-000/episode_000001.json"
+        self.assertFalse(empty_path.exists())
+        payload = json.loads(failed_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["sub_task_annotation"], [])
+        self.assertEqual(
+            payload["failure_recovery_annotation"]["events"][0]["event_id"],
+            "fr_000",
+        )
+
+    def test_archived_failure_hint_adds_segment_frame_offset(self):
+        bag_path = Path(self.temp_dir) / "0"
+        bag_path.mkdir()
+        metadata = {
+            "rosbag2_bagfile_information": {
+                "starting_time": {"nanoseconds_since_epoch": 10_000_000_000},
+                "files": [
+                    {
+                        "path": "0_0.mcap",
+                        "starting_time": {"nanoseconds_since_epoch": 10_000_000_000},
+                    },
+                    {
+                        "path": "0_1.mcap",
+                        "starting_time": {"nanoseconds_since_epoch": 20_000_000_000},
+                    },
+                ],
+            }
+        }
+        (bag_path / "metadata.yaml").write_text(
+            base_converter.yaml.safe_dump(metadata),
+            encoding="utf-8",
+        )
+        mcaps = [bag_path / "0_0.mcap", bag_path / "0_1.mcap"]
+        for mcap in mcaps:
+            mcap.touch()
+        episode_info = {
+            "segments": [
+                {"frame_duration": [0.0, 1.0]},
+                {"frame_duration": [1.0, 2.0]},
+            ],
+            "failure_recovery_annotation": {
+                "events": [{
+                    "event_id": "fr_000",
+                    "sub_task_idx": 1,
+                    "source_mark": {"source": "left_button", "time_sec": 1.19},
+                }]
+            },
+        }
+        segment_episodes = {
+            0: EpisodeData(
+                episode_index=0,
+                length=3,
+                grid_log_times_sec=[10.0, 10.1, 10.2],
+            ),
+            1: EpisodeData(
+                episode_index=0,
+                length=3,
+                grid_log_times_sec=[20.0, 20.2, 20.4],
+            ),
+        }
+
+        annotation = self.converter._resolve_archived_failure_annotation(
+            episode_info,
+            bag_path,
+            segment_episodes,
+            {0: 0, 1: 3},
+            mcaps,
+            6,
+        )
+
+        self.assertEqual(
+            annotation["events"][0]["source_mark"]["hint_frame"],
+            4,
+        )
+
+    def test_archived_fixture_writes_failure_annotations_for_v21_and_v30(self):
+        source = Path(self.temp_dir) / "source" / "0"
+        source.mkdir(parents=True)
+        segments = [
+            {
+                "sub_task_instruction": f"subtask {idx}",
+                "frame_duration": [float(idx), float(idx + 1)],
+            }
+            for idx in range(3)
+        ]
+        metadata_files = []
+        for idx in range(3):
+            filename = f"0_{idx}.mcap"
+            (source / filename).touch()
+            metadata_files.append({
+                "path": filename,
+                "starting_time": {
+                    "nanoseconds_since_epoch": (idx + 1) * 10_000_000_000,
+                },
+            })
+        (source / "metadata.yaml").write_text(
+            base_converter.yaml.safe_dump({
+                "rosbag2_bagfile_information": {
+                    "files": metadata_files,
+                }
+            }),
+            encoding="utf-8",
+        )
+        info_path = source / "episode_info.json"
+        info = {
+            "task_name": "failure fixture",
+            "segments": segments,
+            "failure_recovery_annotation": {
+                "schema_version": 1,
+                "review_status": "pending",
+                "events": [
+                    {
+                        "event_id": f"fr_{idx:03d}",
+                        "sub_task_idx": idx,
+                        "annotation_status": "pending",
+                        "source_mark": {
+                            "source": (
+                                "left_button" if idx != 1 else "ui_failed"
+                            ),
+                            "time_sec": float(idx) + 0.5,
+                        },
+                        "failure": {"frame_duration": None},
+                        "recovery": {"frame_duration": None},
+                    }
+                    for idx in range(3)
+                ],
+            },
+        }
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+
+        converters = [
+            RosbagToLerobotConverter(
+                ConversionConfig(
+                    repo_id="test/v21",
+                    output_dir=Path(self.temp_dir) / "v21",
+                    fps=15,
+                    use_videos=False,
+                )
+            ),
+            RosbagToLerobotV30Converter(
+                V30ConversionConfig(
+                    repo_id="test/v30",
+                    output_dir=Path(self.temp_dir) / "v30",
+                    fps=15,
+                    use_videos=False,
+                )
+            ),
+        ]
+
+        for converter in converters:
+            def fake_extract(mcap_path, episode_index, trim_points, exclude_regions):
+                start = converter._recording_start_sec(source, Path(mcap_path).name)
+                return EpisodeData(
+                    episode_index=episode_index,
+                    timestamps=[0.0, 0.3, 0.6],
+                    observation_state=[np.zeros(1)] * 3,
+                    action=[np.zeros(1)] * 3,
+                    length=3,
+                    grid_log_times_sec=[start + 0.2, start + 0.5, start + 0.8],
+                )
+
+            with patch.dict(
+                os.environ,
+                {"CYCLO_PREPARED_EPISODE_CACHE_DISABLE": "1"},
+            ), patch.object(
+                converter,
+                "_extract_joint_data",
+                side_effect=fake_extract,
+            ):
+                episode = converter.convert_single_rosbag(source, 0)
+            self.assertIsNotNone(episode)
+            converter._write_subtask_annotations(converter.config.output_dir, [episode])
+            annotation_path = (
+                converter.config.output_dir
+                / "annotations/chunk-000/episode_000000.json"
+            )
+            payload = json.loads(annotation_path.read_text(encoding="utf-8"))
+            events = payload["failure_recovery_annotation"]["events"]
+            self.assertEqual(
+                [event["source_mark"]["hint_frame"] for event in events],
+                [1, 4, 7],
+            )
+            self.assertEqual(
+                [event["sub_task_idx"] for event in events],
+                [0, 1, 2],
+            )
+            self.assertTrue(all(
+                0 <= event["source_mark"]["hint_frame"] < 9
+                for event in events
+            ))
 
     def test_compute_episode_stats(self):
         episode = EpisodeData(

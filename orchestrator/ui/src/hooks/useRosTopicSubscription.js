@@ -309,6 +309,7 @@ export function useRosTopicSubscription() {
               currentTaskInstruction: msg.current_task_instruction || '',
               currentSubtaskIndex: msg.current_subtask_index || 0,
               subtaskCount: msg.subtask_count || 0,
+              failureEventCount: msg.failure_event_count || 0,
               currentSubtaskInstruction: msg.current_subtask_instruction || '',
               subtaskInstructions: msg.subtask_instructions || [],
               savedSubtaskIndices: Array.isArray(msg.saved_subtask_indices)
@@ -478,6 +479,7 @@ export function useRosTopicSubscription() {
         start: 'Recording started',
         finish: 'Recording finished',
         cancel: 'Cancelled',
+        failed: 'Failure',
         review_on: 'Previous data needs review',
         review_off: 'Previous data review cleared',
       };

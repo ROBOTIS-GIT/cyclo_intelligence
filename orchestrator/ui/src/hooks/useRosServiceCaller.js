@@ -314,6 +314,9 @@ export function useRosServiceCaller() {
           case 'cancel_segment':
             command_enum = TaskCommand.CANCEL_SEGMENT;
             break;
+          case 'mark_failed':
+            command_enum = TaskCommand.MARK_FAILED;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }
@@ -399,6 +402,10 @@ export function useRosServiceCaller() {
                 : 0.3
             ),
             include_robotis_license: Boolean(taskInfo.includeRobotisLicense),
+            max_failure_marks: Math.max(
+              0,
+              Math.min(65535, Number(taskInfo.maxFailureMarks || 0))
+            ),
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             action_request_mode: actionRequestMode,

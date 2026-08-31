@@ -22,6 +22,8 @@ uint8 FINISH_EPISODE = 13
 uint8 DISCARD_EPISODE = 14
 uint8 SET_TASK_INFO = 15
 uint8 CANCEL_SEGMENT = 16
+uint8 MARK_FAILED = 17
+uint8 LEFT_TRIGGER = 18
 
 uint8 command
 TaskInfo task_info
@@ -41,6 +43,11 @@ string[] topics
 # STOP / FINISH / MOVE_TO_NEXT / RERECORD. Empty → metadata save skipped.
 # Forwarder reads this from orchestrator's ROS parameter `urdf_path`.
 string urdf_path
+# ROS clock timestamp captured when MARK_FAILED / LEFT_TRIGGER was received.
+# A value <= 0 asks cyclo_data to use its own ROS clock.
+int64 event_time_ns
 ---
 bool success
 string message
+bool recording_discarded
+uint16 failure_event_count

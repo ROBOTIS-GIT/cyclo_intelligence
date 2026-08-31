@@ -14,6 +14,7 @@ import {
   MdDone,
   MdFiberManualRecord,
   MdSave,
+  MdWarningAmber,
 } from 'react-icons/md';
 
 import { RecordPhase } from '../constants/taskPhases';
@@ -22,6 +23,7 @@ import {
   resetSegmentPlan,
   resetSegmentProgress,
   selectRecordTaskInfo,
+  setRecordTaskInfo,
   setActiveSlotIndex,
   setPlannedCount,
   setPlannedSubTaskAt,
@@ -34,6 +36,7 @@ import InfoPanel from './InfoPanel';
 import Tooltip from './Tooltip';
 
 const MAX_PLANNED_SLOTS = 50;
+const MAX_FAILURE_MARKS = 65535;
 
 const isInputFocused = () => {
   const el = document.activeElement;
@@ -58,6 +61,10 @@ export default function SegmentPanel() {
   const [episodeAcquisitionStarted, setEpisodeAcquisitionStarted] = useState(false);
   const [savingInProgress, setSavingInProgress] = useState(false);
   const [serverResetInProgress, setServerResetInProgress] = useState(false);
+  const [failureLimitInput, setFailureLimitInput] = useState(
+    String(taskInfo.maxFailureMarks ?? 0)
+  );
+  const failureLimitInputFocusedRef = useRef(false);
   const episodeFullIndexRef = useRef(null);
   const lastServerEpisodeRef = useRef(null);
   const commandSequenceInProgressRef = useRef(false);
@@ -88,6 +95,18 @@ export default function SegmentPanel() {
   const isPlanMode = plannedCountNumber > 0;
   const isSingleMode = plannedCountNumber === 0;
   const currentFullEpisodeIndex = Number(recordStatus.currentEpisodeNumber || 0);
+  const maxFailureMarks = Math.max(
+    0,
+    Math.min(MAX_FAILURE_MARKS, Number(taskInfo.maxFailureMarks || 0))
+  );
+  const failureEventCount = Math.max(0, Number(recordStatus.failureEventCount || 0));
+  const failureMarkEnabled = (
+    isRecording &&
+    !savingInProgress &&
+    !serverResetInProgress &&
+    maxFailureMarks > 0 &&
+    failureEventCount < maxFailureMarks
+  );
   const firstPendingSlot = useMemo(
     () => slotToServerIdx.findIndex((v) => v === -1),
     [slotToServerIdx]
@@ -108,6 +127,12 @@ export default function SegmentPanel() {
   useEffect(() => {
     setOptimisticRecording(serverRecording);
   }, [serverRecording]);
+
+  useEffect(() => {
+    if (!failureLimitInputFocusedRef.current) {
+      setFailureLimitInput(String(maxFailureMarks));
+    }
+  }, [maxFailureMarks]);
 
   useEffect(() => {
     if (serverRecording || hasLocalSavedSubtasks || hasServerSavedSubtasks) {
@@ -289,6 +314,44 @@ export default function SegmentPanel() {
     },
     [applyPlanCount, isRecording, minAllowedCount, savingInProgress]
   );
+
+  const handleFailureLimitInput = useCallback((rawValue) => {
+    if (episodeAcquisitionStarted || isRecording || savingInProgress) return;
+    setFailureLimitInput(rawValue);
+    if (rawValue === '') return;
+
+    const parsed = Number(rawValue);
+    const bounded = Math.max(
+      0,
+      Math.min(MAX_FAILURE_MARKS, Number.isFinite(parsed) ? Math.trunc(parsed) : 0)
+    );
+    setFailureLimitInput(String(bounded));
+    dispatch(setRecordTaskInfo({ maxFailureMarks: bounded }));
+    dispatch(markLocalTaskInfoEdited());
+  }, [dispatch, episodeAcquisitionStarted, isRecording, savingInProgress]);
+
+  const commitFailureLimitInput = useCallback(() => {
+    failureLimitInputFocusedRef.current = false;
+    if (episodeAcquisitionStarted || isRecording || savingInProgress) return;
+
+    const parsed = failureLimitInput === '' ? 0 : Number(failureLimitInput);
+    const bounded = Math.max(
+      0,
+      Math.min(MAX_FAILURE_MARKS, Number.isFinite(parsed) ? Math.trunc(parsed) : 0)
+    );
+    setFailureLimitInput(String(bounded));
+    if (bounded !== maxFailureMarks) {
+      dispatch(setRecordTaskInfo({ maxFailureMarks: bounded }));
+      dispatch(markLocalTaskInfoEdited());
+    }
+  }, [
+    dispatch,
+    episodeAcquisitionStarted,
+    failureLimitInput,
+    isRecording,
+    maxFailureMarks,
+    savingInProgress,
+  ]);
 
   const runCommand = useCallback(
     async (label, command, opts = {}) => {
@@ -472,6 +535,16 @@ export default function SegmentPanel() {
     ]
   );
 
+  const handleMarkFailed = useCallback(async (slotIdx) => {
+    if (!failureMarkEnabled || commandSequenceInProgressRef.current) return;
+    commandSequenceInProgressRef.current = true;
+    try {
+      await runCommand('FAILED', 'mark_failed', { segmentIndex: slotIdx });
+    } finally {
+      commandSequenceInProgressRef.current = false;
+    }
+  }, [failureMarkEnabled, runCommand]);
+
   const handleDiscardEpisode = useCallback(async () => {
     if (
       savingInProgress ||
@@ -602,11 +675,12 @@ export default function SegmentPanel() {
       !serverResetInProgress &&
       (isCurrentlyRecording || (isSaved && !isRecording))
     );
+    const failedEnabled = isCurrentlyRecording && failureMarkEnabled;
 
     return (
       <div
         key={`slot-${i}`}
-        className={clsx('flex items-center gap-2 px-2 py-1.5 rounded-md border', {
+        className={clsx('flex flex-wrap items-center gap-2 px-2 py-1.5 rounded-md border', {
           'border-gray-100 opacity-70 bg-gray-50': isSaved,
           'border-red-300 bg-red-50': isCurrentlyRecording,
           'border-blue-200 bg-blue-50': isActive && !isCurrentlyRecording,
@@ -635,6 +709,23 @@ export default function SegmentPanel() {
           onChange={(e) => handleSubTaskChange(i, e.target.value)}
           disabled={inputDisabled}
         />
+        {isCurrentlyRecording && (
+          <button
+            onClick={() => handleMarkFailed(i)}
+            disabled={!failedEnabled}
+            className={clsx(
+              'px-2 py-1 rounded-md text-xs font-semibold flex items-center gap-1',
+              failedEnabled
+                ? 'bg-amber-500 text-white hover:bg-amber-600'
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+            )}
+            aria-label={`Mark failed subtask ${i + 1}`}
+            title="Mark a failure in this subtask"
+          >
+            <MdWarningAmber size={14} />
+            FAILED {failureEventCount}/{maxFailureMarks}
+          </button>
+        )}
         <button
           onClick={() => handleSlotSave(i)}
           disabled={!saveEnabled}
@@ -715,6 +806,45 @@ export default function SegmentPanel() {
           {canSaveSingle ? 'Save Episode' : 'Record Start'}
         </button>
       </Tooltip>
+
+      {isSingleMode && isRecording && (
+        <button
+          onClick={() => handleMarkFailed(0)}
+          disabled={!failureMarkEnabled}
+          className={clsx(
+            'w-full mb-3 px-3 py-2 rounded-md text-sm font-semibold',
+            'flex items-center justify-center gap-2 transition-colors',
+            failureMarkEnabled
+              ? 'bg-amber-500 text-white hover:bg-amber-600'
+              : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+          )}
+          aria-label="Mark failed episode"
+        >
+          <MdWarningAmber size={16} />
+          FAILED {failureEventCount}/{maxFailureMarks}
+        </button>
+      )}
+
+      <div className="mb-3">
+        <label htmlFor="max-failure-marks" className="block text-sm font-semibold text-gray-700 mb-2">
+          Max Failure Marks
+          <span className="ml-1 text-xs font-normal text-gray-400">(per subtask)</span>
+        </label>
+        <input
+          id="max-failure-marks"
+          type="number"
+          min="0"
+          max={MAX_FAILURE_MARKS}
+          value={failureLimitInput}
+          onFocus={() => {
+            failureLimitInputFocusedRef.current = true;
+          }}
+          onBlur={commitFailureLimitInput}
+          onChange={(event) => handleFailureLimitInput(event.target.value)}
+          disabled={episodeAcquisitionStarted || isRecording || savingInProgress}
+          className="w-full text-sm p-1.5 border border-gray-300 rounded-md outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500"
+        />
+      </div>
 
       <div className="mb-3">
         <div className="text-sm font-semibold text-gray-700 mb-2">

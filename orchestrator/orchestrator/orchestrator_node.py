@@ -306,7 +306,8 @@ class OrchestratorNode(Node):
 
     def _forward_recording(self, command: int, task_info=None,
                            include_topics: bool = False,
-                           segment_index: int = 0):
+                           segment_index: int = 0,
+                           event_time_ns: int = 0):
         """DRY helper for every recording forwarder site.
 
         Populates topics + urdf_path from orchestrator-owned state
@@ -325,6 +326,7 @@ class OrchestratorNode(Node):
             RecordingCommand.Request.FINISH,
             RecordingCommand.Request.STOP_SEGMENT,
             RecordingCommand.Request.CANCEL_SEGMENT,
+            RecordingCommand.Request.LEFT_TRIGGER,
             RecordingCommand.Request.FINISH_EPISODE,
             RecordingCommand.Request.CANCEL,
             RecordingCommand.Request.RERECORD,
@@ -341,6 +343,7 @@ class OrchestratorNode(Node):
                 topics=topics,
                 urdf_path=urdf_path,
                 segment_index=segment_index,
+                event_time_ns=event_time_ns,
                 timeout_sec=timeout_sec,
             )
 
@@ -355,6 +358,7 @@ class OrchestratorNode(Node):
                 str(item or '')
                 for item in (getattr(task_info, 'subtask_instruction', []) or [])
             ),
+            int(getattr(task_info, 'max_failure_marks', 0) or 0),
         )
 
     def _cache_ui_task_info(self, task_info: TaskInfo, source: str) -> None:
@@ -406,6 +410,7 @@ class OrchestratorNode(Node):
             'inference_hz',
             'chunk_align_window_s',
             'include_robotis_license',
+            'max_failure_marks',
             'service_type',
             'inference_mode',
             'action_request_mode',
@@ -1386,6 +1391,16 @@ class OrchestratorNode(Node):
                 cd_result = self._forward_recording(
                     RecordingCommand.Request.SET_TASK_INFO,
                     task_info=request.task_info,
+                )
+                self._apply_cyclo_data_response(cd_result, response)
+
+            elif request.command == SendCommand.Request.MARK_FAILED:
+                event_time_ns = int(self.get_clock().now().nanoseconds)
+                cd_result = self._forward_recording(
+                    RecordingCommand.Request.MARK_FAILED,
+                    task_info=request.task_info,
+                    segment_index=int(request.segment_index),
+                    event_time_ns=event_time_ns,
                 )
                 self._apply_cyclo_data_response(cd_result, response)
 
@@ -3018,31 +3033,28 @@ class OrchestratorNode(Node):
         self._trigger_record_next_segment_index = next_index
         self._start_record_trigger_segment(next_index)
 
-    def _cancel_record_trigger_segment(self) -> None:
+    def _handle_record_left_trigger(self) -> None:
         task_info = self._prepared_record_task_info
         if task_info is None:
             self.get_logger().warning(
-                'Trigger record cancel ignored: prepare the Record session first')
+                'Record left trigger ignored: prepare the Record session first')
             return
         segment_index = int(self._trigger_record_active_segment_index)
-        self.get_logger().info(
-            f'Trigger: CANCEL_SEGMENT segment={segment_index}')
+        event_time_ns = int(self.get_clock().now().nanoseconds)
         cd_result = self._forward_recording(
-            RecordingCommand.Request.CANCEL_SEGMENT,
+            RecordingCommand.Request.LEFT_TRIGGER,
             task_info=task_info,
             segment_index=segment_index,
+            event_time_ns=event_time_ns,
         )
-        if (cd_result.success
-                and cd_result.response is not None
-                and cd_result.response.success):
-            self._set_session_active(on_recording=False)
-            self._trigger_record_next_segment_index = segment_index
+        result = cd_result.response
+        if cd_result.success and result is not None and result.success:
+            if bool(result.recording_discarded):
+                self._set_session_active(on_recording=False)
+                self._trigger_record_next_segment_index = segment_index
             return
-        message = (
-            cd_result.response.message
-            if cd_result.response is not None else cd_result.message
-        )
-        self.get_logger().error(f'Trigger CANCEL_SEGMENT failed: {message}')
+        message = result.message if result is not None else cd_result.message
+        self.get_logger().error(f'Trigger LEFT_TRIGGER failed: {message}')
 
     def _toggle_inference_trigger_recording(self, is_recording: bool) -> None:
         task_info = self._get_inference_record_task_info()
@@ -3115,7 +3127,9 @@ class OrchestratorNode(Node):
         """
         Handle leader tact triggers as backend-owned recording controls.
 
-        ``right`` toggles start/save. ``left`` cancels the active recording.
+        ``right`` toggles start/save. In Record mode, ``left`` marks FAILED
+        until the configured limit and then cancels; inference recording keeps
+        the legacy immediate-cancel behavior.
         """
         self.get_logger().info(f'Joystick trigger: {joystick_mode}')
 
@@ -3154,7 +3168,7 @@ class OrchestratorNode(Node):
                         int(self._trigger_record_next_segment_index)
                     )
             elif snapshot_on_recording:
-                self._cancel_record_trigger_segment()
+                self._handle_record_left_trigger()
             else:
                 self.get_logger().debug(
                     'Record trigger cancel ignored: no active recording')

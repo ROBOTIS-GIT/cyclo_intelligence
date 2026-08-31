@@ -27,6 +27,10 @@ export const normalizeRecordTaskInfo = (taskInfo = {}) => ({
   taskInstruction: stringArray(taskInfo.taskInstruction),
   subtaskInstruction: stringArray(taskInfo.subtaskInstruction),
   includeRobotisLicense: Boolean(taskInfo.includeRobotisLicense),
+  maxFailureMarks: Math.max(
+    0,
+    Math.min(65535, numberOrDefault(taskInfo.maxFailureMarks ?? 0, 0))
+  ),
   warmupTime: numberOrDefault(taskInfo.warmupTime ?? 0, 0),
   episodeTime: numberOrDefault(taskInfo.episodeTime ?? 0, 0),
   resetTime: numberOrDefault(taskInfo.resetTime ?? 0, 0),
@@ -90,6 +94,10 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   inferenceHz: taskInfo.inference_hz || 15,
   chunkAlignWindowS: taskInfo.chunk_align_window_s || 0.3,
   includeRobotisLicense: Boolean(taskInfo.include_robotis_license),
+  maxFailureMarks: Math.max(
+    0,
+    Math.min(65535, numberOrDefault(taskInfo.max_failure_marks, 0))
+  ),
   warmupTime: taskInfo.warmup_time_s || 0,
   episodeTime: taskInfo.episode_time_s || 0,
   resetTime: taskInfo.reset_time_s || 0,

@@ -211,6 +211,9 @@ class DataManager:
         finally:
             self._episode_info_scan_cache = None
         self._start_time_s = 0
+        self._recording_start_time_ns = 0
+        self._failure_events: list[dict] = []
+        self._max_failure_marks = self._bounded_failure_limit(task_info)
         self._proceed_time = 0
         self._status = 'idle'  # Start in idle state (simplified mode)
         self._cpu_checker = CPUChecker()
@@ -538,9 +541,42 @@ class DataManager:
         with self._state_lock:
             return self._status
 
+    @staticmethod
+    def _bounded_failure_limit(task_info) -> int:
+        try:
+            value = int(getattr(task_info, 'max_failure_marks', 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, min(65535, value))
+
+    def failure_event_count(self) -> int:
+        with self._state_lock:
+            return len(self._failure_events)
+
+    def mark_failure(
+        self,
+        source: str,
+        event_time_ns: int,
+    ) -> tuple[bool, str, int]:
+        """Append one FAILED mark to the active take within its configured limit."""
+        with self._state_lock:
+            count = len(self._failure_events)
+            if self._status != 'recording':
+                return False, 'No active recording', count
+            if self._max_failure_marks <= 0:
+                return False, 'FAILED marks are disabled', count
+            if count >= self._max_failure_marks:
+                return False, 'Maximum FAILED marks reached', count
+            self._failure_events.append({
+                'source': str(source),
+                'event_time_ns': int(event_time_ns),
+            })
+            count = len(self._failure_events)
+        return True, f'Failure marked ({count}/{self._max_failure_marks})', count
+
     # ========== Simplified Recording Methods (rosbag2-only mode) ==========
 
-    def start_recording(self):
+    def start_recording(self, start_time_ns: int = 0):
         """
         Start recording (simplified mode).
 
@@ -549,6 +585,9 @@ class DataManager:
         with self._state_lock:
             self._status = 'recording'
             self._start_time_s = time.perf_counter()
+            self._recording_start_time_ns = int(start_time_ns)
+            self._failure_events = []
+            self._max_failure_marks = self._bounded_failure_limit(self._task_info)
             episode = self._record_episode_count
             full_episode = self._current_full_episode_index
             subtask = self._current_subtask_index
@@ -580,6 +619,8 @@ class DataManager:
                     )
                 self._current_scenario_number = self._current_subtask_index
             self._start_time_s = 0
+            self._recording_start_time_ns = 0
+            self._failure_events = []
             total = self._record_episode_count
         print(f'[DataManager] Recording stopped - Episode saved. '
               f'Total episodes: {total}')
@@ -826,6 +867,8 @@ class DataManager:
         with self._state_lock:
             self._status = 'idle'
             self._start_time_s = 0
+            self._recording_start_time_ns = 0
+            self._failure_events = []
             if reset_subtask_index and self._segmented_storage_mode:
                 self._current_subtask_index = 0
                 self._current_scenario_number = 0
@@ -920,6 +963,7 @@ class DataManager:
         total_messages = 0
         ros_distro = 'jazzy'
         segments_meta = []
+        failure_events = []
         segment_start_s = 0.0
 
         for subtask_idx, seg_dir in enumerate(ordered):
@@ -1012,6 +1056,36 @@ class DataManager:
                 ),
                 'frame_duration': [segment_start_s, segment_end_s],
             })
+            annotation = seg_info.get('failure_recovery_annotation') or {}
+            raw_events = (
+                annotation.get('events')
+                if isinstance(annotation, dict)
+                else []
+            )
+            if isinstance(raw_events, list):
+                segment_duration_s = max(0.0, segment_end_s - segment_start_s)
+                for event in raw_events:
+                    if not isinstance(event, dict):
+                        continue
+                    source_mark = event.get('source_mark') or {}
+                    try:
+                        local_time_s = float(
+                            source_mark.get('time_sec', 0.0) or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        local_time_s = 0.0
+                    local_time_s = max(0.0, min(segment_duration_s, local_time_s))
+                    failure_events.append({
+                        'event_id': '',
+                        'sub_task_idx': subtask_idx,
+                        'annotation_status': 'pending',
+                        'source_mark': {
+                            'source': str(source_mark.get('source', '') or ''),
+                            'time_sec': segment_start_s + local_time_s,
+                        },
+                        'failure': {'frame_duration': None},
+                        'recovery': {'frame_duration': None},
+                    })
             segment_start_s = segment_end_s
 
         topics_with_count = []
@@ -1084,6 +1158,14 @@ class DataManager:
         }
         if video_warnings:
             summary['video_warnings'] = video_warnings
+        if failure_events:
+            for event_idx, event in enumerate(failure_events):
+                event['event_id'] = f'fr_{event_idx:03d}'
+            summary['failure_recovery_annotation'] = {
+                'schema_version': 1,
+                'review_status': 'pending',
+                'events': failure_events,
+            }
         try:
             _atomic_write_json(out_dir / 'episode_info.json', summary)
         except Exception as e:
@@ -1348,6 +1430,7 @@ class DataManager:
         )
         with self._state_lock:
             if self._status == 'idle':
+                self._max_failure_marks = self._bounded_failure_limit(task_info)
                 if layout_changed:
                     self._episode_info_scan_cache = self._collect_episode_info_entries()
                     try:
@@ -1406,6 +1489,59 @@ class DataManager:
             print(f'[ROBOTIS] README.md written at: {readme_path} ({variant})')
         except Exception as e:
             print(f'[ROBOTIS] Failed to write README.md at {task_dir}: {e}')
+
+    @staticmethod
+    def _rosbag_time_bounds(episode_dir: Path) -> tuple[int, int]:
+        metadata_path = Path(episode_dir) / 'metadata.yaml'
+        if not metadata_path.exists():
+            return 0, 0
+        try:
+            metadata = yaml.safe_load(metadata_path.read_text(encoding='utf-8')) or {}
+            bag_info = metadata.get('rosbag2_bagfile_information', {}) or {}
+            start_ns = int(
+                (bag_info.get('starting_time') or {}).get(
+                    'nanoseconds_since_epoch', 0
+                ) or 0
+            )
+            duration_ns = int(
+                (bag_info.get('duration') or {}).get('nanoseconds', 0) or 0
+            )
+            return start_ns, max(0, duration_ns)
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            return 0, 0
+
+    def _active_failure_annotation(self, episode_dir: Path) -> Optional[dict]:
+        with self._state_lock:
+            raw_events = [dict(event) for event in self._failure_events]
+            fallback_start_ns = int(self._recording_start_time_ns)
+            subtask_idx = int(self._current_subtask_index)
+        if not raw_events:
+            return None
+
+        bag_start_ns, duration_ns = self._rosbag_time_bounds(episode_dir)
+        start_ns = bag_start_ns if bag_start_ns > 0 else fallback_start_ns
+        events = []
+        for event_idx, event in enumerate(raw_events):
+            event_time_ns = int(event.get('event_time_ns', 0) or 0)
+            local_ns = max(0, event_time_ns - start_ns) if start_ns > 0 else 0
+            if duration_ns > 0:
+                local_ns = min(local_ns, duration_ns)
+            events.append({
+                'event_id': f'fr_{event_idx:03d}',
+                'sub_task_idx': subtask_idx,
+                'annotation_status': 'pending',
+                'source_mark': {
+                    'source': str(event.get('source', '') or ''),
+                    'time_sec': local_ns / 1_000_000_000.0,
+                },
+                'failure': {'frame_duration': None},
+                'recovery': {'frame_duration': None},
+            })
+        return {
+            'schema_version': 1,
+            'review_status': 'pending',
+            'events': events,
+        }
 
     def save_robotis_metadata(
         self,
@@ -1516,6 +1652,9 @@ class DataManager:
                 else ('done' if has_mp4 else 'not_required')
             ),
         }
+        failure_annotation = self._active_failure_annotation(Path(rosbag_path))
+        if failure_annotation is not None:
+            meta_data['failure_recovery_annotation'] = failure_annotation
 
         meta_data_path = os.path.join(rosbag_path, 'episode_info.json')
         try:
@@ -1577,6 +1716,7 @@ class DataManager:
         )
         current_status.current_subtask_index = subtask_index if self._subtask_mode else 0
         current_status.subtask_count = self._subtask_total if self._subtask_mode else 0
+        current_status.failure_event_count = self.failure_event_count()
         current_status.current_subtask_instruction = self._current_subtask_instruction()
         current_status.subtask_instructions = list(self._subtask_instructions)
         if self._subtask_mode:

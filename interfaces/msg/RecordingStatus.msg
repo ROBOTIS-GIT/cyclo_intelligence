@@ -16,6 +16,7 @@ uint16 current_scenario_number
 string current_task_instruction
 uint16 current_subtask_index
 uint16 subtask_count
+uint16 failure_event_count
 string current_subtask_instruction
 string[] subtask_instructions
 uint16[] saved_subtask_indices

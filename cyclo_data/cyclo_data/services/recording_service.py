@@ -67,6 +67,8 @@ _COMMAND_NAMES = {
     RecordingCommand.Request.DISCARD_EPISODE: 'DISCARD_EPISODE',
     RecordingCommand.Request.SET_TASK_INFO: 'SET_TASK_INFO',
     RecordingCommand.Request.CANCEL_SEGMENT: 'CANCEL_SEGMENT',
+    RecordingCommand.Request.MARK_FAILED: 'MARK_FAILED',
+    RecordingCommand.Request.LEFT_TRIGGER: 'LEFT_TRIGGER',
 }
 
 
@@ -380,6 +382,11 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _callback(self, request, response):
+        response.recording_discarded = False
+        response.failure_event_count = (
+            self._data_manager.failure_event_count()
+            if self._data_manager is not None else 0
+        )
         command_name = _COMMAND_NAMES.get(request.command)
         if command_name is None:
             response.success = False
@@ -403,6 +410,8 @@ class RecordingService:
                 return self._do_set_task_info(request, response)
             if cmd in (Req.START, Req.START_SEGMENT):
                 return self._do_start(request, response)
+            if cmd in (Req.MARK_FAILED, Req.LEFT_TRIGGER):
+                return self._do_mark_failure(request, response)
             if cmd in (Req.STOP, Req.FINISH, Req.MOVE_TO_NEXT, Req.STOP_SEGMENT):
                 return self._do_stop_and_save(
                     request, response, command_name, event='finish')
@@ -645,7 +654,9 @@ class RecordingService:
             if self._camera_info is not None:
                 self._camera_info.start_episode(episode_dir)
 
-            dm.start_recording()
+            dm.start_recording(
+                start_time_ns=int(self._node.get_clock().now().nanoseconds)
+            )
             dm_started = True
         except Exception as exc:  # noqa: BLE001
             self._cleanup_failed_start(
@@ -720,6 +731,47 @@ class RecordingService:
         self._publish_recording_status()
         response.success = True
         response.message = 'task_info cached'
+        return response
+
+    def _do_mark_failure(self, request, response):
+        dm = self._data_manager
+        if dm is None or not dm.is_recording():
+            response.success = False
+            response.message = 'MARK_FAILED: no active recording'
+            response.failure_event_count = 0
+            return response
+        if not self._validate_active_segment(request, response, 'MARK_FAILED'):
+            response.failure_event_count = dm.failure_event_count()
+            return response
+
+        event_time_ns = int(getattr(request, 'event_time_ns', 0) or 0)
+        if event_time_ns <= 0:
+            event_time_ns = int(self._node.get_clock().now().nanoseconds)
+        source = (
+            'left_button'
+            if request.command == RecordingCommand.Request.LEFT_TRIGGER
+            else 'ui_failed'
+        )
+        marked, message, count = dm.mark_failure(source, event_time_ns)
+        response.failure_event_count = count
+        if marked:
+            self._rosbag.publish_action_event('failed')
+            self._publish_recording_status()
+            response.success = True
+            response.message = message
+            return response
+
+        if (
+            request.command == RecordingCommand.Request.LEFT_TRIGGER
+            and dm.is_recording()
+        ):
+            response = self._do_discard(request, response, event='cancel')
+            response.recording_discarded = bool(response.success)
+            response.failure_event_count = 0
+            return response
+
+        response.success = False
+        response.message = message
         return response
 
     def _ensure_transcoder(self) -> TranscodeWorker:
@@ -1156,6 +1208,8 @@ class RecordingService:
 
         response.success = True
         response.message = 'Recording discarded'
+        response.recording_discarded = True
+        response.failure_event_count = 0
         return response
 
     def _validate_active_segment(self, request, response, command_name: str) -> bool:
