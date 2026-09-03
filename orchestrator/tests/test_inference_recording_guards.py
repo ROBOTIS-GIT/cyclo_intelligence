@@ -197,6 +197,58 @@ def test_copy_task_info_preserves_rlt_runtime_fields():
     assert copied.rlt_robot_override is True
 
 
+def test_non_groot_backend_forces_pytorch_acceleration():
+    task_info = _task_info('lerobot')
+    task_info.acceleration_mode = 'tensorrt_dit'
+    task_info.acceleration_engine_path = '/workspace/model/groot/engine.trt'
+
+    assert OrchestratorNode._acceleration_for_service(
+        task_info,
+        '/lerobot',
+    ) == ('pytorch', '')
+
+
+def test_groot_backend_preserves_supported_tensorrt_acceleration():
+    task_info = _task_info('groot')
+    task_info.acceleration_mode = 'tensorrt'
+    task_info.acceleration_engine_path = (
+        '/workspace/model/groot/showroom_groot/../showroom_groot/engine.trt'
+    )
+
+    assert OrchestratorNode._acceleration_for_service(
+        task_info,
+        '/groot',
+    ) == (
+        'tensorrt_dit',
+        '/workspace/model/groot/showroom_groot/engine.trt',
+    )
+
+
+def test_orchestrator_preserves_tt_rtc_action_request_mode():
+    assert OrchestratorNode._normalize_action_request_mode('tt_rtc') == 'tt_rtc'
+    assert OrchestratorNode._normalize_action_request_mode('sync') == 'sync'
+
+
+def test_orchestrator_rejects_tt_rtc_for_non_groot_backend():
+    assert OrchestratorNode._action_request_mode_error(
+        'tt_rtc',
+        '/lerobot',
+    ) == 'TT-RTC action requests are supported only by GR00T N1.7'
+    assert OrchestratorNode._action_request_mode_error('tt_rtc', '/groot') == ''
+    assert OrchestratorNode._action_request_mode_error('async', '/lerobot') == ''
+
+
+def test_orchestrator_rejects_tensorrt_for_tt_rtc():
+    assert OrchestratorNode._action_request_mode_error(
+        'tt_rtc',
+        '/groot',
+        'tensorrt_dit',
+    ) == (
+        'TT-RTC currently requires PyTorch; disable TensorRT before starting '
+        'inference'
+    )
+
+
 def test_action_policy_switch_is_forwarded_for_active_rlt_session():
     node = _node()
     client = SimpleNamespace(

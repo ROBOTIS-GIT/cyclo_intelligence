@@ -188,6 +188,7 @@ def _write_completed_online_bundle(
     base_policy: Path,
     *,
     job_id: str = "d" * 32,
+    operation: str = "combined",
     task_instruction: str = "pick up the jelly bag",
     robot_type: str = "ffw_sg2_rev1",
     ppo_config: dict | None = None,
@@ -232,6 +233,7 @@ def _write_completed_online_bundle(
     )
     summary = {
         "status": "completed",
+        "operation": operation,
         "job_id": job_id,
         "episodes": 2,
         "updates": update_step,
@@ -251,6 +253,7 @@ def _write_completed_online_bundle(
     manifest = {
         "format": service.FLOW_SDE_ONLINE_BUNDLE_FORMAT,
         "status": "complete",
+        "operation": operation,
         "job_id": job_id,
         "base_checkpoint": str(base_policy),
         "base_policy_artifacts": base_hashes,
@@ -288,6 +291,81 @@ def _write_completed_online_bundle(
     return output, model, checkpoint
 
 
+def _write_rollout_collection(
+    output_root: Path,
+    base_policy: Path,
+    *,
+    job_id: str = "e" * 32,
+    episode_return: float = 1.0,
+) -> tuple[Path, Path]:
+    output = output_root / job_id
+    bundle = output / "rollouts" / ("update_000000_" + "f" * 32)
+    trainer = bundle / "source_training_state" / "trainer_state.pt"
+    trainer.parent.mkdir(parents=True)
+    trainer.write_bytes(b"source actor+critic+optimizer state")
+    rollout = bundle / "rollout.pt"
+    rollout.write_bytes(b"sealed on-policy rollout")
+    digest = "sha256:" + "1" * 64
+    config = _ppo_config()
+    manifest = {
+        "format": service.FLOW_SDE_ROLLOUT_BUNDLE_FORMAT,
+        "status": "sealed",
+        "payload": {"path": "rollout.pt", "sha256": _sha256(rollout)},
+        "source_trainer_checkpoint": {
+            "path": "source_training_state/trainer_state.pt",
+            "sha256": _sha256(trainer),
+        },
+        "contract": {
+            "episodes": 1,
+            "transitions": 3,
+            "conditioning_dim": 32,
+            "chain_length": 5,
+            "horizon": 10,
+            "action_dim": 19,
+        },
+        "policy_identity": {
+            "format": "cyclo.flow_sde_ppo.policy_identity.v1",
+            "source_update_step": 0,
+            "actor_sha256": digest,
+            "critic_sha256": digest,
+            "ppo_config": config,
+        },
+        "source_policy": {
+            "format": "cyclo.flow_sde_ppo.source_policy.v1",
+            "checkpoint_path": str(base_policy.resolve()),
+            "artifacts": _policy_hashes(base_policy),
+            "frozen_policy_sha256": digest,
+            "policy_contract": {"action_dim": 19, "chunk_size": 10},
+            "critic_contract": {"conditioning_dim": 32},
+            "task_instruction": "pick up the jelly bag",
+            "robot_type": "ffw_sg2_rev1",
+        },
+        "metadata": {"episode_return": episode_return},
+    }
+    (bundle / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    (output / "summary.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "operation": "collect",
+                "job_id": job_id,
+                "episodes": 1,
+                "episode_return": episode_return,
+                "base_checkpoint": str(base_policy.resolve()),
+                "task_instruction": "pick up the jelly bag",
+                "robot_type": "ffw_sg2_rev1",
+                "ppo_config": config,
+                "rollout_bundles": [str(bundle.resolve())],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return output, bundle
+
+
 def test_idle_status_and_routes_are_explicit(roots):
     supervisor = _supervisor()
 
@@ -302,6 +380,13 @@ def test_idle_status_and_routes_are_explicit(roots):
         "/flow-sde-ppo/status",
         "/flow-sde-ppo/stop",
         "/flow-sde-ppo/outcome",
+        "/flow-sde-ppo/rollout/start",
+        "/flow-sde-ppo/rollout/status",
+        "/flow-sde-ppo/rollout/stop",
+        "/flow-sde-ppo/rollout/outcome",
+        "/flow-sde-ppo/update/start",
+        "/flow-sde-ppo/update/status",
+        "/flow-sde-ppo/update/stop",
         "/flow-sde-ppo/value-warmup/start",
         "/flow-sde-ppo/value-warmup/status",
         "/flow-sde-ppo/value-warmup/stop",
@@ -530,10 +615,51 @@ def test_command_uses_dedicated_cli_container_and_writable_caches(
     assert command[command.index("--entrypoint") + 1] == "/lerobot/.venv/bin/python"
     assert "cyclo_brain.algorithm.rl.flow_sde_ppo.live_cli" in command
     assert command[command.index("--base-checkpoint") + 1] == job.policy_checkpoint
+    assert command[command.index("--operation") + 1] == "combined"
     assert command[command.index("--max-chunk-decisions") + 1] == "20"
     assert command[command.index("--ack-timeout") + 1] == "5.0"
     assert command[command.index("--sensor-timeout") + 1] == "15.0"
     assert "--value-warmup-bundle" not in command
+
+
+@pytest.mark.parametrize(
+    ("operation", "rollout_bundle"),
+    (
+        ("collect", ""),
+        (
+            "update",
+            "/workspace/checkpoint/multi_task_dit/flow_sde_ppo/"
+            + "e" * 32
+            + "/rollouts/update_000000_"
+            + "f" * 32,
+        ),
+    ),
+)
+def test_split_command_preserves_operation_and_exact_rollout_bundle(
+    tmp_path,
+    operation,
+    rollout_bundle,
+):
+    supervisor = _supervisor()
+    job = _job(
+        tmp_path,
+        episodes=1,
+        operation=operation,
+        rollout_bundle=rollout_bundle,
+        rollout_bundles=[rollout_bundle] if rollout_bundle else [],
+    )
+
+    command = supervisor._command(job)
+    status = supervisor._status(job)
+
+    assert command[command.index("--operation") + 1] == operation
+    assert status.operation == operation
+    if rollout_bundle:
+        assert command[command.index("--rollout-bundle") + 1] == rollout_bundle
+        assert status.rollout_bundles == [rollout_bundle]
+    else:
+        assert "--rollout-bundle" not in command
+        assert status.rollout_bundles == []
 
 
 def test_online_command_and_status_include_optional_value_warmup_bundle(tmp_path):
@@ -556,6 +682,63 @@ def test_online_request_without_warmup_preserves_existing_contract():
 
     assert request.value_warmup_bundle is None
     assert request.resume_checkpoint is None
+
+
+def test_rollout_collection_requires_exactly_one_episode(monkeypatch):
+    supervisor = _supervisor()
+    monkeypatch.setattr(
+        service.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("Popen must not be called"),
+    )
+
+    with pytest.raises(HTTPException, match="exactly one episode") as exc_info:
+        supervisor.start_rollout(
+            service.FlowSDEPPOStartRequest(
+                policy_checkpoint="/missing/is/not/validated",
+                robot_type="ffw_sg2_rev1",
+                episodes=2,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message", "status_code"),
+    (
+        ("payload", "payload failed verification", 400),
+        ("consumed", "already consumed", 409),
+    ),
+)
+def test_update_rejects_tampered_or_consumed_rollout_before_launch(
+    roots,
+    monkeypatch,
+    mutation,
+    message,
+    status_code,
+):
+    policy_root, output_root, _ = roots
+    policy = _write_policy(policy_root / "base")
+    _, bundle = _write_rollout_collection(output_root, policy)
+    if mutation == "payload":
+        (bundle / "rollout.pt").write_bytes(b"tampered rollout")
+    else:
+        (bundle / "consumption.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        service.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("Popen must not be called"),
+    )
+
+    with pytest.raises(HTTPException, match=message) as exc_info:
+        _supervisor().start_update(
+            service.FlowSDEPPOUpdateStartRequest(
+                rollout_bundle=str(bundle.resolve()),
+            )
+        )
+
+    assert exc_info.value.status_code == status_code
 
 
 def test_online_command_and_status_include_explicit_resume(tmp_path):
@@ -715,6 +898,39 @@ def test_online_start_carries_validated_resume_and_recovery_survives_restart(
     assert recovered.checkpoint_path == str(checkpoint.resolve())
     assert recovered.model_path == str(model.resolve())
     assert recovered.lineage_policy_checkpoint == str(base.resolve())
+
+
+def test_restart_discovery_preserves_update_operation(roots):
+    policy_root, output_root, _ = roots
+    base = _write_policy(policy_root / "base")
+    output, model, checkpoint = _write_completed_online_bundle(
+        output_root,
+        base,
+        operation="update",
+    )
+
+    recovered = service._discover_latest_online_job()
+
+    assert recovered is not None
+    assert recovered.operation == "update"
+    assert recovered.output_dir == str(output.resolve())
+    assert recovered.model_path == str(model.resolve())
+    assert recovered.checkpoint_path == str(checkpoint.resolve())
+
+
+def test_restart_discovery_preserves_collect_operation_and_bundle(roots):
+    policy_root, output_root, _ = roots
+    base = _write_policy(policy_root / "base")
+    output, bundle = _write_rollout_collection(output_root, base)
+
+    recovered = service._discover_latest_rollout_job()
+
+    assert recovered is not None
+    assert recovered.operation == "collect"
+    assert recovered.status == "completed"
+    assert recovered.output_dir == str(output.resolve())
+    assert recovered.rollout_bundles == [str(bundle.resolve())]
+    assert recovered.episodes == 1
 
 
 def test_online_start_carries_validated_warmup_into_job_and_process_command(
@@ -1025,6 +1241,51 @@ def test_live_cli_episode_events_drive_outcome_and_nested_metrics(tmp_path):
     assert job.clip_fraction == pytest.approx(0.25)
     assert job.checkpoint_path == "/tmp/trainer_state.pt"
     assert job.percentage == pytest.approx(50.0)
+
+
+def test_rollout_events_seal_exact_bundle_and_complete_collection(tmp_path):
+    supervisor = _supervisor()
+    first = "/workspace/checkpoint/multi_task_dit/flow_sde_ppo/rollout/one"
+    second = "/workspace/checkpoint/multi_task_dit/flow_sde_ppo/rollout/two"
+    job = _job(
+        tmp_path,
+        operation="collect",
+        episodes=1,
+        awaiting_outcome=True,
+    )
+
+    collected = supervisor._consume_event(
+        job,
+        {
+            "event": "episode_collected",
+            "episode": 1,
+            "episodes": 1,
+            "episode_return": 1.0,
+            "rollout_bundle": first,
+        },
+    )
+
+    assert collected is False
+    assert job.phase == "sealed"
+    assert job.awaiting_outcome is False
+    assert job.episode == 1
+    assert job.episode_return == pytest.approx(1.0)
+    assert job.percentage == pytest.approx(99.0)
+    assert job.rollout_bundles == [first]
+
+    completed = supervisor._consume_event(
+        job,
+        {
+            "event": "rollout_completed",
+            "status": "completed",
+            "rollout_bundles": [first, first, second],
+        },
+    )
+
+    assert completed is True
+    assert job.phase == "sealed"
+    assert job.rollout_bundles == [first, second]
+    assert job.awaiting_outcome is False
 
 
 def test_outcome_is_atomic_current_and_only_allowed_while_awaiting(tmp_path):

@@ -29,6 +29,8 @@ describe('RLTArchitectureDiagram', () => {
       .toBeInTheDocument();
     expect(screen.getByText('10 × 19 action chunk')).toBeInTheDocument();
     expect(screen.getByTestId('rlt-action-policy-diagram')).toBeInTheDocument();
+    expect(screen.getByTestId('rlt-action-policy-diagram'))
+      .toHaveAttribute('data-loop-policy-update-source', 'top-center');
     expect(screen.getByTestId('rlt-q-critic-diagram')).toBeInTheDocument();
     expect(screen.getByLabelText('RLT independent twin Q critic flow')).toBeInTheDocument();
     expect(screen.getByLabelText('Independent twin Q critics')).toBeInTheDocument();

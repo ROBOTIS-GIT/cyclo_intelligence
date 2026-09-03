@@ -165,6 +165,8 @@ class GR00TRLTShadowPolicy(nn.Module):
         image_token: Tensor,
         proprio: Tensor,
         reference_actions: Tensor,
+        *,
+        reference_offset_steps: int = 0,
     ) -> RLTShadowOutput:
         if not isinstance(reference_actions, Tensor) or tuple(reference_actions.shape) != (
             tokens.shape[0],
@@ -190,6 +192,18 @@ class GR00TRLTShadowPolicy(nn.Module):
             torch.isfinite(proprio).all()
         ):
             raise ValueError("RLT shadow inputs must be finite")
+        if (
+            isinstance(reference_offset_steps, bool)
+            or not isinstance(reference_offset_steps, int)
+            or reference_offset_steps < 0
+            or reference_offset_steps + self.spec.chunk_length
+            > self.spec.reference_horizon
+        ):
+            raise ValueError(
+                "RLT reference_offset_steps must select one complete "
+                f"{self.spec.chunk_length}-step chunk inside the "
+                f"{self.spec.reference_horizon}-step reference"
+            )
 
         z_rl = self.encoder(tokens, token_valid, image_token)
         actor_parameter = next(self.actor.parameters())
@@ -199,7 +213,9 @@ class GR00TRLTShadowPolicy(nn.Module):
             dtype=actor_parameter.dtype,
         )
         reference_prefix = reference_actions[
-            :, : self.spec.chunk_length
+            :,
+            reference_offset_steps : reference_offset_steps
+            + self.spec.chunk_length,
         ].detach().to(device=actor_parameter.device, dtype=actor_parameter.dtype)
         action_mean = self.actor(z_rl, proprio_actor, reference_prefix)
         expected = (tokens.shape[0], self.spec.chunk_length, self.spec.action_dim)

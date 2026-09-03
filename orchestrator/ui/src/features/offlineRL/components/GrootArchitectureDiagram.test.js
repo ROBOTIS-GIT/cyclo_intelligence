@@ -38,7 +38,13 @@ describe('GrootArchitectureDiagram', () => {
     expect(container.querySelector('[data-trainable-group="visual_encoder"]'))
       .toHaveClass('bg-[#f1eee7]', 'border-[#d9d2c5]');
     expect(container.querySelector('[data-trainable-group="action_module"]'))
-      .toHaveClass('bg-[#f8f1e6]', 'border-[#d8c4a5]');
+      .toHaveClass('bg-[#edf4ec]', 'border-[#acc2ae]');
+    expect(container.querySelector('[data-trainable-group="action_module"]'))
+      .not.toHaveClass('bg-[#f1eee7]', 'border-[#d9d2c5]');
+    expect(container.querySelector('[data-trainable-group="action_module"]'))
+      .toHaveClass('opacity-100');
+    expect(container.querySelector('[data-trainable-group="action_module"]'))
+      .not.toHaveClass('opacity-75');
     expect(screen.getByTestId('groot-policy-output'))
       .toHaveClass('bg-[#e9edfa]', 'border-[#9faacf]');
     expect(screen.getByText('Action chunk')).toBeInTheDocument();

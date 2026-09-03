@@ -103,6 +103,71 @@ describe('ACTTD3TrainingLoop', () => {
     ]));
   });
 
+  test('routes the replay arrow outside a wide algorithm card before entering its right edge', () => {
+    const geometry = buildLoopConnectorGeometry({
+      containerRect: {
+        left: 100, top: 50, right: 1100, bottom: 850, width: 1000, height: 800,
+      },
+      policyRect: {
+        left: 120, top: 80, right: 480, bottom: 280, width: 360, height: 200,
+      },
+      replayRect: {
+        left: 620, top: 90, right: 980, bottom: 310, width: 360, height: 220,
+      },
+      algorithmRect: {
+        left: 225, top: 430, right: 975, bottom: 650, width: 750, height: 220,
+      },
+    });
+
+    const connector = geometry.paths.find(({ id }) => id === 'replay-to-algorithm');
+    expect(connector).toMatchObject({
+      routing: 'outside-right',
+      start: { x: 700, y: 260 },
+      end: { x: 875, y: 490 },
+    });
+    expect(connector.d).toBe(
+      'M 700 260 C 700 356 907 356 907 380 L 907 490 L 875 490'
+    );
+  });
+
+  test('connects dedicated RLT anchors at Training Settings and Action Policy top centers', () => {
+    const geometry = buildLoopConnectorGeometry({
+      containerRect: {
+        left: 100, top: 50, right: 1100, bottom: 850, width: 1000, height: 800,
+      },
+      policyRect: {
+        left: 120, top: 80, right: 480, bottom: 280, width: 360, height: 200,
+      },
+      replayRect: {
+        left: 620, top: 90, right: 980, bottom: 310, width: 360, height: 220,
+      },
+      algorithmRect: {
+        left: 225, top: 430, right: 975, bottom: 650, width: 750, height: 220,
+      },
+      algorithmEntryRect: {
+        left: 750, top: 430, right: 975, bottom: 650, width: 225, height: 220,
+      },
+      algorithmExitRect: {
+        left: 225, top: 430, right: 450, bottom: 650, width: 225, height: 220,
+      },
+    });
+
+    const replayConnector = geometry.paths.find(({ id }) => id === 'replay-to-algorithm');
+    const policyConnector = geometry.paths.find(({ id }) => id === 'algorithm-to-policy');
+    expect(replayConnector).toMatchObject({
+      routing: 'entry-top-center',
+      start: { x: 700, y: 260 },
+      end: { x: 762.5, y: 380 },
+      d: 'M 700 260 C 700 302 762.5 338 762.5 380',
+    });
+    expect(policyConnector).toMatchObject({
+      routing: 'exit-top-center',
+      start: { x: 237.5, y: 380 },
+      end: { x: 200, y: 230 },
+      d: 'M 237.5 380 C 237.5 327.5 200 282.5 200 230',
+    });
+  });
+
   test('remeasures connector paths when observed card bounds change', () => {
     const frames = [];
     let resizeCallback = null;
@@ -196,6 +261,16 @@ describe('ACTTD3TrainingLoop', () => {
     expect(onCriticEpochsChange).toHaveBeenCalledWith('20');
     expect(onActorEpochsChange).toHaveBeenCalledWith('8');
     expect(onBatchSizeChange).toHaveBeenCalledWith('16');
+  });
+
+  test('allows a one-to-one warmed-critic schedule and explains its actor update period', () => {
+    renderLoop({ criticEpochs: '1', actorEpochs: '1' });
+
+    expect(screen.getByLabelText('Critic epochs')).toHaveAttribute('min', '1');
+    expect(screen.getByLabelText('Critic epochs')).toHaveAttribute('step', '1');
+    expect(screen.getByTestId('td3-schedule-help')).toHaveTextContent(
+      'Actor update period: every 1 critic update. 1:1 is allowed'
+    );
   });
 
   test('forwards the compact fit-content contract to the shared loop shell', () => {

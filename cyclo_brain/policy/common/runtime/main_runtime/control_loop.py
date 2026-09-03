@@ -47,16 +47,27 @@ logger = get_logger("main_runtime.control_loop")
 
 ACTION_REQUEST_MODE_ASYNC = "async"
 ACTION_REQUEST_MODE_SYNC = "sync"
-ACTION_REQUEST_MODES = {ACTION_REQUEST_MODE_ASYNC, ACTION_REQUEST_MODE_SYNC}
+ACTION_REQUEST_MODE_TT_RTC = "tt_rtc"
+ACTION_REQUEST_MODES = {
+    ACTION_REQUEST_MODE_ASYNC,
+    ACTION_REQUEST_MODE_SYNC,
+    ACTION_REQUEST_MODE_TT_RTC,
+}
 ACTION_POLICY_BASE = "base"
 ACTION_POLICY_RLT = "rlt"
 ACTION_POLICY_MODES = {ACTION_POLICY_BASE, ACTION_POLICY_RLT}
 
+TT_RTC_SOURCE_HZ = 15.0
+TT_RTC_HORIZON = 16
+TT_RTC_DELAY_STEPS = 6
+TT_RTC_ACTION_DIM = 19
+TT_RTC_RLT_CHUNK_SIZE = 10
+
 
 def normalize_action_request_mode(value: object) -> str:
     mode = str(value or "").strip().lower()
-    if mode == ACTION_REQUEST_MODE_SYNC:
-        return ACTION_REQUEST_MODE_SYNC
+    if mode in ACTION_REQUEST_MODES:
+        return mode
     return ACTION_REQUEST_MODE_ASYNC
 
 
@@ -121,6 +132,7 @@ class ControlLoop:
         self._rlt_enabled = False
         self._active_action_policy_mode = ACTION_POLICY_BASE
         self._pending_action_policy_mode: Optional[str] = None
+        self._action_policy_switch_error: Optional[str] = None
         self._active_rlt_robot_override = False
         self._pending_rlt_robot_override: Optional[bool] = None
 
@@ -145,11 +157,16 @@ class ControlLoop:
                 enable_command_publishers=True,
                 enable_preview_publisher=True,
             )
+            tt_rtc_enabled = (
+                self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC
+            )
             self._processor = ActionChunkProcessor(
-                inference_hz=self._inference_hz,
+                inference_hz=(
+                    TT_RTC_SOURCE_HZ if tt_rtc_enabled else self._inference_hz
+                ),
                 control_hz=self._control_hz,
                 chunk_align_window_s=self._chunk_align_window_s,
-                postprocess=self._postprocess_actions,
+                postprocess=self._postprocess_actions and not tt_rtc_enabled,
                 target_chunk_size=self._target_chunk_size,
                 alignment_mode=self._alignment_mode,
             )
@@ -159,6 +176,7 @@ class ControlLoop:
             self._rlt_enabled = bool(rlt_enabled)
             self._active_action_policy_mode = ACTION_POLICY_BASE
             self._pending_action_policy_mode = None
+            self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
             self._reset_request_latency_locked()
@@ -181,6 +199,7 @@ class ControlLoop:
             self._rlt_enabled = False
             self._active_action_policy_mode = ACTION_POLICY_BASE
             self._pending_action_policy_mode = None
+            self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
             self._processor = None
@@ -205,6 +224,7 @@ class ControlLoop:
             self._generation += 1
             self._active_action_policy_mode = ACTION_POLICY_BASE
             self._pending_action_policy_mode = None
+            self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
             self._mode_condition.notify_all()
@@ -217,6 +237,7 @@ class ControlLoop:
             self._generation += 1
             self._active_action_policy_mode = ACTION_POLICY_BASE
             self._pending_action_policy_mode = None
+            self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
             self._mode_condition.notify_all()
@@ -228,10 +249,12 @@ class ControlLoop:
         allow_robot_rlt: bool = False,
         timeout_s: float = 5.0,
     ) -> tuple[bool, str]:
-        """Switch at the next drained-buffer boundary without reloading.
+        """Switch policy routes without reloading the Engine.
 
         A generation bump invalidates any old-mode async request already in
-        flight. Actions already committed to the processor remain untouched.
+        flight. Sync/async switch at a drained buffer; TT-RTC hands over by
+        preserving the current prefix and atomically buffering the new route's
+        postfix. Actions already committed to the processor remain untouched.
         """
         try:
             target = normalize_action_policy_mode(action_policy_mode)
@@ -262,7 +285,14 @@ class ControlLoop:
 
             self._pending_action_policy_mode = target
             self._pending_rlt_robot_override = requested_robot_override
-            self._generation += 1
+            self._action_policy_switch_error = None
+            if self._action_request_mode != ACTION_REQUEST_MODE_TT_RTC:
+                # Async/sync cannot merge an old-route response across a
+                # switch. TT-RTC can: the old postfix safely bridges the
+                # committed prefix, then the target route takes the following
+                # refill. Keeping its generation prevents a switch requested
+                # mid-inference from draining the queue idle.
+                self._generation += 1
             self._mode_condition.notify_all()
             while (
                 self._running
@@ -279,6 +309,10 @@ class ControlLoop:
                 and self._pending_action_policy_mode is None
             ):
                 return True, f"{target.upper()} action active"
+            if self._action_policy_switch_error:
+                message = self._action_policy_switch_error
+                self._action_policy_switch_error = None
+                return False, message
             if self._pending_action_policy_mode == target:
                 self._pending_action_policy_mode = None
                 self._pending_rlt_robot_override = None
@@ -391,7 +425,23 @@ class ControlLoop:
             self._commit_pending_action_policy_locked(processor)
             generation = self._generation
             action_policy_mode = self._active_action_policy_mode
+            if (
+                action_request_mode == ACTION_REQUEST_MODE_TT_RTC
+                and self._pending_action_policy_mode is not None
+            ):
+                # A TT-RTC route switch is itself a prefix-conditioned refill.
+                # Keep executing the old route's committed prefix, but ask the
+                # target route for the next postfix instead of draining idle.
+                action_policy_mode = self._pending_action_policy_mode
             should_request = self._should_request_actions(processor)
+            rtc_prefix_actions = None
+            rtc_prefix_captured_at = None
+            if (
+                should_request
+                and action_request_mode == ACTION_REQUEST_MODE_TT_RTC
+            ):
+                rtc_prefix_actions = processor.peek_actions()
+                rtc_prefix_captured_at = time.monotonic()
 
         if should_request:
             self._request_thread = threading.Thread(
@@ -401,6 +451,8 @@ class ControlLoop:
                     generation,
                     action_request_mode,
                     action_policy_mode,
+                    rtc_prefix_actions,
+                    rtc_prefix_captured_at,
                 ),
                 daemon=True,
             )
@@ -412,15 +464,44 @@ class ControlLoop:
         generation: int,
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
         action_policy_mode: str = ACTION_POLICY_BASE,
+        rtc_prefix_actions: Optional[np.ndarray] = None,
+        rtc_prefix_captured_at: Optional[float] = None,
     ) -> None:
         action_request_mode = normalize_action_request_mode(action_request_mode)
         action_policy_mode = normalize_action_policy_mode(action_policy_mode)
+        rtc_prefix = np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+        rtc_delay_steps = 0
+        if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            try:
+                rtc_prefix = self._validate_tt_rtc_request_prefix(
+                    rtc_prefix_actions
+                )
+            except ValueError as error:
+                logger.warning("TT-RTC request discarded: %s", error)
+                return
+            rtc_delay_steps = int(rtc_prefix.shape[0])
         started_at = time.monotonic()
+        if (
+            action_request_mode == ACTION_REQUEST_MODE_TT_RTC
+            and rtc_prefix_captured_at is None
+        ):
+            rtc_prefix_captured_at = started_at
         try:
-            response = self._requester.get_action(
-                task_instruction,
-                action_policy_mode=action_policy_mode,
-            )
+            if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+                response = self._requester.get_action(
+                    task_instruction,
+                    action_policy_mode=action_policy_mode,
+                    action_request_mode=action_request_mode,
+                    rtc_delay_steps=rtc_delay_steps,
+                    rtc_action_dim=TT_RTC_ACTION_DIM,
+                    rtc_prefix_action_list=rtc_prefix.reshape(-1).tolist(),
+                )
+            else:
+                response = self._requester.get_action(
+                    task_instruction,
+                    action_policy_mode=action_policy_mode,
+                    action_request_mode=action_request_mode,
+                )
         except Exception as e:
             latency_s = time.monotonic() - started_at
             self._record_request_latency(latency_s)
@@ -428,6 +509,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 f"get_action raised: {e}",
+                action_request_mode=action_request_mode,
             )
             return
         latency_s = time.monotonic() - started_at
@@ -437,6 +519,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 f"get_action failed: {getattr(response, 'message', '')}",
+                action_request_mode=action_request_mode,
             )
             return
         try:
@@ -447,6 +530,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 f"get_action returned invalid chunk shape: {error}",
+                action_request_mode=action_request_mode,
             )
             return
         if chunk_size <= 0 or action_dim <= 0:
@@ -454,6 +538,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 "get_action returned empty action list",
+                action_request_mode=action_request_mode,
             )
             return
         try:
@@ -466,6 +551,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 f"action list is not numeric: {error}",
+                action_request_mode=action_request_mode,
             )
             return
         if not bool(np.isfinite(data).all()):
@@ -473,6 +559,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 "action list contains NaN or Inf",
+                action_request_mode=action_request_mode,
             )
             return
         if data.size != chunk_size * action_dim:
@@ -481,6 +568,7 @@ class ControlLoop:
                 action_policy_mode,
                 f"action list size mismatch: {data.size} != "
                 f"{chunk_size} * {action_dim}",
+                action_request_mode=action_request_mode,
             )
             return
         chunk = data.reshape(chunk_size, action_dim)
@@ -489,6 +577,7 @@ class ControlLoop:
                 generation,
                 action_policy_mode,
                 "reshaped action chunk contains NaN or Inf",
+                action_request_mode=action_request_mode,
             )
             return
         with self._lock:
@@ -497,6 +586,24 @@ class ControlLoop:
                 and self._running
                 and self._processor is not None
             ):
+                if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+                    committed = self._commit_tt_rtc_chunk_locked(
+                        chunk=chunk,
+                        captured_prefix=rtc_prefix,
+                        delay_steps=rtc_delay_steps,
+                        prefix_captured_at=float(rtc_prefix_captured_at),
+                        action_policy_mode=action_policy_mode,
+                    )
+                    if committed:
+                        self._commit_tt_rtc_action_policy_locked(
+                            action_policy_mode
+                        )
+                    else:
+                        self._handle_tt_rtc_commit_failure_locked(
+                            generation=generation,
+                            action_policy_mode=action_policy_mode,
+                        )
+                    return
                 buffer_delay_s = self._processor.buffer_size / max(
                     1.0,
                     self._processor.output_hz,
@@ -528,11 +635,205 @@ class ControlLoop:
                     scheduled_start_text,
                 )
 
+    @staticmethod
+    def _validate_tt_rtc_request_prefix(
+        prefix_actions: Optional[np.ndarray],
+    ) -> np.ndarray:
+        if prefix_actions is None:
+            return np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+        prefix = np.asarray(prefix_actions, dtype=np.float64)
+        if prefix.size == 0:
+            return np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+        if prefix.ndim != 2:
+            raise ValueError(
+                f"prefix must be 2D (T, D); got shape {prefix.shape}"
+            )
+        if prefix.shape[1] != TT_RTC_ACTION_DIM:
+            raise ValueError(
+                f"prefix action_dim must be {TT_RTC_ACTION_DIM}; "
+                f"got {prefix.shape[1]}"
+            )
+        if prefix.shape[0] > TT_RTC_DELAY_STEPS:
+            raise ValueError(
+                f"prefix may contain at most {TT_RTC_DELAY_STEPS} actions; "
+                f"got {prefix.shape[0]}"
+            )
+        if not bool(np.isfinite(prefix).all()):
+            raise ValueError("prefix contains NaN or Inf")
+        return prefix.copy()
+
+    def _commit_tt_rtc_chunk_locked(
+        self,
+        *,
+        chunk: np.ndarray,
+        captured_prefix: np.ndarray,
+        delay_steps: int,
+        prefix_captured_at: float,
+        action_policy_mode: str,
+    ) -> bool:
+        """Atomically validate and append one TT-RTC postfix.
+
+        The already queued prefix remains the sole source of commands during
+        inference.  A base GR00T response includes that prefix and contributes
+        only ``chunk[d:]``; an RLT response is already the 10-action postfix.
+        """
+        processor = self._processor
+        if processor is None:
+            return False
+        if chunk.ndim != 2 or chunk.shape[1] != TT_RTC_ACTION_DIM:
+            logger.warning(
+                "TT-RTC response discarded: expected action_dim=%d, got %s",
+                TT_RTC_ACTION_DIM,
+                tuple(chunk.shape),
+            )
+            return False
+        remaining_prefix = processor.peek_actions()
+        consumed_steps = self._tt_rtc_consumed_prefix_steps(
+            captured_prefix,
+            remaining_prefix,
+        )
+        if consumed_steps is None:
+            logger.warning(
+                "TT-RTC response discarded: committed prefix changed while "
+                "inference was in flight"
+            )
+            return False
+
+        if action_policy_mode == ACTION_POLICY_BASE:
+            if chunk.shape[0] != TT_RTC_HORIZON:
+                logger.warning(
+                    "TT-RTC base response discarded: expected H=%d, got %d",
+                    TT_RTC_HORIZON,
+                    chunk.shape[0],
+                )
+                return False
+            if delay_steps and not np.allclose(
+                chunk[:delay_steps],
+                captured_prefix,
+                rtol=1e-6,
+                atol=1e-6,
+            ):
+                logger.warning(
+                    "TT-RTC base response discarded: returned prefix does "
+                    "not match the committed action prefix"
+                )
+                return False
+            postfix = chunk[delay_steps:]
+        else:
+            if chunk.shape[0] != TT_RTC_RLT_CHUNK_SIZE:
+                logger.warning(
+                    "TT-RTC RLT response discarded: expected C=%d, got %d",
+                    TT_RTC_RLT_CHUNK_SIZE,
+                    chunk.shape[0],
+                )
+                return False
+            postfix = chunk
+
+        # Check the deadline immediately before enqueue so model execution,
+        # response parsing, lock contention, and validation are all included.
+        elapsed_since_capture_s = max(
+            0.0,
+            time.monotonic() - prefix_captured_at,
+        )
+        if delay_steps > 0:
+            deadline_s = delay_steps / TT_RTC_SOURCE_HZ
+            if elapsed_since_capture_s > deadline_s + 1e-9:
+                logger.warning(
+                    "TT-RTC response discarded: capture-to-enqueue latency "
+                    "%.3fs exceeded %d-step deadline %.3fs",
+                    elapsed_since_capture_s,
+                    delay_steps,
+                    deadline_s,
+                )
+                return False
+
+        produced = processor.push_actions(
+            postfix,
+            scheduled_start_delay_s=None,
+            align=False,
+        )
+        logger.debug(
+            "buffered TT-RTC postfix: policy=%s delay=%d source=%d "
+            "produced=%d capture_to_enqueue=%.3fs consumed_prefix=%d "
+            "remaining_prefix=%d",
+            action_policy_mode,
+            delay_steps,
+            chunk.shape[0],
+            produced,
+            elapsed_since_capture_s,
+            consumed_steps,
+            remaining_prefix.shape[0],
+        )
+        return True
+
+    def _commit_tt_rtc_action_policy_locked(self, action_policy_mode: str) -> None:
+        """Commit a pending TT-RTC route only after its postfix is buffered."""
+        if self._pending_action_policy_mode != action_policy_mode:
+            return
+        self._active_action_policy_mode = action_policy_mode
+        self._active_rlt_robot_override = (
+            bool(self._pending_rlt_robot_override)
+            if action_policy_mode == ACTION_POLICY_RLT
+            else False
+        )
+        self._pending_action_policy_mode = None
+        self._pending_rlt_robot_override = None
+        self._action_policy_switch_error = None
+        logger.info(
+            "TT-RTC action policy switched with prefix handoff: %s",
+            action_policy_mode,
+        )
+        self._mode_condition.notify_all()
+
+    def _handle_tt_rtc_commit_failure_locked(
+        self,
+        *,
+        generation: int,
+        action_policy_mode: str,
+    ) -> None:
+        """Fail an invalid MLP postfix back to VLA without dropping prefix."""
+        if generation != self._generation or not self._running:
+            return
+        if action_policy_mode != ACTION_POLICY_RLT:
+            return
+        if (
+            self._active_action_policy_mode != ACTION_POLICY_RLT
+            and self._pending_action_policy_mode != ACTION_POLICY_RLT
+        ):
+            return
+        self._fallback_rlt_to_base_locked(
+            "TT-RTC MLP response rejected; reverting to VLA action",
+            preserve_buffer=True,
+        )
+
+    @staticmethod
+    def _tt_rtc_consumed_prefix_steps(
+        captured_prefix: np.ndarray,
+        remaining_prefix: np.ndarray,
+    ) -> Optional[int]:
+        """Return consumed steps when queue is the exact captured suffix."""
+        captured = np.asarray(captured_prefix, dtype=np.float64)
+        remaining = np.asarray(remaining_prefix, dtype=np.float64)
+        if captured.ndim != 2 or remaining.ndim != 2:
+            return None
+        if remaining.shape[0] > captured.shape[0]:
+            return None
+        consumed = captured.shape[0] - remaining.shape[0]
+        if remaining.shape[0] == 0:
+            return consumed
+        if remaining.shape[1] != captured.shape[1]:
+            return None
+        if not bool(np.array_equal(remaining, captured[consumed:])):
+            return None
+        return consumed
+
     def _handle_action_request_failure(
         self,
         generation: int,
         action_policy_mode: str,
         reason: str,
+        *,
+        action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
     ) -> None:
         logger.warning("%s", reason)
         if action_policy_mode != ACTION_POLICY_RLT:
@@ -541,16 +842,30 @@ class ControlLoop:
             if (
                 generation != self._generation
                 or not self._running
-                or self._active_action_policy_mode != ACTION_POLICY_RLT
+                or (
+                    self._active_action_policy_mode != ACTION_POLICY_RLT
+                    and self._pending_action_policy_mode != ACTION_POLICY_RLT
+                )
             ):
                 return
             self._fallback_rlt_to_base_locked(
-                f"RLT inference failed; reverting to base action: {reason}"
+                f"RLT inference failed; reverting to base action: {reason}",
+                preserve_buffer=(
+                    normalize_action_request_mode(action_request_mode)
+                    == ACTION_REQUEST_MODE_TT_RTC
+                ),
             )
 
-    def _fallback_rlt_to_base_locked(self, reason: str) -> None:
-        if self._processor is not None:
+    def _fallback_rlt_to_base_locked(
+        self,
+        reason: str,
+        *,
+        preserve_buffer: bool = False,
+    ) -> None:
+        if self._processor is not None and not preserve_buffer:
             self._processor.clear()
+        if self._pending_action_policy_mode == ACTION_POLICY_RLT:
+            self._action_policy_switch_error = reason
         self._active_action_policy_mode = ACTION_POLICY_BASE
         self._pending_action_policy_mode = None
         self._active_rlt_robot_override = False
@@ -564,6 +879,13 @@ class ControlLoop:
         processor: ActionChunkProcessor,
     ) -> None:
         target = self._pending_action_policy_mode
+        if (
+            target is not None
+            and self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC
+        ):
+            # TT-RTC commits the route together with the target postfix.  A
+            # plain drained-buffer commit would introduce an idle bootstrap.
+            return
         if target is None or processor.buffer_size > 0:
             return
         if self._request_thread is not None and self._request_thread.is_alive():
@@ -582,10 +904,15 @@ class ControlLoop:
     def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
         if self._request_thread is not None and self._request_thread.is_alive():
             return False
-        if self._pending_action_policy_mode is not None:
+        if (
+            self._pending_action_policy_mode is not None
+            and self._action_request_mode != ACTION_REQUEST_MODE_TT_RTC
+        ):
             return False
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
             return processor.buffer_size <= 0
+        if self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            return processor.buffer_size <= TT_RTC_DELAY_STEPS
         return processor.buffer_size < self._refill_threshold(processor)
 
     def _refill_threshold(self, processor: ActionChunkProcessor) -> int:

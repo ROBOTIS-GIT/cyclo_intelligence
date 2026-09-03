@@ -27,7 +27,13 @@ from .on_policy import (
     index_rollout,
     rollout_to,
 )
+from .rollout_bundle import (
+    LoadedFlowSDERolloutBundle,
+    POLICY_IDENTITY_FORMAT,
+    validate_source_policy,
+)
 from .sampler import recompute_flow_sde_log_probs, sample_flow_sde_chunk
+from .value_warmup import module_sha256
 
 
 @runtime_checkable
@@ -219,6 +225,22 @@ class FlowSDEPPOTrainer:
         """Return a defensive copy of the critic initialization contract."""
 
         return copy.deepcopy(self._value_initialization_provenance)
+
+    def rollout_policy_identity(self) -> dict[str, Any]:
+        """Return the exact actor, critic, and PPO config used for collection.
+
+        A persisted rollout must match this identity before ``update``.  In
+        particular, a freshly initialized critic is not interchangeable with
+        the critic that supplied the stored ``old_value`` estimates.
+        """
+
+        return {
+            "format": POLICY_IDENTITY_FORMAT,
+            "source_update_step": self.update_step,
+            "actor_sha256": module_sha256(self._actor_module()),
+            "critic_sha256": module_sha256(self.value_head),
+            "ppo_config": asdict(self.config),
+        }
 
     def record_value_initialization_provenance(self, provenance: Mapping[str, Any]) -> None:
         """Bind one immutable offline initialization record to this online run."""
@@ -642,17 +664,67 @@ class FlowSDEPPOTrainer:
         return resolved
 
 
-def collect_one_episode_and_update(
+def collect_one_episode(
     trainer: FlowSDEPPOTrainer,
     source: FlowSDEEpisodeSource,
-) -> tuple[FlowSDEEpisode, FlowSDEPPOUpdateMetrics]:
-    """Minimal real entrypoint used by a live or test rollout source."""
+) -> FlowSDEEpisode:
+    """Collect one complete episode without mutating either optimizer."""
 
     if not isinstance(trainer, FlowSDEPPOTrainer):
-        raise TypeError("Flow-SDE one-episode update requires FlowSDEPPOTrainer")
+        raise TypeError("Flow-SDE episode collection requires FlowSDEPPOTrainer")
     if not isinstance(source, FlowSDEEpisodeSource):
         raise TypeError("Flow-SDE source must implement collect_episode(trainer)")
     episode = source.collect_episode(trainer)
     if not isinstance(episode, FlowSDEEpisode):
         raise TypeError("Flow-SDE source returned an invalid episode")
-    return episode, trainer.update([episode])
+    return episode
+
+
+def _update_collected_episodes(
+    trainer: FlowSDEPPOTrainer,
+    episodes: tuple[FlowSDEEpisode, ...] | list[FlowSDEEpisode],
+) -> FlowSDEPPOUpdateMetrics:
+    """Update only from already-collected, complete on-policy episodes."""
+
+    if not isinstance(trainer, FlowSDEPPOTrainer):
+        raise TypeError("Flow-SDE rollout update requires FlowSDEPPOTrainer")
+    if not isinstance(episodes, (tuple, list)) or not episodes:
+        raise ValueError("Flow-SDE rollout update requires complete episodes")
+    if not all(isinstance(episode, FlowSDEEpisode) for episode in episodes):
+        raise TypeError("Flow-SDE rollout update received an invalid episode")
+    return trainer.update(episodes)
+
+
+def update_rollout_bundle(
+    trainer: FlowSDEPPOTrainer,
+    bundle: LoadedFlowSDERolloutBundle,
+    *,
+    expected_source_policy: Mapping[str, Any],
+) -> FlowSDEPPOUpdateMetrics:
+    """Restore the bundle's behavior policy, validate it, then update once."""
+
+    if not isinstance(trainer, FlowSDEPPOTrainer):
+        raise TypeError("Flow-SDE rollout update requires FlowSDEPPOTrainer")
+    if not isinstance(bundle, LoadedFlowSDERolloutBundle):
+        raise TypeError("Flow-SDE rollout update requires a loaded rollout bundle")
+    if bundle.consumption_receipt is not None:
+        raise RuntimeError("Flow-SDE rollout bundle was already consumed")
+    expected_source = validate_source_policy(expected_source_policy)
+    if bundle.source_policy != expected_source:
+        raise RuntimeError("Rollout source policy artifacts or contract do not match")
+    restored_step = trainer.load_checkpoint(bundle.source_trainer_checkpoint)
+    if restored_step != bundle.policy_identity["source_update_step"]:
+        raise RuntimeError("Rollout source checkpoint update step mismatch")
+    if trainer.rollout_policy_identity() != bundle.policy_identity:
+        raise RuntimeError("Rollout source checkpoint did not restore exactly")
+    return _update_collected_episodes(trainer, list(bundle.episodes))
+
+
+def collect_one_episode_and_update(
+    trainer: FlowSDEPPOTrainer,
+    source: FlowSDEEpisodeSource,
+) -> tuple[FlowSDEEpisode, FlowSDEPPOUpdateMetrics]:
+    """Compatibility facade for the original coupled live-job contract."""
+
+    episode = collect_one_episode(trainer, source)
+    return episode, _update_collected_episodes(trainer, [episode])

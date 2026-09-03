@@ -3,6 +3,9 @@ import {
   getActionPolicyCommandFields,
   getCommandRecordingFolder,
   getConversionCommandFields,
+  getInferenceAccelerationFields,
+  getInferenceActionRequestMode,
+  getInferenceTaskTags,
   getRecordCommandServiceTimeoutMs,
   isInferenceCommandRequest,
   normalizeEpisodeOutcome,
@@ -20,6 +23,64 @@ describe('command task-info source', () => {
       'inference'
     )).toBe(true);
     expect(isInferenceCommandRequest(PageType.INFERENCE, 'record')).toBe(false);
+  });
+});
+
+describe('inference task tags', () => {
+  test('round-trips the selected policy type without a ROS interface change', () => {
+    expect(getInferenceTaskTags(
+      { serviceType: 'groot', policyType: 'n17' },
+      'robot'
+    )).toEqual([
+      'inference_mode:robot',
+      'policy_type:n17',
+    ]);
+  });
+
+  test('omits an empty policy type for legacy callers', () => {
+    expect(getInferenceTaskTags({}, 'simulation')).toEqual([
+      'inference_mode:simulation',
+    ]);
+  });
+});
+
+describe('inference acceleration fields', () => {
+  test('keeps TensorRT fields for GR00T N1.7', () => {
+    expect(getInferenceAccelerationFields({
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: ' /workspace/model/groot/dit.trt ',
+    })).toEqual({
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/dit.trt',
+    });
+  });
+
+  test.each([
+    ['ACT', 'lerobot', 'act'],
+    ['an unsupported GR00T policy', 'groot', 'future'],
+  ])('forces %s onto PyTorch', (_label, serviceType, policyType) => {
+    expect(getInferenceAccelerationFields({
+      serviceType,
+      policyType,
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/dit.trt',
+    })).toEqual({
+      accelerationMode: 'pytorch',
+      accelerationEnginePath: '',
+    });
+  });
+});
+
+describe('inference action-request mode', () => {
+  test('preserves TT-RTC for the TaskInfo wire payload', () => {
+    expect(getInferenceActionRequestMode({ actionRequestMode: 'tt_rtc' }))
+      .toBe('tt_rtc');
+    expect(getInferenceActionRequestMode({ actionRequestMode: 'sync' }))
+      .toBe('sync');
+    expect(getInferenceActionRequestMode({ actionRequestMode: 'unsupported' }))
+      .toBe('async');
   });
 });
 

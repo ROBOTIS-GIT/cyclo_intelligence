@@ -161,7 +161,11 @@ export default function RLTArchitectureDiagram({
       className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 lg:gap-4"
       data-testid="rlt-architecture-diagram"
     >
-      <div className="flex min-w-0 flex-col" data-testid="rlt-action-policy-diagram">
+      <div
+        className="flex min-w-0 flex-col"
+        data-testid="rlt-action-policy-diagram"
+        data-loop-policy-update-source="top-center"
+      >
         <div className="flex shrink-0 items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="truncate text-[13px] font-semibold text-[#39352e]">

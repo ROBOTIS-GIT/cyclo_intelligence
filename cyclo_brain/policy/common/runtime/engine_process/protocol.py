@@ -41,6 +41,10 @@ string acceleration_engine_path
 bool rlt_enabled
 string rlt_bundle_path
 string action_policy_mode
+string action_request_mode
+int32 rtc_delay_steps
+int32 rtc_action_dim
+float64[] rtc_prefix_action_list
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -67,6 +71,10 @@ class EngineCommandRequest:
     rlt_enabled: bool = False
     rlt_bundle_path: str = ""
     action_policy_mode: str = "base"
+    action_request_mode: str = "async"
+    rtc_delay_steps: int = 0
+    rtc_action_dim: int = 0
+    rtc_prefix_action_list: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -82,6 +90,7 @@ class EngineCommandResponse:
 
 def request_from_message(message: Any) -> EngineCommandRequest:
     """Normalize a ROS/Zenoh request object into a dataclass."""
+    rtc_prefix = getattr(message, "rtc_prefix_action_list", None)
     return EngineCommandRequest(
         command=int(getattr(message, "command", 0)),
         seq_id=int(getattr(message, "seq_id", 0)),
@@ -98,6 +107,15 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         action_policy_mode=str(
             getattr(message, "action_policy_mode", "") or "base"
         ),
+        action_request_mode=str(
+            getattr(message, "action_request_mode", "") or "async"
+        ),
+        rtc_delay_steps=int(getattr(message, "rtc_delay_steps", 0)),
+        rtc_action_dim=int(getattr(message, "rtc_action_dim", 0)),
+        rtc_prefix_action_list=[
+            float(value)
+            for value in (list(rtc_prefix) if rtc_prefix is not None else [])
+        ],
     )
 
 
@@ -143,6 +161,13 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "rlt_enabled": bool(request.rlt_enabled),
         "rlt_bundle_path": str(request.rlt_bundle_path),
         "action_policy_mode": str(request.action_policy_mode),
+        "action_request_mode": str(request.action_request_mode),
+        "rtc_delay_steps": int(request.rtc_delay_steps),
+        "rtc_action_dim": int(request.rtc_action_dim),
+        "rtc_prefix_action_list": np.asarray(
+            request.rtc_prefix_action_list,
+            dtype=np.float64,
+        ),
     }
 
 

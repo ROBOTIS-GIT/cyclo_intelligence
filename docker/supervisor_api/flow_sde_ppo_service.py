@@ -59,6 +59,7 @@ FLOW_SDE_POLICY_ARTIFACTS = (
 FLOW_SDE_ONLINE_BUNDLE_FORMAT = "cyclo.flow_sde_ppo.online.bundle.v1"
 FLOW_SDE_ONLINE_STARTUP_FORMAT = "cyclo.flow_sde_ppo.online_startup.v1"
 FLOW_SDE_ONLINE_EXPORT_FORMAT = "cyclo.flow_sde_ppo.actor.v1"
+FLOW_SDE_ROLLOUT_BUNDLE_FORMAT = "cyclo.flow_sde_ppo.rollout.bundle.v1"
 
 
 class FlowSDEPPOStartRequest(BaseModel):
@@ -88,6 +89,10 @@ class FlowSDEPPOOutcomeRequest(BaseModel):
     outcome: Literal["success", "fail", "cancel"]
 
 
+class FlowSDEPPOUpdateStartRequest(BaseModel):
+    rollout_bundle: str
+
+
 class FlowSDEValueWarmupStartRequest(BaseModel):
     policy_checkpoint: str
     dataset_paths: list[str] = Field(min_length=1, max_length=128)
@@ -102,6 +107,7 @@ class FlowSDEValueWarmupStartRequest(BaseModel):
 class FlowSDEPPOStatus(BaseModel):
     ready: bool = True
     status: Literal["idle", "running", "completed", "failed", "stopped"]
+    operation: Literal["combined", "collect", "update"] = "combined"
     phase: str = "idle"
     percentage: float = 0.0
     job_id: str = ""
@@ -114,6 +120,7 @@ class FlowSDEPPOStatus(BaseModel):
     output_dir: str = ""
     checkpoint_path: str = ""
     model_path: str = ""
+    rollout_bundles: list[str] = Field(default_factory=list)
     episode: int = 0
     episodes: int = 1
     chunk_decisions: int = 0
@@ -172,6 +179,8 @@ class _FlowSDEPPOJob:
     value_learning_rate: float
     ack_timeout_seconds: float
     sensor_timeout_seconds: float
+    operation: str = "combined"
+    rollout_bundle: str = ""
     value_warmup_bundle: str = ""
     resume_checkpoint: str = ""
     resume_source_job_id: str = ""
@@ -181,6 +190,7 @@ class _FlowSDEPPOJob:
     percentage: float = 0.0
     checkpoint_path: str = ""
     model_path: str = ""
+    rollout_bundles: list[str] = field(default_factory=list)
     episode: int = 0
     chunk_decisions: int = 0
     update_step: int = 0
@@ -920,6 +930,11 @@ def _discover_latest_online_job() -> _FlowSDEPPOJob | None:
                 value_learning_rate=float(config["value_learning_rate"]),
             )
             summary = _read_json_object(output / "summary.json", name="online PPO summary")
+            operation = str(
+                manifest.get("operation") or summary.get("operation") or "combined"
+            )
+            if operation not in {"combined", "update"}:
+                continue
             episodes = summary.get("episodes")
             if isinstance(episodes, bool) or not isinstance(episodes, int) or episodes < 1:
                 continue
@@ -961,6 +976,7 @@ def _discover_latest_online_job() -> _FlowSDEPPOJob | None:
                 value_learning_rate=float(config["value_learning_rate"]),
                 ack_timeout_seconds=5.0,
                 sensor_timeout_seconds=15.0,
+                operation=operation,
                 value_warmup_bundle=warmup_bundle,
                 resume_checkpoint=previous_checkpoint,
                 resume_source_job_id=previous_job_id,
@@ -973,6 +989,93 @@ def _discover_latest_online_job() -> _FlowSDEPPOJob | None:
                 episode=episodes,
                 update_step=resolved.update_step,
                 message="Recovered completed Flow-SDE PPO job",
+                returncode=0,
+            )
+        except (HTTPException, KeyError, TypeError, ValueError, OSError):
+            continue
+    return None
+
+
+def _discover_latest_rollout_job() -> _FlowSDEPPOJob | None:
+    """Recover the newest unconsumed, sealed rollout after an API restart."""
+
+    root = Path(os.path.abspath(str(FLOW_SDE_OUTPUT_ROOT)))
+    if not root.is_dir() or root.is_symlink():
+        return None
+    try:
+        candidates = sorted(
+            (
+                path
+                for path in root.iterdir()
+                if path.is_dir()
+                and not path.is_symlink()
+                and _is_job_id(path.name)
+                and (path / "summary.json").is_file()
+            ),
+            key=lambda path: (path / "summary.json").stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return None
+
+    for output in candidates:
+        try:
+            summary = _read_json_object(
+                output / "summary.json",
+                name="rollout collection summary",
+            )
+            if (
+                summary.get("status") != "completed"
+                or summary.get("operation") != "collect"
+                or summary.get("job_id") != output.name
+            ):
+                continue
+            bundle_paths = summary.get("rollout_bundles")
+            if not isinstance(bundle_paths, list) or len(bundle_paths) != 1:
+                continue
+            bundle, manifest = _resolve_rollout_bundle(bundle_paths[0])
+            bundle.relative_to((output / "rollouts").resolve())
+            source_policy = manifest["source_policy"]
+            identity = manifest["policy_identity"]
+            contract = manifest["contract"]
+            config = identity.get("ppo_config")
+            if not isinstance(config, dict) or config != _expected_online_ppo_config(
+                ppo_epochs=int(config["ppo_epochs"]),
+                minibatch_size=int(config["minibatch_size"]),
+                actor_learning_rate=float(config["actor_learning_rate"]),
+                value_learning_rate=float(config["value_learning_rate"]),
+            ):
+                continue
+            if contract.get("episodes") != 1:
+                continue
+            checkpoint = _resolve_policy_checkpoint(source_policy["checkpoint_path"])
+            robot_type = _safe_robot_type(source_policy["robot_type"])
+            task_instruction = _safe_instruction(source_policy["task_instruction"])
+            return _FlowSDEPPOJob(
+                job_id=output.name,
+                policy_checkpoint=str(checkpoint),
+                robot_type=robot_type,
+                task_instruction=task_instruction,
+                output_dir=str(output),
+                control_file=str(output / "control" / "outcome.json"),
+                log_path=str(FLOW_SDE_LOG_ROOT / f"{output.name}.log"),
+                episodes=1,
+                ppo_epochs=int(config["ppo_epochs"]),
+                minibatch_size=int(config["minibatch_size"]),
+                max_chunk_decisions=20,
+                actor_learning_rate=float(config["actor_learning_rate"]),
+                value_learning_rate=float(config["value_learning_rate"]),
+                ack_timeout_seconds=5.0,
+                sensor_timeout_seconds=15.0,
+                operation="collect",
+                rollout_bundles=[str(bundle)],
+                lineage_policy_checkpoint=str(checkpoint),
+                status="completed",
+                phase="complete",
+                percentage=100.0,
+                episode=1,
+                episode_return=float(summary.get("episode_return", 0.0)),
+                message="Recovered sealed Flow-SDE PPO rollout",
                 returncode=0,
             )
         except (HTTPException, KeyError, TypeError, ValueError, OSError):
@@ -1329,6 +1432,62 @@ def _flow_sde_output_path(job_id: str) -> Path:
     return output
 
 
+def _resolve_rollout_bundle(raw_path: str) -> tuple[Path, dict[str, Any]]:
+    """Resolve one sealed, unconsumed rollout under the PPO output root."""
+
+    candidate = Path(str(raw_path or "").strip()).expanduser()
+    if not candidate.is_absolute():
+        raise HTTPException(400, "rollout_bundle must be an absolute path")
+    try:
+        resolved = candidate.resolve(strict=True)
+        output_root = FLOW_SDE_OUTPUT_ROOT.resolve(strict=True)
+        resolved.relative_to(output_root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, "rollout_bundle must be under the Flow-SDE output root") from exc
+    if _has_symlink_component(FLOW_SDE_OUTPUT_ROOT, candidate) or not resolved.is_dir():
+        raise HTTPException(400, "rollout_bundle must be a real directory")
+    required = (
+        resolved / "manifest.json",
+        resolved / "rollout.pt",
+        resolved / "source_training_state" / "trainer_state.pt",
+    )
+    if any(path.is_symlink() or not path.is_file() for path in required):
+        raise HTTPException(400, "rollout_bundle is incomplete")
+    if (resolved / "consumption.json").exists():
+        raise HTTPException(409, "rollout_bundle was already consumed")
+    try:
+        manifest = json.loads(required[0].read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "rollout_bundle manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("format") != FLOW_SDE_ROLLOUT_BUNDLE_FORMAT
+        or manifest.get("status") != "sealed"
+    ):
+        raise HTTPException(400, "rollout_bundle is not a sealed Flow-SDE rollout")
+    for name in ("policy_identity", "source_policy", "contract"):
+        if not isinstance(manifest.get(name), dict):
+            raise HTTPException(400, f"rollout_bundle {name} is invalid")
+    payload = manifest.get("payload")
+    source_checkpoint = manifest.get("source_trainer_checkpoint")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("path") != "rollout.pt"
+        or not _is_sha256(payload.get("sha256"))
+        or _sha256_file(required[1]) != payload["sha256"]
+    ):
+        raise HTTPException(400, "rollout_bundle payload failed verification")
+    if (
+        not isinstance(source_checkpoint, dict)
+        or source_checkpoint.get("path")
+        != "source_training_state/trainer_state.pt"
+        or not _is_sha256(source_checkpoint.get("sha256"))
+        or _sha256_file(required[2]) != source_checkpoint["sha256"]
+    ):
+        raise HTTPException(400, "rollout_bundle trainer state failed verification")
+    return resolved, manifest
+
+
 def _remove_empty_job_directories(output_dir: Path, control_dir: Path) -> None:
     """Best-effort cleanup restricted to the two freshly-created directories."""
 
@@ -1430,6 +1589,48 @@ class FlowSDEPPOSupervisor:
             response_model=FlowSDEPPOStatus,
         )
         self.router.add_api_route(
+            "/rollout/start",
+            self.start_rollout,
+            methods=["POST"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/rollout/status",
+            self.status,
+            methods=["GET"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/rollout/stop",
+            self.stop,
+            methods=["POST"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/rollout/outcome",
+            self.outcome,
+            methods=["POST"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/update/start",
+            self.start_update,
+            methods=["POST"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/update/status",
+            self.status,
+            methods=["GET"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
+            "/update/stop",
+            self.stop,
+            methods=["POST"],
+            response_model=FlowSDEPPOStatus,
+        )
+        self.router.add_api_route(
             "/value-warmup/start",
             self.start_value_warmup,
             methods=["POST"],
@@ -1514,6 +1715,8 @@ class FlowSDEPPOSupervisor:
             job.output_dir,
             "--job-id",
             job.job_id,
+            "--operation",
+            job.operation,
             "--control-file",
             job.control_file,
             "--robot-type",
@@ -1537,6 +1740,8 @@ class FlowSDEPPOSupervisor:
             "--sensor-timeout",
             str(job.sensor_timeout_seconds),
         ]
+        if job.rollout_bundle:
+            command.extend(("--rollout-bundle", job.rollout_bundle))
         if job.value_warmup_bundle:
             command.extend(("--value-warmup-bundle", job.value_warmup_bundle))
         if job.resume_checkpoint:
@@ -1626,6 +1831,7 @@ class FlowSDEPPOSupervisor:
             )
         return FlowSDEPPOStatus(
             status=job.status,
+            operation=job.operation,
             phase=job.phase,
             percentage=job.percentage,
             job_id=job.job_id,
@@ -1638,6 +1844,7 @@ class FlowSDEPPOSupervisor:
             output_dir=job.output_dir,
             checkpoint_path=job.checkpoint_path,
             model_path=job.model_path if job.status == "completed" else "",
+            rollout_bundles=list(job.rollout_bundles),
             episode=job.episode,
             episodes=job.episodes,
             chunk_decisions=job.chunk_decisions,
@@ -1969,7 +2176,11 @@ class FlowSDEPPOSupervisor:
             return False
         if event == "ready":
             job.phase = str(payload.get("stage") or "rollout")
-            job.message = "Flow-SDE PPO is ready to collect an episode"
+            job.message = (
+                "Flow-SDE PPO is ready to update the sealed rollout"
+                if job.operation == "update"
+                else "Flow-SDE PPO is ready to collect an episode"
+            )
             return False
         if event == "episode_started":
             self._number(job, payload, "episode")
@@ -2016,6 +2227,32 @@ class FlowSDEPPOSupervisor:
                     min(99.0, 100.0 * float(job.episode) / job.episodes),
                 )
             return False
+        if event == "episode_collected":
+            self._number(job, payload, "episode")
+            self._number(job, payload, "episode_return")
+            rollout_bundle = payload.get("rollout_bundle")
+            if isinstance(rollout_bundle, str) and rollout_bundle:
+                if rollout_bundle not in job.rollout_bundles:
+                    job.rollout_bundles.append(rollout_bundle)
+            job.awaiting_outcome = False
+            job.phase = "sealed"
+            job.message = "PPO rollout sealed; it is ready for Training"
+            if job.episodes > 0:
+                job.percentage = max(
+                    0.0,
+                    min(99.0, 100.0 * float(job.episode) / job.episodes),
+                )
+            return False
+        if event == "rollout_completed":
+            bundles = payload.get("rollout_bundles")
+            if isinstance(bundles, list) and all(
+                isinstance(path, str) and path for path in bundles
+            ):
+                job.rollout_bundles = list(dict.fromkeys(bundles))
+            job.awaiting_outcome = False
+            job.phase = "sealed"
+            job.message = "PPO rollout collection completed"
+            return payload.get("status") == "completed" and bool(job.rollout_bundles)
         if event == "episode_cancelled":
             job.awaiting_outcome = False
             job.phase = "resetting"
@@ -2160,6 +2397,19 @@ class FlowSDEPPOSupervisor:
             and resume.lineage_policy_checkpoint == expected_lineage
         )
 
+    @staticmethod
+    def _verified_rollout_bundles(job: _FlowSDEPPOJob) -> bool:
+        if not job.rollout_bundles:
+            return False
+        expected_root = (Path(job.output_dir) / "rollouts").resolve()
+        for raw_path in job.rollout_bundles:
+            try:
+                bundle, _manifest = _resolve_rollout_bundle(raw_path)
+                bundle.relative_to(expected_root)
+            except (HTTPException, OSError, ValueError):
+                return False
+        return True
+
     def _monitor(self, job: _FlowSDEPPOJob) -> None:
         result_complete = False
         try:
@@ -2193,10 +2443,10 @@ class FlowSDEPPOSupervisor:
             with self._lock:
                 job.message = f"Flow-SDE PPO monitor failed: {exc}"
 
-        bundle_verified = (
-            returncode == 0
-            and result_complete
-            and self._verified_completed_bundle(job)
+        bundle_verified = returncode == 0 and result_complete and (
+            self._verified_rollout_bundles(job)
+            if job.operation == "collect"
+            else self._verified_completed_bundle(job)
         )
         with self._lock:
             job.returncode = returncode
@@ -2214,7 +2464,11 @@ class FlowSDEPPOSupervisor:
                 job.status = "completed"
                 job.phase = "complete"
                 job.percentage = 100.0
-                job.message = "Flow-SDE PPO training completed"
+                job.message = (
+                    "Flow-SDE PPO rollout collection completed"
+                    if job.operation == "collect"
+                    else "Flow-SDE PPO training completed"
+                )
             else:
                 job.status = "failed"
                 job.phase = "error"
@@ -2223,12 +2477,28 @@ class FlowSDEPPOSupervisor:
                         f"Flow-SDE PPO exited with code {returncode}"
                         if returncode != 0
                         else (
-                            "Flow-SDE PPO result or verified actor+critic bundle "
+                            "Flow-SDE PPO verified rollout or actor+critic bundle "
                             "is missing"
                         )
                     )
 
     def start(self, request: FlowSDEPPOStartRequest) -> FlowSDEPPOStatus:
+        return self._start_collection_job(request, operation="combined")
+
+    def start_rollout(self, request: FlowSDEPPOStartRequest) -> FlowSDEPPOStatus:
+        if request.episodes != 1:
+            raise HTTPException(
+                400,
+                "PPO rollout collection requires exactly one episode per update",
+            )
+        return self._start_collection_job(request, operation="collect")
+
+    def _start_collection_job(
+        self,
+        request: FlowSDEPPOStartRequest,
+        *,
+        operation: Literal["combined", "collect"],
+    ) -> FlowSDEPPOStatus:
         conflict = self._conflict_message()
         if conflict:
             raise HTTPException(409, conflict)
@@ -2301,6 +2571,7 @@ class FlowSDEPPOSupervisor:
                 value_learning_rate=request.value_learning_rate,
                 ack_timeout_seconds=request.ack_timeout_seconds,
                 sensor_timeout_seconds=request.sensor_timeout_seconds,
+                operation=operation,
                 value_warmup_bundle=(
                     str(value_warmup_bundle)
                     if value_warmup_bundle is not None
@@ -2344,6 +2615,115 @@ class FlowSDEPPOSupervisor:
             args=(job,),
             daemon=True,
             name=f"flow-sde-ppo-{job_id[:12]}",
+        ).start()
+        with self._lock:
+            return self._status(job)
+
+    def start_update(
+        self,
+        request: FlowSDEPPOUpdateStartRequest,
+    ) -> FlowSDEPPOStatus:
+        conflict = self._conflict_message()
+        if conflict:
+            raise HTTPException(409, conflict)
+        rollout_bundle, manifest = _resolve_rollout_bundle(request.rollout_bundle)
+        source_policy = manifest["source_policy"]
+        policy_identity = manifest["policy_identity"]
+        contract = manifest["contract"]
+        try:
+            checkpoint = _resolve_policy_checkpoint(source_policy["checkpoint_path"])
+            robot_type = _safe_robot_type(source_policy["robot_type"])
+            task_instruction = _safe_instruction(source_policy["task_instruction"])
+            config = dict(policy_identity["ppo_config"])
+            ppo_epochs = int(config["ppo_epochs"])
+            minibatch_size = int(config["minibatch_size"])
+            actor_learning_rate = float(config["actor_learning_rate"])
+            value_learning_rate = float(config["value_learning_rate"])
+            episodes = int(contract["episodes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(400, "rollout_bundle training contract is invalid") from exc
+        expected_config = _expected_online_ppo_config(
+            ppo_epochs=ppo_epochs,
+            minibatch_size=minibatch_size,
+            actor_learning_rate=actor_learning_rate,
+            value_learning_rate=value_learning_rate,
+        )
+        if config != expected_config or episodes < 1:
+            raise HTTPException(400, "rollout_bundle PPO config is unsupported")
+        artifacts = source_policy.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != set(
+            FLOW_SDE_POLICY_ARTIFACTS
+        ):
+            raise HTTPException(400, "rollout_bundle policy artifacts are invalid")
+        for name in FLOW_SDE_POLICY_ARTIFACTS:
+            if artifacts[name] != _sha256_file(checkpoint / name):
+                raise HTTPException(400, f"rollout_bundle policy artifact changed: {name}")
+
+        with self._lock:
+            if self._job is not None and self._job.status == "running":
+                raise HTTPException(409, "A Flow-SDE PPO job is already running")
+            if (
+                self._value_warmup_job is not None
+                and self._value_warmup_job.status == "running"
+            ):
+                raise HTTPException(
+                    409,
+                    "Stop Flow-SDE PPO value warm-up before starting PPO update",
+                )
+            job_id = uuid.uuid4().hex
+            output_dir = _flow_sde_output_path(job_id)
+            if _paths_overlap(rollout_bundle, output_dir):
+                raise HTTPException(400, "rollout_bundle cannot overlap update output")
+            control_dir = _prepare_job_directories(output_dir)
+            job = _FlowSDEPPOJob(
+                job_id=job_id,
+                policy_checkpoint=str(checkpoint),
+                robot_type=robot_type,
+                task_instruction=task_instruction,
+                output_dir=str(output_dir),
+                control_file=str(control_dir / "outcome.json"),
+                log_path=str(FLOW_SDE_LOG_ROOT / f"update_{job_id}.log"),
+                episodes=episodes,
+                ppo_epochs=ppo_epochs,
+                minibatch_size=minibatch_size,
+                max_chunk_decisions=1,
+                actor_learning_rate=actor_learning_rate,
+                value_learning_rate=value_learning_rate,
+                ack_timeout_seconds=5.0,
+                sensor_timeout_seconds=15.0,
+                operation="update",
+                rollout_bundle=str(rollout_bundle),
+                rollout_bundles=[str(rollout_bundle)],
+                lineage_policy_checkpoint=str(checkpoint),
+            )
+            try:
+                environment = self._compose_environment()
+            except Exception as exc:  # noqa: BLE001 - Docker mount boundary
+                _remove_empty_job_directories(output_dir, control_dir)
+                raise HTTPException(
+                    503,
+                    f"Could not resolve Docker workspace: {exc}",
+                ) from exc
+            try:
+                process = subprocess.Popen(
+                    self._command(job),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=environment,
+                )
+            except OSError as exc:
+                _remove_empty_job_directories(output_dir, control_dir)
+                raise HTTPException(503, f"Could not launch Flow-SDE PPO: {exc}") from exc
+            job.process = process
+            self._job = job
+
+        threading.Thread(
+            target=self._monitor,
+            args=(job,),
+            daemon=True,
+            name=f"flow-sde-update-{job_id[:12]}",
         ).start()
         with self._lock:
             return self._status(job)
@@ -2424,7 +2804,10 @@ class FlowSDEPPOSupervisor:
     def status(self) -> FlowSDEPPOStatus:
         with self._lock:
             if self._job is None:
-                self._job = _discover_latest_online_job()
+                self._job = (
+                    _discover_latest_rollout_job()
+                    or _discover_latest_online_job()
+                )
             return self._status(self._job)
 
     def value_warmup_status(self) -> FlowSDEValueWarmupStatus:

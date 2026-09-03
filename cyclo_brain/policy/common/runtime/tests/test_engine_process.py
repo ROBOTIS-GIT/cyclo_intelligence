@@ -19,6 +19,8 @@ from engine_process.protocol import (  # noqa: E402
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
     EngineCommandRequest,
+    request_from_message,
+    request_to_message_kwargs,
 )
 from engine_process.worker import EngineWorker  # noqa: E402
 
@@ -57,6 +59,25 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_tt_rtc_protocol_round_trip_preserves_prefix(self) -> None:
+        request = EngineCommandRequest(
+            command=CMD_GET_ACTION,
+            seq_id=7,
+            action_request_mode="tt_rtc",
+            rtc_delay_steps=2,
+            rtc_action_dim=3,
+            rtc_prefix_action_list=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+
+        decoded = request_from_message(
+            SimpleNamespace(**request_to_message_kwargs(request))
+        )
+
+        self.assertEqual(decoded.action_request_mode, "tt_rtc")
+        self.assertEqual(decoded.rtc_delay_steps, 2)
+        self.assertEqual(decoded.rtc_action_dim, 3)
+        self.assertEqual(decoded.rtc_prefix_action_list, request.rtc_prefix_action_list)
+
     def test_load_policy_delegates_to_engine(self) -> None:
         engine = FakeEngine()
         worker = EngineWorker(engine)
@@ -102,6 +123,10 @@ class EngineWorkerTests(unittest.TestCase):
                 seq_id=12,
                 task_instruction="move",
                 action_policy_mode="rlt",
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=2,
+                rtc_action_dim=3,
+                rtc_prefix_action_list=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
             )
         )
 
@@ -113,6 +138,13 @@ class EngineWorkerTests(unittest.TestCase):
         self.assertIsInstance(engine.action_requested_with, SimpleNamespace)
         self.assertEqual(engine.action_requested_with.task_instruction, "move")
         self.assertEqual(engine.action_requested_with.action_policy_mode, "rlt")
+        self.assertEqual(engine.action_requested_with.action_request_mode, "tt_rtc")
+        self.assertEqual(engine.action_requested_with.rtc_delay_steps, 2)
+        self.assertEqual(engine.action_requested_with.rtc_action_dim, 3)
+        self.assertEqual(
+            engine.action_requested_with.rtc_prefix_action_list,
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        )
 
     def test_unload_is_idempotent_cleanup(self) -> None:
         engine = FakeEngine()

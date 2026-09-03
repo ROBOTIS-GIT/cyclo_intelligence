@@ -44,7 +44,9 @@ import {
 import {
   requiresInstruction,
   supportsRltInference,
+  supportsTensorRtInference,
 } from '../constants/policyCapabilities';
+import { normalizeActionRequestMode } from '../utils/taskInfoSync';
 import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
@@ -88,6 +90,7 @@ export default function InferenceControlPanel({
   showRecordingControls = true,
   variant = 'default',
   policyEpoch = null,
+  startBlockedReason = '',
 }) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -181,7 +184,7 @@ export default function InferenceControlPanel({
 
   const ensureTensorRtReady = useCallback(async () => {
     if (
-      taskInfo.serviceType !== 'groot' ||
+      !supportsTensorRtInference(taskInfo.serviceType, taskInfo.policyType) ||
       taskInfo.accelerationMode !== 'tensorrt_dit'
     ) {
       return true;
@@ -210,6 +213,7 @@ export default function InferenceControlPanel({
     }
   }, [
     taskInfo.serviceType,
+    taskInfo.policyType,
     taskInfo.accelerationMode,
     taskInfo.policyPath,
     taskInfo.accelerationEnginePath,
@@ -391,8 +395,14 @@ export default function InferenceControlPanel({
   ) => {
     setPendingActionPolicyMode(normalizedTarget);
     try {
+      const ttRtc = normalizeActionRequestMode(
+        taskInfo.actionRequestMode
+      ) === 'tt_rtc';
+      const commandName = ttRtc
+        ? (normalizedTarget === 'rlt' ? 'Use MLP Action' : 'Use VLA Action')
+        : (normalizedTarget === 'rlt' ? 'Use RLT Action' : 'Use GR00T Action');
       const result = await executeCommand(
-        normalizedTarget === 'rlt' ? 'Use RLT Action' : 'Use GR00T Action',
+        commandName,
         'set_action_policy',
         { actionPolicyMode: normalizedTarget, ...options }
       );
@@ -410,6 +420,7 @@ export default function InferenceControlPanel({
   }, [
     dispatch,
     executeCommand,
+    taskInfo.actionRequestMode,
   ]);
 
   const handleActionPolicySwitch = useCallback(async (targetMode) => {
@@ -456,16 +467,23 @@ export default function InferenceControlPanel({
     setPendingRobotRltApproval(false);
   }, []);
 
-  const startEnabled = shouldCheckBackend && backendReadiness.ready;
+  const externalStartBlocked = Boolean(String(startBlockedReason || '').trim());
+  const startEnabled = (
+    shouldCheckBackend && backendReadiness.ready && !externalStartBlocked
+  );
   const stopEnabled = isInferencing;
   const clearEnabled = isModelLoaded && !recordingControl.lifecycleLocked;
-  const startDescription = isBackendStartBlocked
-    ? backendReadiness.message
+  const startDescription = externalStartBlocked
+    ? startBlockedReason
+    : isBackendStartBlocked
+      ? backendReadiness.message
     : isPaused
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = isBackendStartBlocked
-    ? backendReadiness.message
+  const guideMessage = externalStartBlocked
+    ? startBlockedReason
+    : isBackendStartBlocked
+      ? backendReadiness.message
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner = isInferencing || isLoading || isBackendWarming;
 
@@ -529,6 +547,18 @@ export default function InferenceControlPanel({
   const activeActionPolicyMode = taskInfo.actionPolicyMode === 'rlt'
     ? 'rlt'
     : 'base';
+  const isTtRtcRequest = normalizeActionRequestMode(
+    taskInfo.actionRequestMode
+  ) === 'tt_rtc';
+  const actionPolicyOptions = isTtRtcRequest
+    ? [
+        { mode: 'base', label: 'Use VLA Action' },
+        { mode: 'rlt', label: 'Use MLP Action' },
+      ]
+    : [
+        { mode: 'base', label: 'Use GR00T Action' },
+        { mode: 'rlt', label: 'Use RLT Action' },
+      ];
   const showActionPolicySwitcher = Boolean(
     isInferencing &&
     taskInfo.rltEnabled &&
@@ -748,10 +778,7 @@ export default function InferenceControlPanel({
           )}>
             Action Output
           </span>
-          {[
-            { mode: 'base', label: 'Use GR00T Action' },
-            { mode: 'rlt', label: 'Use RLT Action' },
-          ].map(({ mode, label }) => {
+          {actionPolicyOptions.map(({ mode, label }) => {
             const active = activeActionPolicyMode === mode;
             const pending = pendingActionPolicyMode === mode;
             const disabled = Boolean(
@@ -768,6 +795,8 @@ export default function InferenceControlPanel({
                 title={
                   mode === 'rlt' && rltSwitchBlocked
                     ? 'Real Robot RLT requires explicit safety confirmation. Click to review and approve.'
+                    : isTtRtcRequest
+                      ? 'Switch with a prefix-conditioned TT-RTC handoff'
                     : mode === 'rlt' && isRealRobotRltTarget
                       ? 'Real Robot RLT safety override approved. Switch after the current action buffer drains.'
                       : 'Switch after the current action buffer drains'
@@ -786,7 +815,9 @@ export default function InferenceControlPanel({
           })}
           {pendingActionPolicyMode && (
             <span role="status" className="text-[10px] text-[#756e63]">
-              Waiting for action boundary…
+              {isTtRtcRequest
+                ? 'Waiting for TT-RTC handoff…'
+                : 'Waiting for action boundary…'}
             </span>
           )}
           {isRealRobotRltTarget && !pendingActionPolicyMode && (

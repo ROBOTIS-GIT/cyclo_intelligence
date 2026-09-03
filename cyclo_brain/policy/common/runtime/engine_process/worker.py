@@ -103,6 +103,10 @@ class EngineWorker:
             SimpleNamespace(
                 task_instruction=request.task_instruction,
                 action_policy_mode=request.action_policy_mode,
+                action_request_mode=request.action_request_mode,
+                rtc_delay_steps=request.rtc_delay_steps,
+                rtc_action_dim=request.rtc_action_dim,
+                rtc_prefix_action_list=list(request.rtc_prefix_action_list),
             )
         )
         if not result.get("success"):

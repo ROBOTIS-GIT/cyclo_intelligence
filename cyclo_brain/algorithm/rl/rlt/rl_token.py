@@ -1,7 +1,9 @@
-"""Frozen PI RLT Stage-1 RL-token encoder artifact support.
+"""PI RLT Stage-1 RL-token representation model and inference artifact.
 
-This is intentionally the inference-only half of the original Stage-1
-autoencoder: the reconstruction decoder is not constructed or loaded.
+Stage 1 learns a one-token bottleneck by reconstructing detached token
+embeddings from a frozen VLA.  Only the encoder half is exported for RLT
+actor-critic training and inference; the reconstruction decoder never enters
+the deployment artifact.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from torch import Tensor, nn
 
 
 TokenSelection = Literal["all", "image"]
+LossReduction = Literal["paper_per_sample_sum", "valid_token_mean"]
 _ARTIFACT_FORMAT = "cyclo_brain.rlt.frozen_encoder/v1"
 _MAX_ARTIFACT_BYTES = 8 * 1024**3
 _SUPPORTED_DTYPES = {
@@ -49,7 +52,7 @@ class RLTokenConfig:
     dropout: float = 0.0
     layer_norm_eps: float = 1e-5
     token_selection: TokenSelection = "image"
-    loss_reduction: str = "paper_per_sample_sum"
+    loss_reduction: LossReduction = "paper_per_sample_sum"
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -83,6 +86,35 @@ class RLTokenConfig:
             raise ValueError("RLT layer_norm_eps must be finite and positive")
         if self.token_selection not in {"all", "image"}:
             raise ValueError("RLT token_selection must be 'all' or 'image'")
+        if self.loss_reduction not in {
+            "paper_per_sample_sum",
+            "valid_token_mean",
+        }:
+            raise ValueError(
+                "RLT loss_reduction must be 'paper_per_sample_sum' "
+                "or 'valid_token_mean'"
+            )
+
+
+@dataclass(frozen=True)
+class RLTokenForward:
+    """Stage-1 outputs for the paper's reconstruction objective."""
+
+    z_rl: Tensor
+    reconstruction: Tensor
+    target: Tensor
+    target_valid: Tensor
+
+
+@dataclass(frozen=True)
+class RLTokenReconstruction:
+    """Reconstruction objective and scale-independent diagnostics."""
+
+    loss: Tensor
+    mean_token_l2: Tensor
+    element_mse: Tensor
+    per_sample_sse: Tensor
+    valid_tokens: int
 
 
 def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
@@ -160,6 +192,345 @@ def _artifact_fingerprint(
             "tensors": tensors,
         }
     )
+
+
+def _selected_token_mask(
+    tokens: Tensor,
+    token_valid: Tensor,
+    image_token: Tensor | None,
+    *,
+    config: RLTokenConfig,
+) -> Tensor:
+    if not isinstance(tokens, Tensor) or not tokens.is_floating_point():
+        raise TypeError("RLT tokens must be a floating tensor")
+    if tokens.requires_grad:
+        raise ValueError("RLT tokens must be detached from the frozen GR00T model")
+    if tokens.ndim != 3 or tokens.shape[-1] != config.embedding_dim:
+        raise ValueError(
+            f"RLT tokens must have shape (B, M, {config.embedding_dim})"
+        )
+    mask_shape = tuple(tokens.shape[:2])
+    if (
+        not isinstance(token_valid, Tensor)
+        or token_valid.dtype != torch.bool
+        or tuple(token_valid.shape) != mask_shape
+    ):
+        raise ValueError("RLT token_valid must be boolean with shape (B, M)")
+    if token_valid.device != tokens.device:
+        raise ValueError("RLT tokens and token_valid must share one device")
+    selected = token_valid
+    if config.token_selection == "image":
+        if (
+            not isinstance(image_token, Tensor)
+            or image_token.dtype != torch.bool
+            or tuple(image_token.shape) != mask_shape
+        ):
+            raise ValueError("RLT image_token must be boolean with shape (B, M)")
+        if image_token.device != tokens.device:
+            raise ValueError("RLT tokens and image_token must share one device")
+        selected = token_valid & image_token
+    elif image_token is not None and image_token.device != tokens.device:
+        raise ValueError("RLT tokens and image_token must share one device")
+    if not bool(selected.any(dim=1).all()):
+        raise ValueError("RLT every sample must contain a selected valid token")
+    return selected
+
+
+def _compact_selected_tokens(tokens: Tensor, selected: Tensor) -> tuple[Tensor, Tensor]:
+    counts = selected.sum(dim=1)
+    token_count = int(counts.max().item())
+    compact = tokens.new_zeros((tokens.shape[0], token_count, tokens.shape[2]))
+    rows, columns = selected.nonzero(as_tuple=True)
+    packed_columns = selected.long().cumsum(dim=1)[rows, columns] - 1
+    compact[rows, packed_columns] = tokens[rows, columns]
+    compact_valid = (
+        torch.arange(token_count, device=tokens.device).unsqueeze(0)
+        < counts.unsqueeze(1)
+    )
+    return compact, compact_valid
+
+
+class RLTokenAutoencoder(nn.Module):
+    """Paper-faithful one-token bottleneck with a training-only decoder."""
+
+    def __init__(self, config: RLTokenConfig) -> None:
+        super().__init__()
+        if not isinstance(config, RLTokenConfig):
+            raise TypeError("RLT autoencoder requires RLTokenConfig")
+        self.config = config
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.embedding_dim,
+            nhead=config.num_heads,
+            dim_feedforward=config.feedforward_dim,
+            dropout=float(config.dropout),
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.embedding_dim,
+            nhead=config.num_heads,
+            dim_feedforward=config.feedforward_dim,
+            dropout=float(config.dropout),
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=config.encoder_layers,
+            norm=nn.LayerNorm(config.embedding_dim, eps=float(config.layer_norm_eps)),
+            enable_nested_tensor=False,
+        )
+        self.decoder = nn.TransformerEncoder(
+            decoder_layer,
+            num_layers=config.decoder_layers,
+            norm=nn.LayerNorm(config.embedding_dim, eps=float(config.layer_norm_eps)),
+            enable_nested_tensor=False,
+        )
+        self.rl_embedding = nn.Parameter(torch.empty(1, 1, config.embedding_dim))
+        self.rl_position = nn.Parameter(torch.empty(1, 1, config.embedding_dim))
+        self.encoder_positions = nn.Parameter(
+            torch.empty(1, config.max_tokens, config.embedding_dim)
+        )
+        self.decoder_positions = nn.Parameter(
+            torch.empty(1, config.max_tokens, config.embedding_dim)
+        )
+        self.output_projection = nn.Linear(config.embedding_dim, config.embedding_dim)
+        self.reset_stage1_parameters()
+
+    def reset_stage1_parameters(self) -> None:
+        nn.init.normal_(self.rl_embedding, mean=0.0, std=0.02)
+        nn.init.normal_(self.rl_position, mean=0.0, std=0.02)
+        nn.init.normal_(self.encoder_positions, mean=0.0, std=0.02)
+        nn.init.normal_(self.decoder_positions, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
+
+    def _select(
+        self,
+        tokens: Tensor,
+        token_valid: Tensor,
+        image_token: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        selected = _selected_token_mask(
+            tokens,
+            token_valid,
+            image_token,
+            config=self.config,
+        )
+        compact, compact_valid = _compact_selected_tokens(tokens, selected)
+        if compact.shape[1] > self.config.max_tokens:
+            raise ValueError("RLT selected token count exceeds configured max_tokens")
+        parameter = self.rl_embedding
+        return (
+            compact.detach().to(device=parameter.device, dtype=parameter.dtype),
+            compact_valid.to(device=parameter.device),
+        )
+
+    def _encode_compact(self, target: Tensor, target_valid: Tensor) -> Tensor:
+        batch_size, token_count, _ = target.shape
+        positioned = target + self.encoder_positions[:, :token_count]
+        encoder_input = target.new_zeros(
+            (batch_size, token_count + 1, self.config.embedding_dim)
+        )
+        encoder_input[:, :token_count] = positioned
+        encoder_valid = torch.zeros(
+            (batch_size, token_count + 1),
+            dtype=torch.bool,
+            device=target.device,
+        )
+        encoder_valid[:, :token_count] = target_valid
+        rl_indices = target_valid.sum(dim=1)
+        rows = torch.arange(batch_size, device=target.device)
+        encoder_input[rows, rl_indices] = (
+            self.rl_embedding[0, 0] + self.rl_position[0, 0]
+        )
+        encoder_valid[rows, rl_indices] = True
+        encoded = self.encoder(
+            encoder_input,
+            src_key_padding_mask=~encoder_valid,
+        )
+        return encoded[rows, rl_indices]
+
+    def reconstruct_teacher_forced(
+        self,
+        z_rl: Tensor,
+        target: Tensor,
+        target_valid: Tensor,
+    ) -> Tensor:
+        """Decode ``[z_rl, stopgrad(z_1), ..., stopgrad(z_(M-1))]``."""
+        if (
+            not isinstance(z_rl, Tensor)
+            or z_rl.ndim != 2
+            or tuple(z_rl.shape) != (target.shape[0], self.config.embedding_dim)
+        ):
+            raise ValueError("RLT z_rl must have shape (B, E)")
+        if (
+            not isinstance(target, Tensor)
+            or target.ndim != 3
+            or target.shape[-1] != self.config.embedding_dim
+        ):
+            raise ValueError("RLT reconstruction target must have shape (B, M, E)")
+        if (
+            not isinstance(target_valid, Tensor)
+            or target_valid.dtype != torch.bool
+            or tuple(target_valid.shape) != tuple(target.shape[:2])
+        ):
+            raise ValueError("RLT reconstruction target_valid must have shape (B, M)")
+        if target.shape[1] > self.config.max_tokens:
+            raise ValueError("RLT reconstruction target exceeds max_tokens")
+        if len({z_rl.device, target.device, target_valid.device}) != 1:
+            raise ValueError("RLT reconstruction tensors must share one device")
+
+        token_count = target.shape[1]
+        decoder_input = target.new_zeros(target.shape)
+        decoder_input[:, 0] = z_rl
+        if token_count > 1:
+            decoder_input[:, 1:] = target[:, :-1].detach()
+        decoder_input = decoder_input + self.decoder_positions[:, :token_count]
+        causal_mask = torch.triu(
+            torch.ones(
+                (token_count, token_count),
+                dtype=torch.bool,
+                device=target.device,
+            ),
+            diagonal=1,
+        )
+        decoded = self.decoder(
+            decoder_input,
+            mask=causal_mask,
+            src_key_padding_mask=~target_valid,
+        )
+        return self.output_projection(decoded)
+
+    def encode(
+        self,
+        tokens: Tensor,
+        token_valid: Tensor,
+        image_token: Tensor | None = None,
+    ) -> Tensor:
+        target, target_valid = self._select(tokens, token_valid, image_token)
+        return self._encode_compact(target, target_valid)
+
+    def forward(
+        self,
+        tokens: Tensor,
+        token_valid: Tensor,
+        image_token: Tensor | None = None,
+    ) -> RLTokenForward:
+        target, target_valid = self._select(tokens, token_valid, image_token)
+        z_rl = self._encode_compact(target, target_valid)
+        reconstruction = self.reconstruct_teacher_forced(
+            z_rl,
+            target,
+            target_valid,
+        )
+        return RLTokenForward(
+            z_rl=z_rl,
+            reconstruction=reconstruction,
+            target=target,
+            target_valid=target_valid,
+        )
+
+    def encoder_state_dict(self) -> dict[str, Tensor]:
+        """Return exactly the tensor names consumed by the frozen loader."""
+        state = self.state_dict()
+        names = {
+            "rl_embedding",
+            "rl_position",
+            "encoder_positions",
+        }
+        return {
+            name: value.detach().cpu().clone()
+            for name, value in state.items()
+            if name.startswith("encoder.") or name in names
+        }
+
+
+def rl_token_reconstruction_loss(
+    output: RLTokenForward,
+    *,
+    reduction: LossReduction = "paper_per_sample_sum",
+) -> RLTokenReconstruction:
+    """Masked equation (2) from RLT plus comparable diagnostics."""
+    if not isinstance(output, RLTokenForward):
+        raise TypeError("RLT reconstruction loss requires RLTokenForward")
+    if reduction not in {"paper_per_sample_sum", "valid_token_mean"}:
+        raise ValueError("RLT reconstruction loss reduction is invalid")
+    if output.reconstruction.shape != output.target.shape:
+        raise ValueError("RLT reconstruction and target shapes disagree")
+    if tuple(output.target_valid.shape) != tuple(output.target.shape[:2]):
+        raise ValueError("RLT reconstruction target mask shape disagrees")
+
+    squared_error = (output.reconstruction - output.target.detach()).square()
+    token_sse = squared_error.sum(dim=-1)
+    valid = output.target_valid.to(dtype=token_sse.dtype)
+    per_sample_sse = (token_sse * valid).sum(dim=1)
+    valid_tokens = int(output.target_valid.sum().item())
+    if valid_tokens < 1:
+        raise ValueError("RLT reconstruction requires at least one valid token")
+    if reduction == "paper_per_sample_sum":
+        loss = per_sample_sse.mean()
+    else:
+        loss = per_sample_sse.sum() / valid_tokens
+    mean_token_l2 = (token_sse.sqrt() * valid).sum() / valid_tokens
+    element_mse = per_sample_sse.sum() / (
+        valid_tokens * output.target.shape[-1]
+    )
+    return RLTokenReconstruction(
+        loss=loss,
+        mean_token_l2=mean_token_l2,
+        element_mse=element_mse,
+        per_sample_sse=per_sample_sse,
+        valid_tokens=valid_tokens,
+    )
+
+
+def build_frozen_rl_token_encoder_artifact(
+    model: RLTokenAutoencoder,
+    representation_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the strict encoder-only payload consumed by the RLT runtime."""
+    if not isinstance(model, RLTokenAutoencoder):
+        raise TypeError("RLT encoder export requires RLTokenAutoencoder")
+    if not isinstance(representation_contract, Mapping):
+        raise TypeError("RLT encoder export requires a representation contract")
+    representation = dict(representation_contract)
+    embeddings = representation.get("embeddings")
+    if (
+        not isinstance(embeddings, Mapping)
+        or embeddings.get("width") != model.config.embedding_dim
+    ):
+        raise ValueError("RLT encoder representation width disagrees")
+    contract_fingerprint = _canonical_fingerprint(representation)
+    state = model.encoder_state_dict()
+    if not state:
+        raise RuntimeError("RLT encoder export state is empty")
+    artifact_dtype: torch.dtype | None = None
+    for name, value in state.items():
+        if (
+            not value.is_floating_point()
+            or value.dtype not in _SUPPORTED_DTYPES
+            or not bool(torch.isfinite(value).all())
+        ):
+            raise ValueError(f"RLT encoder tensor {name!r} is invalid")
+        if artifact_dtype is None:
+            artifact_dtype = value.dtype
+        elif artifact_dtype != value.dtype:
+            raise ValueError("RLT encoder export tensor dtypes disagree")
+    return {
+        "format": _ARTIFACT_FORMAT,
+        "config": asdict(model.config),
+        "representation_contract": representation,
+        "representation_contract_fingerprint": contract_fingerprint,
+        "artifact_fingerprint": _artifact_fingerprint(
+            model.config,
+            contract_fingerprint,
+            state,
+        ),
+        "encoder": state,
+    }
 
 
 class FrozenRLTokenEncoder(nn.Module):
@@ -384,8 +755,14 @@ def load_frozen_rl_token_encoder(
 
 
 __all__ = [
+    "LossReduction",
     "FrozenRLTokenEncoder",
+    "RLTokenAutoencoder",
     "RLTokenConfig",
+    "RLTokenForward",
+    "RLTokenReconstruction",
     "TokenSelection",
+    "build_frozen_rl_token_encoder_artifact",
     "load_frozen_rl_token_encoder",
+    "rl_token_reconstruction_loss",
 ]

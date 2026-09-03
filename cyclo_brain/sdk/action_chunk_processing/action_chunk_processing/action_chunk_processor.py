@@ -73,6 +73,26 @@ class ActionChunkProcessor:
     def output_hz(self) -> float:
         return self._control_hz if self._postprocess else self._inference_hz
 
+    def peek_actions(self, count: Optional[int] = None) -> np.ndarray:
+        """Return a copy of queued actions without consuming them.
+
+        TT-RTC uses this snapshot as the clean action prefix supplied to the
+        next inference request.  Returning a copy prevents inference code from
+        mutating actions that are already committed for robot execution.
+        """
+        with self._lock:
+            if count is not None and count < 0:
+                raise ValueError("count must be non-negative")
+            actions = list(self._buffer)
+            if count is not None:
+                actions = actions[:count]
+            if not actions:
+                return np.empty((0, 0), dtype=np.float64)
+            return np.stack(
+                [np.asarray(action, dtype=np.float64).copy() for action in actions],
+                axis=0,
+            )
+
     def push_chunk(
         self,
         chunk: np.ndarray,

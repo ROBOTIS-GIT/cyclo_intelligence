@@ -133,8 +133,8 @@ def _service_type_from_model(model: str) -> str:
 
 def _normalize_action_request_mode(value: str) -> str:
     mode = str(value or '').strip().lower()
-    if mode == 'sync':
-        return 'sync'
+    if mode in {'sync', 'tt_rtc'}:
+        return mode
     return 'async'
 
 

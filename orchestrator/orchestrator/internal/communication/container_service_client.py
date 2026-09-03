@@ -373,9 +373,9 @@ class ContainerServiceClient:
         other commands. ``task_instruction`` is used by LOAD (training-time
         conditioning) and RESUME (online re-conditioning). ``publish_to_robot``
         gates the policy container's robot command publishers; false is
-        simulation / 3D preview only. ``action_request_mode`` controls whether
-        the policy Main runtime prefetches chunks ("async") or waits for the
-        current buffer to drain ("sync"). ``acceleration_mode`` and
+        simulation / 3D preview only. ``action_request_mode`` selects async
+        prefetch, drained-buffer sync, or GR00T-only ``tt_rtc`` clean-prefix
+        continuation. ``acceleration_mode`` and
         ``acceleration_engine_path`` are LOAD-time runtime optimization knobs.
 
         Timeout defaults to INFERENCE_LOAD_TIMEOUT_SEC for LOAD (CUDA init,

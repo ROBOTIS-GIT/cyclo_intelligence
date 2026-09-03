@@ -4,10 +4,14 @@
 // you may not use this file except in compliance with the License.
 
 import React from 'react';
+import clsx from 'clsx';
 import {
+  MdAcUnit,
   MdArrowDownward,
   MdCameraAlt,
+  MdLock,
   MdMemory,
+  MdWhatshot,
 } from 'react-icons/md';
 
 const CORE_NODES = {
@@ -17,6 +21,7 @@ const CORE_NODES = {
     detail: 'SigLIP + PaliGemma → multimodal tokens',
     className: 'border-[#c7bde6] bg-[#f0edfa] text-[#514672]',
     eyebrowClassName: 'text-[#756b94]',
+    trainable: false,
   },
   actionConditioning: {
     eyebrow: 'Condition encoder',
@@ -24,6 +29,7 @@ const CORE_NODES = {
     detail: 'Robot state + noisy action + time',
     className: 'border-[#dfc6a4] bg-[#fbf2e5] text-[#6c4f2e]',
     eyebrowClassName: 'text-[#9a7650]',
+    trainable: true,
   },
   actionModule: {
     eyebrow: 'Action model',
@@ -31,6 +37,7 @@ const CORE_NODES = {
     detail: 'Flow-matching velocity prediction',
     className: 'border-[#acc2ae] bg-[#edf4ec] text-[#38533d]',
     eyebrowClassName: 'text-[#667d69]',
+    trainable: true,
   },
 };
 
@@ -48,22 +55,56 @@ function InputNode({ icon: Icon, label, detail }) {
   );
 }
 
-function CoreNode({ node, testId }) {
+function LockedArchitectureNode({ node, testId }) {
   return (
-    <div
-      role="group"
-      aria-label={node.label}
-      className={`flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left shadow-[0_1px_2px_rgba(56,50,42,0.04)] ${node.className}`}
+    <button
+      type="button"
+      aria-pressed={node.trainable}
+      aria-label={`${node.label}: ${node.trainable ? 'Trainable' : 'Frozen'}; locked`}
+      disabled
+      className={clsx(
+        'flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left shadow-[0_1px_2px_rgba(56,50,42,0.04)]',
+        node.trainable
+          ? [node.className, 'cursor-default opacity-100']
+          : 'cursor-not-allowed border-[#d9d2c5] bg-[#f1eee7] text-[#7d7569] opacity-75'
+      )}
       data-testid={testId}
+      data-trainable-group={node.id}
     >
-      <span className={`mb-1 text-[8px] font-bold uppercase tracking-[0.12em] ${node.eyebrowClassName}`}>
+      <span
+        className={clsx(
+          'mb-1 text-[8px] font-bold uppercase tracking-[0.12em]',
+          node.trainable ? node.eyebrowClassName : 'text-[#999084]'
+        )}
+      >
         {node.eyebrow}
       </span>
-      <span className="truncate text-[12px] font-semibold">{node.label}</span>
-      <span className={`mt-1 block truncate text-[10px] ${node.eyebrowClassName}`}>
+      <span className="flex items-center justify-between gap-2">
+        <span className="truncate text-[12px] font-semibold">{node.label}</span>
+        <span
+          className={clsx(
+            'flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.06em]',
+            node.trainable
+              ? 'bg-[#69866f] text-white'
+              : 'border border-[#d3ccc0] bg-white/60 text-[#80776a]'
+          )}
+        >
+          {node.trainable ? (
+            <><MdWhatshot size={10} aria-hidden="true" /> Fire · Trainable</>
+          ) : (
+            <><MdAcUnit size={10} aria-hidden="true" /> Frozen</>
+          )}
+        </span>
+      </span>
+      <span
+        className={clsx(
+          'mt-1 block truncate text-[10px]',
+          node.trainable ? node.eyebrowClassName : 'text-[#958c80]'
+        )}
+      >
         {node.detail}
       </span>
-    </div>
+    </button>
   );
 }
 
@@ -74,25 +115,43 @@ const FlowArrow = () => (
 );
 
 /**
- * Static Pi0.5 policy topology.
+ * Presentation-only Pi0.5 policy topology.
  *
- * Trainability is deliberately not editable here. The current training request
- * has no Pi0.5 module-freezing contract, so displaying local Frozen / Fire
- * controls would imply that an unsubmitted choice affects the backend.
+ * The fine-tuning view shows the intended frozen VLM / trainable action-side
+ * boundary as locked status, not interactive controls. RLT freezes the complete
+ * base VLA while its external adapter is trained.
  */
-export default function PI05ArchitectureDiagram() {
+export default function PI05ArchitectureDiagram({
+  mode = 'finetune',
+  allFrozen = false,
+}) {
+  const freezeBasePolicy = allFrozen || mode === 'rlt';
+  const nodes = Object.fromEntries(Object.entries(CORE_NODES).map(([key, node]) => [
+    key,
+    {
+      ...node,
+      id: key,
+      trainable: freezeBasePolicy ? false : node.trainable,
+    },
+  ]));
+
   return (
     <div
       className="flex h-full min-h-0 flex-col rounded-2xl border border-[#e0d9ce] bg-white p-3.5 shadow-[0_8px_24px_rgba(61,55,46,0.06)]"
       data-testid="pi05-architecture-diagram"
+      data-architecture-mode={freezeBasePolicy ? 'all-frozen' : 'finetune'}
     >
       <div className="mb-2.5 flex shrink-0 items-center justify-between gap-2">
         <div>
           <div className="text-[13px] font-semibold text-[#39352e]">Pi0.5 Policy</div>
-          <div className="text-[9px] text-[#8d8579]">Reference topology · training controls pending integration</div>
+          <div className="text-[9px] text-[#8d8579]">
+            {freezeBasePolicy
+              ? 'RLT base policy · all modules frozen'
+              : 'Fine-tuning boundary · view only'}
+          </div>
         </div>
-        <span className="rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
-          VLA policy
+        <span className="flex items-center gap-1 rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
+          <MdLock size={10} aria-hidden="true" /> Locked policy
         </span>
       </div>
 
@@ -112,22 +171,22 @@ export default function PI05ArchitectureDiagram() {
         <FlowArrow />
 
         <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_20px_minmax(0,1fr)] items-stretch gap-1.5">
-          <CoreNode
-            node={CORE_NODES.visionLanguageEncoder}
+          <LockedArchitectureNode
+            node={nodes.visionLanguageEncoder}
             testId="pi05-vlm-encoder-node"
           />
           <span className="flex items-center justify-center text-[10px] font-semibold uppercase text-[#aaa295]">
             +
           </span>
-          <CoreNode
-            node={CORE_NODES.actionConditioning}
+          <LockedArchitectureNode
+            node={nodes.actionConditioning}
             testId="pi05-conditioning-node"
           />
         </div>
 
         <FlowArrow />
 
-        <CoreNode node={CORE_NODES.actionModule} testId="pi05-action-module-node" />
+        <LockedArchitectureNode node={nodes.actionModule} testId="pi05-action-module-node" />
 
         <FlowArrow />
 

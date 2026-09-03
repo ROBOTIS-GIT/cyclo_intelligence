@@ -173,6 +173,24 @@ def test_load_send_command_sets_action_request_mode():
     assert task_info.action_request_mode == 'sync'
 
 
+def test_load_send_command_preserves_tt_rtc_action_request_mode():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {
+            'command': 'LOAD',
+            'model': 'groot:n17',
+            'action_request_mode': 'tt_rtc',
+        },
+    )
+    task_info = action._build_task_info()
+
+    assert action.action_request_mode == 'tt_rtc'
+    assert task_info.action_request_mode == 'tt_rtc'
+
+
 def test_multi_task_dit_routes_to_lerobot_backend():
     assert _service_type_from_model('lerobot:multi_task_dit') == 'lerobot'
     assert _service_type_from_model('multi_task_dit') == 'lerobot'

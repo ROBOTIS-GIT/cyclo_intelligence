@@ -3,11 +3,25 @@ import PageType from '../constants/pageType';
 import {
   getInferenceTaskInfoKey,
   hasRosTaskInfoPayload,
+  normalizeActionRequestMode,
   rosTaskInfoToUiTaskInfo,
   shouldApplyServerTaskInfoToPage,
 } from './taskInfoSync';
 
 describe('taskInfoSync echo routing', () => {
+  test('preserves the TT-RTC wire value and defaults unknown request modes', () => {
+    expect(normalizeActionRequestMode(' tt_rtc ')).toBe('tt_rtc');
+    expect(normalizeActionRequestMode('sync')).toBe('sync');
+    expect(normalizeActionRequestMode('unknown')).toBe('async');
+    expect(rosTaskInfoToUiTaskInfo({
+      task_type: 'inference',
+      service_type: 'groot',
+      action_request_mode: 'tt_rtc',
+    })).toEqual(expect.objectContaining({
+      actionRequestMode: 'tt_rtc',
+    }));
+  });
+
   test('detects inference task info even without record identity fields', () => {
     expect(hasRosTaskInfoPayload({
       task_type: 'inference',
@@ -115,6 +129,49 @@ describe('taskInfoSync echo routing', () => {
       rltBundlePath: '/workspace/checkpoint/rlt/showroom_bundle',
       rltRobotOverride: true,
       actionPolicyMode: 'rlt',
+    }));
+  });
+
+  test('hydrates policy type from the existing TaskInfo tags field', () => {
+    expect(rosTaskInfoToUiTaskInfo({
+      task_type: 'inference',
+      service_type: 'lerobot',
+      tags: ['inference_mode:simulation', 'policy_type:multi_task_dit'],
+    })).toEqual(expect.objectContaining({
+      serviceType: 'lerobot',
+      policyType: 'multi_task_dit',
+    }));
+  });
+
+  test('infers N1.7 for a legacy untagged GR00T status message', () => {
+    expect(rosTaskInfoToUiTaskInfo({
+      task_type: 'inference',
+      service_type: 'groot',
+      tags: ['inference_mode:simulation'],
+    })).toEqual(expect.objectContaining({
+      serviceType: 'groot',
+      policyType: 'n17',
+    }));
+  });
+
+  test('does not invent a policy type for a legacy untagged LeRobot message', () => {
+    expect(rosTaskInfoToUiTaskInfo({
+      task_type: 'inference',
+      service_type: 'lerobot',
+    })).not.toHaveProperty('policyType');
+  });
+
+  test('normalizes TensorRT fields out of unsupported policy sync keys', () => {
+    expect(getInferenceTaskInfoKey({
+      serviceType: 'lerobot',
+      policyType: 'act',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/dit.trt',
+    })).toBe(getInferenceTaskInfoKey({
+      serviceType: 'lerobot',
+      policyType: 'act',
+      accelerationMode: 'pytorch',
+      accelerationEnginePath: '',
     }));
   });
 });

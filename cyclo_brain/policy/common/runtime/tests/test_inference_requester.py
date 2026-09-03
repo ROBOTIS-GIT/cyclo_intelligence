@@ -41,6 +41,7 @@ class InferenceRequesterTests(unittest.TestCase):
             "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
             "rlt_enabled": True,
             "rlt_bundle_path": "/models/rlt",
+            "action_request_mode": "tt_rtc",
         })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
@@ -51,6 +52,7 @@ class InferenceRequesterTests(unittest.TestCase):
         )
         self.assertTrue(client.calls[0][0].rlt_enabled)
         self.assertEqual(client.calls[0][0].rlt_bundle_path, "/models/rlt")
+        self.assertEqual(client.calls[0][0].action_request_mode, "tt_rtc")
 
     def test_get_action_uses_monotonic_seq_id(self) -> None:
         client = FakeEngineClient(
@@ -76,6 +78,28 @@ class InferenceRequesterTests(unittest.TestCase):
         self.assertEqual(request.action_policy_mode, "rlt")
         self.assertEqual(timeout_s, 2.5)
         self.assertFalse(requester.has_pending_get_action())
+
+    def test_tt_rtc_get_action_carries_prefix_contract(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client)
+        prefix = [float(value) for value in range(6 * 19)]
+
+        requester.get_action(
+            "pick",
+            action_policy_mode="base",
+            action_request_mode="tt_rtc",
+            rtc_delay_steps=6,
+            rtc_action_dim=19,
+            rtc_prefix_action_list=prefix,
+        )
+
+        request, _timeout_s = client.calls[0]
+        self.assertEqual(request.action_request_mode, "tt_rtc")
+        self.assertEqual(request.rtc_delay_steps, 6)
+        self.assertEqual(request.rtc_action_dim, 19)
+        self.assertEqual(request.rtc_prefix_action_list, prefix)
 
     def test_timeout_clears_in_flight_and_next_request_advances_seq(self) -> None:
         client = FakeEngineClient(

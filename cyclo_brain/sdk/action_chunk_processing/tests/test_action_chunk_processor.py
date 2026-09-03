@@ -17,6 +17,28 @@ from action_chunk_processing import ActionChunkProcessor  # noqa: E402
 
 
 class ActionChunkProcessorTests(unittest.TestCase):
+    def test_peek_actions_returns_non_mutating_queue_copy(self) -> None:
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        queued = np.arange(12, dtype=np.float64).reshape(3, 4)
+        processor.push_actions(queued)
+
+        snapshot = processor.peek_actions(2)
+        snapshot[0, 0] = -999.0
+
+        self.assertEqual(processor.buffer_size, 3)
+        np.testing.assert_allclose(processor.pop_action(), queued[0])
+        np.testing.assert_allclose(processor.peek_actions(), queued[1:])
+
+    def test_peek_actions_rejects_negative_count(self) -> None:
+        processor = ActionChunkProcessor(postprocess=False)
+
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            processor.peek_actions(-1)
+
     def test_dynamic_resampling_preserves_legacy_16_step_timing(self) -> None:
         processor = ActionChunkProcessor(
             inference_hz=15.0,

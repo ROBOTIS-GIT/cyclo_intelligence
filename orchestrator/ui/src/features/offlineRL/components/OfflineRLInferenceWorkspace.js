@@ -46,6 +46,7 @@ import {
 } from '../offlineRLSlice';
 import OfflineRLRecordingSubtaskPlan from './OfflineRLRecordingSubtaskPlan';
 import OfflineRLWorkspaceStatusModal from './OfflineRLWorkspaceStatusModal';
+import FlowSDEPPOInferenceControls from './FlowSDEPPOInferenceControls';
 
 const CAMERA_LABELS = ['Left wrist', 'Head', 'Right wrist'];
 
@@ -108,6 +109,12 @@ export default function OfflineRLInferenceWorkspace({
   policyEpoch = 0,
   workspaceStatusOpen = false,
   onCloseWorkspaceStatus = () => {},
+  getFlowSDEPPOPolicyRolloutStatus,
+  onStartFlowSDEPPOPolicyRollout,
+  onStopFlowSDEPPOPolicyRollout,
+  onSubmitFlowSDEPPOPolicyRolloutOutcome,
+  getFlowSDEPPOValueWarmupStatus,
+  onFlowSDEPPOPolicyRolloutBundleChange = () => {},
 }) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -131,6 +138,7 @@ export default function OfflineRLInferenceWorkspace({
   const [activeSubtaskIndex, setActiveSubtaskIndex] = useState(0);
   const [savedSubtaskIndices, setSavedSubtaskIndices] = useState([]);
   const [subtaskAdvancing, setSubtaskAdvancing] = useState(false);
+  const [flowSdeJobBusy, setFlowSdeJobBusy] = useState(false);
   const recordingFolderRef = useRef(taskInfo.recordingFolder || '');
   const isRecordingWorkspace = workspaceMode === 'recording';
 
@@ -440,6 +448,22 @@ export default function OfflineRLInferenceWorkspace({
             showRecordingControls
             variant="offlineRL"
             policyEpoch={policyEpoch}
+            startBlockedReason={flowSdeJobBusy
+              ? 'Stop the Flow-SDE PPO job before standard VLA inference'
+              : ''}
+          />
+        )}
+        {!isRecordingWorkspace && (
+          <FlowSDEPPOInferenceControls
+            isActive={isActive}
+            inferencePhase={inferencePhase}
+            getRolloutStatus={getFlowSDEPPOPolicyRolloutStatus}
+            onStartRollout={onStartFlowSDEPPOPolicyRollout}
+            onStopRollout={onStopFlowSDEPPOPolicyRollout}
+            onSubmitOutcome={onSubmitFlowSDEPPOPolicyRolloutOutcome}
+            getValueWarmupStatus={getFlowSDEPPOValueWarmupStatus}
+            onBusyChange={setFlowSdeJobBusy}
+            onRolloutBundleChange={onFlowSDEPPOPolicyRolloutBundleChange}
           />
         )}
       </div>

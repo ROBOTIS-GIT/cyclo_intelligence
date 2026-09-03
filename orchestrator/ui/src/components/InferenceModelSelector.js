@@ -14,7 +14,11 @@ import {
   selectInferenceTaskInfo,
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
-import { supportsRltInference } from '../constants/policyCapabilities';
+import {
+  supportsRltInference,
+  supportsTensorRtInference,
+  supportsTtRtcInference,
+} from '../constants/policyCapabilities';
 
 // Inference models. Each option pairs a backend (orchestrator routing
 // via TaskInfo.service_type) with a policy class (drives instruction
@@ -102,16 +106,26 @@ const InferenceModelSelector = ({
   const handleChange = (e) => {
     const sel = AVAILABLE_MODEL_OPTIONS.find((o) => o.value === e.target.value);
     if (!sel) return;
+    const supportsTensorRt = supportsTensorRtInference(
+      sel.serviceType,
+      sel.policyType
+    );
     dispatch(
       setInferenceTaskInfo({
         serviceType: sel.serviceType,
         policyType: sel.policyType,
-        accelerationMode: sel.serviceType === 'groot'
+        accelerationMode: supportsTensorRt
           ? (info.accelerationMode || 'pytorch')
           : 'pytorch',
-        accelerationEnginePath: sel.serviceType === 'groot'
+        accelerationEnginePath: supportsTensorRt
           ? (info.accelerationEnginePath || '')
           : '',
+        actionRequestMode: supportsTtRtcInference(
+          sel.serviceType,
+          sel.policyType
+        )
+          ? (info.actionRequestMode || 'async')
+          : (info.actionRequestMode === 'tt_rtc' ? 'async' : info.actionRequestMode),
         // Keep the selected bundle for quick return to N1.7, but never leave
         // RLT logically enabled on a policy that cannot consume it.
         rltEnabled: supportsRltInference(sel.serviceType, sel.policyType)

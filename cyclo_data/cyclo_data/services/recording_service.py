@@ -777,6 +777,19 @@ class RecordingService:
 
     def _do_set_task_info(self, request, response):
         if getattr(request.task_info, 'task_type', '') == 'inference':
+            # Inference recording creates its DataManager lazily on the first
+            # Record command.  Once that manager exists, however, it owns the
+            # TaskInfo echoed on /data/recording/status.  Refresh it here so a
+            # later model/runtime selection is not overwritten in the UI by
+            # the stale snapshot captured when the session was created.
+            with self._session_lock:
+                data_manager = self._data_manager
+            if data_manager is not None:
+                data_manager.update_task_info(request.task_info)
+                self._publish_recording_status()
+                response.success = True
+                response.message = 'inference task_info updated'
+                return response
             response.success = True
             response.message = (
                 'inference task_info acknowledged; DataManager starts on Record'

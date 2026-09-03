@@ -138,6 +138,16 @@ function AlgorithmCard({
   onBatchSizeChange,
   disabled,
 }) {
+  const parsedCriticEpochs = Number(criticEpochs);
+  const parsedActorEpochs = Number(actorEpochs);
+  const actorUpdatePeriod = (
+    Number.isInteger(parsedCriticEpochs) &&
+    Number.isInteger(parsedActorEpochs) &&
+    parsedCriticEpochs >= parsedActorEpochs &&
+    parsedActorEpochs > 0 &&
+    parsedCriticEpochs % parsedActorEpochs === 0
+  ) ? parsedCriticEpochs / parsedActorEpochs : null;
+
   return (
     <TrainingCardShell
       eyebrow="Training"
@@ -197,8 +207,8 @@ function AlgorithmCard({
           value={criticEpochs}
           onChange={onCriticEpochsChange}
           disabled={disabled}
-          min={2}
-          step={2}
+          min={1}
+          step={1}
         />
         <NumberSetting
           label="Actor epochs"
@@ -216,6 +226,12 @@ function AlgorithmCard({
           max={64}
         />
       </div>
+
+      <p className="mt-2 text-[8px] leading-relaxed text-[#8d8579]" data-testid="td3-schedule-help">
+        {actorUpdatePeriod
+          ? `Actor update period: every ${actorUpdatePeriod} critic ${actorUpdatePeriod === 1 ? 'update' : 'updates'}. 1:1 is allowed, including with a warmed critic.`
+          : 'Use positive whole epochs with Critic ≥ Actor and Critic divisible by Actor. The ratio determines the actor update period; 1:1 is allowed.'}
+      </p>
 
     </TrainingCardShell>
   );
@@ -436,6 +452,8 @@ export function buildLoopConnectorGeometry({
   policyRect,
   replayRect,
   algorithmRect,
+  algorithmEntryRect = null,
+  algorithmExitRect = null,
 }) {
   if (!containerRect || !policyRect || !replayRect || !algorithmRect) {
     return emptyConnectorGeometry;
@@ -444,11 +462,21 @@ export function buildLoopConnectorGeometry({
   const policy = relativeRect(containerRect, policyRect);
   const replay = relativeRect(containerRect, replayRect);
   const algorithm = relativeRect(containerRect, algorithmRect);
+  const algorithmEntry = algorithmEntryRect
+    ? relativeRect(containerRect, algorithmEntryRect)
+    : null;
+  const algorithmExit = algorithmExitRect
+    ? relativeRect(containerRect, algorithmExitRect)
+    : null;
   const policyToReplayStart = point(policy.right, policy.top + (policy.height / 2));
   const policyToReplayEnd = point(replay.left, replay.top + (replay.height / 2));
   const replayToAlgorithmStart = point(replay.left + (replay.width / 2), replay.bottom);
-  const replayToAlgorithmEnd = point(algorithm.right, algorithm.top + (algorithm.height / 2));
-  const algorithmToPolicyStart = point(algorithm.left, algorithm.top + (algorithm.height / 2));
+  const replayToAlgorithmEnd = algorithmEntry
+    ? point(algorithmEntry.left + (algorithmEntry.width / 2), algorithmEntry.top)
+    : point(algorithm.right, algorithm.top + (algorithm.height / 2));
+  const algorithmToPolicyStart = algorithmExit
+    ? point(algorithmExit.left + (algorithmExit.width / 2), algorithmExit.top)
+    : point(algorithm.left, algorithm.top + (algorithm.height / 2));
   const algorithmToPolicyEnd = point(policy.left + (policy.width / 2), policy.bottom);
 
   const horizontalGap = Math.max(18, Math.abs(policyToReplayEnd.x - policyToReplayStart.x) * 0.38);
@@ -458,6 +486,62 @@ export function buildLoopConnectorGeometry({
   const leftTurn = Math.max(24, Math.min(48, Math.abs(
     algorithmToPolicyEnd.y - algorithmToPolicyStart.y
   ) * 0.35));
+  const replayProjectsThroughAlgorithm = (
+    replayToAlgorithmStart.y < algorithm.top &&
+    replayToAlgorithmStart.x > algorithm.left &&
+    replayToAlgorithmStart.x < algorithm.right
+  );
+  const availableRightLane = Math.max(0, containerRect.width - algorithm.right);
+  const outsideRightX = rounded(
+    algorithm.right + Math.max(8, Math.min(32, availableRightLane * 0.45))
+  );
+  const approachY = rounded(
+    algorithm.top - Math.max(
+      8,
+      Math.min(24, Math.max(0, algorithm.top - replayToAlgorithmStart.y) * 0.5)
+    )
+  );
+  const dedicatedEntryTurn = Math.max(20, Math.min(56, Math.abs(
+    replayToAlgorithmEnd.y - replayToAlgorithmStart.y
+  ) * 0.35));
+  const dedicatedExitTurn = Math.max(20, Math.min(56, Math.abs(
+    algorithmToPolicyStart.y - algorithmToPolicyEnd.y
+  ) * 0.35));
+  const replayToAlgorithmPath = algorithmEntry
+    ? [
+      `M ${replayToAlgorithmStart.x} ${replayToAlgorithmStart.y}`,
+      `C ${replayToAlgorithmStart.x} ${rounded(replayToAlgorithmStart.y + dedicatedEntryTurn)}`,
+      `${replayToAlgorithmEnd.x} ${rounded(replayToAlgorithmEnd.y - dedicatedEntryTurn)}`,
+      `${replayToAlgorithmEnd.x} ${replayToAlgorithmEnd.y}`,
+    ].join(' ')
+    : replayProjectsThroughAlgorithm
+      ? [
+      `M ${replayToAlgorithmStart.x} ${replayToAlgorithmStart.y}`,
+      `C ${replayToAlgorithmStart.x} ${approachY}`,
+      `${outsideRightX} ${approachY}`,
+      `${outsideRightX} ${algorithm.top}`,
+      `L ${outsideRightX} ${replayToAlgorithmEnd.y}`,
+      `L ${replayToAlgorithmEnd.x} ${replayToAlgorithmEnd.y}`,
+      ].join(' ')
+      : [
+        `M ${replayToAlgorithmStart.x} ${replayToAlgorithmStart.y}`,
+        `C ${replayToAlgorithmStart.x} ${rounded(replayToAlgorithmStart.y + rightTurn)}`,
+        `${rounded(replayToAlgorithmEnd.x + rightTurn)} ${replayToAlgorithmEnd.y}`,
+        `${replayToAlgorithmEnd.x} ${replayToAlgorithmEnd.y}`,
+      ].join(' ');
+  const algorithmToPolicyPath = algorithmExit
+    ? [
+      `M ${algorithmToPolicyStart.x} ${algorithmToPolicyStart.y}`,
+      `C ${algorithmToPolicyStart.x} ${rounded(algorithmToPolicyStart.y - dedicatedExitTurn)}`,
+      `${algorithmToPolicyEnd.x} ${rounded(algorithmToPolicyEnd.y + dedicatedExitTurn)}`,
+      `${algorithmToPolicyEnd.x} ${algorithmToPolicyEnd.y}`,
+    ].join(' ')
+    : [
+      `M ${algorithmToPolicyStart.x} ${algorithmToPolicyStart.y}`,
+      `C ${rounded(algorithmToPolicyStart.x - leftTurn)} ${algorithmToPolicyStart.y}`,
+      `${algorithmToPolicyEnd.x} ${rounded(algorithmToPolicyEnd.y + leftTurn)}`,
+      `${algorithmToPolicyEnd.x} ${algorithmToPolicyEnd.y}`,
+    ].join(' ');
 
   return {
     width: Math.max(1, rounded(containerRect.width)),
@@ -478,23 +562,17 @@ export function buildLoopConnectorGeometry({
         id: 'replay-to-algorithm',
         start: replayToAlgorithmStart,
         end: replayToAlgorithmEnd,
-        d: [
-          `M ${replayToAlgorithmStart.x} ${replayToAlgorithmStart.y}`,
-          `C ${replayToAlgorithmStart.x} ${rounded(replayToAlgorithmStart.y + rightTurn)}`,
-          `${rounded(replayToAlgorithmEnd.x + rightTurn)} ${replayToAlgorithmEnd.y}`,
-          `${replayToAlgorithmEnd.x} ${replayToAlgorithmEnd.y}`,
-        ].join(' '),
+        routing: algorithmEntry
+          ? 'entry-top-center'
+          : (replayProjectsThroughAlgorithm ? 'outside-right' : 'direct'),
+        d: replayToAlgorithmPath,
       },
       {
         id: 'algorithm-to-policy',
         start: algorithmToPolicyStart,
         end: algorithmToPolicyEnd,
-        d: [
-          `M ${algorithmToPolicyStart.x} ${algorithmToPolicyStart.y}`,
-          `C ${rounded(algorithmToPolicyStart.x - leftTurn)} ${algorithmToPolicyStart.y}`,
-          `${algorithmToPolicyEnd.x} ${rounded(algorithmToPolicyEnd.y + leftTurn)}`,
-          `${algorithmToPolicyEnd.x} ${algorithmToPolicyEnd.y}`,
-        ].join(' '),
+        routing: algorithmExit ? 'exit-top-center' : 'direct',
+        d: algorithmToPolicyPath,
       },
     ],
   };
@@ -505,6 +583,7 @@ function DesktopLoopConnector({
   policyRef,
   replayRef,
   algorithmRef,
+  anchorKey = '',
   testId = 'policy-training-loop-connectors',
 }) {
   const reactId = useId();
@@ -512,13 +591,25 @@ function DesktopLoopConnector({
   const [geometry, setGeometry] = useState(emptyConnectorGeometry);
 
   useEffect(() => {
-    const elements = [
+    const requiredElements = [
       containerRef.current,
       policyRef.current,
       replayRef.current,
       algorithmRef.current,
     ];
-    if (elements.some((element) => !element)) return undefined;
+    if (requiredElements.some((element) => !element)) return undefined;
+
+    const algorithmEntryElement = algorithmRef.current?.querySelector(
+      '[data-loop-replay-target="top-center"]'
+    );
+    const algorithmExitElement = algorithmRef.current?.querySelector(
+      '[data-loop-policy-update-source="top-center"]'
+    );
+    const elements = [
+      ...requiredElements,
+      algorithmEntryElement,
+      algorithmExitElement,
+    ].filter(Boolean);
 
     const requestFrame = window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window)
@@ -537,6 +628,12 @@ function DesktopLoopConnector({
           policyRect: policyRef.current?.getBoundingClientRect(),
           replayRect: replayRef.current?.getBoundingClientRect(),
           algorithmRect: algorithmRef.current?.getBoundingClientRect(),
+          algorithmEntryRect: algorithmRef.current?.querySelector(
+            '[data-loop-replay-target="top-center"]'
+          )?.getBoundingClientRect(),
+          algorithmExitRect: algorithmRef.current?.querySelector(
+            '[data-loop-policy-update-source="top-center"]'
+          )?.getBoundingClientRect(),
         }));
       });
     };
@@ -553,7 +650,7 @@ function DesktopLoopConnector({
       window.removeEventListener('resize', measure);
       if (frameId !== null) cancelFrame(frameId);
     };
-  }, [algorithmRef, containerRef, policyRef, replayRef]);
+  }, [algorithmRef, anchorKey, containerRef, policyRef, replayRef]);
 
   return (
     <svg
@@ -581,6 +678,7 @@ function DesktopLoopConnector({
         <path
           key={connector.id}
           data-connector={connector.id}
+          data-routing={connector.routing || 'direct'}
           d={connector.d}
           fill="none"
           stroke="#8f887d"
@@ -628,6 +726,7 @@ export function PolicyTrainingLoopLayout({
   connectorTestId = 'policy-training-loop-connectors',
   updated = false,
   fitContent = false,
+  wideTrainingStage = false,
 }) {
   const containerRef = useRef(null);
   const policyRef = useRef(null);
@@ -652,6 +751,7 @@ export function PolicyTrainingLoopLayout({
         policyRef={policyRef}
         replayRef={replayRef}
         algorithmRef={algorithmRef}
+        anchorKey={`${policyModel}:${trainingMode}:${wideTrainingStage ? 'wide' : 'standard'}`}
         testId={connectorTestId}
       />
 
@@ -693,8 +793,14 @@ export function PolicyTrainingLoopLayout({
 
         <div
           ref={algorithmRef}
-          className="min-w-0 2xl:col-span-2 2xl:w-[calc(50%-1.5rem)] 2xl:justify-self-center"
+          className={clsx(
+            'min-w-0 2xl:col-span-2 2xl:justify-self-center',
+            wideTrainingStage
+              ? '2xl:w-3/4'
+              : '2xl:w-[calc(50%-1.5rem)]'
+          )}
           data-testid="training-algorithm-stage"
+          data-training-stage-width={wideTrainingStage ? 'wide' : 'standard'}
         >
           {trainingNode}
         </div>

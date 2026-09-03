@@ -28,10 +28,14 @@ import RobotLabIcon from './RobotLabIcon';
 import { InferencePhase, RecordPhase } from '../../../constants/taskPhases';
 import PageType from '../../../constants/pageType';
 import {
-  getFlowSDEPPOStatus,
-  startFlowSDEPPOTraining,
-  stopFlowSDEPPOTraining,
-  submitFlowSDEPPOOutcome,
+  getFlowSDEPPOPolicyRolloutStatus,
+  getFlowSDEPPOUpdateStatus,
+  getFlowSDEPPOValueWarmupStatus,
+  startFlowSDEPPOPolicyRollout,
+  startFlowSDEPPOUpdate,
+  stopFlowSDEPPOPolicyRollout,
+  stopFlowSDEPPOUpdate,
+  submitFlowSDEPPOPolicyRolloutOutcome,
 } from '../../../utils/offlineRlApi';
 import {
   markLocalTaskInfoEdited,
@@ -149,10 +153,32 @@ export default function RLWorkflowLayout({ isActive = true }) {
   const selectedPolicyType = useSelector(
     (state) => String(state.tasks.inferenceTaskInfo.policyType || '').trim()
   );
+  const selectedAccelerationMode = useSelector(
+    (state) => String(state.tasks.inferenceTaskInfo.accelerationMode || 'pytorch').trim()
+  );
+  const selectedAccelerationEnginePath = useSelector(
+    (state) => String(state.tasks.inferenceTaskInfo.accelerationEnginePath || '').trim()
+  );
+  const selectedRltEnabled = useSelector(
+    (state) => Boolean(state.tasks.inferenceTaskInfo.rltEnabled)
+  );
+  const selectedRltBundlePath = useSelector(
+    (state) => String(state.tasks.inferenceTaskInfo.rltBundlePath || '').trim()
+  );
+  const selectedRltRobotOverride = useSelector(
+    (state) => Boolean(state.tasks.inferenceTaskInfo.rltRobotOverride)
+  );
+  const selectedActionPolicyMode = useSelector(
+    (state) => String(state.tasks.inferenceTaskInfo.actionPolicyMode || 'base').trim()
+  );
   const [showWorkspaceStatus, setShowWorkspaceStatus] = useState(false);
   const [showDataConversionGuide, setShowDataConversionGuide] = useState(false);
   const [showTrainingGuide, setShowTrainingGuide] = useState(false);
-  const [activeFrameworkSection, setActiveFrameworkSection] = useState('environment');
+  const [frameworkPanels, setFrameworkPanels] = useState({
+    replay: false,
+    training: false,
+    lastActive: null,
+  });
   const [isFrameworkRailCollapsed, setIsFrameworkRailCollapsed] = useState(false);
   const replayDrawerCloseButtonRef = useRef(null);
   const trainingDrawerCloseButtonRef = useRef(null);
@@ -160,17 +186,22 @@ export default function RLWorkflowLayout({ isActive = true }) {
   const [trainingInteractionLocked, setTrainingInteractionLocked] = useState(true);
   const [trainingMethod, setTrainingMethod] = useState('reinforcement');
   const [isTrainingCompact, setIsTrainingCompact] = useState(false);
+  const [flowSdeRolloutBundle, setFlowSdeRolloutBundle] = useState('');
   const [rlLineage, setRLLineage] = useState(() => resolveOfflineRLLineageState());
   const [deploymentState, setDeploymentState] = useState({
     ready: false,
+    artifactKind: 'policy',
     modelPath: '',
+    rltBundlePath: '',
     serviceType: 'lerobot',
     policyType: 'act',
     rlEpoch: 0,
     lineageMode: 'unchanged',
   });
   const [activeDeployment, setActiveDeployment] = useState({
+    artifactKind: '',
     modelPath: '',
+    rltBundlePath: '',
     serviceType: '',
     policyType: '',
     previousLineage: null,
@@ -184,7 +215,11 @@ export default function RLWorkflowLayout({ isActive = true }) {
   const handleDeploymentStateChange = useCallback((nextState) => {
     setDeploymentState({
       ready: Boolean(nextState?.ready),
+      artifactKind: nextState?.artifactKind === 'rlt_bundle'
+        ? 'rlt_bundle'
+        : 'policy',
       modelPath: String(nextState?.modelPath || '').trim(),
+      rltBundlePath: String(nextState?.rltBundlePath || '').trim(),
       serviceType: String(nextState?.serviceType || 'lerobot').trim(),
       policyType: String(nextState?.policyType || 'act').trim(),
       rlEpoch: Number.isInteger(Number(nextState?.rlEpoch)) && Number(nextState.rlEpoch) >= 0
@@ -197,9 +232,24 @@ export default function RLWorkflowLayout({ isActive = true }) {
   }, [rlLineage.policyEpoch]);
 
   const handleDeployPolicy = useCallback(() => {
-    if (!deploymentState.ready || !deploymentState.modelPath) return;
+    const isRltBundle = deploymentState.artifactKind === 'rlt_bundle';
+    const candidatePath = isRltBundle
+      ? deploymentState.rltBundlePath
+      : deploymentState.modelPath;
+    if (!deploymentState.ready || !candidatePath) return;
+    if (
+      isRltBundle &&
+      (
+        !deploymentState.modelPath ||
+        selectedPolicyPath !== deploymentState.modelPath ||
+        selectedServiceType !== deploymentState.serviceType ||
+        selectedPolicyType !== deploymentState.policyType
+      )
+    ) return;
     setActiveDeployment({
+      artifactKind: deploymentState.artifactKind,
       modelPath: deploymentState.modelPath,
+      rltBundlePath: deploymentState.rltBundlePath,
       serviceType: deploymentState.serviceType,
       policyType: deploymentState.policyType,
       previousLineage: rlLineage,
@@ -207,12 +257,27 @@ export default function RLWorkflowLayout({ isActive = true }) {
         policyPath: selectedPolicyPath,
         serviceType: selectedServiceType,
         policyType: selectedPolicyType,
+        accelerationMode: selectedAccelerationMode,
+        accelerationEnginePath: selectedAccelerationEnginePath,
+        rltEnabled: selectedRltEnabled,
+        rltBundlePath: selectedRltBundlePath,
+        rltRobotOverride: selectedRltRobotOverride,
+        actionPolicyMode: selectedActionPolicyMode,
       },
     });
-    dispatch(setInferenceTaskInfo({
+    dispatch(setInferenceTaskInfo(isRltBundle ? {
+      serviceType: deploymentState.serviceType,
+      policyType: deploymentState.policyType,
+      rltEnabled: true,
+      rltBundlePath: deploymentState.rltBundlePath,
+      rltRobotOverride: false,
+      actionPolicyMode: 'base',
+    } : {
       policyPath: deploymentState.modelPath,
       serviceType: deploymentState.serviceType,
       policyType: deploymentState.policyType,
+      accelerationMode: 'pytorch',
+      accelerationEnginePath: '',
     }));
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     setRLLineage((current) => (
@@ -220,52 +285,95 @@ export default function RLWorkflowLayout({ isActive = true }) {
         ? createOfflineRLLineage(deploymentState.modelPath)
         : advanceOfflineRLLineage(current, {
           policyEpoch: deploymentState.rlEpoch,
-          policyPath: deploymentState.modelPath,
+          policyPath: isRltBundle ? selectedPolicyPath : deploymentState.modelPath,
         })
     ));
-    toast.success('Trained policy selected for inference');
+    toast.success(isRltBundle
+      ? 'Trained RLT Bundle selected for inference'
+      : 'Trained policy selected for inference');
   }, [
     deploymentState,
     dispatch,
     rlLineage,
+    selectedAccelerationEnginePath,
+    selectedAccelerationMode,
+    selectedActionPolicyMode,
     selectedPolicyPath,
     selectedPolicyType,
+    selectedRltBundlePath,
+    selectedRltEnabled,
+    selectedRltRobotOverride,
     selectedServiceType,
   ]);
 
   const handleDiscardPolicy = useCallback(() => {
-    if (
-      !activeDeployment.modelPath ||
-      selectedPolicyPath !== activeDeployment.modelPath
-    ) {
-      return;
-    }
+    const isRltBundle = activeDeployment.artifactKind === 'rlt_bundle';
+    const deploymentStillSelected = isRltBundle
+      ? Boolean(
+        activeDeployment.rltBundlePath &&
+        selectedRltEnabled &&
+        selectedRltBundlePath === activeDeployment.rltBundlePath &&
+        selectedPolicyPath === activeDeployment.modelPath &&
+        selectedServiceType === activeDeployment.serviceType &&
+        selectedPolicyType === activeDeployment.policyType
+      )
+      : Boolean(
+        activeDeployment.modelPath &&
+        selectedPolicyPath === activeDeployment.modelPath
+      );
+    if (!deploymentStillSelected) return;
     dispatch(setInferenceTaskInfo(activeDeployment.previousTaskInfo));
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     if (activeDeployment.previousLineage) {
       setRLLineage(activeDeployment.previousLineage);
     }
     setActiveDeployment({
+      artifactKind: '',
       modelPath: '',
+      rltBundlePath: '',
       serviceType: '',
       policyType: '',
       previousLineage: null,
       previousTaskInfo: null,
     });
-    toast.success('Policy removed from inference; trained files retained');
-  }, [activeDeployment, dispatch, selectedPolicyPath]);
+    toast.success(isRltBundle
+      ? 'RLT Bundle removed from inference; trained files retained'
+      : 'Policy removed from inference; trained files retained');
+  }, [
+    activeDeployment,
+    dispatch,
+    selectedPolicyPath,
+    selectedPolicyType,
+    selectedRltBundlePath,
+    selectedRltEnabled,
+    selectedServiceType,
+  ]);
+
+  const activeDeploymentSelected = activeDeployment.artifactKind === 'rlt_bundle'
+    ? Boolean(
+      activeDeployment.rltBundlePath &&
+      selectedRltEnabled &&
+      selectedRltBundlePath === activeDeployment.rltBundlePath &&
+      selectedPolicyPath === activeDeployment.modelPath &&
+      selectedServiceType === activeDeployment.serviceType &&
+      selectedPolicyType === activeDeployment.policyType
+    )
+    : Boolean(
+      activeDeployment.modelPath &&
+      selectedPolicyPath === activeDeployment.modelPath &&
+      selectedServiceType === activeDeployment.serviceType &&
+      selectedPolicyType === activeDeployment.policyType
+    );
 
   useEffect(() => {
-    if (
-      activeDeployment.modelPath &&
-      (
-        selectedPolicyPath !== activeDeployment.modelPath ||
-        selectedServiceType !== activeDeployment.serviceType ||
-        selectedPolicyType !== activeDeployment.policyType
-      )
-    ) {
+    const hasActiveDeployment = Boolean(
+      activeDeployment.modelPath || activeDeployment.rltBundlePath
+    );
+    if (hasActiveDeployment && !activeDeploymentSelected) {
       setActiveDeployment({
+        artifactKind: '',
         modelPath: '',
+        rltBundlePath: '',
         serviceType: '',
         policyType: '',
         previousLineage: null,
@@ -274,16 +382,28 @@ export default function RLWorkflowLayout({ isActive = true }) {
     }
   }, [
     activeDeployment,
+    activeDeploymentSelected,
     selectedPolicyPath,
     selectedPolicyType,
     selectedServiceType,
   ]);
 
   const deployedCandidateSelected = Boolean(
-    deploymentState.modelPath &&
-    selectedPolicyPath === deploymentState.modelPath &&
-    selectedServiceType === deploymentState.serviceType &&
-    selectedPolicyType === deploymentState.policyType
+    deploymentState.artifactKind === 'rlt_bundle'
+      ? (
+        deploymentState.rltBundlePath &&
+        selectedRltEnabled &&
+        selectedRltBundlePath === deploymentState.rltBundlePath &&
+        selectedPolicyPath === deploymentState.modelPath &&
+        selectedServiceType === deploymentState.serviceType &&
+        selectedPolicyType === deploymentState.policyType
+      )
+      : (
+        deploymentState.modelPath &&
+        selectedPolicyPath === deploymentState.modelPath &&
+        selectedServiceType === deploymentState.serviceType &&
+        selectedPolicyType === deploymentState.policyType
+      )
   );
 
   const workspaceModeSwitchLocked = (
@@ -293,8 +413,23 @@ export default function RLWorkflowLayout({ isActive = true }) {
     recordingControl.lifecycleLocked
   );
   const isRecordingWorkspace = workspaceMode === 'recording';
-  const isReplayDrawerOpen = isActive && activeFrameworkSection === 'replay';
-  const isTrainingDrawerOpen = isActive && activeFrameworkSection === 'training';
+  const isReplayDrawerOpen = isActive && frameworkPanels.replay;
+  const isTrainingDrawerOpen = isActive && frameworkPanels.training;
+  const activeFrameworkSection = isReplayDrawerOpen || isTrainingDrawerOpen
+    ? (
+      frameworkPanels.lastActive === 'replay' && isReplayDrawerOpen
+        ? 'replay'
+        : frameworkPanels.lastActive === 'training' && isTrainingDrawerOpen
+          ? 'training'
+          : isTrainingDrawerOpen ? 'training' : 'replay'
+    )
+    : 'environment';
+  const frameworkPanelState = isReplayDrawerOpen && isTrainingDrawerOpen
+    ? 'both'
+    : activeFrameworkSection;
+  const drawerWidthClass = isReplayDrawerOpen && isTrainingDrawerOpen
+    ? 'lg:w-[calc(50%_-_1.5rem)]'
+    : 'lg:w-1/2';
 
   const lineageResetDisabled = (
     workspaceModeSwitchLocked ||
@@ -313,14 +448,18 @@ export default function RLWorkflowLayout({ isActive = true }) {
     setRLLineage(createOfflineRLLineage(selectedPolicyPath));
     setDeploymentState({
       ready: false,
+      artifactKind: 'policy',
       modelPath: '',
+      rltBundlePath: '',
       serviceType: 'lerobot',
       policyType: 'act',
       rlEpoch: 0,
       lineageMode: 'unchanged',
     });
     setActiveDeployment({
+      artifactKind: '',
       modelPath: '',
+      rltBundlePath: '',
       serviceType: '',
       policyType: '',
       previousLineage: null,
@@ -340,16 +479,25 @@ export default function RLWorkflowLayout({ isActive = true }) {
     !isActive ||
     !deploymentState.ready ||
     inferencePhase !== InferencePhase.READY ||
+    (
+      deploymentState.artifactKind === 'rlt_bundle' &&
+      (
+        !deploymentState.rltBundlePath ||
+        !deploymentState.modelPath ||
+        selectedPolicyPath !== deploymentState.modelPath ||
+        selectedServiceType !== deploymentState.serviceType ||
+        selectedPolicyType !== deploymentState.policyType
+      )
+    ) ||
     deployedCandidateSelected
   );
   const discardDisabled = (
     !isActive ||
     inferencePhase !== InferencePhase.READY ||
-    !activeDeployment.modelPath ||
-    selectedPolicyPath !== activeDeployment.modelPath ||
-    selectedServiceType !== activeDeployment.serviceType ||
-    selectedPolicyType !== activeDeployment.policyType
+    !activeDeploymentSelected
   );
+  const isRltBundleCandidate = deploymentState.artifactKind === 'rlt_bundle';
+  const isRltBundleActive = activeDeployment.artifactKind === 'rlt_bundle';
 
   const closeWorkspaceStatus = useCallback(() => {
     setShowWorkspaceStatus(false);
@@ -372,7 +520,11 @@ export default function RLWorkflowLayout({ isActive = true }) {
   }, [closeDataConversionGuide, closeTrainingGuide, closeWorkspaceStatus, isActive]);
 
   const closeReplayDrawer = useCallback(() => {
-    setActiveFrameworkSection('environment');
+    setFrameworkPanels((current) => ({
+      ...current,
+      replay: false,
+      lastActive: current.training ? 'training' : null,
+    }));
     if (typeof document !== 'undefined') {
       document.getElementById('rl-framework-section-replay')?.focus();
     }
@@ -383,44 +535,41 @@ export default function RLWorkflowLayout({ isActive = true }) {
   }, [isReplayDrawerOpen]);
 
   useEffect(() => {
-    if (
-      !isReplayDrawerOpen ||
-      showWorkspaceStatus ||
-      showDataConversionGuide ||
-      typeof document === 'undefined'
-    ) return undefined;
-    const handleKeyDown = (event) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      closeReplayDrawer();
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [
-    closeReplayDrawer,
-    isReplayDrawerOpen,
-    showDataConversionGuide,
-    showWorkspaceStatus,
-  ]);
-
-  useEffect(() => {
     if (!isReplayDrawerOpen) closeDataConversionGuide();
   }, [closeDataConversionGuide, isReplayDrawerOpen]);
 
   const closeTrainingDrawer = useCallback(() => {
-    setActiveFrameworkSection('environment');
+    setFrameworkPanels((current) => ({
+      ...current,
+      training: false,
+      lastActive: current.replay ? 'replay' : null,
+    }));
     if (typeof document !== 'undefined') {
       document.getElementById('rl-framework-section-training')?.focus();
     }
   }, []);
 
   const handleFrameworkSectionChange = useCallback((nextSection) => {
-    setActiveFrameworkSection((currentSection) => (
-      currentSection === nextSection && nextSection !== 'environment'
-        ? 'environment'
-        : nextSection
-    ));
-  }, []);
+    if (nextSection === 'environment') {
+      setFrameworkPanels({ replay: false, training: false, lastActive: null });
+      return;
+    }
+    if (nextSection !== 'replay' && nextSection !== 'training') return;
+    setFrameworkPanels((current) => {
+      const otherSection = nextSection === 'replay' ? 'training' : 'replay';
+      const nextOpen = !current[nextSection];
+      return {
+        ...current,
+        [nextSection]: nextOpen,
+        lastActive: nextOpen
+          ? nextSection
+          : current[otherSection] ? otherSection : null,
+      };
+    });
+    if (frameworkPanels[nextSection] && typeof document !== 'undefined') {
+      document.getElementById(`rl-framework-section-${nextSection}`)?.focus();
+    }
+  }, [frameworkPanels]);
 
   useEffect(() => {
     if (isTrainingDrawerOpen) trainingDrawerCloseButtonRef.current?.focus();
@@ -428,21 +577,30 @@ export default function RLWorkflowLayout({ isActive = true }) {
 
   useEffect(() => {
     if (
-      !isTrainingDrawerOpen ||
+      (!isReplayDrawerOpen && !isTrainingDrawerOpen) ||
       showWorkspaceStatus ||
+      showDataConversionGuide ||
       showTrainingGuide ||
       typeof document === 'undefined'
     ) return undefined;
     const handleKeyDown = (event) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      closeTrainingDrawer();
+      if (activeFrameworkSection === 'training') {
+        closeTrainingDrawer();
+      } else {
+        closeReplayDrawer();
+      }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [
+    activeFrameworkSection,
+    closeReplayDrawer,
     closeTrainingDrawer,
+    isReplayDrawerOpen,
     isTrainingDrawerOpen,
+    showDataConversionGuide,
     showTrainingGuide,
     showWorkspaceStatus,
   ]);
@@ -458,6 +616,10 @@ export default function RLWorkflowLayout({ isActive = true }) {
     >
       <RLFrameworkRail
         activeSection={activeFrameworkSection}
+        openSections={{
+          replay: isReplayDrawerOpen,
+          training: isTrainingDrawerOpen,
+        }}
         collapsed={isFrameworkRailCollapsed}
         onBack={() => dispatch(moveToPage(PageType.HOME))}
         onSectionChange={handleFrameworkSectionChange}
@@ -536,6 +698,12 @@ export default function RLWorkflowLayout({ isActive = true }) {
                 policyEpoch={rlLineage.policyEpoch}
                 workspaceStatusOpen={showWorkspaceStatus}
                 onCloseWorkspaceStatus={closeWorkspaceStatus}
+                getFlowSDEPPOPolicyRolloutStatus={getFlowSDEPPOPolicyRolloutStatus}
+                onStartFlowSDEPPOPolicyRollout={startFlowSDEPPOPolicyRollout}
+                onStopFlowSDEPPOPolicyRollout={stopFlowSDEPPOPolicyRollout}
+                onSubmitFlowSDEPPOPolicyRolloutOutcome={submitFlowSDEPPOPolicyRolloutOutcome}
+                getFlowSDEPPOValueWarmupStatus={getFlowSDEPPOValueWarmupStatus}
+                onFlowSDEPPOPolicyRolloutBundleChange={setFlowSdeRolloutBundle}
               />
             </section>
           </div>
@@ -543,13 +711,13 @@ export default function RLWorkflowLayout({ isActive = true }) {
           <div
             className="pointer-events-none absolute inset-0 z-20 overflow-hidden"
             data-testid="offline-rl-workflow-steps"
-            data-panel-state={activeFrameworkSection}
+            data-panel-state={frameworkPanelState}
           >
             <aside
               id="offline-rl-replay-drawer"
               aria-labelledby="offline-rl-replay-drawer-title"
               aria-hidden={!isReplayDrawerOpen}
-              className={`absolute inset-y-4 left-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none lg:w-1/2 ${
+              className={`absolute inset-y-4 left-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${drawerWidthClass} ${
                 isReplayDrawerOpen
                   ? 'visible translate-x-0 opacity-100 pointer-events-auto'
                   : 'invisible -translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
@@ -620,7 +788,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
               id="offline-rl-training-drawer"
               aria-labelledby="offline-rl-training-drawer-title"
               aria-hidden={!isTrainingDrawerOpen}
-              className={`absolute inset-y-4 right-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none lg:w-1/2 ${
+              className={`absolute inset-y-4 right-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${drawerWidthClass} ${
                 isTrainingDrawerOpen
                   ? 'visible translate-x-0 opacity-100 pointer-events-auto'
                   : 'invisible translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
@@ -732,10 +900,10 @@ export default function RLWorkflowLayout({ isActive = true }) {
                   onRunningChange={setTrainingInteractionLocked}
                   onTrainingMethodStateChange={setTrainingMethod}
                   flowSdePpoReady
-                  getFlowSDEPPOStatus={getFlowSDEPPOStatus}
-                  onStartFlowSDEPPO={startFlowSDEPPOTraining}
-                  onStopFlowSDEPPO={stopFlowSDEPPOTraining}
-                  onSubmitFlowSDEPPOOutcome={submitFlowSDEPPOOutcome}
+                  flowSdeRolloutBundle={flowSdeRolloutBundle}
+                  getFlowSDEPPOStatus={getFlowSDEPPOUpdateStatus}
+                  onStartFlowSDEPPO={startFlowSDEPPOUpdate}
+                  onStopFlowSDEPPO={stopFlowSDEPPOUpdate}
                   onDeploymentStateChange={handleDeploymentStateChange}
                   onCompactLayoutChange={setIsTrainingCompact}
                   />
@@ -754,7 +922,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                         Step 05 · Deployment
                       </div>
                       <div className="truncate text-[11px] font-semibold text-[#403b34]">
-                        Policy Deploy
+                        {isRltBundleCandidate ? 'RLT Bundle Deploy' : 'Policy Deploy'}
                       </div>
                     </div>
                   </div>
@@ -767,7 +935,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                         ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
                         : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#a86b68] bg-[#a86b68] px-4 text-[10px] font-semibold text-white hover:bg-[#965d5a]'}
                     >
-                      <MdUndo size={14} /> Discard Policy
+                      <MdUndo size={14} /> {isRltBundleActive ? 'Discard RLT Bundle' : 'Discard Policy'}
                     </button>
                     <button
                       type="button"
@@ -777,7 +945,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                         ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
                         : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#5f7965] bg-[#69866f] px-4 text-[10px] font-semibold text-white hover:bg-[#5f7965]'}
                     >
-                      <MdCloudUpload size={14} /> Deploy Policy
+                      <MdCloudUpload size={14} /> {isRltBundleCandidate ? 'Deploy RLT Bundle' : 'Deploy Policy'}
                     </button>
                   </div>
                 </section>

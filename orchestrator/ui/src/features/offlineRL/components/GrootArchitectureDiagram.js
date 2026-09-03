@@ -84,10 +84,10 @@ const GROUP_TONES = {
     eyebrow: 'Action head',
   },
   action_module: {
-    border: 'border-[#d8c4a5]',
-    background: 'bg-[#f8f1e6]',
-    text: 'text-[#654f32]',
-    detail: 'text-[#8b7659]',
+    border: 'border-[#acc2ae]',
+    background: 'bg-[#edf4ec]',
+    text: 'text-[#38533d]',
+    detail: 'text-[#667d69]',
     eyebrow: 'Action head',
   },
 };
@@ -108,10 +108,10 @@ function LockedArchitectureNode({ group, memberGroups = [group.id] }) {
       aria-label={`${group.label}: ${group.trainable ? 'Trainable' : 'Frozen'}; locked`}
       disabled
       className={clsx(
-        'flex h-full min-h-[58px] w-full min-w-0 cursor-not-allowed flex-col justify-center rounded-xl border px-3 py-2.5 text-left opacity-75 shadow-[0_1px_2px_rgba(56,50,42,0.04)]',
+        'flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left shadow-[0_1px_2px_rgba(56,50,42,0.04)]',
         group.trainable
-          ? [tone.border, tone.background, tone.text]
-          : 'border-[#d9d2c5] bg-[#f1eee7] text-[#7d7569]'
+          ? [tone.border, tone.background, tone.text, 'cursor-default opacity-100']
+          : 'cursor-not-allowed border-[#d9d2c5] bg-[#f1eee7] text-[#7d7569] opacity-75'
       )}
       data-trainable-group={group.id}
       data-member-groups={memberGroups.join(' ')}

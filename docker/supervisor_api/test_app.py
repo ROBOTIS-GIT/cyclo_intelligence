@@ -113,9 +113,32 @@ def test_flow_sde_ppo_routes_are_registered():
     assert "/flow-sde-ppo/status" in paths
     assert "/flow-sde-ppo/stop" in paths
     assert "/flow-sde-ppo/outcome" in paths
+    assert "/flow-sde-ppo/rollout/start" in paths
+    assert "/flow-sde-ppo/rollout/status" in paths
+    assert "/flow-sde-ppo/rollout/stop" in paths
+    assert "/flow-sde-ppo/rollout/outcome" in paths
+    assert "/flow-sde-ppo/update/start" in paths
+    assert "/flow-sde-ppo/update/status" in paths
+    assert "/flow-sde-ppo/update/stop" in paths
     assert "/flow-sde-ppo/value-warmup/start" in paths
     assert "/flow-sde-ppo/value-warmup/status" in paths
     assert "/flow-sde-ppo/value-warmup/stop" in paths
+
+
+def test_rlt_stage1_routes_are_registered():
+    paths = {route.path for route in app.app.routes if hasattr(route, "path")}
+
+    assert "/rlt-stage1/start" in paths
+    assert "/rlt-stage1/status" in paths
+    assert "/rlt-stage1/stop" in paths
+
+
+def test_rlt_stage2_routes_are_registered():
+    paths = {route.path for route in app.app.routes if hasattr(route, "path")}
+
+    assert "/rlt-stage2/start" in paths
+    assert "/rlt-stage2/status" in paths
+    assert "/rlt-stage2/stop" in paths
 
 
 def test_act_td3_critic_warmup_routes_are_registered():
@@ -1891,7 +1914,10 @@ def test_offline_rl_multi_dataset_request_is_ordered_and_aggregated(monkeypatch,
     assert "first ordered" in error.value.detail
 
 
-def test_offline_rl_enforces_v30_max_and_first_round_cap(monkeypatch, tmp_path):
+def test_offline_rl_enforces_v30_max_and_allows_full_initial_replay(
+    monkeypatch,
+    tmp_path,
+):
     import pytest
 
     dataset, _act, _model_root = _offline_rl_test_layout(
@@ -1909,10 +1935,13 @@ def test_offline_rl_enforces_v30_max_and_first_round_cap(monkeypatch, tmp_path):
         "total_episodes": 100,
         "features": {"episode_success": {"dtype": "bool"}},
     }))
-    with pytest.raises(app.HTTPException) as error:
-        app._offline_rl_parent_checkpoint("", 100)
-    assert "1..50" in error.value.detail
     assert app._offline_rl_parent_checkpoint("", 30) == (None, 0, 0)
+    assert app._offline_rl_parent_checkpoint("", 100) == (None, 0, 0)
+    assert app._offline_rl_parent_checkpoint("", 200) == (None, 0, 0)
+    for invalid_count in (0, 201):
+        with pytest.raises(app.HTTPException) as error:
+            app._offline_rl_parent_checkpoint("", invalid_count)
+        assert "1..200" in error.value.detail
 
 
 def test_offline_rl_parent_accepts_inferred_next_1_to_50(monkeypatch, tmp_path):
@@ -1965,7 +1994,10 @@ def test_offline_rl_parent_validates_its_recorded_td3_schedule(monkeypatch, tmp_
 
     manifest_path = round_root / "training_manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["schedule"]["actor_equivalent_epochs"] = 2
+    manifest["schedule"] = {
+        "critic_epochs": 5,
+        "actor_equivalent_epochs": 3,
+    }
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(app.HTTPException) as error:
         app._offline_rl_parent_checkpoint(str(parent), 60)
@@ -2862,6 +2894,239 @@ def test_offline_rl_stop_rolls_back_when_no_target_can_be_signalled(
     assert job.status == "running"
 
 
+def test_offline_rl_cancel_discards_only_stopped_job_output_and_clears_progress(
+    monkeypatch,
+    tmp_path,
+):
+    dataset, act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    job_id = "1234567890abcdef1234567890abcdef"
+    output = model_root / "offline_rl" / "td3_bc_episodes_0050_1234567890ab"
+    checkpoint = output / "training_state" / "act_td3.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"incomplete checkpoint")
+    (output / "training_manifest.json").write_text('{"status":"stopped"}')
+    dataset_marker = dataset / "keep.txt"
+    dataset_marker.write_text("dataset")
+    warmup = act / "critic" / "latest.pt"
+    warmup.parent.mkdir(parents=True)
+    warmup.write_bytes(b"warm critic")
+    parent = model_root / "offline_rl" / "completed_parent" / "training_state" / "act_td3.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"completed parent")
+    log_path = tmp_path / "logs" / f"{job_id}.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("diagnostic log")
+    job = app._OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        dataset_paths=[str(dataset)],
+        act_checkpoint=str(act),
+        parent_checkpoint=str(parent),
+        output_dir=str(output),
+        episode_count=50,
+        log_path=str(log_path),
+        status="stopped",
+        percentage=42.0,
+        completed_epochs=4,
+        total_epochs=10,
+        completed_critic_updates=21,
+        total_critic_updates=50,
+        completed_actor_updates=10,
+        total_actor_updates=25,
+        critic_loss=1.25,
+        actor_loss=-0.5,
+        loss_history=[app.OfflineRLLossPoint(step=21, critic_loss=1.25)],
+        rl_metric_history=[
+            app.OfflineRLRLMetricPoint(
+                rl_epoch=2,
+                actor_loss_mean=-0.5,
+                critic_loss_mean=1.25,
+                replay_average_reward=0.5,
+            )
+        ],
+        eta_seconds=15.0,
+        model_path=str(output / "pretrained_model"),
+        checkpoint_path=str(checkpoint),
+        critic_source="parent_checkpoint",
+        critic_checkpoint=str(parent),
+        stop_requested=True,
+        stop_confirmed=True,
+        returncode=0,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+
+    response = asyncio.run(app.offline_rl_cancel(
+        app.OfflineRLCancelRequest(job_id=job_id)
+    ))
+
+    assert response.status == "cancelled"
+    assert response.percentage == 0.0
+    assert response.completed_epochs == 0
+    assert response.total_epochs == 10
+    assert response.completed_critic_updates == 0
+    assert response.total_critic_updates == 0
+    assert response.completed_actor_updates == 0
+    assert response.total_actor_updates == 0
+    assert response.critic_loss is None
+    assert response.actor_loss is None
+    assert response.loss_history == []
+    assert response.rl_metric_history == []
+    assert response.model_path == ""
+    assert response.checkpoint_path == ""
+    assert response.critic_source == ""
+    assert response.critic_checkpoint == ""
+    assert response.dataset_paths == [str(dataset)]
+    assert response.act_checkpoint == str(act)
+    assert response.parent_checkpoint == str(parent)
+    assert response.output_dir == str(output)
+    assert not output.exists()
+    assert dataset_marker.read_text() == "dataset"
+    assert warmup.read_bytes() == b"warm critic"
+    assert parent.read_bytes() == b"completed parent"
+    assert log_path.read_text() == "diagnostic log"
+    assert app._OFFLINE_RL_JOB is job
+
+
+def test_offline_rl_cancel_accepts_failed_job_with_missing_output(
+    monkeypatch,
+    tmp_path,
+):
+    dataset, act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    job_id = "failed1234567890abcdef1234567890ab"
+    output = model_root / "offline_rl" / "td3_episodes_0050_failed123456"
+    job = app._OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        output_dir=str(output),
+        episode_count=50,
+        log_path=str(tmp_path / "failed.log"),
+        actor_objective="td3",
+        status="failed",
+        checkpoint_path=str(output / "training_state" / "act_td3.pt"),
+        returncode=1,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+
+    response = asyncio.run(app.offline_rl_cancel(
+        app.OfflineRLCancelRequest(job_id=job_id)
+    ))
+
+    assert response.status == "cancelled"
+    assert response.act_checkpoint == str(act)
+    assert response.parent_checkpoint == ""
+    assert response.checkpoint_path == ""
+    assert response.returncode is None
+
+
+@pytest.mark.parametrize("status", ["running", "completed", "cancelled"])
+def test_offline_rl_cancel_rejects_non_incomplete_terminal_status(
+    monkeypatch,
+    tmp_path,
+    status,
+):
+    dataset, act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    job_id = "state1234567890abcdef1234567890abc"
+    output = model_root / "offline_rl" / "td3_bc_episodes_0050_state1234567"
+    output.mkdir(parents=True)
+    marker = output / "keep.pt"
+    marker.write_bytes(b"keep")
+    job = app._OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        output_dir=str(output),
+        episode_count=50,
+        log_path=str(tmp_path / "state.log"),
+        status=status,
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_cancel(
+            app.OfflineRLCancelRequest(job_id=job_id)
+        ))
+
+    assert error.value.status_code == 409
+    assert marker.read_bytes() == b"keep"
+    assert job.status == status
+
+
+def test_offline_rl_cancel_rejects_stale_id_and_unsafe_output_paths(
+    monkeypatch,
+    tmp_path,
+):
+    dataset, act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    job_id = "unsafe1234567890abcdef1234567890ab"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.pt"
+    marker.write_bytes(b"keep")
+    job = app._OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        output_dir=str(outside),
+        episode_count=50,
+        log_path=str(tmp_path / "unsafe.log"),
+        status="stopped",
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+
+    with pytest.raises(app.HTTPException) as stale_error:
+        asyncio.run(app.offline_rl_cancel(
+            app.OfflineRLCancelRequest(job_id="stale")
+        ))
+    assert stale_error.value.status_code == 409
+
+    with pytest.raises(app.HTTPException) as path_error:
+        asyncio.run(app.offline_rl_cancel(
+            app.OfflineRLCancelRequest(job_id=job_id)
+        ))
+    assert path_error.value.status_code == 409
+    assert marker.read_bytes() == b"keep"
+    assert job.status == "stopped"
+
+
+def test_offline_rl_cancel_rejects_symlink_output_without_following_it(
+    monkeypatch,
+    tmp_path,
+):
+    dataset, act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
+    job_id = "symlink1234567890abcdef1234567890a"
+    output = model_root / "offline_rl" / "td3_bc_episodes_0050_symlink12345"
+    output.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    marker = outside / "keep.pt"
+    marker.write_bytes(b"keep")
+    output.symlink_to(outside, target_is_directory=True)
+    job = app._OfflineRLJob(
+        job_id=job_id,
+        dataset_path=str(dataset),
+        act_checkpoint=str(act),
+        parent_checkpoint="",
+        output_dir=str(output),
+        episode_count=50,
+        log_path=str(tmp_path / "symlink.log"),
+        status="failed",
+    )
+    monkeypatch.setattr(app, "_OFFLINE_RL_JOB", job)
+
+    with pytest.raises(app.HTTPException) as error:
+        asyncio.run(app.offline_rl_cancel(
+            app.OfflineRLCancelRequest(job_id=job_id)
+        ))
+
+    assert error.value.status_code == 409
+    assert output.is_symlink()
+    assert marker.read_bytes() == b"keep"
+    assert job.status == "failed"
+
+
 def test_offline_rl_start_launches_single_pinned_compose_job(monkeypatch, tmp_path):
     dataset, act, _model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
     launched = {}
@@ -3027,7 +3292,13 @@ def test_offline_rl_start_rejects_invalid_td3_epoch_ratio():
         asyncio.run(app.offline_rl_start(request))
 
     assert error.value.status_code == 400
-    assert "policy_update_period" in error.value.detail
+    assert "exact integer multiple" in error.value.detail
+
+
+def test_offline_rl_schedule_accepts_equal_actor_and_critic_epochs():
+    assert app._offline_rl_schedule(1, 1) == (1, 1)
+    assert app._offline_rl_schedule(10, 10) == (10, 10)
+    assert app._offline_rl_schedule(10, 5) == (10, 5)
 
 
 def test_offline_rl_start_request_validates_batch_size():

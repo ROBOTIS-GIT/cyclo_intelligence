@@ -60,6 +60,9 @@ class InferenceRequester:
             rlt_enabled=bool(getattr(request, "rlt_enabled", False)),
             rlt_bundle_path=str(getattr(request, "rlt_bundle_path", "") or ""),
             action_policy_mode="base",
+            action_request_mode=str(
+                getattr(request, "action_request_mode", "") or "async"
+            ),
         )
         return self._call(
             engine_request,
@@ -71,6 +74,11 @@ class InferenceRequester:
         task_instruction: str,
         action_policy_mode: str = "base",
         timeout_s: float | None = None,
+        *,
+        action_request_mode: str = "async",
+        rtc_delay_steps: int = 0,
+        rtc_action_dim: int = 0,
+        rtc_prefix_action_list: list[float] | None = None,
     ) -> EngineCommandResponse:
         with self._lock:
             if self._get_action_in_flight:
@@ -86,6 +94,10 @@ class InferenceRequester:
             seq_id=seq_id,
             task_instruction=task_instruction or "",
             action_policy_mode=str(action_policy_mode or "base"),
+            action_request_mode=str(action_request_mode or "async"),
+            rtc_delay_steps=int(rtc_delay_steps),
+            rtc_action_dim=int(rtc_action_dim),
+            rtc_prefix_action_list=list(rtc_prefix_action_list or []),
         )
         try:
             return self._call(

@@ -64,6 +64,28 @@ describe('RLFrameworkRail', () => {
     expect(onSectionChange).toHaveBeenCalledWith('training');
   });
 
+  test('shows Replay Buffer and Training as expanded at the same time', () => {
+    render(
+      <RLFrameworkRail
+        activeSection="training"
+        openSections={{ replay: true, training: true }}
+        sectionControls={{
+          replay: 'offline-rl-replay-drawer',
+          training: 'offline-rl-training-drawer',
+        }}
+      />
+    );
+
+    const replayButton = screen.getByRole('button', { name: 'Replay Buffer' });
+    const trainingButton = screen.getByRole('button', { name: 'Training' });
+    expect(replayButton).toHaveAttribute('aria-expanded', 'true');
+    expect(trainingButton).toHaveAttribute('aria-expanded', 'true');
+    expect(replayButton).toHaveClass('bg-[#e2e9df]');
+    expect(trainingButton).toHaveClass('bg-[#e2e9df]');
+    expect(replayButton).not.toHaveAttribute('aria-current');
+    expect(trainingButton).toHaveAttribute('aria-current', 'page');
+  });
+
   test('collapses to an icon-only rail while keeping accessible controls', () => {
     const { container } = render(<RLFrameworkRail collapsed />);
 

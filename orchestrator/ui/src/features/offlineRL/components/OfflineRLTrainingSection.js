@@ -8,30 +8,41 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import {
+  MdAcUnit,
+  MdArrowForward,
   MdDataObject,
+  MdDeleteForever,
   MdFolderOpen,
   MdModelTraining,
   MdPlayArrow,
   MdStop,
+  MdWhatshot,
 } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import ProgressBar from '../../../components/ProgressBar';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 import { InferencePhase } from '../../../constants/taskPhases';
 import {
+  cancelOfflineRLTraining,
   getACTTD3CriticWarmupStatus,
   getFlowSDEPPOValueWarmupStatus,
   getImitationLearningStatus,
   getOfflineRLDatasetInfo,
   getOfflineRLStatus,
+  getRLTStage1Status,
+  getRLTStage2Status,
   startACTTD3CriticWarmup,
   startFlowSDEPPOValueWarmup,
   startImitationLearningTraining,
   startOfflineRLTraining,
+  startRLTStage1Training,
+  startRLTStage2Training,
   stopACTTD3CriticWarmup,
   stopFlowSDEPPOValueWarmup,
   stopImitationLearningTraining,
   stopOfflineRLTraining,
+  stopRLTStage1Training,
+  stopRLTStage2Training,
 } from '../../../utils/offlineRlApi';
 import {
   markLocalTaskInfoEdited,
@@ -72,8 +83,27 @@ const DEFAULT_ALGORITHM_BY_POLICY = Object.freeze({
   act: 'td3',
   multi_task_dit: 'flow_sde_ppo',
   groot: 'rlt',
-  pi05: 'rlt',
+  pi05: '',
 });
+const IMPLEMENTED_RL_ALGORITHMS_BY_POLICY = Object.freeze({
+  act: Object.freeze(['td3']),
+  multi_task_dit: Object.freeze(['flow_sde_ppo']),
+  groot: Object.freeze(['rlt']),
+  pi05: Object.freeze([]),
+});
+
+const isImplementedRLAlgorithm = (policyModel, algorithm) => (
+  Boolean(algorithm) &&
+  (IMPLEMENTED_RL_ALGORITHMS_BY_POLICY[policyModel] || []).includes(algorithm)
+);
+
+export const reconcileAlgorithmForPolicy = (algorithm, policyModel) => {
+  if (isImplementedRLAlgorithm(policyModel, algorithm)) return algorithm;
+  const defaultAlgorithm = DEFAULT_ALGORITHM_BY_POLICY[policyModel] || '';
+  return isImplementedRLAlgorithm(policyModel, defaultAlgorithm)
+    ? defaultAlgorithm
+    : '';
+};
 
 export const resolveTrainingPolicyModel = (taskInfo = {}) => {
   const serviceType = String(taskInfo.serviceType || '').trim().toLowerCase();
@@ -85,6 +115,7 @@ export const resolveTrainingPolicyModel = (taskInfo = {}) => {
 };
 const RUNNING_STATUSES = new Set(['starting', 'running']);
 const COMPLETE_STATUSES = new Set(['complete', 'completed']);
+const CANCELLABLE_TD3_STATUSES = new Set(['stopped', 'failed']);
 const INFERENCE_PHASE_NAMES = {
   [InferencePhase.READY]: 'READY',
   [InferencePhase.LOADING]: 'LOADING',
@@ -170,6 +201,20 @@ const actPolicyPathsEquivalent = (left, right) => {
     selected === `${reported}/pretrained_model`
   );
 };
+
+const parentPolicyPathFromTD3Checkpoint = (value) => {
+  const checkpoint = normalizeContractPath(value);
+  const suffix = '/training_state/act_td3.pt';
+  if (!checkpoint.endsWith(suffix)) return '';
+  return `${checkpoint.slice(0, -suffix.length)}/pretrained_model`;
+};
+
+const orderedValuesEqual = (left, right) => (
+  Array.isArray(left) &&
+  Array.isArray(right) &&
+  left.length === right.length &&
+  left.every((value, index) => value === right[index])
+);
 
 const shortWarmupSource = (status, bundlePath) => {
   const jobId = String(status?.job_id || '').trim();
@@ -267,6 +312,276 @@ const WorkflowChoiceGroup = ({ label, children }) => (
 const activeChoiceClass = 'h-7 rounded-md bg-[#69866f] px-3 text-[10px] font-semibold text-white shadow-sm';
 const inactiveChoiceClass = 'h-7 rounded-md px-3 text-[10px] font-semibold text-[#746d62] hover:bg-[#e7e2d9] disabled:cursor-not-allowed disabled:opacity-60';
 const disabledChoiceClass = 'h-7 cursor-not-allowed rounded-md px-3 text-[10px] font-semibold text-[#aaa295] opacity-70';
+
+function RLTokenStage1TrainingCard({
+  steps,
+  setSteps,
+  batchSize,
+  setBatchSize,
+  saveFreq,
+  setSaveFreq,
+  disabled,
+}) {
+  const inputClassName = clsx(
+    'mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] px-2.5 text-[10px]',
+    'font-semibold text-[#4a4038] outline-none focus:border-[#bd8564]',
+    'focus:ring-2 focus:ring-[#ead7ca]',
+    disabled ? 'cursor-not-allowed bg-[#eeeae4] text-[#999187]' : 'bg-white'
+  );
+  const trainableNode = (label, detail) => (
+    <div
+      className="min-w-0 rounded-xl border border-[#9faf9f] bg-[#edf3ec] p-3 text-[#344a38]"
+      aria-label={`${label}: Trainable`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[12px] font-semibold">{label}</span>
+        <span className="flex shrink-0 items-center gap-1 rounded-full bg-[#69866f] px-2 py-0.5 text-[8px] font-bold uppercase tracking-[0.05em] text-white">
+          <MdWhatshot size={10} aria-hidden="true" /> Fire · Trainable
+        </span>
+      </div>
+      <div className="mt-1 truncate text-[9px] text-[#667d69]">{detail}</div>
+    </div>
+  );
+
+  return (
+    <section
+      className="h-full min-w-0 rounded-2xl border border-[#decfc3] bg-white p-4 shadow-[0_8px_24px_rgba(75,66,51,0.07)]"
+      aria-labelledby="groot-rlt-stage1-title"
+      data-testid="groot-rlt-stage1-training-card"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#aa795f]">
+            Representation pretraining
+          </div>
+          <h3 id="groot-rlt-stage1-title" className="mt-0.5 text-[14px] font-semibold text-[#38342e]">
+            RL Token Training
+          </h3>
+          <p className="mt-1 text-[10px] text-[#8b8378]">
+            Reconstruct frozen GR00T token features from demonstrations
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full bg-[#e6ece6] px-2.5 py-1 text-[9px] font-bold text-[#5f7664]">
+          RLT Stage 1
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)_22px_minmax(0,1fr)] items-stretch gap-1.5">
+        {trainableNode('RL Token Encoder', 'Frozen GR00T features → compact RL token')}
+        <span className="flex items-center justify-center text-[#aaa295]" aria-hidden="true">
+          <MdArrowForward size={15} />
+        </span>
+        {trainableNode('Reconstruction Decoder', 'Autoregressive frozen-token reconstruction')}
+      </div>
+
+      <div className="mt-3 rounded-xl border border-[#cfd5e7] bg-[#f2f4fa] p-3 text-[#4b587b]">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#7180a4]">
+            Reconstruction objective
+          </span>
+          <span className="flex items-center gap-1 rounded-full border border-[#d3ccc0] bg-white/70 px-2 py-0.5 text-[8px] font-semibold text-[#80776a]">
+            <MdAcUnit size={9} aria-hidden="true" /> GR00T frozen
+          </span>
+        </div>
+        <div className="mt-1 text-[13px] font-semibold">Frozen Token Feature MSE</div>
+        <div className="mt-0.5 text-[9px] text-[#6f7890]">
+          Gradients update only the RL Token Encoder and Reconstruction Decoder
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+          Training steps
+          <input
+            aria-label="RL Token training steps"
+            type="number"
+            min={1}
+            value={steps}
+            onChange={(event) => setSteps(event.target.value)}
+            disabled={disabled}
+            className={inputClassName}
+          />
+        </label>
+        <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+          Batch size
+          <input
+            aria-label="RL Token batch size"
+            type="number"
+            min={1}
+            max={64}
+            value={batchSize}
+            onChange={(event) => setBatchSize(event.target.value)}
+            disabled={disabled}
+            className={inputClassName}
+          />
+        </label>
+        <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+          Save frequency
+          <input
+            aria-label="RL Token save frequency"
+            type="number"
+            min={1}
+            value={saveFreq}
+            onChange={(event) => setSaveFreq(event.target.value)}
+            disabled={disabled}
+            className={inputClassName}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+function RLTStage2TrainingCard({
+  policyLabel,
+  trainableGroups,
+  onTrainableGroupsChange,
+  sourceMode,
+  sourcePath,
+  candidateBundlePath,
+  steps,
+  onStepsChange,
+  batchSize,
+  onBatchSizeChange,
+  saveFreq,
+  onSaveFreqChange,
+  disabled,
+}) {
+  const isResume = sourceMode === 'resume';
+  const hasSource = Boolean(String(sourcePath || '').trim());
+  const inputClassName = clsx(
+    'h-8 w-full min-w-0 rounded-lg border border-[#d9d2c5] px-2.5 text-[10px]',
+    'font-medium text-[#4a4038] outline-none focus:border-[#97a897] focus:ring-2',
+    'focus:ring-[#dce6db]',
+    disabled ? 'cursor-not-allowed bg-[#eeeae4] text-[#999187]' : 'bg-white'
+  );
+
+  return (
+    <div
+      className="mx-auto grid w-full max-w-[1080px] min-w-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(240px,1fr)] xl:items-start xl:gap-4"
+      data-testid="rlt-stage2-training-card"
+      data-layout="three-column"
+    >
+      <div className="min-w-0 xl:col-span-1">
+        <RLTArchitectureDiagram
+          policyLabel={policyLabel}
+          trainableGroups={trainableGroups}
+          onChange={onTrainableGroupsChange}
+          disabled={disabled}
+        />
+      </div>
+
+      <section
+        className="min-w-0 border-t border-[#e3ddd3] pt-3 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0"
+        aria-label="RLT training settings"
+        data-testid="rlt-training-settings"
+        data-loop-replay-target="top-center"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-[13px] font-semibold text-[#39352e]">
+              Training settings
+            </div>
+            <div className="truncate text-[9px] text-[#8d8579]">
+              Automatic source · optimizer schedule
+            </div>
+          </div>
+          <span className="shrink-0 rounded-full bg-[#eee9df] px-2.5 py-1 text-[9px] font-semibold text-[#746b5e]">
+            Stage 2
+          </span>
+        </div>
+
+        <div className="mt-3">
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-[#8d8579]">
+            RLT Source
+          </div>
+          <div
+            className={clsx(
+              'rounded-xl border px-3 py-2.5',
+              hasSource
+                ? 'border-[#cfd8cd] bg-[#eef3ec]'
+                : 'border-[#e1cdbd] bg-[#faf1e7]'
+            )}
+            aria-label="RLT automatic source"
+            data-source-mode={sourceMode}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold text-[#4f5f50]">
+                {isResume ? 'Current Inference Bundle' : 'RL Token Seed Bundle'}
+              </span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-[8px] font-bold uppercase tracking-[0.08em] text-[#647664]">
+                {isResume ? 'Resume' : 'New'}
+              </span>
+            </div>
+            <output
+              aria-label="RLT training source"
+              className={clsx(
+                'mt-1.5 block truncate font-mono text-[8px]',
+                hasSource ? 'text-[#657266]' : 'text-[#a56e50]'
+              )}
+              title={sourcePath || ''}
+            >
+              {sourcePath || 'Train an RL Token Seed for the selected GR00T first'}
+            </output>
+          </div>
+        </div>
+
+        <div className="mt-2 rounded-lg border border-[#dfd8cd] bg-[#f7f4ed] px-3 py-2">
+          <div className="text-[8px] font-semibold uppercase tracking-[0.1em] text-[#91897d]">
+            Candidate RLT Bundle
+          </div>
+          <output
+            aria-label="Candidate RLT Bundle"
+            className="mt-1 block truncate font-mono text-[8px] text-[#70695f]"
+            title={candidateBundlePath || ''}
+          >
+            {candidateBundlePath || 'Created as an immutable bundle after training'}
+          </output>
+        </div>
+
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+            Training steps
+            <input
+              aria-label="RLT training steps"
+              type="number"
+              min={1}
+              value={steps}
+              onChange={(event) => onStepsChange(event.target.value)}
+              disabled={disabled}
+              className={clsx(inputClassName, 'mt-1')}
+            />
+          </label>
+          <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+            Batch size
+            <input
+              aria-label="RLT batch size"
+              type="number"
+              min={1}
+              max={64}
+              value={batchSize}
+              onChange={(event) => onBatchSizeChange(event.target.value)}
+              disabled={disabled}
+              className={clsx(inputClassName, 'mt-1')}
+            />
+          </label>
+          <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
+            Save frequency
+            <input
+              aria-label="RLT save frequency"
+              type="number"
+              min={1}
+              value={saveFreq}
+              onChange={(event) => onSaveFreqChange(event.target.value)}
+              disabled={disabled}
+              className={clsx(inputClassName, 'mt-1')}
+            />
+          </label>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 function CriticWarmupPanel({
   controlsDisabled,
@@ -460,6 +775,8 @@ function CriticWarmupPanel({
 function WorkflowTrainingView({
   trainingMethod,
   onTrainingMethodChange,
+  grootImitationObjective,
+  onGrootImitationObjectiveChange,
   selectedPolicyModel,
   onPolicyModelChange,
   algorithm,
@@ -499,6 +816,21 @@ function WorkflowTrainingView({
   setImitationSaveFreq,
   imitationActionChunkSize,
   setImitationActionChunkSize,
+  rltStage1Steps,
+  setRltStage1Steps,
+  rltStage1BatchSize,
+  setRltStage1BatchSize,
+  rltStage1SaveFreq,
+  setRltStage1SaveFreq,
+  rltSourceMode,
+  rltSourcePath,
+  rltCandidateBundlePath,
+  rltStage2Steps,
+  setRltStage2Steps,
+  rltStage2BatchSize,
+  setRltStage2BatchSize,
+  rltStage2SaveFreq,
+  setRltStage2SaveFreq,
   criticWarmupUpdates,
   setCriticWarmupUpdates,
   statusLabel,
@@ -512,13 +844,14 @@ function WorkflowTrainingView({
   robotType,
   handleStart,
   handleStop,
-  handleFlowSDEPPOOutcome,
+  handleCancel,
   startDisabled,
   stopDisabled,
-  flowOutcomeDisabled,
+  cancelVisible,
+  cancelDisabled,
   isRunning,
   isStopping,
-  isSubmittingOutcome,
+  isCancelling,
   statusReady,
   isConversionRunning,
   trainabilityError,
@@ -529,7 +862,15 @@ function WorkflowTrainingView({
   const isCriticWarmup = trainingMethod === 'critic';
   const isActSelected = selectedPolicyModel === 'act';
   const isMultiTaskDiTSelected = selectedPolicyModel === 'multi_task_dit';
-  const isRltPolicySelected = ['groot', 'pi05'].includes(selectedPolicyModel);
+  const isRltStage1 = (
+    isImitationLearning &&
+    selectedPolicyModel === 'groot' &&
+    grootImitationObjective === 'rl_token'
+  );
+  const isRltPolicySelected = isImplementedRLAlgorithm(
+    selectedPolicyModel,
+    'rlt'
+  );
   const isDiffusionCriticWarmup = isCriticWarmup && isMultiTaskDiTSelected;
   const criticModelUnsupported = (
     isCriticWarmup && !isActSelected && !isMultiTaskDiTSelected
@@ -610,20 +951,22 @@ function WorkflowTrainingView({
   const isPureTD3 = isActTD3 && td3ActorObjective === 'td3';
   const flowSdePpoAvailable = (
     isReinforcementLearning &&
-    isMultiTaskDiTSelected &&
+    isImplementedRLAlgorithm(selectedPolicyModel, 'flow_sde_ppo') &&
     !browserDisabled
   );
   const rltAvailable = (
     isReinforcementLearning &&
-    isRltPolicySelected &&
-    !browserDisabled
+    isRltPolicySelected
   );
+  const rltSelectionDisabled = !rltAvailable || browserDisabled;
   const isRltLayout = (
     isReinforcementLearning &&
     isRltPolicySelected &&
     algorithm === 'rlt'
   );
   const isRlt = rltAvailable && algorithm === 'rlt';
+  const isRltStage2 = isRlt && selectedPolicyModel === 'groot';
+  const isRltStage2BackendReady = !isRltStage2 || jobStatus?.ready !== false;
   const isCompactWorkflowLayout = (
     isRltLayout ||
     isActTrainingLoop ||
@@ -684,7 +1027,9 @@ function WorkflowTrainingView({
     actionChunkDisabled: false,
     actionChunkTitle: '',
   };
-  const isSupportedPolicy = isActSelected || isMultiTaskDiTSelected;
+  const isSupportedPolicy = (
+    isActSelected || isMultiTaskDiTSelected || isRltStage1 || isRltStage2
+  );
   const parsedRoundIndex = Number(jobStatus?.round_index);
   const targetPolicyEpoch = (
     isReinforcementLearning &&
@@ -700,7 +1045,7 @@ function WorkflowTrainingView({
     pi05: 'Pi0.5',
   }[selectedPolicyModel] || selectedPolicyModel;
   const sharedLoopReplayStep = isImitationLearning
-    ? 'Replay Buffer → IL'
+    ? (isRltStage1 ? 'Replay Buffer → RL Token Training' : 'Replay Buffer → IL')
     : (isCriticWarmup
       ? 'Replay Buffer → Critic'
       : (isRlt
@@ -708,7 +1053,7 @@ function WorkflowTrainingView({
         : (isFlowSdePpo ? 'Rollout Buffer → PPO' : 'Replay Buffer → Training')));
   const sharedLoopRegionLabel = `${selectedPolicyLabel} ${
     isImitationLearning
-      ? 'imitation'
+      ? (isRltStage1 ? 'RL Token Stage 1' : 'imitation')
       : (isCriticWarmup ? 'critic warm-up' : (isRlt ? 'RLT' : 'reinforcement'))
   } training loop`;
   const workflowStartDisabled = (
@@ -754,7 +1099,26 @@ function WorkflowTrainingView({
     handleStart();
   };
 
-  const progressMetrics = isImitationLearning ? (isMultiTaskDiTSelected ? [
+  const encoderArtifactPath = String(
+    statusValue(jobStatus, 'encoder_artifact_path', 'rl_token_encoder_path') || ''
+  ).trim();
+  const progressMetrics = isRltStage1 ? [
+    {
+      label: 'Reconstruction loss',
+      value: formatLoss(statusValue(jobStatus, 'reconstruction_loss', 'loss')),
+      tone: 'critic',
+    },
+    {
+      label: 'Step',
+      value: formatCount(statusValue(jobStatus, 'step', 'completed_steps')),
+      tone: 'neutral',
+    },
+    {
+      label: 'RL token encoder',
+      value: encoderArtifactPath ? 'Ready' : '—',
+      tone: 'actor',
+    },
+  ] : isImitationLearning ? (isMultiTaskDiTSelected ? [
     {
       label: 'Flow loss',
       value: formatLoss(statusValue(jobStatus, 'loss', 'flow_loss')),
@@ -870,9 +1234,13 @@ function WorkflowTrainingView({
         ? (isDiffusionCriticWarmup
           ? `Step ${formatCount(statusValue(jobStatus, 'step', 'completed_steps'))}/${formatCount(statusValue(jobStatus, 'total_steps', 'steps'))}`
           : `Update ${formatCount(statusValue(jobStatus, 'completed_critic_updates'))}/${formatCount(criticWarmupTotalUpdates)}`)
-        : ''));
+        : (isRlt
+          ? `Step ${formatCount(statusValue(jobStatus, 'completed_steps', 'step'))}/${formatCount(statusValue(jobStatus, 'total_steps', 'steps'))}`
+          : '')));
   const progressAriaLabel = isActTD3
     ? 'Training loss progress'
+    : (isRltStage1
+      ? 'RL Token training progress'
     : (isImitationLearning
       ? 'Imitation Learning training progress'
       : (isCriticWarmup
@@ -881,17 +1249,17 @@ function WorkflowTrainingView({
           ? 'RLT training progress'
           : (isMultiTaskDiTSelected
             ? 'Flow-SDE PPO training progress'
-            : 'Offline RL training progress'))));
+            : 'Offline RL training progress')))));
 
   const renderPolicyDiagram = () => {
     if (selectedPolicyModel === 'groot') {
-      return <GrootArchitectureDiagram mode={isRlt ? 'rlt' : 'finetune'} />;
+      return <GrootArchitectureDiagram mode={(isRlt || isRltStage1) ? 'rlt' : 'finetune'} />;
     }
     if (selectedPolicyModel === 'multi_task_dit') {
       return <MultiTaskDiTArchitectureDiagram criticOnly={isDiffusionCriticWarmup} />;
     }
     if (selectedPolicyModel === 'pi05') {
-      return <PI05ArchitectureDiagram disabled={browserDisabled} />;
+      return <PI05ArchitectureDiagram mode={isRlt ? 'rlt' : 'finetune'} />;
     }
     return (
       <ACTArchitectureDiagram
@@ -1007,6 +1375,33 @@ function WorkflowTrainingView({
             </button>
           </WorkflowChoiceGroup>
 
+          {isImitationLearning && selectedPolicyModel === 'groot' && (
+            <WorkflowChoiceGroup label="GR00T IL objective">
+              <button
+                type="button"
+                aria-pressed={grootImitationObjective === 'action'}
+                disabled={selectionDisabled}
+                onClick={() => onGrootImitationObjectiveChange('action')}
+                className={grootImitationObjective === 'action'
+                  ? activeChoiceClass
+                  : inactiveChoiceClass}
+              >
+                Action IL
+              </button>
+              <button
+                type="button"
+                aria-pressed={grootImitationObjective === 'rl_token'}
+                disabled={selectionDisabled}
+                onClick={() => onGrootImitationObjectiveChange('rl_token')}
+                className={grootImitationObjective === 'rl_token'
+                  ? activeChoiceClass
+                  : inactiveChoiceClass}
+              >
+                RL Token Training
+              </button>
+            </WorkflowChoiceGroup>
+          )}
+
           <div className="flex flex-col gap-2">
             <WorkflowChoiceGroup label="RL algorithm">
               <button
@@ -1037,12 +1432,12 @@ function WorkflowTrainingView({
               </button>
               <button
                 type="button"
-                disabled={!rltAvailable}
+                disabled={rltSelectionDisabled}
                 aria-pressed={isReinforcementLearning && algorithm === 'rlt'}
                 onClick={() => onAlgorithmChange('rlt')}
                 className={isReinforcementLearning && algorithm === 'rlt'
                   ? activeChoiceClass
-                  : (!rltAvailable ? disabledChoiceClass : inactiveChoiceClass)}
+                  : (rltSelectionDisabled ? disabledChoiceClass : inactiveChoiceClass)}
                 title="RL Token Transformer with a lightweight Action MLP"
               >
                 RLT
@@ -1125,7 +1520,17 @@ function WorkflowTrainingView({
             policyTestId="training-policy-stage"
             policyNode={renderPolicyDiagram()}
             datasets={trainingReplayDatasets}
-            trainingNode={isImitationLearning ? (
+            trainingNode={isRltStage1 ? (
+              <RLTokenStage1TrainingCard
+                steps={rltStage1Steps}
+                setSteps={setRltStage1Steps}
+                batchSize={rltStage1BatchSize}
+                setBatchSize={setRltStage1BatchSize}
+                saveFreq={rltStage1SaveFreq}
+                setSaveFreq={setRltStage1SaveFreq}
+                disabled={browserDisabled}
+              />
+            ) : isImitationLearning ? (
               <ImitationLearningCard
                 policyLabel={imitationPolicyName}
                 title={imitationCardPresentation.title}
@@ -1195,10 +1600,19 @@ function WorkflowTrainingView({
               </div>
             </div>
           ) : isRlt ? (
-            <RLTArchitectureDiagram
+            <RLTStage2TrainingCard
               policyLabel={selectedPolicyLabel}
               trainableGroups={rltTrainableGroups}
-              onChange={setRltTrainableGroups}
+              onTrainableGroupsChange={setRltTrainableGroups}
+              sourceMode={rltSourceMode}
+              sourcePath={rltSourcePath}
+              candidateBundlePath={rltCandidateBundlePath}
+              steps={rltStage2Steps}
+              onStepsChange={setRltStage2Steps}
+              batchSize={rltStage2BatchSize}
+              onBatchSizeChange={setRltStage2BatchSize}
+              saveFreq={rltStage2SaveFreq}
+              onSaveFreqChange={setRltStage2SaveFreq}
               disabled={browserDisabled}
             />
           ) : isFlowSdePpo ? (
@@ -1230,8 +1644,8 @@ function WorkflowTrainingView({
                   <input
                     aria-label="Critic epochs"
                     type="number"
-                    min={2}
-                    step={2}
+                    min={1}
+                    step={1}
                     value={criticEpochs}
                     onChange={(event) => setCriticEpochs(event.target.value)}
                     disabled={browserDisabled}
@@ -1276,7 +1690,7 @@ function WorkflowTrainingView({
                   No compatible RL algorithm
                 </div>
                 <div className="mt-1 text-[10px] text-[#8d8579]">
-                  Select ACT + TD3 or Diffusion Transformer + Flow-SDE PPO.
+                  Select ACT + TD3, Diffusion Transformer + Flow-SDE PPO, or GR00T + RLT.
                 </div>
               </div>
             </div>
@@ -1284,10 +1698,14 @@ function WorkflowTrainingView({
               </div>
             )}
             replayStep={sharedLoopReplayStep}
-            returnStep="Policy update → next cycle"
+            returnStep={isRltStage1
+              ? 'RL Token Encoder → RLT Stage 2'
+              : 'Policy update → next cycle'}
             connectorTestId="policy-training-loop-connectors"
             fitContent={isCompactWorkflowLayout}
+            wideTrainingStage={isRlt}
             updated={Boolean(
+              !isRltStage1 &&
               modelPath &&
               COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase())
             )}
@@ -1308,7 +1726,9 @@ function WorkflowTrainingView({
         >
           <div className="flex items-center justify-between gap-2 text-[10px]">
             <span className="flex min-w-0 items-center gap-2 font-semibold text-[#514b42]">
-              <span>{isCriticWarmup ? 'Critic warm-up progress' : 'Training progress'}</span>
+              <span>{isCriticWarmup
+                ? 'Critic warm-up progress'
+                : (isRltStage1 ? 'RL Token training progress' : 'Training progress')}</span>
               {isActTD3 && (
                 <span
                   className="shrink-0 rounded-md border border-[#cfd8cd] bg-[#e8eee6] px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#58705d]"
@@ -1347,22 +1767,53 @@ function WorkflowTrainingView({
                 {selectedPolicyLabel} critic warm-up is not connected. Select ACT or Diffusion
                 {' '}Transformer; the selected model remains available for inspection.
               </p>
+            ) : isRltStage1 && COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase()) ? (
+              <p className="mt-1 text-[9px] leading-relaxed text-[#55715d]">
+                {String(jobStatus?.output_dir || '').trim()
+                  ? `RLT Seed Bundle ready · ${String(jobStatus.output_dir).trim()}`
+                  : (encoderArtifactPath
+                    ? `RLT Seed ready · ${encoderArtifactPath}`
+                    : 'RL Token training completed, but the Seed Bundle path was not reported.')}
+              </p>
+            ) : isRltStage1 ? (
+              <p className="mt-1 text-[9px] leading-relaxed text-[#948c80]">
+                {datasetSelections.length && actCheckpoint
+                  ? `RL Token Stage 1 ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · frozen GR00T · ${rltStage1Steps} steps · batch ${rltStage1BatchSize}`
+                  : 'Include at least one LeRobot v3.0 Data Epoch and select a GR00T checkpoint. Success/Fail labels are not required.'}
+              </p>
             ) : isImitationLearning && ['groot', 'pi05'].includes(selectedPolicyModel) ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
                 {selectedPolicyLabel} imitation-learning preview is available, but its training backend is not
                 {' '}connected yet. Start Training remains disabled.
               </p>
             ) : isRlt ? (
-              <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
+              <p
+                className={clsx(
+                  'mt-1 text-[9px] leading-relaxed',
+                  selectedPolicyModel === 'pi05' || !isRltStage2BackendReady
+                    ? 'text-[#a06458]'
+                    : 'text-[#948c80]'
+                )}
+                role={selectedPolicyModel === 'pi05' || !isRltStage2BackendReady
+                  ? 'alert'
+                  : undefined}
+              >
                 {selectedPolicyModel === 'pi05'
-                  ? 'Pi0.5 + RLT architecture is available, but a Pi0.5-compatible RLT checkpoint is required. The current showroom RLT artifact is GR00T-only.'
-                  : 'GR00T + RLT architecture is configured for shadow verification.'}
-                {' '}The training backend is not connected yet, so Start Training remains disabled.
+                  ? 'Pi0.5 RL training backend is not connected yet.'
+                  : !isRltStage2BackendReady
+                    ? (jobStatus?.message || 'RLT Stage 2 backend is not ready. Configuration remains editable, but Start Training is disabled.')
+                  : rltSourceMode === 'new'
+                    ? (rltSourcePath && actCheckpoint
+                      ? `New RLT ready · ${rltSourcePath} · ${rltStage2Steps} steps · batch ${rltStage2BatchSize}`
+                      : 'Train an RL Token Seed for the selected frozen GR00T first.')
+                    : (rltSourcePath
+                      ? `Resume RLT ready · ${rltSourcePath}`
+                      : 'Select a GR00T RLT Bundle in Inference Settings first.')}
               </p>
             ) : !isSupportedPolicy ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
                 {selectedPolicyLabel} diagram preview only. Offline RL training backend is not connected.
-                {' '}Training is available for ACT and Diffusion Transformer.
+                {' '}Training is available for ACT, Diffusion Transformer, and GR00T.
               </p>
             ) : isFlowSdePpo && !flowSdePpoReady ? (
               <p className="mt-1 text-[9px] leading-relaxed text-[#a06458]" role="alert">
@@ -1389,7 +1840,9 @@ function WorkflowTrainingView({
             ) : (
               <p className="mt-1 text-[9px] leading-relaxed text-[#948c80]">
                 {isImitationLearning
-                  ? (datasetSelections.length
+                  ? (isRltStage1
+                    ? null
+                    : datasetSelections.length
                     ? `${imitationPolicyName} imitation learning ready · ${datasetSelections.length} Data Epoch${datasetSelections.length === 1 ? '' : 's'} · ${imitationSteps} steps · batch ${imitationBatchSize} · ${displayedImitationActionChunkSize}-step chunk${isActSelected ? ` · ${actorTrainableGroups.length} trainable blocks` : ''} · no reward or Success/Fail labels required`
                     : `Include at least one LeRobot v3.0 Data Epoch in Step 3. No base ${imitationPolicyName} checkpoint, reward, or Success/Fail label is required.`)
                   : isCriticWarmup
@@ -1422,7 +1875,10 @@ function WorkflowTrainingView({
               </p>
             )}
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-1.5">
+          <div className={clsx(
+            'mt-2 grid gap-1.5',
+            cancelVisible ? 'grid-cols-3' : 'grid-cols-2'
+          )}>
             <button
               type="button"
               onClick={handleWorkflowStart}
@@ -1438,8 +1894,12 @@ function WorkflowTrainingView({
               {!statusReady
                 ? 'Checking…'
                 : (isRunning
-                  ? (isCriticWarmup ? 'Warming Critic…' : 'Training…')
-                  : (isCriticWarmup ? 'Start Critic Warm-up' : 'Start Training'))}
+                  ? (isCriticWarmup
+                    ? 'Warming Critic…'
+                    : (isRltStage1 ? 'Training RL Token…' : 'Training…'))
+                  : (isCriticWarmup
+                    ? 'Start Critic Warm-up'
+                    : (isRltStage1 ? 'Start RL Token Training' : 'Start Training')))}
             </button>
             <button
               type="button"
@@ -1455,51 +1915,27 @@ function WorkflowTrainingView({
               <MdStop size={14} />
               {isStopping
                 ? 'Stopping…'
-                : (isCriticWarmup ? 'Stop Critic Warm-up' : 'Stop Training')}
+                : (isCriticWarmup
+                  ? 'Stop Critic Warm-up'
+                  : (isRltStage1 ? 'Stop RL Token Training' : 'Stop Training'))}
             </button>
-          </div>
-          {isFlowSdePpo && isRunning && (
-            <div className="mt-2 border-t border-[#e2dcd1] pt-2">
-              <div className="mb-1.5 flex items-center justify-between gap-2 text-[8px] font-semibold text-[#777064]">
-                <span>Current episode outcome</span>
-                {isSubmittingOutcome ? (
-                  <span className="text-[#777064]">Saving…</span>
-                ) : jobStatus?.awaiting_outcome ? (
-                  <span className="text-[#a06458]">Outcome required</span>
-                ) : null}
-              </div>
-              <div
-                className="grid grid-cols-3 gap-1.5"
-                role="group"
-                aria-label="Flow-SDE episode outcome"
+            {cancelVisible && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={cancelDisabled}
+                className={clsx(
+                  'flex h-8 items-center justify-center gap-1 rounded-lg border text-[9px] font-semibold',
+                  cancelDisabled
+                    ? 'cursor-not-allowed border-[#d9d2c5] bg-[#eeeae2] text-[#aaa296]'
+                    : 'border-[#a86b68] bg-[#a86b68] text-white hover:bg-[#965d5a]'
+                )}
               >
-                <button
-                  type="button"
-                  onClick={() => handleFlowSDEPPOOutcome('success')}
-                  disabled={flowOutcomeDisabled}
-                  className="h-7 rounded-md border border-[#78937d] bg-[#edf4ed] text-[9px] font-semibold text-[#48654e] hover:bg-[#dfeade] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Success
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleFlowSDEPPOOutcome('fail')}
-                  disabled={flowOutcomeDisabled}
-                  className="h-7 rounded-md border border-[#bd8177] bg-[#fff4f1] text-[9px] font-semibold text-[#9d584f] hover:bg-[#f7e4df] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Fail
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleFlowSDEPPOOutcome('cancel')}
-                  disabled={flowOutcomeDisabled}
-                  className="h-7 rounded-md border border-[#c9c0b2] bg-[#f1ede5] text-[9px] font-semibold text-[#6f685d] hover:bg-[#e6e0d6] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+                <MdDeleteForever size={14} />
+                {isCancelling ? 'Cancelling…' : 'Cancel Training'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1516,10 +1952,10 @@ export default function OfflineRLTrainingSection({
   forceFreshLineage = false,
   onFreshLineageConsumed,
   flowSdePpoReady = false,
+  flowSdeRolloutBundle = '',
   getFlowSDEPPOStatus,
   onStartFlowSDEPPO,
   onStopFlowSDEPPO,
-  onSubmitFlowSDEPPOOutcome,
   onCompactLayoutChange,
   variant = 'default',
 }) {
@@ -1534,6 +1970,7 @@ export default function OfflineRLTrainingSection({
   const inferenceModelKey = [
     String(inferenceTaskInfo.serviceType || '').trim(),
     String(inferenceTaskInfo.policyType || '').trim(),
+    normalizeContractPath(inferenceTaskInfo.policyPath),
   ].join(':');
   const conversionStatus = useSelector(
     (state) => state.editDataset?.conversionStatus?.status || 'idle'
@@ -1542,8 +1979,9 @@ export default function OfflineRLTrainingSection({
   const [selectedPolicyModel, setSelectedPolicyModel] = useState(
     () => inferencePolicyModel || 'act'
   );
+  const [grootImitationObjective, setGrootImitationObjective] = useState('action');
   const [algorithm, setAlgorithm] = useState(
-    () => DEFAULT_ALGORITHM_BY_POLICY[inferencePolicyModel || 'act'] || ''
+    () => reconcileAlgorithmForPolicy('', inferencePolicyModel || 'act')
   );
   const [td3ActorObjective, setTD3ActorObjective] = useState('td3_bc');
   const [actorTrainableGroups, setActorTrainableGroups] = useState(
@@ -1561,6 +1999,15 @@ export default function OfflineRLTrainingSection({
   const [imitationActionChunkSize, setImitationActionChunkSize] = useState(
     String(IMITATION_ACTION_CHUNK_SIZES.act)
   );
+  const [rltStage1Steps, setRltStage1Steps] = useState('10000');
+  const [rltStage1BatchSize, setRltStage1BatchSize] = useState('1');
+  const [rltStage1SaveFreq, setRltStage1SaveFreq] = useState('1000');
+  const [rltTokenSource, setRltTokenSource] = useState('');
+  const [rltSeedBundlePath, setRltSeedBundlePath] = useState('');
+  const [rltSeedGrootCheckpoint, setRltSeedGrootCheckpoint] = useState('');
+  const [rltStage2Steps, setRltStage2Steps] = useState('10000');
+  const [rltStage2BatchSize, setRltStage2BatchSize] = useState('1');
+  const [rltStage2SaveFreq, setRltStage2SaveFreq] = useState('1000');
   const [criticWarmupUpdates, setCriticWarmupUpdates] = useState(
     String(DEFAULT_ACT_CRITIC_WARMUP_UPDATES)
   );
@@ -1575,7 +2022,7 @@ export default function OfflineRLTrainingSection({
   const [statusReady, setStatusReady] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
-  const [isSubmittingOutcome, setIsSubmittingOutcome] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [showDatasetBrowser, setShowDatasetBrowser] = useState(false);
   const [showActBrowser, setShowActBrowser] = useState(false);
   const [showParentBrowser, setShowParentBrowser] = useState(false);
@@ -1584,15 +2031,57 @@ export default function OfflineRLTrainingSection({
   const activeStatusRequest = useRef(null);
   const isStartingRef = useRef(false);
   const isStoppingRef = useRef(false);
+  const isCancellingRef = useRef(false);
   const actorTrainabilityHydratedRef = useRef(false);
   const td3ObjectiveHydratedJobRef = useRef('');
   const td3ObjectiveUserSelectedRef = useRef(false);
   const batchSizeHydratedRef = useRef(false);
   const imitationConfigHydratedRef = useRef(false);
+  const rltStage1ConfigHydratedRef = useRef(false);
+  const rltStage2ConfigHydratedRef = useRef(false);
   const criticWarmupConfigHydratedRef = useRef(false);
   const warmupStatusRequestSequence = useRef(0);
   const activeWarmupStatusRequest = useRef(null);
   const lastObservedInferenceModelKeyRef = useRef(inferenceModelKey);
+  const isRltStage1Selection = (
+    trainingMethod === 'imitation' &&
+    selectedPolicyModel === 'groot' &&
+    grootImitationObjective === 'rl_token'
+  );
+  const isRltStage2Selection = (
+    trainingMethod === 'reinforcement' &&
+    selectedPolicyModel === 'groot' &&
+    algorithm === 'rlt'
+  );
+  const configuredInferenceRltBundle = normalizeContractPath(
+    inferenceTaskInfo.rltBundlePath
+  );
+  const hasCompatibleInferenceRltBundle = Boolean(
+    inferencePolicyModel === 'groot' &&
+    String(inferenceTaskInfo.policyType || '').trim().toLowerCase() === 'n17' &&
+    configuredInferenceRltBundle
+  );
+  const useInferenceRltBundle = Boolean(
+    hasCompatibleInferenceRltBundle && !forceFreshLineage
+  );
+  const hasCompatibleRltSeed = Boolean(
+    rltTokenSource.trim() &&
+    rltSeedBundlePath.trim() &&
+    normalizeContractPath(rltSeedGrootCheckpoint) === normalizeContractPath(actCheckpoint)
+  );
+  const effectiveRltInitializationMode = useInferenceRltBundle ? 'resume' : 'new';
+  const effectiveRltBundlePath = useInferenceRltBundle
+    ? configuredInferenceRltBundle
+    : '';
+  const effectiveRltTokenSource = (
+    effectiveRltInitializationMode === 'new' && hasCompatibleRltSeed
+  ) ? rltTokenSource.trim() : '';
+  const effectiveRltSourcePath = effectiveRltInitializationMode === 'resume'
+    ? effectiveRltBundlePath
+    : (hasCompatibleRltSeed ? rltSeedBundlePath.trim() : '');
+  const isRltStage2BackendReady = (
+    !isRltStage2Selection || jobStatus?.ready !== false
+  );
 
   useEffect(() => {
     onTrainingMethodStateChange?.(trainingMethod);
@@ -1639,6 +2128,7 @@ export default function OfflineRLTrainingSection({
     if (
       isStartingRef.current ||
       isStoppingRef.current ||
+      isCancellingRef.current ||
       activeStatusRequest.current !== null
     ) {
       return null;
@@ -1649,7 +2139,11 @@ export default function OfflineRLTrainingSection({
     try {
       const backendSupported = trainingMethod === 'critic'
         ? ['act', 'multi_task_dit'].includes(selectedPolicyModel)
-        : ['act', 'multi_task_dit'].includes(selectedPolicyModel);
+        : (
+          ['act', 'multi_task_dit'].includes(selectedPolicyModel) ||
+          isRltStage1Selection ||
+          isRltStage2Selection
+        );
       if (!backendSupported) {
         if (!isCancelled() && requestSequence === statusRequestSequence.current) {
           setJobStatus({ status: 'idle' });
@@ -1657,8 +2151,12 @@ export default function OfflineRLTrainingSection({
         }
         return { status: 'idle' };
       }
-      const status = trainingMethod === 'imitation'
-        ? await getImitationLearningStatus()
+      const status = isRltStage1Selection
+        ? await getRLTStage1Status()
+        : isRltStage2Selection
+          ? await getRLTStage2Status()
+        : trainingMethod === 'imitation'
+          ? await getImitationLearningStatus()
         : (trainingMethod === 'critic'
           ? (selectedPolicyModel === 'multi_task_dit'
             ? await getFlowSDEPPOValueWarmupStatus()
@@ -1670,6 +2168,7 @@ export default function OfflineRLTrainingSection({
         isCancelled() ||
         isStartingRef.current ||
         isStoppingRef.current ||
+        isCancellingRef.current ||
         requestSequence !== statusRequestSequence.current
       ) {
         return null;
@@ -1686,6 +2185,7 @@ export default function OfflineRLTrainingSection({
         !isCancelled() &&
         !isStartingRef.current &&
         !isStoppingRef.current &&
+        !isCancellingRef.current &&
         requestSequence === statusRequestSequence.current
       ) {
         setStatusReady(false);
@@ -1696,7 +2196,13 @@ export default function OfflineRLTrainingSection({
         activeStatusRequest.current = null;
       }
     }
-  }, [getFlowSDEPPOStatus, selectedPolicyModel, trainingMethod]);
+  }, [
+    getFlowSDEPPOStatus,
+    isRltStage1Selection,
+    isRltStage2Selection,
+    selectedPolicyModel,
+    trainingMethod,
+  ]);
 
   const requestWarmupStatus = useCallback(async ({ isCancelled = () => false } = {}) => {
     if (activeWarmupStatusRequest.current !== null) {
@@ -1757,7 +2263,7 @@ export default function OfflineRLTrainingSection({
 
     async function poll() {
       if (cancelled) return;
-      if (isStartingRef.current || isStoppingRef.current) {
+      if (isStartingRef.current || isStoppingRef.current || isCancellingRef.current) {
         scheduleNextPoll();
         return;
       }
@@ -1779,11 +2285,11 @@ export default function OfflineRLTrainingSection({
   }, [isActive, requestStatus]);
 
   const normalizedStatus = String(jobStatus?.status || 'idle').toLowerCase();
+  const jobOperation = String(jobStatus?.operation || 'combined').toLowerCase();
   const isRunning = isStarting || RUNNING_STATUSES.has(normalizedStatus);
-  const isComplete = COMPLETE_STATUSES.has(normalizedStatus);
   const isFailed = normalizedStatus === 'failed' || normalizedStatus === 'error';
   const isConversionRunning = conversionStatus === 'running';
-  const interactionLocked = !statusReady || isRunning;
+  const interactionLocked = !statusReady || isRunning || isCancelling;
   const isReinforcementLearning = trainingMethod === 'reinforcement';
   const isImitationLearning = trainingMethod === 'imitation';
   const isCriticWarmup = trainingMethod === 'critic';
@@ -1791,14 +2297,29 @@ export default function OfflineRLTrainingSection({
     isCriticWarmup && selectedPolicyModel === 'multi_task_dit'
   );
   const isActCriticWarmup = isCriticWarmup && selectedPolicyModel === 'act';
-  const selectedPolicyBackendSupported = ['act', 'multi_task_dit'].includes(
-    selectedPolicyModel
+  const selectedPolicyBackendSupported = (
+    ['act', 'multi_task_dit'].includes(selectedPolicyModel) ||
+    isRltStage1Selection ||
+    isRltStage2Selection
   );
   const isFlowSdePpo = (
     isReinforcementLearning &&
     selectedPolicyModel === 'multi_task_dit' &&
     algorithm === 'flow_sde_ppo'
   );
+  const isComplete = (
+    COMPLETE_STATUSES.has(normalizedStatus) &&
+    (!isFlowSdePpo || jobOperation === 'update')
+  );
+  const isActTD3Selection = (
+    isReinforcementLearning &&
+    selectedPolicyModel === 'act' &&
+    algorithm === 'td3'
+  );
+  const cancelVisible = (
+    isActTD3Selection && CANCELLABLE_TD3_STATUSES.has(normalizedStatus)
+  );
+  const cancelRequired = cancelVisible;
   const imitationPolicyType = selectedPolicyModel === 'multi_task_dit'
     ? 'multi_task_dit'
     : 'act';
@@ -1811,6 +2332,16 @@ export default function OfflineRLTrainingSection({
     : `Flow-SDE PPO requires Inference READY (current: ${
       INFERENCE_PHASE_NAMES[inferencePhase] || 'UNKNOWN'
     }).`;
+  const statusRolloutBundles = Array.isArray(jobStatus?.rollout_bundles)
+    ? jobStatus.rollout_bundles.map(normalizeContractPath).filter(Boolean)
+    : [];
+  const availableFlowSdeRolloutBundle = normalizeContractPath(
+    flowSdeRolloutBundle || (
+      jobOperation === 'collect' && COMPLETE_STATUSES.has(normalizedStatus)
+        ? statusRolloutBundles[statusRolloutBundles.length - 1]
+        : ''
+    )
+  );
   useEffect(() => {
     if (!isActive || !isFlowSdePpo) {
       warmupStatusRequestSequence.current += 1;
@@ -1848,7 +2379,7 @@ export default function OfflineRLTrainingSection({
   // A status channel can be temporarily unavailable after changing methods.
   // Keep configuration and Start locked until it recovers, but never trap the
   // user in that method. Only a confirmed launch may lock method/model tabs.
-  const selectionLocked = isRunning || warmupIsRunning || !isActive;
+  const selectionLocked = isRunning || isCancelling || warmupIsRunning || !isActive;
   const warmupIsComplete = COMPLETE_STATUSES.has(normalizedWarmupStatus);
   const warmupBundlePath = String(
     statusValue(warmupStatus, 'bundle_path') || ''
@@ -1860,6 +2391,12 @@ export default function OfflineRLTrainingSection({
   const parsedImitationBatchSize = Number(imitationBatchSize);
   const parsedImitationSaveFreq = Number(imitationSaveFreq);
   const parsedImitationActionChunkSize = Number(imitationActionChunkSize);
+  const parsedRltStage1Steps = Number(rltStage1Steps);
+  const parsedRltStage1BatchSize = Number(rltStage1BatchSize);
+  const parsedRltStage1SaveFreq = Number(rltStage1SaveFreq);
+  const parsedRltStage2Steps = Number(rltStage2Steps);
+  const parsedRltStage2BatchSize = Number(rltStage2BatchSize);
+  const parsedRltStage2SaveFreq = Number(rltStage2SaveFreq);
   const parsedCriticWarmupUpdates = Number(criticWarmupUpdates);
   const parsedWarmupSteps = Number(warmupSteps);
   const parsedWarmupBatchSize = Number(warmupBatchSize);
@@ -1870,7 +2407,11 @@ export default function OfflineRLTrainingSection({
     Number.isInteger(parsedActorEquivalentEpochs) &&
     parsedCriticEpochs > 0 &&
     parsedActorEquivalentEpochs > 0 &&
-    parsedCriticEpochs === 2 * parsedActorEquivalentEpochs;
+    parsedCriticEpochs >= parsedActorEquivalentEpochs &&
+    parsedCriticEpochs % parsedActorEquivalentEpochs === 0;
+  const actorUpdatePeriod = scheduleValid
+    ? parsedCriticEpochs / parsedActorEquivalentEpochs
+    : null;
   const batchSizeValid = (
     Number.isInteger(parsedBatchSize) &&
     parsedBatchSize >= 1 &&
@@ -1892,11 +2433,33 @@ export default function OfflineRLTrainingSection({
     parsedImitationSaveFreq <= parsedImitationSteps
   );
   const imitationActionChunkSizeValid = (
-    imitationPolicyType === 'multi_task_dit' || (
+    isRltStage1Selection || imitationPolicyType === 'multi_task_dit' || (
       Number.isInteger(parsedImitationActionChunkSize) &&
       parsedImitationActionChunkSize >= 1 &&
       parsedImitationActionChunkSize <= 100
     )
+  );
+  const rltStage1ConfigValid = (
+    Number.isInteger(parsedRltStage1Steps) &&
+    parsedRltStage1Steps >= 1 &&
+    parsedRltStage1Steps <= 1000000 &&
+    Number.isInteger(parsedRltStage1BatchSize) &&
+    parsedRltStage1BatchSize >= 1 &&
+    parsedRltStage1BatchSize <= 64 &&
+    Number.isInteger(parsedRltStage1SaveFreq) &&
+    parsedRltStage1SaveFreq >= 1 &&
+    parsedRltStage1SaveFreq <= parsedRltStage1Steps
+  );
+  const rltStage2ConfigValid = (
+    Number.isInteger(parsedRltStage2Steps) &&
+    parsedRltStage2Steps >= 1 &&
+    parsedRltStage2Steps <= 1000000 &&
+    Number.isInteger(parsedRltStage2BatchSize) &&
+    parsedRltStage2BatchSize >= 1 &&
+    parsedRltStage2BatchSize <= 64 &&
+    Number.isInteger(parsedRltStage2SaveFreq) &&
+    parsedRltStage2SaveFreq >= 1 &&
+    parsedRltStage2SaveFreq <= parsedRltStage2Steps
   );
   const criticWarmupUpdatesValid = (
     Number.isInteger(parsedCriticWarmupUpdates) &&
@@ -1999,6 +2562,8 @@ export default function OfflineRLTrainingSection({
     actorTrainabilityHydratedRef.current = false;
     batchSizeHydratedRef.current = false;
     imitationConfigHydratedRef.current = false;
+    rltStage1ConfigHydratedRef.current = false;
+    rltStage2ConfigHydratedRef.current = false;
     criticWarmupConfigHydratedRef.current = false;
     lastAnnouncedStatus.current = 'idle';
     setJobStatus({ status: 'idle' });
@@ -2016,7 +2581,10 @@ export default function OfflineRLTrainingSection({
     td3ObjectiveHydratedJobRef.current = '';
     td3ObjectiveUserSelectedRef.current = false;
     setSelectedPolicyModel(inferencePolicyModel);
-    setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[inferencePolicyModel] || '');
+    setAlgorithm((currentAlgorithm) => reconcileAlgorithmForPolicy(
+      currentAlgorithm,
+      inferencePolicyModel
+    ));
     if (
       trainingMethod === 'imitation' &&
       !['act', 'multi_task_dit', 'groot', 'pi05'].includes(inferencePolicyModel)
@@ -2035,7 +2603,10 @@ export default function OfflineRLTrainingSection({
     if (selectionLocked || nextMethod === trainingMethod) return;
     resetStatusChannel();
     if (nextMethod === 'reinforcement') {
-      setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[selectedPolicyModel] || '');
+      setAlgorithm((currentAlgorithm) => reconcileAlgorithmForPolicy(
+        currentAlgorithm,
+        selectedPolicyModel
+      ));
     }
     setTrainingMethod(nextMethod);
   };
@@ -2049,17 +2620,27 @@ export default function OfflineRLTrainingSection({
     td3ObjectiveHydratedJobRef.current = '';
     td3ObjectiveUserSelectedRef.current = false;
     setSelectedPolicyModel(nextPolicyModel);
-    setAlgorithm(DEFAULT_ALGORITHM_BY_POLICY[nextPolicyModel] || '');
+    setAlgorithm((currentAlgorithm) => reconcileAlgorithmForPolicy(
+      currentAlgorithm,
+      nextPolicyModel
+    ));
+  };
+
+  const handleGrootImitationObjectiveChange = (nextObjective) => {
+    if (
+      selectionLocked ||
+      trainingMethod !== 'imitation' ||
+      selectedPolicyModel !== 'groot' ||
+      !['action', 'rl_token'].includes(nextObjective) ||
+      nextObjective === grootImitationObjective
+    ) return;
+    resetStatusChannel();
+    setGrootImitationObjective(nextObjective);
   };
 
   const handleAlgorithmChange = (nextAlgorithm) => {
     if (!isReinforcementLearning || interactionLocked || nextAlgorithm === algorithm) return;
-    const compatible = (
-      (ACT_TD3_ALGORITHMS.has(nextAlgorithm) && selectedPolicyModel === 'act') ||
-      (nextAlgorithm === 'flow_sde_ppo' && selectedPolicyModel === 'multi_task_dit') ||
-      (nextAlgorithm === 'rlt' && ['groot', 'pi05'].includes(selectedPolicyModel))
-    );
-    if (!compatible) return;
+    if (!isImplementedRLAlgorithm(selectedPolicyModel, nextAlgorithm)) return;
     resetStatusChannel();
     setAlgorithm(nextAlgorithm);
   };
@@ -2145,7 +2726,121 @@ export default function OfflineRLTrainingSection({
   }, [isImitationLearning, jobStatus?.batch_size, normalizedStatus]);
 
   useEffect(() => {
-    if (!isImitationLearning || imitationConfigHydratedRef.current || normalizedStatus === 'idle') {
+    if (
+      !isRltStage1Selection ||
+      rltStage1ConfigHydratedRef.current ||
+      normalizedStatus === 'idle'
+    ) return;
+    const reportedSteps = Number(statusValue(jobStatus, 'total_steps', 'steps'));
+    const reportedBatchSize = Number(jobStatus?.batch_size);
+    const reportedSaveFreq = Number(jobStatus?.save_freq);
+    if (Number.isInteger(reportedSteps) && reportedSteps >= 1 && reportedSteps <= 1000000) {
+      setRltStage1Steps(String(reportedSteps));
+    }
+    if (Number.isInteger(reportedBatchSize) && reportedBatchSize >= 1 && reportedBatchSize <= 64) {
+      setRltStage1BatchSize(String(reportedBatchSize));
+    }
+    if (Number.isInteger(reportedSaveFreq) && reportedSaveFreq >= 1) {
+      setRltStage1SaveFreq(String(reportedSaveFreq));
+    }
+    rltStage1ConfigHydratedRef.current = true;
+  }, [isRltStage1Selection, jobStatus, normalizedStatus]);
+
+  useEffect(() => {
+    if (!isRltStage1Selection) return;
+    if (!COMPLETE_STATUSES.has(String(jobStatus?.status || '').toLowerCase())) return;
+    const artifactPath = String(
+      statusValue(jobStatus, 'encoder_artifact_path', 'rl_token_encoder_path') || ''
+    ).trim();
+    const seedBundlePath = String(jobStatus?.output_dir || '').trim() ||
+      artifactPath.replace(/\/artifacts\/rl_token_encoder\.pt$/, '');
+    const grootCheckpoint = String(jobStatus?.groot_checkpoint || '').trim();
+    if (artifactPath && seedBundlePath && grootCheckpoint) {
+      setRltTokenSource(artifactPath);
+      setRltSeedBundlePath(seedBundlePath);
+      setRltSeedGrootCheckpoint(grootCheckpoint);
+    }
+  }, [isRltStage1Selection, jobStatus]);
+
+  useEffect(() => {
+    if (
+      !isRltStage2Selection ||
+      useInferenceRltBundle ||
+      hasCompatibleRltSeed
+    ) return undefined;
+
+    let cancelled = false;
+    let nextPollTimer = null;
+    const pollStage1Seed = async () => {
+      try {
+        const status = await getRLTStage1Status();
+        if (cancelled) return;
+        if (COMPLETE_STATUSES.has(String(status?.status || '').toLowerCase())) {
+          const artifactPath = String(
+            statusValue(status, 'encoder_artifact_path', 'rl_token_encoder_path') || ''
+          ).trim();
+          const seedBundlePath = String(status?.output_dir || '').trim() ||
+            artifactPath.replace(/\/artifacts\/rl_token_encoder\.pt$/, '');
+          const grootCheckpoint = String(status?.groot_checkpoint || '').trim();
+          if (
+            artifactPath &&
+            seedBundlePath &&
+            grootCheckpoint &&
+            normalizeContractPath(grootCheckpoint) === normalizeContractPath(actCheckpoint)
+          ) {
+            setRltTokenSource(artifactPath);
+            setRltSeedBundlePath(seedBundlePath);
+            setRltSeedGrootCheckpoint(grootCheckpoint);
+            return;
+          }
+        }
+      } catch {
+        // The status endpoint can briefly be unavailable while containers are
+        // starting. Keep polling so a completed seed is discovered without a
+        // manual tab or model change.
+      }
+      if (!cancelled) nextPollTimer = setTimeout(pollStage1Seed, POLL_INTERVAL_MS);
+    };
+    pollStage1Seed();
+    return () => {
+      cancelled = true;
+      if (nextPollTimer !== null) clearTimeout(nextPollTimer);
+    };
+  }, [
+    actCheckpoint,
+    hasCompatibleRltSeed,
+    isRltStage2Selection,
+    useInferenceRltBundle,
+  ]);
+
+  useEffect(() => {
+    if (
+      !isRltStage2Selection ||
+      rltStage2ConfigHydratedRef.current ||
+      normalizedStatus === 'idle'
+    ) return;
+    const reportedSteps = Number(statusValue(jobStatus, 'total_steps', 'steps'));
+    const reportedBatchSize = Number(jobStatus?.batch_size);
+    const reportedSaveFreq = Number(jobStatus?.save_freq);
+    if (Number.isInteger(reportedSteps) && reportedSteps >= 1 && reportedSteps <= 1000000) {
+      setRltStage2Steps(String(reportedSteps));
+    }
+    if (Number.isInteger(reportedBatchSize) && reportedBatchSize >= 1 && reportedBatchSize <= 64) {
+      setRltStage2BatchSize(String(reportedBatchSize));
+    }
+    if (Number.isInteger(reportedSaveFreq) && reportedSaveFreq >= 1) {
+      setRltStage2SaveFreq(String(reportedSaveFreq));
+    }
+    rltStage2ConfigHydratedRef.current = true;
+  }, [isRltStage2Selection, jobStatus, normalizedStatus]);
+
+  useEffect(() => {
+    if (
+      !isImitationLearning ||
+      isRltStage1Selection ||
+      imitationConfigHydratedRef.current ||
+      normalizedStatus === 'idle'
+    ) {
       return;
     }
     const reportedSteps = Number(statusValue(jobStatus, 'total_steps', 'steps'));
@@ -2172,6 +2867,7 @@ export default function OfflineRLTrainingSection({
     imitationConfigHydratedRef.current = true;
   }, [
     isImitationLearning,
+    isRltStage1Selection,
     imitationPolicyType,
     jobStatus,
     normalizedStatus,
@@ -2226,8 +2922,12 @@ export default function OfflineRLTrainingSection({
 
   useEffect(() => {
     if (normalizedStatus === lastAnnouncedStatus.current) return;
-    const methodLabel = isImitationLearning
-      ? 'Imitation Learning'
+    const methodLabel = isRltStage1Selection
+      ? 'RL Token'
+      : isRltStage2Selection
+        ? 'RLT'
+      : isImitationLearning
+        ? 'Imitation Learning'
       : (isCriticWarmup ? 'Critic Warm-up' : 'Offline RL');
     if (isComplete) toast.success(`${methodLabel} training completed`);
     if (isFailed) {
@@ -2237,7 +2937,16 @@ export default function OfflineRLTrainingSection({
       toast.success(`${methodLabel} training stopped`);
     }
     lastAnnouncedStatus.current = normalizedStatus;
-  }, [isComplete, isCriticWarmup, isFailed, isImitationLearning, jobStatus?.message, normalizedStatus]);
+  }, [
+    isComplete,
+    isCriticWarmup,
+    isFailed,
+    isImitationLearning,
+    isRltStage1Selection,
+    isRltStage2Selection,
+    jobStatus?.message,
+    normalizedStatus,
+  ]);
 
   const progress = boundedPercentage(
     statusValue(jobStatus, 'percentage', 'progress_percentage', 'progress')
@@ -2249,9 +2958,50 @@ export default function OfflineRLTrainingSection({
   const checkpointPath = String(
     statusValue(jobStatus, 'checkpoint_path', 'training_state_path') || ''
   );
+  const rltCandidateBundlePath = (
+    isRltStage2Selection && isComplete
+  ) ? normalizeContractPath(jobStatus?.output_dir) : '';
+  const rltCandidateBasePolicyPath = (
+    isRltStage2Selection && isComplete
+  ) ? normalizeContractPath(jobStatus?.groot_checkpoint) : '';
+  const rltCandidateMatchesSelectedBase = Boolean(
+    rltCandidateBasePolicyPath &&
+    rltCandidateBasePolicyPath === normalizeContractPath(actCheckpoint)
+  );
 
   useEffect(() => {
     if (!onDeploymentStateChange) return;
+    // Stage 1 exports an encoder artifact for the later RLT actor/critic
+    // stage, not an inference policy. Stage 2 exports an RLT bundle that must
+    // be routed through the RLT runtime selector rather than the ordinary
+    // LeRobot policy deployment callback.
+    if (isRltStage1Selection) {
+      onDeploymentStateChange({
+        ready: false,
+        artifactKind: 'rlt_bundle',
+        modelPath: '',
+        rltBundlePath: '',
+        serviceType: 'groot',
+        policyType: 'n17',
+        rlEpoch: Number(currentPolicyEpoch),
+        lineageMode: 'unchanged',
+      });
+      return;
+    }
+    if (isRltStage2Selection) {
+      onDeploymentStateChange({
+        ready: selectedPolicyBackendSupported && statusReady && isComplete &&
+          Boolean(rltCandidateBundlePath) && rltCandidateMatchesSelectedBase,
+        artifactKind: 'rlt_bundle',
+        modelPath: rltCandidateBasePolicyPath,
+        rltBundlePath: rltCandidateBundlePath,
+        serviceType: 'groot',
+        policyType: 'n17',
+        rlEpoch: Number(currentPolicyEpoch) + 1,
+        lineageMode: 'advance',
+      });
+      return;
+    }
     if (isCriticWarmup) {
       onDeploymentStateChange({
         ready: false,
@@ -2287,15 +3037,21 @@ export default function OfflineRLTrainingSection({
       lineageMode,
     });
   }, [
+    actCheckpoint,
     algorithm,
     currentPolicyEpoch,
     isComplete,
     isCriticWarmup,
     isImitationLearning,
+    isRltStage1Selection,
+    isRltStage2Selection,
     jobStatus?.round_index,
     jobStatus?.policy_type,
     modelPath,
     onDeploymentStateChange,
+    rltCandidateBundlePath,
+    rltCandidateBasePolicyPath,
+    rltCandidateMatchesSelectedBase,
     selectedPolicyBackendSupported,
     selectedPolicyModel,
     statusReady,
@@ -2310,11 +3066,15 @@ export default function OfflineRLTrainingSection({
     if (isComplete) return 'Complete';
     if (isFailed) return 'Failed';
     if (normalizedStatus === 'stopped') return 'Stopped';
+    if (normalizedStatus === 'cancelled') return 'Cancelled';
     return 'Ready';
   }, [isComplete, isCriticWarmup, isFailed, isStarting, normalizedStatus, statusReady]);
 
   const validateRequest = () => {
     if (!statusReady) return 'Wait for training status to load';
+    if (cancelRequired) {
+      return 'Cancel the stopped or failed ACT-TD3 run before starting again';
+    }
     if (
       isCriticWarmup &&
       !['act', 'multi_task_dit'].includes(selectedPolicyModel)
@@ -2323,17 +3083,23 @@ export default function OfflineRLTrainingSection({
     }
     if (
       !isCriticWarmup &&
-      !['act', 'multi_task_dit'].includes(selectedPolicyModel)
+      !['act', 'multi_task_dit'].includes(selectedPolicyModel) &&
+      !isRltStage1Selection &&
+      !isRltStage2Selection
     ) {
       const policyLabel = selectedPolicyModel === 'pi05' ? 'Pi0.5' : 'GR00T';
       return `${policyLabel} training backend is not connected`;
     }
     if (isFlowSdePpo) {
-      if (!actCheckpoint.trim()) return 'Select the MultiTaskDiT checkpoint';
-      if (!robotType?.trim()) return 'Select a robot type on the Home page first';
       if (!flowInferenceReady) return flowInferenceBlockedReason;
       if (!flowSdePpoReady || typeof onStartFlowSDEPPO !== 'function') {
         return 'Flow-SDE PPO backend is not ready';
+      }
+      if (jobOperation === 'collect' && RUNNING_STATUSES.has(normalizedStatus)) {
+        return 'Finish the PPO rollout and mark its outcome in Inference';
+      }
+      if (!availableFlowSdeRolloutBundle) {
+        return 'Collect and label one PPO rollout in Inference first';
       }
       return '';
     }
@@ -2341,11 +3107,35 @@ export default function OfflineRLTrainingSection({
     if (!datasetPaths.length) return 'Include at least one LeRobot v3 Data Epoch';
     if (selectedDatasetVersionInvalid) {
       const trainingLabel = isImitationLearning
-        ? `${imitationPolicyType === 'multi_task_dit' ? 'Diffusion Transformer' : 'ACT'} imitation learning`
+        ? (isRltStage1Selection
+          ? 'RL Token training'
+          : `${imitationPolicyType === 'multi_task_dit' ? 'Diffusion Transformer' : 'ACT'} imitation learning`)
         : (isCriticWarmup
           ? `${isDiffusionCriticWarmup ? 'Diffusion' : 'ACT'} critic warm-up`
           : 'TD3');
       return `${trainingLabel} requires LeRobot v3.0`;
+    }
+    if (isRltStage2Selection) {
+      if (!isRltStage2BackendReady) {
+        return jobStatus?.message || 'RLT Stage 2 backend is not ready';
+      }
+      if (!rltStage2ConfigValid) {
+        return 'RLT settings require valid steps, batch size, and save frequency';
+      }
+      if (effectiveRltInitializationMode === 'new') {
+        if (!actCheckpoint.trim()) return 'Select the frozen GR00T checkpoint';
+        if (!effectiveRltTokenSource) {
+          return 'Train an RL Token Seed for the selected GR00T first';
+        }
+        return '';
+      }
+      if (effectiveRltInitializationMode === 'resume') {
+        if (!effectiveRltBundlePath) {
+          return 'Select an RLT Bundle in GR00T Inference Settings to resume';
+        }
+        return '';
+      }
+      return 'RLT source could not be resolved';
     }
     if (isCriticWarmup) {
       if (isDiffusionCriticWarmup) {
@@ -2370,15 +3160,24 @@ export default function OfflineRLTrainingSection({
       return '';
     }
     if (isImitationLearning) {
+      if (isRltStage1Selection && !actCheckpoint.trim()) {
+        return 'Select the frozen GR00T checkpoint';
+      }
+      if (isRltStage1Selection && !rltStage1ConfigValid) {
+        return 'RL Token settings require valid steps, batch size, and save frequency';
+      }
+      if (isRltStage1Selection) return '';
       if (!imitationStepsValid) return 'Imitation steps must be an integer from 1 to 1,000,000';
       if (!imitationBatchSizeValid) return 'Imitation batch size must be an integer from 1 to 64';
       if (!imitationSaveFreqValid) {
         return 'Imitation save frequency must be an integer from 1 through the total steps';
       }
-      if (!imitationActionChunkSizeValid) {
+      if (!isRltStage1Selection && !imitationActionChunkSizeValid) {
         return 'ACT imitation action chunk must be an integer from 1 to 100';
       }
-      if (imitationPolicyType === 'act' && trainabilityError) return trainabilityError;
+      if (!isRltStage1Selection && imitationPolicyType === 'act' && trainabilityError) {
+        return trainabilityError;
+      }
       return '';
     }
     if (!actCheckpoint.trim()) {
@@ -2396,7 +3195,7 @@ export default function OfflineRLTrainingSection({
     if (trainabilityError) return trainabilityError;
     if (!batchSizeValid) return 'Batch size must be an integer from 1 to 64';
     if (!scheduleValid) {
-      return 'TD3 requires Critic epochs = 2 × Actor equivalent epochs';
+      return 'TD3 requires positive whole epochs with Critic epochs ≥ Actor epochs and Critic epochs divisible by Actor epochs; 1:1 is allowed';
     }
     return '';
   };
@@ -2428,6 +3227,45 @@ export default function OfflineRLTrainingSection({
     jobStatus?.algorithm === algorithm &&
     jobStatus?.actor_objective === td3ActorObjective
   );
+  const cancelledDatasetPaths = Array.isArray(jobStatus?.dataset_paths) &&
+    jobStatus.dataset_paths.length
+    ? jobStatus.dataset_paths.map(normalizeContractPath).filter(Boolean)
+    : [normalizeContractPath(jobStatus?.dataset_path)].filter(Boolean);
+  const selectedCancelledDatasetPaths = datasetPaths.map(normalizeContractPath);
+  const cancelledParentCheckpoint = normalizeContractPath(jobStatus?.parent_checkpoint);
+  const cancelledParentPolicy = parentPolicyPathFromTD3Checkpoint(
+    cancelledParentCheckpoint
+  );
+  const cancelledBasePolicy = normalizeContractPath(jobStatus?.act_checkpoint);
+  const cancelledModelMatchesSelection = Boolean(
+    actPolicyPathsEquivalent(selectedActCheckpoint, cancelledBasePolicy) ||
+    actPolicyPathsEquivalent(selectedActCheckpoint, cancelledParentPolicy)
+  );
+  const cancelledRequestedGroups = td3ActorObjective === 'td3'
+    ? actorTrainableGroups.filter((group) => group !== 'cvae_encoder')
+    : actorTrainableGroups;
+  const cancelledContractMatches = (
+    jobStatus?.algorithm === 'td3' &&
+    jobStatus?.actor_objective === td3ActorObjective &&
+    Number(jobStatus?.batch_size) === parsedBatchSize &&
+    Number(jobStatus?.critic_epochs) === parsedCriticEpochs &&
+    Number(jobStatus?.actor_equivalent_epochs) === parsedActorEquivalentEpochs &&
+    orderedValuesEqual(
+      jobStatus?.actor_trainable_groups,
+      cancelledRequestedGroups
+    )
+  );
+  const canRetryCancelledWorkflow = (
+    variant === 'workflow' &&
+    isActTD3Selection &&
+    !forceFreshLineage &&
+    normalizedStatus === 'cancelled' &&
+    Boolean(String(jobStatus?.job_id || '').trim()) &&
+    Boolean(cancelledBasePolicy) &&
+    orderedValuesEqual(cancelledDatasetPaths, selectedCancelledDatasetPaths) &&
+    cancelledModelMatchesSelection &&
+    cancelledContractMatches
+  );
 
   const handleStart = async () => {
     const validationError = validateRequest();
@@ -2440,8 +3278,16 @@ export default function OfflineRLTrainingSection({
     activeStatusRequest.current = null;
     setIsStarting(true);
     try {
-      const result = isImitationLearning
-        ? await startImitationLearningTraining({
+      const result = isRltStage1Selection
+        ? await startRLTStage1Training({
+          dataset_paths: datasetPaths,
+          groot_checkpoint: selectedActCheckpoint,
+          steps: parsedRltStage1Steps,
+          batch_size: parsedRltStage1BatchSize,
+          save_freq: parsedRltStage1SaveFreq,
+        })
+        : isImitationLearning
+          ? await startImitationLearningTraining({
           // Keep the legacy scalar together with the authoritative ordered
           // roots so the ACT-IL adapter can train every checked Data Epoch.
           dataset_path: datasetPaths[0],
@@ -2478,23 +3324,25 @@ export default function OfflineRLTrainingSection({
               batch_size: parsedBatchSize,
               critic_updates: parsedCriticWarmupUpdates,
             }))
-        : isFlowSdePpo
-          ? await onStartFlowSDEPPO({
-            policy_type: 'multi_task_dit',
-            policy_checkpoint: ppoResumeReady
-              ? resumeModelPath
-              : selectedActCheckpoint,
-            algorithm: 'flow_sde_ppo',
-            robot_type: robotType.trim(),
-            ...(ppoResumeReady
-              ? { resume_checkpoint: resumeCheckpointPath }
-              : (compatibleWarmupReady
-                ? { value_warmup_bundle: warmupBundlePath }
-                : {})),
-            ...(flowTaskInstruction
-              ? { task_instruction: flowTaskInstruction }
-              : {}),
+        : isRltStage2Selection
+          ? await startRLTStage2Training({
+            initialization_mode: effectiveRltInitializationMode,
+            dataset_paths: datasetPaths,
+            groot_checkpoint: effectiveRltInitializationMode === 'new'
+              ? selectedActCheckpoint
+              : '',
+            rl_token_encoder_path: effectiveRltInitializationMode === 'new'
+              ? effectiveRltTokenSource
+              : '',
+            rlt_bundle_path: effectiveRltInitializationMode === 'resume'
+              ? effectiveRltBundlePath
+              : '',
+            steps: parsedRltStage2Steps,
+            batch_size: parsedRltStage2BatchSize,
+            save_freq: parsedRltStage2SaveFreq,
           })
+        : isFlowSdePpo
+          ? await onStartFlowSDEPPO(availableFlowSdeRolloutBundle)
           : await startOfflineRLTraining({
           // Keep the first root in the legacy scalar field while the ordered
           // list is authoritative for immutable multi-epoch replay.
@@ -2506,9 +3354,13 @@ export default function OfflineRLTrainingSection({
           // Redux checkpoint is never submitted by this variant.
           act_checkpoint: canAutoResumeWorkflow
             ? completedBaseActCheckpoint
-            : selectedActCheckpoint,
+            : (canRetryCancelledWorkflow
+              ? cancelledBasePolicy
+              : selectedActCheckpoint),
           parent_checkpoint: variant === 'workflow'
-            ? (canAutoResumeWorkflow ? checkpointPath.trim() : '')
+            ? (canAutoResumeWorkflow
+              ? checkpointPath.trim()
+              : (canRetryCancelledWorkflow ? cancelledParentCheckpoint : ''))
             : parentCheckpoint.trim(),
           algorithm: 'td3',
           actor_objective: td3ActorObjective,
@@ -2534,15 +3386,23 @@ export default function OfflineRLTrainingSection({
       ) {
         onFreshLineageConsumed?.();
       }
-      const methodLabel = isImitationLearning
-        ? 'Imitation Learning'
+      const methodLabel = isRltStage1Selection
+        ? 'RL Token'
+        : isRltStage2Selection
+          ? 'RLT'
+        : isImitationLearning
+          ? 'Imitation Learning'
         : (isCriticWarmup
           ? 'Critic Warm-up'
           : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL'));
       toast.success(`${methodLabel} training started`);
     } catch (error) {
-      const methodLabel = isImitationLearning
-        ? 'Imitation Learning'
+      const methodLabel = isRltStage1Selection
+        ? 'RL Token'
+        : isRltStage2Selection
+          ? 'RLT'
+        : isImitationLearning
+          ? 'Imitation Learning'
         : (isCriticWarmup
           ? 'Critic Warm-up'
           : (isFlowSdePpo ? 'Flow-SDE PPO' : 'Offline RL'));
@@ -2561,8 +3421,10 @@ export default function OfflineRLTrainingSection({
     const jobId = String(jobStatus?.job_id || '').trim();
     if (!jobId || !RUNNING_STATUSES.has(normalizedStatus) || isStopping) return;
     if (isFlowSdePpo && typeof onStopFlowSDEPPO !== 'function') return;
-    const methodLabel = isImitationLearning
-      ? 'Imitation Learning'
+    const methodLabel = isRltStage1Selection
+      ? 'RL Token'
+      : isImitationLearning
+        ? 'Imitation Learning'
       : (isCriticWarmup ? 'Critic Warm-up' : 'Offline RL');
     if (!window.confirm(
       `Stop the current ${methodLabel} training job?\n\n` +
@@ -2574,8 +3436,12 @@ export default function OfflineRLTrainingSection({
     activeStatusRequest.current = null;
     setIsStopping(true);
     try {
-      const result = isImitationLearning
-        ? await stopImitationLearningTraining(jobId)
+      const result = isRltStage1Selection
+        ? await stopRLTStage1Training(jobId)
+        : isRltStage2Selection
+          ? await stopRLTStage2Training(jobId)
+        : isImitationLearning
+          ? await stopImitationLearningTraining(jobId)
         : (isCriticWarmup
           ? (isDiffusionCriticWarmup
             ? await stopFlowSDEPPOValueWarmup(jobId)
@@ -2600,33 +3466,54 @@ export default function OfflineRLTrainingSection({
     isStoppingRef.current = false;
   };
 
-  const handleFlowSDEPPOOutcome = async (outcome) => {
+  const handleCancel = async () => {
     const jobId = String(jobStatus?.job_id || '').trim();
-    if (
-      !isFlowSdePpo ||
-      !RUNNING_STATUSES.has(normalizedStatus) ||
-      !jobId ||
-      typeof onSubmitFlowSDEPPOOutcome !== 'function' ||
-      isSubmittingOutcome
-    ) return;
+    const outputDir = String(jobStatus?.output_dir || '').trim();
+    if (!cancelVisible || !jobId || isCancelling) return;
+    if (!window.confirm(
+      'Cancel this ACT-TD3 training run and permanently delete its incomplete model?\n\n' +
+      `Output: ${outputDir || 'No output directory reported'}\n\n` +
+      'The base policy, previous completed checkpoint, replay datasets, and recordings will be kept.'
+    )) return;
 
-    setIsSubmittingOutcome(true);
+    isCancellingRef.current = true;
+    statusRequestSequence.current += 1;
+    activeStatusRequest.current = null;
+    setIsCancelling(true);
     try {
-      const result = await onSubmitFlowSDEPPOOutcome(jobId, outcome);
-      setJobStatus(result || jobStatus);
-      toast.success(`Episode marked ${outcome}`);
+      const result = await cancelOfflineRLTraining(jobId);
+      setJobStatus({
+        ...jobStatus,
+        ...(result || {}),
+        status: 'cancelled',
+      });
+      setStatusReady(true);
+      toast.success('Incomplete ACT-TD3 model deleted; training is ready to restart');
     } catch (error) {
-      toast.error(`Episode outcome failed: ${error.message}`);
-    } finally {
-      setIsSubmittingOutcome(false);
+      toast.error(`Offline RL cancel failed: ${error.message}`);
+      setStatusReady(false);
+      isCancellingRef.current = false;
+      setIsCancelling(false);
+      await requestStatus();
+      return;
     }
+    isCancellingRef.current = false;
+    setIsCancelling(false);
   };
 
   const browserDisabled = interactionLocked || warmupIsRunning || !isActive;
   const selectedTrainingConfigurationValid = isImitationLearning
-    ? imitationStepsValid && imitationBatchSizeValid && imitationSaveFreqValid &&
-      imitationActionChunkSizeValid &&
-      (imitationPolicyType !== 'act' || trainabilityValid)
+    ? (isRltStage1Selection
+      ? (
+        rltStage1ConfigValid &&
+        Boolean(datasetPaths.length) &&
+        Boolean(actCheckpoint.trim())
+      )
+      : (
+        imitationStepsValid && imitationBatchSizeValid && imitationSaveFreqValid &&
+        imitationActionChunkSizeValid &&
+        (imitationPolicyType !== 'act' || trainabilityValid)
+      ))
     : (isCriticWarmup
       ? (isDiffusionCriticWarmup
         ? (
@@ -2647,15 +3534,27 @@ export default function OfflineRLTrainingSection({
       ? (
         flowSdePpoReady &&
         typeof onStartFlowSDEPPO === 'function' &&
-        Boolean(actCheckpoint.trim()) &&
-        Boolean(robotType?.trim()) &&
+        Boolean(availableFlowSdeRolloutBundle) &&
         flowInferenceReady
       )
+      : isRltStage2Selection
+        ? (
+          isRltStage2BackendReady &&
+          rltStage2ConfigValid &&
+          Boolean(datasetPaths.length) &&
+          (
+            effectiveRltInitializationMode === 'new'
+              ? Boolean(actCheckpoint.trim()) && Boolean(effectiveRltTokenSource)
+              : effectiveRltInitializationMode === 'resume' &&
+                Boolean(effectiveRltBundlePath)
+          )
+        )
       : scheduleValid && batchSizeValid && trainabilityValid));
   const startDisabled = (
     interactionLocked ||
+    cancelRequired ||
     (!isFlowSdePpo && isConversionRunning) ||
-    (isFlowSdePpo && (!warmupStatusReady || warmupIsRunning)) ||
+    (isFlowSdePpo && warmupIsRunning) ||
     !selectedTrainingConfigurationValid ||
     (!isFlowSdePpo && selectedDatasetVersionInvalid) ||
     !isActive
@@ -2665,23 +3564,25 @@ export default function OfflineRLTrainingSection({
     !statusReady ||
     !RUNNING_STATUSES.has(normalizedStatus) ||
     !String(jobStatus?.job_id || '').trim() ||
+    (isFlowSdePpo && jobOperation !== 'update') ||
     (isFlowSdePpo && typeof onStopFlowSDEPPO !== 'function') ||
     isStopping
   );
-  const flowOutcomeDisabled = (
+  const cancelDisabled = (
     !isActive ||
-    !isFlowSdePpo ||
-    !RUNNING_STATUSES.has(normalizedStatus) ||
-    jobStatus?.awaiting_outcome !== true ||
+    !statusReady ||
+    !cancelVisible ||
     !String(jobStatus?.job_id || '').trim() ||
-    typeof onSubmitFlowSDEPPOOutcome !== 'function' ||
-    isSubmittingOutcome
+    isCancelling
   );
   if (variant === 'workflow') {
     return (
-      <WorkflowTrainingView
+      <>
+        <WorkflowTrainingView
         trainingMethod={trainingMethod}
         onTrainingMethodChange={handleTrainingMethodChange}
+        grootImitationObjective={grootImitationObjective}
+        onGrootImitationObjectiveChange={handleGrootImitationObjectiveChange}
         selectedPolicyModel={selectedPolicyModel}
         onPolicyModelChange={handlePolicyModelChange}
         algorithm={algorithm}
@@ -2721,6 +3622,21 @@ export default function OfflineRLTrainingSection({
         setImitationSaveFreq={setImitationSaveFreq}
         imitationActionChunkSize={imitationActionChunkSize}
         setImitationActionChunkSize={setImitationActionChunkSize}
+        rltStage1Steps={rltStage1Steps}
+        setRltStage1Steps={setRltStage1Steps}
+        rltStage1BatchSize={rltStage1BatchSize}
+        setRltStage1BatchSize={setRltStage1BatchSize}
+        rltStage1SaveFreq={rltStage1SaveFreq}
+        setRltStage1SaveFreq={setRltStage1SaveFreq}
+        rltSourceMode={effectiveRltInitializationMode}
+        rltSourcePath={effectiveRltSourcePath}
+        rltCandidateBundlePath={rltCandidateBundlePath}
+        rltStage2Steps={rltStage2Steps}
+        setRltStage2Steps={setRltStage2Steps}
+        rltStage2BatchSize={rltStage2BatchSize}
+        setRltStage2BatchSize={setRltStage2BatchSize}
+        rltStage2SaveFreq={rltStage2SaveFreq}
+        setRltStage2SaveFreq={setRltStage2SaveFreq}
         criticWarmupUpdates={criticWarmupUpdates}
         setCriticWarmupUpdates={setCriticWarmupUpdates}
         statusLabel={statusLabel}
@@ -2734,18 +3650,20 @@ export default function OfflineRLTrainingSection({
         robotType={robotType}
         handleStart={handleStart}
         handleStop={handleStop}
-        handleFlowSDEPPOOutcome={handleFlowSDEPPOOutcome}
+        handleCancel={handleCancel}
         startDisabled={startDisabled}
         stopDisabled={stopDisabled}
-        flowOutcomeDisabled={flowOutcomeDisabled}
+        cancelVisible={cancelVisible}
+        cancelDisabled={cancelDisabled}
         isRunning={isRunning}
         isStopping={isStopping}
-        isSubmittingOutcome={isSubmittingOutcome}
+        isCancelling={isCancelling}
         statusReady={statusReady}
         isConversionRunning={isConversionRunning}
         trainabilityError={trainabilityError}
-        onCompactLayoutChange={onCompactLayoutChange}
-      />
+          onCompactLayoutChange={onCompactLayoutChange}
+        />
+      </>
     );
   }
 
@@ -2825,14 +3743,14 @@ export default function OfflineRLTrainingSection({
 
           <div className="grid grid-cols-2 gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600 sm:grid-cols-5">
             <div><span className="block text-gray-400">Maximum</span><b>200 episodes</b></div>
-            <div><span className="block text-gray-400">New this round</span><b>Auto · 1–50</b></div>
+            <div><span className="block text-gray-400">Round episodes</span><b>Initial 1–200 · Later +1–50</b></div>
             <label className="flex flex-col gap-1">
               <span className="text-gray-400">Critic epochs</span>
               <input
                 aria-label="Critic epochs"
                 type="number"
-                min={2}
-                step={2}
+                min={1}
+                step={1}
                 value={criticEpochs}
                 onChange={(event) => setCriticEpochs(event.target.value)}
                 disabled={browserDisabled}
@@ -2869,9 +3787,11 @@ export default function OfflineRLTrainingSection({
             </label>
           </div>
           <p className="-mt-2 text-xs text-gray-500">
-            Round size is inferred from dataset growth. TD3 policy delay stays at 2,
-            so Critic epochs must be exactly twice Actor equivalent epochs. A resumed
-            round keeps its batch size; a fresh training lineage may choose a new value.
+            Round size is inferred from dataset growth. Use positive whole epochs with
+            Critic ≥ Actor and Critic divisible by Actor; this makes the actor update every
+            {' '}{actorUpdatePeriod || '—'} critic {actorUpdatePeriod === 1 ? 'update' : 'updates'}.
+            {' '}A 1:1 schedule is allowed, including with a warmed critic. A resumed round
+            keeps its batch size; a fresh training lineage may choose a new value.
           </p>
 
           <div className="flex items-center gap-3">
@@ -2893,6 +3813,17 @@ export default function OfflineRLTrainingSection({
               <MdStop size={20} />
               {isStopping ? 'Stopping…' : 'Stop Training'}
             </button>
+            {cancelVisible && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={cancelDisabled}
+                className="flex h-11 items-center justify-center gap-2 rounded-lg border border-red-500 bg-red-600 px-5 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400"
+              >
+                <MdDeleteForever size={20} />
+                {isCancelling ? 'Cancelling…' : 'Cancel Training'}
+              </button>
+            )}
             <span className="text-sm text-gray-500">
               Robot: <b>{robotType || 'Not selected'}</b>
             </span>

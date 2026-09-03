@@ -32,6 +32,32 @@ ProgressCallback = Callable[["ACTTD3OfflineTrainingProgress"], None]
 StopPredicate = Callable[[], bool]
 
 
+def policy_update_period_for_epoch_schedule(
+    critic_epochs: int,
+    actor_equivalent_epochs: int,
+) -> int:
+    """Derive an exact delayed-policy period from replay epoch counts.
+
+    The interleaved learner can perform at most one actor update after each
+    critic update.  Equal epoch counts therefore mean a 1:1 update schedule;
+    larger exact integer ratios retain delayed TD3 updates (for example 10:5
+    gives period 2).  Non-integral ratios would make the advertised actor epoch
+    count disagree with the updates actually performed, so they remain invalid.
+    """
+
+    critic = _positive_integer(critic_epochs, "critic_epochs")
+    actor = _positive_integer(
+        actor_equivalent_epochs,
+        "actor_equivalent_epochs",
+    )
+    if critic < actor or critic % actor:
+        raise ValueError(
+            "ACT-TD3 critic_epochs must be an exact integer multiple of "
+            "actor_equivalent_epochs (1:1 is supported)"
+        )
+    return critic // actor
+
+
 @dataclass(frozen=True)
 class RLMetricHistoryPoint:
     """One replay-round metric point keyed by the public RL epoch."""
@@ -679,6 +705,9 @@ def load_policy_local_warmup_critic(
     # resume checkpoints objective-exact.
     ignored_config = {
         "critic_warmup_updates",
+        # A policy-local warm critic never updates the actor.  It is therefore
+        # reusable for either a 1:1 or delayed actor schedule.
+        "policy_update_period",
         "actor_trainable_groups",
         "actor_objective",
     }
@@ -734,21 +763,25 @@ class ACTTD3OfflineTrainingRunner:
     """Train one versioned round over the entire current cumulative replay.
 
     Every round makes ``critic_epochs`` exact passes over replay. One critic
-    update is made for every batch, and the fixed TD3
-    ``policy_update_period=2`` schedule interleaves one actor update for every
-    two critic updates. ``actor_equivalent_epochs`` is therefore not an
-    independent actor-only phase and must be exactly half ``critic_epochs``.
+    update is made for every batch. The exact critic-to-actor epoch ratio
+    derives the TD3 policy update period: 1:1 updates both networks per batch,
+    while the default 2:1 schedule retains one actor update for every two
+    critic updates. ``actor_equivalent_epochs`` is not an actor-only phase.
 
-    A completed round may seed a new checkpoint after one or more immutable
-    LeRobot data-epoch roots are appended. The ordered root identity must retain
-    the exact prior prefix; parquet/video files are never physically merged.
-    Legacy one-root checkpoints remain readable and can be upgraded at the
-    resume boundary when the first virtual root has the same content identity.
+    The initial round may use the complete seed replay up to ``MAX_EPISODES``.
+    A completed round may seed a new checkpoint after up to ``ROUND_EPISODES``
+    are appended in one or more immutable LeRobot data-epoch roots. The ordered
+    root identity must retain the exact prior prefix; parquet/video files are
+    never physically merged. Legacy one-root checkpoints remain readable and
+    can be upgraded at the resume boundary when the first virtual root has the
+    same content identity.
     """
 
     STATE_FORMAT = "cyclo_brain.act_td3_offline_training/v2"
     SAMPLING = "one_random_permutation_per_replay_epoch"
     CRITIC_EPOCHS = 10
+    # Legacy/default value retained for callers that inspect the class recipe.
+    # Runtime scheduling uses ``self.policy_update_period``.
     POLICY_UPDATE_PERIOD = 2
     ACTOR_EQUIVALENT_EPOCHS = 5
     MAX_EPISODES = 200
@@ -814,21 +847,20 @@ class ACTTD3OfflineTrainingRunner:
             actor_equivalent_epochs,
             "actor_equivalent_epochs",
         )
-        if (
-            self.critic_epochs
-            != self.POLICY_UPDATE_PERIOD * self.actor_equivalent_epochs
-        ):
-            raise ValueError(
-                "ACT-TD3 critic_epochs must equal policy_update_period "
-                "times actor_equivalent_epochs"
-            )
+        self.policy_update_period = policy_update_period_for_epoch_schedule(
+            self.critic_epochs,
+            self.actor_equivalent_epochs,
+        )
         if learner.config.critic_warmup_updates != 0:
             raise ValueError(
                 "ACT-TD3 staged training requires critic_warmup_updates=0; "
                 "critic epochs already interleave delayed actor updates"
             )
-        if learner.config.policy_update_period != self.POLICY_UPDATE_PERIOD:
-            raise ValueError("ACT-TD3 staged training requires policy_update_period=2")
+        if learner.config.policy_update_period != self.policy_update_period:
+            raise ValueError(
+                "ACT-TD3 learner policy_update_period disagrees with the "
+                "critic/actor epoch schedule"
+            )
         if learner.completed_critic_updates != 0 or learner.completed_actor_updates != 0:
             raise ValueError(
                 "ACT-TD3 staged runner requires a fresh learner; resume through "
@@ -868,16 +900,12 @@ class ACTTD3OfflineTrainingRunner:
                 raise FileExistsError(
                     f"ACT-TD3 round checkpoint already exists: {self.checkpoint_path}"
                 )
-            if dataset.num_episodes > self.ROUND_EPISODES:
-                raise ValueError(
-                    "ACT-TD3 first cumulative replay round must contain 1..50 episodes"
-                )
         elif not self.resume_from.is_file():
             raise FileNotFoundError(self.resume_from)
 
         self.batches_per_epoch = math.ceil(len(dataset) / self.batch_size)
         self.total_critic_updates = self.critic_epochs * self.batches_per_epoch
-        if self.total_critic_updates % self.POLICY_UPDATE_PERIOD:
+        if self.total_critic_updates % self.policy_update_period:
             raise RuntimeError(
                 "ACT-TD3 round cannot realize the requested actor-equivalent epochs"
             )
@@ -939,7 +967,7 @@ class ACTTD3OfflineTrainingRunner:
             "sampling_seed": self.sampling_seed,
             "batch_size": self.batch_size,
             **self._schedule_contract(),
-            "policy_update_period": self.POLICY_UPDATE_PERIOD,
+            "policy_update_period": self.policy_update_period,
             "max_episodes": self.MAX_EPISODES,
             "round_episodes": self.ROUND_EPISODES,
             "fps": float(self.dataset.fps),
@@ -1188,7 +1216,7 @@ class ACTTD3OfflineTrainingRunner:
                 + expected_updates
                 - self.learner.config.critic_warmup_updates
             )
-            // self.POLICY_UPDATE_PERIOD
+            // self.policy_update_period
             - self._round_start_actor_updates
         )
         if self._completed_actor_updates() != expected_actor_updates:
@@ -1254,9 +1282,18 @@ class ACTTD3OfflineTrainingRunner:
             or not isinstance(stored_actor_epochs, int)
             or stored_critic_epochs < 1
             or stored_actor_epochs < 1
-            or stored_critic_epochs
-            != self.POLICY_UPDATE_PERIOD * stored_actor_epochs
         ):
+            raise ValueError("ACT-TD3 round checkpoint schedule is invalid")
+        try:
+            stored_policy_update_period = policy_update_period_for_epoch_schedule(
+                stored_critic_epochs,
+                stored_actor_epochs,
+            )
+        except ValueError as error:
+            raise ValueError(
+                "ACT-TD3 round checkpoint schedule is invalid"
+            ) from error
+        if stored_base.get("policy_update_period") != stored_policy_update_period:
             raise ValueError("ACT-TD3 round checkpoint schedule is invalid")
         schedule_fields = {"critic_epochs", "actor_equivalent_epochs"}
         if {
@@ -1398,7 +1435,7 @@ class ACTTD3OfflineTrainingRunner:
             or raw_update["actor_updated"]
             != (
                 self.learner.completed_critic_updates
-                % self.POLICY_UPDATE_PERIOD
+                % self.policy_update_period
                 == 0
             )
             or not math.isfinite(float(raw_update["critic_loss"]))
@@ -1441,11 +1478,16 @@ class ACTTD3OfflineTrainingRunner:
             "new_episode_count",
             inferred_previous_delta,
         )
+        previous_delta_limit = (
+            self.MAX_EPISODES
+            if prior_episode_count == 0
+            else self.ROUND_EPISODES
+        )
         if (
             isinstance(recorded_previous_delta, bool)
             or not isinstance(recorded_previous_delta, int)
             or recorded_previous_delta != inferred_previous_delta
-            or not 1 <= recorded_previous_delta <= self.ROUND_EPISODES
+            or not 1 <= recorded_previous_delta <= previous_delta_limit
         ):
             raise ValueError("ACT-TD3 checkpoint new episode count is invalid")
 
@@ -1672,7 +1714,7 @@ class ACTTD3OfflineTrainingRunner:
             update = self.learner.update(self._next_batch())
             expected_actor = (
                 self.learner.completed_critic_updates
-                % self.POLICY_UPDATE_PERIOD
+                % self.policy_update_period
                 == 0
             )
             if update.actor_updated != expected_actor or (
@@ -1734,4 +1776,5 @@ __all__ = [
     "ACTTD3OfflineTrainingRunner",
     "RLMetricHistoryPoint",
     "load_policy_local_warmup_critic",
+    "policy_update_period_for_epoch_schedule",
 ]

@@ -25,6 +25,7 @@ from cyclo_brain.algorithm.rl.act_td3 import (
 )
 from cyclo_brain.algorithm.rl.act_td3.offline_training import (
     load_policy_local_warmup_critic,
+    policy_update_period_for_epoch_schedule,
 )
 from cyclo_brain.algorithm.rl.act_td3.offline_warmup import _module_sha256
 from cyclo_brain.algorithm.rl.tests.test_act_td3_lerobot_offline import (
@@ -40,9 +41,15 @@ from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE
 
 def _learner(
     actor_trainable_groups: tuple[str, ...] | None = None,
+    *,
+    policy_update_period: int = 2,
 ) -> ACTTD3Learner:
     source = _warmup_learner()
-    config = replace(source.config, critic_warmup_updates=0)
+    config = replace(
+        source.config,
+        critic_warmup_updates=0,
+        policy_update_period=policy_update_period,
+    )
     if actor_trainable_groups is not None:
         config = replace(
             config,
@@ -160,7 +167,11 @@ def _multi_identity(
 def _install_fast_update(learner: ACTTD3Learner) -> None:
     def update(_batch) -> ACTTD3UpdateResult:
         learner.completed_critic_updates += 1
-        actor_updated = learner.completed_critic_updates % 2 == 0
+        actor_updated = (
+            learner.completed_critic_updates
+            % learner.config.policy_update_period
+            == 0
+        )
         if actor_updated:
             learner.completed_actor_updates += 1
         return ACTTD3UpdateResult(
@@ -311,15 +322,23 @@ def _runner(
     critic_epochs: int = 10,
     actor_equivalent_epochs: int = 5,
     actor_trainable_groups: tuple[str, ...] | None = None,
+    batch_size: int = 2,
 ) -> ACTTD3OfflineTrainingRunner:
     replay = dataset or _dataset()
-    learner = _learner(actor_trainable_groups)
+    policy_update_period = policy_update_period_for_epoch_schedule(
+        critic_epochs,
+        actor_equivalent_epochs,
+    )
+    learner = _learner(
+        actor_trainable_groups,
+        policy_update_period=policy_update_period,
+    )
     _install_fast_update(learner)
     return ACTTD3OfflineTrainingRunner(
         learner,
         replay,
         ACTTD3LeRobotCollator(_OffsetPreprocessor()),
-        batch_size=2,
+        batch_size=batch_size,
         sampling_seed=19,
         training_data_identity=identity or _identity(replay),
         checkpoint_path=checkpoint,
@@ -638,24 +657,65 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
                 {"critic_epochs": 10, "actor_equivalent_epochs": 5},
             )
 
-    def test_schedule_requires_exact_fixed_two_to_one_ratio(self) -> None:
+    def test_schedule_requires_an_exact_integer_ratio(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "critic_epochs must equal"):
+            with self.assertRaisesRegex(ValueError, "exact integer multiple"):
                 _runner(
                     Path(directory) / "bad.pt",
-                    critic_epochs=6,
-                    actor_equivalent_epochs=2,
+                    critic_epochs=5,
+                    actor_equivalent_epochs=3,
                 )
 
-    def test_each_round_accepts_one_through_fifty_new_episodes(self) -> None:
+    def test_equal_epoch_schedule_updates_actor_and_critic_one_to_one(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = _runner(
+                Path(directory) / "one_to_one.pt",
+                critic_epochs=1,
+                actor_equivalent_epochs=1,
+                batch_size=2,
+            )
+            self.assertEqual(runner.policy_update_period, 1)
+            result = runner.run()
+            self.assertEqual(
+                result.completed_critic_updates,
+                result.completed_actor_updates,
+            )
+            self.assertEqual(
+                result.total_critic_updates,
+                result.total_actor_updates,
+            )
+
+    def test_initial_replay_may_exceed_fifty_but_growth_stays_capped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaisesRegex(ValueError, "first.*1..50"):
-                _runner(
-                    root / "too_many_first.pt",
-                    dataset=_dataset(tuple((1, False) for _ in range(51))),
-                )
+            initial_episodes = tuple(
+                (1, bool(index % 2)) for index in range(59)
+            )
+            first_path = root / "round_001.pt"
+            first = _runner(
+                first_path,
+                dataset=_dataset(initial_episodes),
+                critic_epochs=2,
+                actor_equivalent_epochs=1,
+                batch_size=59,
+            )
+            self.assertEqual(first.new_episode_count, 59)
+            first.run()
 
+            one_more = _runner(
+                root / "round_002_one_more.pt",
+                dataset=_dataset((*initial_episodes, (1, True))),
+                resume_from=first_path,
+                critic_epochs=2,
+                actor_equivalent_epochs=1,
+                batch_size=59,
+            )
+            self.assertEqual(one_more.round_index, 2)
+            self.assertEqual(one_more.new_episode_count, 1)
+
+    def test_later_round_accepts_one_through_fifty_new_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             first_path = root / "round_001.pt"
             _runner(first_path).run()
             prefix = ((5, True), (3, False))
@@ -851,7 +911,10 @@ class ACTTD3OfflineTrainingRunnerTest(unittest.TestCase):
             for parameter in source.critic_target.parameters():
                 parameter.fill_(-0.25)
 
-        target = _learner(actor_trainable_groups=("action_decoder",))
+        target = _learner(
+            actor_trainable_groups=("action_decoder",),
+            policy_update_period=1,
+        )
         actor_before = {
             name: value.detach().clone()
             for name, value in target.actor.state_dict().items()

@@ -315,6 +315,10 @@ class OfflineRLStopRequest(BaseModel):
     job_id: str = Field(min_length=1, max_length=64)
 
 
+class OfflineRLCancelRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=64)
+
+
 class OfflineRLLossPoint(BaseModel):
     """One finite ACT-TD3 loss sample keyed by completed critic updates."""
 
@@ -333,7 +337,14 @@ class OfflineRLRLMetricPoint(BaseModel):
 
 
 class OfflineRLStatus(BaseModel):
-    status: Literal["idle", "running", "completed", "failed", "stopped"]
+    status: Literal[
+        "idle",
+        "running",
+        "completed",
+        "failed",
+        "stopped",
+        "cancelled",
+    ]
     algorithm: Literal["td3"] = "td3"
     actor_objective: Literal["td3", "td3_bc"] = "td3_bc"
     percentage: float = 0.0
@@ -3238,11 +3249,14 @@ def _offline_rl_schedule(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise HTTPException(400, f"{label} must be a positive integer")
-    if critic_epochs != 2 * actor_equivalent_epochs:
+    if (
+        critic_epochs < actor_equivalent_epochs
+        or critic_epochs % actor_equivalent_epochs != 0
+    ):
         raise HTTPException(
             400,
-            "TD3 requires critic_epochs = 2 * actor_equivalent_epochs "
-            "because policy_update_period is fixed at 2",
+            "TD3 requires critic_epochs to be an exact integer multiple of "
+            "actor_equivalent_epochs; 1:1 is supported",
         )
     return critic_epochs, actor_equivalent_epochs
 
@@ -3382,10 +3396,15 @@ def _offline_rl_parent_checkpoint(
 ) -> tuple[Path | None, int, int]:
     value = (raw_path or "").strip()
     if not value:
-        if episode_count > _OFFLINE_RL_MAX_NEW_EPISODES:
+        # The initial replay may contain both the IL seed data and the first
+        # policy-collected Data Epoch.  It is bounded by the cumulative replay
+        # limit, not by the per-round append limit.  Once a completed TD3
+        # parent exists, only the newly appended 1..50 episodes are accepted
+        # below.
+        if not 1 <= episode_count <= _OFFLINE_RL_MAX_EPISODES:
             raise HTTPException(
                 400,
-                "The first ACT-TD3 round may contain 1..50 episodes",
+                "The first ACT-TD3 round may contain 1..200 episodes",
             )
         return None, 0, 0
 
@@ -3575,6 +3594,119 @@ def _offline_rl_output_path(
     if output.exists():
         raise HTTPException(409, f"Offline RL output already exists: {output}")
     return output
+
+
+def _offline_rl_cancel_output(job: _OfflineRLJob) -> None:
+    """Remove only this incomplete job's generated output directory.
+
+    Cancellation is deliberately narrower than policy or dataset deletion.  A
+    stopped round contains a resumable actor/critic/optimizer checkpoint, but
+    none of it is deployable until the round completes.  The caller may choose
+    to discard that one versioned directory while retaining the immutable
+    replay, base ACT policy, completed parent round, and policy-local warm-up
+    critic needed to retry the same round.
+    """
+
+    if job.actor_objective not in _OFFLINE_RL_ACTOR_OBJECTIVES:
+        raise HTTPException(409, "Offline RL job has an invalid actor objective")
+
+    expected_name = (
+        f"{job.actor_objective}_episodes_{job.episode_count:04d}_{job.job_id[:12]}"
+    )
+    output_root = _OFFLINE_RL_OUTPUT_ROOT
+    expected = output_root / expected_name
+    configured = Path(job.output_dir)
+    if os.path.normpath(str(configured)) != os.path.normpath(str(expected)):
+        raise HTTPException(
+            409,
+            "Offline RL cancellation output does not match the current job",
+        )
+
+    if _OFFLINE_RL_MODEL_ROOT.is_symlink():
+        raise HTTPException(500, "Offline RL model root must not be a symbolic link")
+    try:
+        model_root = _OFFLINE_RL_MODEL_ROOT.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(500, "Offline RL model root is unavailable") from exc
+    if not model_root.is_dir() or model_root.is_symlink():
+        raise HTTPException(500, "Offline RL model root must be a real directory")
+    if output_root.is_symlink():
+        raise HTTPException(409, "Offline RL output root must not be a symbolic link")
+    if output_root.exists() and not output_root.is_dir():
+        raise HTTPException(409, "Offline RL output root must be a directory")
+    try:
+        resolved_output_root = output_root.resolve(strict=output_root.exists())
+        resolved_output_root.relative_to(model_root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, "Offline RL output root escapes the model root") from exc
+
+    # ``Path.exists`` is false for a dangling symlink, so check the link before
+    # accepting an absent output as an already-clean cancellation.
+    if configured.is_symlink():
+        raise HTTPException(
+            409,
+            "Offline RL cancellation output must not be a symbolic link",
+        )
+    if not configured.exists():
+        return
+    if not configured.is_dir():
+        raise HTTPException(409, "Offline RL cancellation output must be a directory")
+    try:
+        resolved_output = configured.resolve(strict=True)
+        if resolved_output.parent != resolved_output_root:
+            raise ValueError("output is not a direct child of the output root")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            409,
+            "Offline RL cancellation output escapes the output root",
+        ) from exc
+
+    trash = resolved_output_root / (
+        f".{expected_name}.cancel-{uuid.uuid4().hex}.trash"
+    )
+    if trash.exists() or trash.is_symlink():
+        raise HTTPException(409, "Offline RL cancellation staging path already exists")
+    try:
+        os.replace(resolved_output, trash)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not stage Offline RL cancellation: {exc}") from exc
+    try:
+        shutil.rmtree(trash)
+    except OSError as exc:
+        # The public output path disappeared atomically.  Keep any hidden
+        # remainder outside model discovery and report it for admin cleanup.
+        logger.warning(
+            "Offline RL output was cancelled but hidden staging path %s could "
+            "not be fully purged: %s",
+            trash,
+            exc,
+        )
+
+
+def _offline_rl_mark_cancelled(job: _OfflineRLJob) -> None:
+    """Clear incomplete training telemetry while retaining the retry contract."""
+
+    job.status = "cancelled"
+    job.percentage = 0.0
+    job.completed_epochs = 0
+    job.completed_critic_updates = 0
+    job.total_critic_updates = 0
+    job.completed_actor_updates = 0
+    job.total_actor_updates = 0
+    job.critic_loss = None
+    job.actor_loss = None
+    job.loss_history.clear()
+    job.rl_metric_history.clear()
+    job.eta_seconds = None
+    job.model_path = ""
+    job.checkpoint_path = ""
+    job.critic_source = ""
+    job.critic_checkpoint = ""
+    job.message = "ACT-TD3 training cancelled; incomplete output was discarded"
+    job.process = None
+    job.stop_requested = False
+    job.stop_confirmed = False
+    job.returncode = None
 
 
 def _offline_rl_command(
@@ -5545,6 +5677,12 @@ def _flow_sde_ppo_training_conflict() -> Optional[str]:
             and _IMITATION_LEARNING_JOB.status == "running"
         ):
             return "Stop imitation learning before starting Flow-SDE PPO"
+    rlt_stage1 = globals().get("_RLT_STAGE1_SUPERVISOR")
+    if rlt_stage1 is not None and rlt_stage1.is_running():
+        return "Stop GR00T RLT Stage 1 before starting Flow-SDE PPO"
+    rlt_stage2 = globals().get("_RLT_STAGE2_SUPERVISOR")
+    if rlt_stage2 is not None and rlt_stage2.is_running():
+        return "Stop GR00T RLT Stage 2 before starting Flow-SDE PPO"
     return None
 
 
@@ -5581,11 +5719,130 @@ flow_sde_ppo_router, _FLOW_SDE_PPO_SUPERVISOR = create_flow_sde_ppo_router(
 _include_router_with_eager_routes(app, flow_sde_ppo_router)
 
 
+def _rlt_stage1_training_conflict() -> Optional[str]:
+    """Keep frozen-GR00T representation training GPU-exclusive."""
+
+    with _OFFLINE_RL_LOCK:
+        if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+            return "Stop the ACT-TD3 job before starting GR00T RLT Stage 1"
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            return "Stop ACT-TD3 critic warm-up before starting GR00T RLT Stage 1"
+    with _IMITATION_LEARNING_LOCK:
+        if (
+            _IMITATION_LEARNING_JOB is not None
+            and _IMITATION_LEARNING_JOB.status == "running"
+        ):
+            return "Stop imitation learning before starting GR00T RLT Stage 1"
+    if _FLOW_SDE_PPO_SUPERVISOR.is_running():
+        return "Stop Flow-SDE PPO before starting GR00T RLT Stage 1"
+    rlt_stage2 = globals().get("_RLT_STAGE2_SUPERVISOR")
+    if rlt_stage2 is not None and rlt_stage2.is_running():
+        return "Stop GR00T RLT Stage 2 before starting GR00T RLT Stage 1"
+    return None
+
+
+def _rlt_stage1_interrupt_container(container_name: str) -> bool:
+    """Signal only the one-shot GR00T container owned by this Stage 1 job."""
+
+    try:
+        container = _docker_client().containers.get(container_name)
+        container.kill(signal="SIGINT")
+        return True
+    except NotFound:
+        return False
+    except DockerException as exc:
+        raise RuntimeError(
+            f"Could not signal RLT Stage 1 container {container_name}: {exc}"
+        ) from exc
+
+
+from supervisor_api.rlt_stage1_service import (  # noqa: E402
+    create_rlt_stage1_router,
+)
+
+
+rlt_stage1_router, _RLT_STAGE1_SUPERVISOR = create_rlt_stage1_router(
+    compose_command=_compose_base_cmd,
+    compose_environment=_compose_env,
+    conflict_message=_rlt_stage1_training_conflict,
+    interrupt_container=_rlt_stage1_interrupt_container,
+)
+_include_router_with_eager_routes(app, rlt_stage1_router)
+
+
+def _rlt_stage2_training_conflict() -> Optional[str]:
+    """Keep RLT actor-critic training GPU-exclusive."""
+
+    with _OFFLINE_RL_LOCK:
+        if _OFFLINE_RL_JOB is not None and _OFFLINE_RL_JOB.status == "running":
+            return "Stop the ACT-TD3 job before starting GR00T RLT Stage 2"
+    with _ACT_TD3_CRITIC_WARMUP_LOCK:
+        if (
+            _ACT_TD3_CRITIC_WARMUP_JOB is not None
+            and _ACT_TD3_CRITIC_WARMUP_JOB.status == "running"
+        ):
+            return "Stop ACT-TD3 critic warm-up before starting GR00T RLT Stage 2"
+    with _IMITATION_LEARNING_LOCK:
+        if (
+            _IMITATION_LEARNING_JOB is not None
+            and _IMITATION_LEARNING_JOB.status == "running"
+        ):
+            return "Stop imitation learning before starting GR00T RLT Stage 2"
+    if _FLOW_SDE_PPO_SUPERVISOR.is_running():
+        return "Stop Flow-SDE PPO before starting GR00T RLT Stage 2"
+    if _RLT_STAGE1_SUPERVISOR.is_running():
+        return "Stop GR00T RLT Stage 1 before starting GR00T RLT Stage 2"
+    return None
+
+
+def _rlt_stage2_interrupt_container(container_name: str) -> bool:
+    """Signal only the one-shot GR00T container owned by this Stage 2 job."""
+
+    try:
+        container = _docker_client().containers.get(container_name)
+        container.kill(signal="SIGINT")
+        return True
+    except NotFound:
+        return False
+    except DockerException as exc:
+        raise RuntimeError(
+            f"Could not signal RLT Stage 2 container {container_name}: {exc}"
+        ) from exc
+
+
+from supervisor_api.rlt_stage2_service import (  # noqa: E402
+    create_rlt_stage2_router,
+)
+
+
+rlt_stage2_router, _RLT_STAGE2_SUPERVISOR = create_rlt_stage2_router(
+    compose_command=_compose_base_cmd,
+    compose_environment=_compose_env,
+    conflict_message=_rlt_stage2_training_conflict,
+    interrupt_container=_rlt_stage2_interrupt_container,
+)
+_include_router_with_eager_routes(app, rlt_stage2_router)
+
+
 def _reject_running_flow_sde_ppo() -> None:
     if _FLOW_SDE_PPO_SUPERVISOR.is_running():
         raise HTTPException(
             409,
             "Stop Flow-SDE PPO before starting another GPU training job",
+        )
+    if _RLT_STAGE1_SUPERVISOR.is_running():
+        raise HTTPException(
+            409,
+            "Stop GR00T RLT Stage 1 before starting another GPU training job",
+        )
+    if _RLT_STAGE2_SUPERVISOR.is_running():
+        raise HTTPException(
+            409,
+            "Stop GR00T RLT Stage 2 before starting another GPU training job",
         )
 
 
@@ -5864,6 +6121,26 @@ async def offline_rl_stop(request: OfflineRLStopRequest) -> OfflineRLStatus:
         raise HTTPException(409, "Offline RL job exited before it could be stopped")
 
     with _OFFLINE_RL_LOCK:
+        return _offline_rl_status(job)
+
+
+@app.post("/offline-rl/cancel", response_model=OfflineRLStatus)
+async def offline_rl_cancel(request: OfflineRLCancelRequest) -> OfflineRLStatus:
+    """Discard only the current stopped/failed round's incomplete artifacts."""
+
+    with _OFFLINE_RL_LOCK:
+        job = _OFFLINE_RL_JOB
+        requested_job_id = request.job_id.strip()
+        if job is None or requested_job_id != job.job_id:
+            raise HTTPException(409, "Offline RL job_id is stale or no longer current")
+        if job.status not in {"stopped", "failed"}:
+            raise HTTPException(
+                409,
+                f"Offline RL job must be stopped or failed before cancellation; "
+                f"current status is {job.status}",
+            )
+        _offline_rl_cancel_output(job)
+        _offline_rl_mark_cancelled(job)
         return _offline_rl_status(job)
 
 

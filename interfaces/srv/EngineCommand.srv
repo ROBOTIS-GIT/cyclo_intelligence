@@ -24,9 +24,18 @@ string acceleration_engine_path
 # LOAD_POLICY-only RLT preload settings.
 bool rlt_enabled
 string rlt_bundle_path
-# GET_ACTION router selection ("base" or "rlt"). The Main process changes
-# this value only after the previously committed action buffer drains.
+# GET_ACTION router selection ("base" or "rlt"). Sync/async switch at a
+# drained chunk boundary; TT-RTC preserves the committed prefix and switches
+# atomically when the selected route's continuation is enqueued.
 string action_policy_mode
+
+# GET_ACTION timing contract. TT-RTC carries the exact unconsumed source-rate
+# action prefix to the Engine. rtc_prefix_action_list is row-major:
+# rtc_delay_steps * rtc_action_dim == len(rtc_prefix_action_list).
+string action_request_mode
+int32 rtc_delay_steps
+int32 rtc_action_dim
+float64[] rtc_prefix_action_list
 ---
 uint64 seq_id
 bool success

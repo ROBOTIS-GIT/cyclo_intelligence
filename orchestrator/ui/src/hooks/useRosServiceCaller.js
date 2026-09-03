@@ -29,6 +29,8 @@ import {
   selectRecordTaskInfo,
 } from '../features/tasks/taskSlice';
 import { CYCLO_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
+import { supportsTensorRtInference } from '../constants/policyCapabilities';
+import { normalizeActionRequestMode } from '../utils/taskInfoSync';
 
 const DEFAULT_SERVICE_TIMEOUT_MS = 10000;
 const START_INFERENCE_SERVICE_TIMEOUT_MS = 30000;
@@ -129,6 +131,32 @@ export function getCommandRecordingFolder(taskInfo = {}, options = {}) {
   return String(
     hasOverride ? options.recordingFolder : (taskInfo.recordingFolder || '')
   ).trim();
+}
+
+export function getInferenceTaskTags(taskInfo = {}, inferenceMode = 'simulation') {
+  const tags = [`inference_mode:${inferenceMode}`];
+  const policyType = String(taskInfo.policyType || '').trim();
+  if (policyType) {
+    tags.push(`policy_type:${policyType}`);
+  }
+  return tags;
+}
+
+export function getInferenceAccelerationFields(taskInfo = {}) {
+  if (!supportsTensorRtInference(taskInfo.serviceType, taskInfo.policyType)) {
+    return {
+      accelerationMode: 'pytorch',
+      accelerationEnginePath: '',
+    };
+  }
+  return {
+    accelerationMode: String(taskInfo.accelerationMode || 'pytorch').trim(),
+    accelerationEnginePath: String(taskInfo.accelerationEnginePath || '').trim(),
+  };
+}
+
+export function getInferenceActionRequestMode(taskInfo = {}) {
+  return normalizeActionRequestMode(taskInfo.actionRequestMode);
 }
 
 export function transformReplayDataResult(result = {}, bagPath = '') {
@@ -453,17 +481,11 @@ export function useRosServiceCaller() {
         const imageResize = options.imageResize || null;
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
         const policyPath = String(taskInfo.policyPath || '').trim();
-        const accelerationMode = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationMode || 'pytorch').trim()
-          : 'pytorch';
-        const accelerationEnginePath = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationEnginePath || '').trim()
-          : '';
-        const actionRequestMode = (
-          String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
-            ? 'sync'
-            : 'async'
-        );
+        const {
+          accelerationMode,
+          accelerationEnginePath,
+        } = getInferenceAccelerationFields(taskInfo);
+        const actionRequestMode = getInferenceActionRequestMode(taskInfo);
         const actionPolicyFields = getActionPolicyCommandFields(
           taskInfo,
           command,
@@ -490,7 +512,7 @@ export function useRosServiceCaller() {
             policy_path: policyPath,
             record_inference_mode:
               inferenceMode === 'robot' && Boolean(taskInfo.recordInferenceMode),
-            tags: [`inference_mode:${inferenceMode}`],
+            tags: getInferenceTaskTags(taskInfo, inferenceMode),
             control_hz: Number(taskInfo.controlHz || 100),
             inference_hz: Number(taskInfo.inferenceHz || 15),
             chunk_align_window_s: Number(

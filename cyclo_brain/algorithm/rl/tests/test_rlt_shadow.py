@@ -95,6 +95,36 @@ class ShowroomGR00TRLTShadowTest(unittest.TestCase):
                 torch.zeros(1, 10, 19),
             )
 
+    def test_shadow_forward_can_select_the_tt_rtc_shifted_reference(self):
+        reference = torch.arange(16 * 19, dtype=torch.float32).reshape(1, 16, 19)
+
+        output = self.policy(
+            torch.ones(1, 2, 2048),
+            torch.ones(1, 2, dtype=torch.bool),
+            torch.ones(1, 2, dtype=torch.bool),
+            torch.zeros(1, 19),
+            reference,
+            reference_offset_steps=6,
+        )
+
+        torch.testing.assert_close(
+            output.reference_prefix,
+            reference[:, 6:16],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_shadow_forward_rejects_an_out_of_range_tt_rtc_shift(self):
+        with self.assertRaisesRegex(ValueError, "reference_offset_steps"):
+            self.policy(
+                torch.ones(1, 2, 2048),
+                torch.ones(1, 2, dtype=torch.bool),
+                torch.ones(1, 2, dtype=torch.bool),
+                torch.zeros(1, 19),
+                torch.zeros(1, 16, 19),
+                reference_offset_steps=7,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

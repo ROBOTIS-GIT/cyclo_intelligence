@@ -1489,7 +1489,6 @@ class OrchestratorNode(Node):
                         'RLT Bundle Path is required when RLT is enabled'
                     )
                     return response
-                self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 task_instruction = (
                     task_info.task_instruction[0]
@@ -1498,12 +1497,31 @@ class OrchestratorNode(Node):
                 )
                 publish_to_robot = publish_to_robot_from_task_info(task_info)
                 service_prefix = self._determine_service_prefix(task_info)
-                requested_acceleration_mode, requested_acceleration_engine_path = (
-                    self._acceleration_from_task_info(task_info)
-                )
                 requested_action_request_mode = (
                     self._action_request_mode_from_task_info(task_info)
                 )
+                requested_acceleration_mode, requested_acceleration_engine_path = (
+                    self._acceleration_for_service(task_info, service_prefix)
+                )
+                action_mode_error = self._action_request_mode_error(
+                    requested_action_request_mode,
+                    service_prefix,
+                    requested_acceleration_mode,
+                )
+                if action_mode_error:
+                    response.success = False
+                    response.message = action_mode_error
+                    return response
+                # TaskInfo is also cached and republished as UI status.  Store
+                # the backend-qualified values so a stale TensorRT selection
+                # can never appear active for ACT or another non-GR00T policy.
+                if hasattr(task_info, 'acceleration_mode'):
+                    task_info.acceleration_mode = requested_acceleration_mode
+                if hasattr(task_info, 'acceleration_engine_path'):
+                    task_info.acceleration_engine_path = (
+                        requested_acceleration_engine_path
+                    )
+                self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 # If the requested policy is already loaded on this
                 # container, treat START_INFERENCE as RESUME. If the user
@@ -2812,11 +2830,27 @@ class OrchestratorNode(Node):
             engine_path = ''
         return mode, engine_path
 
+    @classmethod
+    def _acceleration_for_service(
+        cls,
+        task_info,
+        service_prefix: str,
+    ) -> tuple[str, str]:
+        """Return acceleration settings permitted by the selected backend.
+
+        TensorRT acceleration is a GR00T-specific contract.  Treat any stale
+        or malformed TensorRT fields on ACT/LeRobot requests as eager PyTorch
+        instead of forwarding them to a backend that cannot consume them.
+        """
+        if str(service_prefix or '').strip().rstrip('/') != '/groot':
+            return 'pytorch', ''
+        return cls._acceleration_from_task_info(task_info)
+
     @staticmethod
     def _normalize_action_request_mode(value: str) -> str:
         mode = str(value or '').strip().lower()
-        if mode == 'sync':
-            return 'sync'
+        if mode in {'sync', 'tt_rtc'}:
+            return mode
         return 'async'
 
     @classmethod
@@ -2824,6 +2858,21 @@ class OrchestratorNode(Node):
         return cls._normalize_action_request_mode(
             getattr(task_info, 'action_request_mode', '')
         )
+
+    @staticmethod
+    def _action_request_mode_error(
+        mode: str,
+        service_prefix: str,
+        acceleration_mode: str = 'pytorch',
+    ) -> str:
+        if mode == 'tt_rtc' and str(service_prefix or '').rstrip('/') != '/groot':
+            return 'TT-RTC action requests are supported only by GR00T N1.7'
+        if mode == 'tt_rtc' and acceleration_mode != 'pytorch':
+            return (
+                'TT-RTC currently requires PyTorch; disable TensorRT before '
+                'starting inference'
+            )
+        return ''
 
     def _determine_service_prefix(self, task_info) -> str:
         """Determine inference service prefix from task_info or policy config.

@@ -136,14 +136,15 @@ class ACTTD3OfflineTrainingCLITest(unittest.TestCase):
             )
 
     def test_schedule_validation_and_manifests_retain_round_contract(self) -> None:
-        cli._validate_schedule(6, 3)  # noqa: SLF001
-        with self.assertRaisesRegex(ValueError, "critic_epochs must equal"):
-            cli._validate_schedule(6, 2)  # noqa: SLF001
+        self.assertEqual(cli._validate_schedule(6, 3), 2)  # noqa: SLF001
+        self.assertEqual(cli._validate_schedule(1, 1), 1)  # noqa: SLF001
+        with self.assertRaisesRegex(ValueError, "exact integer multiple"):
+            cli._validate_schedule(5, 3)  # noqa: SLF001
 
         runner = SimpleNamespace(
             critic_epochs=6,
             actor_equivalent_epochs=3,
-            POLICY_UPDATE_PERIOD=2,
+            policy_update_period=2,
             ROUND_EPISODES=50,
             MAX_EPISODES=200,
             round_index=2,

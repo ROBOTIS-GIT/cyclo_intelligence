@@ -19,6 +19,7 @@ if str(GROOT_ROOT) not in sys.path:
 
 from runtime.rlt_adapter import (  # noqa: E402
     GR00TRLTInferenceAdapter,
+    GR00TRLTTokenExtractor,
     is_deployment_qualified,
     resolve_rlt_bundle,
 )
@@ -106,6 +107,16 @@ class _Model:
     def __init__(self):
         self.backbone = _Backbone()
         self.action_head = _ActionHead()
+        self.training = True
+        self.requires_grad = True
+
+    def eval(self):
+        self.training = False
+        return self
+
+    def requires_grad_(self, value):
+        self.requires_grad = bool(value)
+        return self
 
     def prepare_input(self, inputs):
         return inputs, inputs
@@ -137,6 +148,43 @@ class _Policy:
         return {"inputs": {"state": torch.from_numpy(state)}}
 
 
+class _TTRTCPolicy(_Policy):
+    def __init__(self, *, preserve_prefix=True):
+        super().__init__()
+        self.preserve_prefix = preserve_prefix
+        self.tt_kwargs = None
+
+    def get_action_tt_rtc(self, _observation, **kwargs):
+        self.tt_kwargs = kwargs
+        delay_steps = kwargs["delay_steps"]
+        normalized_prefix = torch.full(
+            (1, delay_steps, 19),
+            0.5,
+            dtype=torch.float32,
+        )
+        reference = torch.arange(
+            16 * 19,
+            dtype=torch.float32,
+        ).reshape(1, 16, 19)
+        if self.preserve_prefix:
+            reference[:, :delay_steps] = normalized_prefix
+        return {}, {
+            "tt_rtc_rlt_context": {
+                "schema": "cyclo.groot.tt-rtc-rlt-context/v1",
+                "delay_steps": delay_steps,
+                "tokens": torch.arange(8, dtype=torch.float32).reshape(1, 2, 4),
+                "token_valid": torch.ones(1, 2, dtype=torch.bool),
+                "image_token": torch.tensor([[True, False]]),
+                "proprio": torch.zeros(1, 19),
+                "reference_actions": reference,
+                "normalized_committed_prefix": normalized_prefix,
+                "batched_states": {
+                    "state": np.zeros((1, 1, 19), dtype=np.float32)
+                },
+            }
+        }
+
+
 class _Shadow:
     actor_qualification = "training_only_not_deployment_validated"
     spec = SimpleNamespace(
@@ -149,10 +197,23 @@ class _Shadow:
     def __init__(self):
         self.tokens = None
 
-    def __call__(self, tokens, _valid, _image, proprio, reference):
+    def __call__(
+        self,
+        tokens,
+        _valid,
+        _image,
+        proprio,
+        reference,
+        *,
+        reference_offset_steps=0,
+    ):
         self.tokens = tokens.clone()
         self.proprio = proprio.clone()
         self.reference = reference.clone()
+        self.reference_offset_steps = reference_offset_steps
+        self.reference_slice = reference[
+            :, reference_offset_steps : reference_offset_steps + 10
+        ].clone()
         batch = tokens.shape[0]
         return SimpleNamespace(action_mean=torch.full((batch, 10, 19), 0.25))
 
@@ -201,6 +262,91 @@ class RLTInferenceAdapterTests(unittest.TestCase):
             shadow.tokens[0, 0], torch.tensor([0.0, 1.0, 2.0, 3.0])
         )
         np.testing.assert_allclose(action["action"], 0.25)
+
+    def test_tt_rtc_reference_uses_delay_shift_instead_of_first_ten(self) -> None:
+        policy = _Policy()
+        shadow = _Shadow()
+        adapter = GR00TRLTInferenceAdapter(
+            policy,
+            shadow,
+            SimpleNamespace(root=Path("."), encoder=Path("e"), actor=Path("a")),
+        )
+        observation = {
+            "state": {"state": np.zeros((1, 1, 19), dtype=np.float32)}
+        }
+
+        adapter.get_action(observation, reference_offset_steps=6)
+
+        self.assertEqual(shadow.reference_offset_steps, 6)
+        torch.testing.assert_close(
+            shadow.reference_slice,
+            shadow.reference[:, 6:16],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_tt_rtc_mlp_uses_same_forward_context_and_shifted_reference(self) -> None:
+        policy = _TTRTCPolicy()
+        shadow = _Shadow()
+        adapter = GR00TRLTInferenceAdapter(
+            policy,
+            shadow,
+            SimpleNamespace(root=Path("."), encoder=Path("e"), actor=Path("a")),
+        )
+        adapter.require_tt_rtc_capability = lambda: None
+
+        action = adapter.get_action_tt_rtc(
+            {},
+            committed_action_prefix=np.zeros((1, 6, 19), dtype=np.float32),
+            delay_steps=6,
+            action_horizon=16,
+        )
+
+        self.assertEqual(action["action"].shape, (1, 10, 19))
+        self.assertTrue(policy.tt_kwargs["return_rlt_context"])
+        self.assertEqual(shadow.reference_offset_steps, 6)
+        torch.testing.assert_close(
+            shadow.reference_slice,
+            shadow.reference[:, 6:16],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_tt_rtc_mlp_rejects_a_reference_that_does_not_preserve_prefix(self) -> None:
+        policy = _TTRTCPolicy(preserve_prefix=False)
+        shadow = _Shadow()
+        adapter = GR00TRLTInferenceAdapter(
+            policy,
+            shadow,
+            SimpleNamespace(root=Path("."), encoder=Path("e"), actor=Path("a")),
+        )
+        adapter.require_tt_rtc_capability = lambda: None
+
+        with self.assertRaisesRegex(RuntimeError, "exact normalized committed prefix"):
+            adapter.get_action_tt_rtc(
+                {},
+                committed_action_prefix=np.zeros((1, 6, 19), dtype=np.float32),
+                delay_steps=6,
+                action_horizon=16,
+            )
+
+    def test_stage1_extractor_freezes_model_and_skips_action_head(self) -> None:
+        policy = _Policy()
+        extractor = GR00TRLTTokenExtractor(policy)
+        observation = {
+            "state": {"state": np.zeros((1, 1, 19), dtype=np.float32)}
+        }
+
+        result = extractor.extract(observation)
+
+        self.assertFalse(policy.model.training)
+        self.assertFalse(policy.model.requires_grad)
+        self.assertEqual(tuple(result["tokens"].shape), (1, 2, 4))
+        self.assertEqual(result["token_valid"].dtype, torch.bool)
+        self.assertEqual(result["image_token"].dtype, torch.bool)
+        torch.testing.assert_close(
+            result["tokens"][0, 0], torch.tensor([0.0, 1.0, 2.0, 3.0])
+        )
 
 
 if __name__ == "__main__":

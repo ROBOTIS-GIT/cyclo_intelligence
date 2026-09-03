@@ -30,6 +30,7 @@ string inference_mode
 
 # Action chunk request scheduling. "async" requests the next chunk while the
 # current buffer is still executing. "sync" waits until the buffer is empty.
+# "tt_rtc" is available only for a qualified GR00T N1.7 checkpoint.
 string action_request_mode
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
@@ -46,8 +47,9 @@ bool rlt_enabled
 string rlt_bundle_path
 
 # Runtime action router selection. "base" executes the frozen VLA reference
-# policy and "rlt" executes the RLT Action MLP. The runtime applies changes at
-# an action-buffer boundary, never in the middle of a committed chunk.
+# policy and "rlt" executes the RLT Action MLP. Sync/async switch at a drained
+# chunk boundary; TT-RTC preserves the committed prefix and hands off when the
+# selected route's continuation has been validated and enqueued.
 string action_policy_mode
 
 # Explicit operator acknowledgement for routing an unqualified RLT action to a

@@ -35,6 +35,7 @@ from .offline_training import (
     ACTTD3OfflineTrainingProgress,
     ACTTD3OfflineTrainingRunner,
     load_policy_local_warmup_critic,
+    policy_update_period_for_epoch_schedule,
 )
 from .offline_warmup_cli import (
     _MAX_SEED,
@@ -56,7 +57,7 @@ from .training_identity import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train one cumulative-replay ACT-TD3 round with a fixed 2:1 "
+            "Train one cumulative-replay ACT-TD3 round with an exact integer "
             "critic-to-actor update schedule, capped at 200 episodes."
         )
     )
@@ -134,8 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-partial-round",
         action="store_true",
         help=(
-            "Deprecated compatibility flag. Every round now infers and accepts "
-            "1..50 new episodes from the dataset and optional parent checkpoint."
+            "Deprecated compatibility flag. The initial round accepts 1..200 "
+            "episodes; later rounds infer and accept 1..50 appended episodes "
+            "from the dataset and optional parent checkpoint."
         ),
     )
     parser.add_argument(
@@ -170,23 +172,18 @@ def _progress_line(progress: ACTTD3OfflineTrainingProgress) -> None:
     _json_line({"event": "progress", **asdict(progress)})
 
 
-def _validate_schedule(critic_epochs: int, actor_equivalent_epochs: int) -> None:
-    if (
-        critic_epochs
-        != ACTTD3OfflineTrainingRunner.POLICY_UPDATE_PERIOD
-        * actor_equivalent_epochs
-    ):
-        raise ValueError(
-            "ACT-TD3 critic_epochs must equal policy_update_period "
-            "times actor_equivalent_epochs"
-        )
+def _validate_schedule(critic_epochs: int, actor_equivalent_epochs: int) -> int:
+    return policy_update_period_for_epoch_schedule(
+        critic_epochs,
+        actor_equivalent_epochs,
+    )
 
 
 def _schedule_manifest(runner: ACTTD3OfflineTrainingRunner) -> dict[str, int]:
     return {
         "critic_epochs": runner.critic_epochs,
         "actor_equivalent_epochs": runner.actor_equivalent_epochs,
-        "policy_update_period": runner.POLICY_UPDATE_PERIOD,
+        "policy_update_period": runner.policy_update_period,
         # Retain the original field for consumers while defining it as a cap.
         "round_episodes": runner.ROUND_EPISODES,
         "max_new_episodes_per_round": runner.ROUND_EPISODES,
@@ -507,7 +504,10 @@ def _run_from_args_unlocked(
     *,
     should_stop: Callable[[], bool] | None = None,
 ) -> ACTTD3OfflineTrainingProgress:
-    _validate_schedule(args.critic_epochs, args.actor_equivalent_epochs)
+    policy_update_period = _validate_schedule(
+        args.critic_epochs,
+        args.actor_equivalent_epochs,
+    )
     dataset_roots = tuple(
         _input_directory(value, f"dataset root {index}")
         for index, value in enumerate(_dataset_root_arguments(args.dataset_root))
@@ -608,6 +608,7 @@ def _run_from_args_unlocked(
     config = ACTTD3Config(
         discount_reference_hz=float(replay.fps),
         critic_warmup_updates=0,
+        policy_update_period=policy_update_period,
         actor_objective=args.actor_objective,
         actor_trainable_groups=tuple(
             args.actor_trainable_groups or ACT_TRAINABLE_GROUPS

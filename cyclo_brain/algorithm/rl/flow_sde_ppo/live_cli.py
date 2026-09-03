@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,17 @@ from .live_source import (
     FlowSDECollectionCancelled,
     ZenohAtomicActionStepTransport,
 )
-from .runner import FlowSDEPPOTrainer, collect_one_episode_and_update
+from .rollout_bundle import (
+    SOURCE_POLICY_FORMAT,
+    load_rollout_bundle,
+    mark_rollout_bundle_consumed,
+    save_rollout_bundle,
+)
+from .runner import (
+    FlowSDEPPOTrainer,
+    collect_one_episode,
+    update_rollout_bundle,
+)
 from .value_warmup import module_sha256
 from .value_warmup_online import load_value_warmup_bundle
 
@@ -76,6 +87,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
+    parser.add_argument(
+        "--operation",
+        choices=("combined", "collect", "update"),
+        default="combined",
+        help="Compatibility job, rollout-only collection, or bundle-only PPO update",
+    )
+    parser.add_argument(
+        "--rollout-bundle",
+        type=Path,
+        help="One sealed rollout bundle consumed by --operation update",
+    )
     parser.add_argument(
         "--control-file",
         type=Path,
@@ -132,6 +154,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("job-id must be non-empty")
     if not args.task_instruction.strip():
         raise ValueError("task-instruction must be non-empty")
+    if args.operation == "update" and args.rollout_bundle is None:
+        raise ValueError("rollout-bundle is required for update operation")
+    if args.operation != "update" and args.rollout_bundle is not None:
+        raise ValueError("rollout-bundle is only valid for update operation")
+    if args.operation == "collect" and args.episodes != 1:
+        raise ValueError(
+            "collect operation requires exactly one episode per PPO update"
+        )
     initialization_sources = (
         bool(args.resume),
         args.resume_checkpoint is not None,
@@ -140,6 +170,10 @@ def _validate_args(args: argparse.Namespace) -> None:
     if sum(initialization_sources) > 1:
         raise ValueError(
             "resume, resume-checkpoint, and value-warmup-bundle are mutually exclusive"
+        )
+    if args.operation == "update" and any(initialization_sources):
+        raise ValueError(
+            "update operation restores initialization from its rollout bundle"
         )
 
 
@@ -496,6 +530,7 @@ def run(args: argparse.Namespace) -> int:
     progress = JsonlProgress(output_dir / "progress.jsonl", job_id=args.job_id.strip())
     training_state = output_dir / "training_state" / "trainer_state.pt"
     pretrained_output = output_dir / "pretrained_model"
+    rollout_bundles: list[Path] = []
 
     # uid=1000 cannot read /root/.cache in the policy container. The compose
     # service exposes a host-populated, read-only SDK cache at /zenoh_cache.
@@ -511,6 +546,7 @@ def run(args: argparse.Namespace) -> int:
     progress.emit(
         "starting",
         stage="load_checkpoint",
+        operation=args.operation,
         base_checkpoint=str(args.base_checkpoint),
         output_dir=str(output_dir),
         control_file=str(control_file),
@@ -628,10 +664,24 @@ def run(args: argparse.Namespace) -> int:
             "resume": resume_provenance,
             "value_initialization": trainer.value_initialization_provenance,
         }
+        source_policy_contract = {
+            "format": SOURCE_POLICY_FORMAT,
+            "checkpoint_path": str(pretrained_dir),
+            "artifacts": base_policy_artifacts,
+            "frozen_policy_sha256": _frozen_policy_sha256(policy),
+            "policy_contract": contract,
+            "critic_contract": {
+                "type": "multi_task_dit_value_head",
+                "conditioning_dim": adapter.conditioning_dim,
+            },
+            "task_instruction": args.task_instruction,
+            "robot_type": args.robot_type,
+        }
 
         startup_manifest = {
             "format": "cyclo.flow_sde_ppo.online_startup.v1",
             "status": "ready",
+            "operation": args.operation,
             "job_id": args.job_id,
             "base_checkpoint": str(pretrained_dir),
             "base_policy_artifacts": base_policy_artifacts,
@@ -648,56 +698,24 @@ def run(args: argparse.Namespace) -> int:
         }
         _atomic_json(output_dir / "startup_manifest.json", startup_manifest)
 
-        observations = CycloLeRobotObservationSource(
-            policy=policy,
-            preprocessor=preprocessor,
-            robot_type=args.robot_type,
-            task_instruction=args.task_instruction,
-            sensor_timeout=args.sensor_timeout,
-        )
-        transport = ZenohAtomicActionStepTransport(ack_timeout=args.ack_timeout)
-        source = CycloFlowSDEEpisodeSource(
-            observations=observations,
-            actions=transport,
-            outcomes=AtomicOutcomeFile(control_file, job_id=args.job_id),
-            postprocessor=postprocessor,
-            max_chunk_decisions=args.max_chunk_decisions,
-            sensor_timeout=args.sensor_timeout,
-        )
-        progress.emit(
-            "ready",
-            stage="rollout",
-            checkpoint=str(pretrained_dir),
-            contract=contract,
-            ppo_config=asdict(config),
-            source_lineage=source_lineage,
-            value_initialization_provenance=trainer.value_initialization_provenance,
-        )
-
         completed = 0
-        attempted = 0
-        while completed < args.episodes:
-            attempted += 1
+        if args.operation == "update":
+            sealed = load_rollout_bundle(args.rollout_bundle)
+            rollout_bundle = sealed.path
+            rollout_bundles.append(rollout_bundle)
             progress.emit(
-                "episode_started",
-                episode=completed + 1,
-                episodes=args.episodes,
-                attempt=attempted,
+                "ready",
+                stage="update",
+                checkpoint=str(pretrained_dir),
+                rollout_bundle=str(rollout_bundle),
+                contract=contract,
+                ppo_config=asdict(config),
             )
-            try:
-                episode, metrics = collect_one_episode_and_update(trainer, source)
-            except FlowSDECollectionCancelled as exc:
-                # UI Cancel excludes the current rollout; it is not equivalent
-                # to Stop Training and must never update PPO with partial data.
-                progress.emit(
-                    "episode_cancelled",
-                    episode=completed + 1,
-                    episodes=args.episodes,
-                    attempt=attempted,
-                    completed_episodes=completed,
-                    message=str(exc),
-                )
-                continue
+            metrics = update_rollout_bundle(
+                trainer,
+                sealed,
+                expected_source_policy=source_policy_contract,
+            )
             trainer.save_checkpoint(training_state)
             # Exercise the actual restore contract after every update. This is
             # intentionally the same trainer so validation does not double GPU
@@ -705,18 +723,158 @@ def run(args: argparse.Namespace) -> int:
             restored_step = trainer.load_checkpoint(training_state)
             if restored_step != metrics.update_step:
                 raise RuntimeError("Trainer checkpoint reload step mismatch")
-            completed += 1
+            mark_rollout_bundle_consumed(
+                sealed,
+                result_policy_identity=trainer.rollout_policy_identity(),
+                metrics=metrics.as_dict(),
+                trainer_checkpoint=training_state,
+            )
+            completed = len(sealed.episodes)
             progress.emit(
                 "episode_updated",
                 episode=completed,
-                episodes=args.episodes,
-                episode_return=episode.episode_return,
-                terminated=episode.transitions[-1].terminated,
-                truncated=episode.transitions[-1].truncated,
+                episodes=completed,
+                episode_return=sum(item.episode_return for item in sealed.episodes),
                 checkpoint=str(training_state),
+                rollout_bundle=str(rollout_bundle),
                 metrics=metrics.as_dict(),
-                **source.last_episode_diagnostics,
             )
+        else:
+            observations = CycloLeRobotObservationSource(
+                policy=policy,
+                preprocessor=preprocessor,
+                robot_type=args.robot_type,
+                task_instruction=args.task_instruction,
+                sensor_timeout=args.sensor_timeout,
+            )
+            transport = ZenohAtomicActionStepTransport(ack_timeout=args.ack_timeout)
+            source = CycloFlowSDEEpisodeSource(
+                observations=observations,
+                actions=transport,
+                outcomes=AtomicOutcomeFile(control_file, job_id=args.job_id),
+                postprocessor=postprocessor,
+                max_chunk_decisions=args.max_chunk_decisions,
+                sensor_timeout=args.sensor_timeout,
+            )
+            progress.emit(
+                "ready",
+                stage="rollout",
+                checkpoint=str(pretrained_dir),
+                contract=contract,
+                ppo_config=asdict(config),
+                source_lineage=source_lineage,
+                value_initialization_provenance=trainer.value_initialization_provenance,
+            )
+
+            attempted = 0
+            while completed < args.episodes:
+                attempted += 1
+                progress.emit(
+                    "episode_started",
+                    episode=completed + 1,
+                    episodes=args.episodes,
+                    attempt=attempted,
+                )
+                try:
+                    episode = collect_one_episode(trainer, source)
+                except FlowSDECollectionCancelled as exc:
+                    # Cancel discards the partial rollout and never reaches a
+                    # bundle or optimizer boundary.
+                    progress.emit(
+                        "episode_cancelled",
+                        episode=completed + 1,
+                        episodes=args.episodes,
+                        attempt=attempted,
+                        completed_episodes=completed,
+                        message=str(exc),
+                    )
+                    continue
+
+                policy_identity = trainer.rollout_policy_identity()
+                rollout_bundle = save_rollout_bundle(
+                    output_dir
+                    / "rollouts"
+                    / (
+                        f"update_{policy_identity['source_update_step']:06d}_"
+                        f"{uuid.uuid4().hex}"
+                    ),
+                    [episode],
+                    policy_identity=policy_identity,
+                    source_policy=source_policy_contract,
+                    source_training_state=trainer.training_state_dict(),
+                    metadata={
+                        "job_id": args.job_id,
+                        "episode": completed + 1,
+                        "attempt": attempted,
+                        "task_instruction": args.task_instruction,
+                        "robot_type": args.robot_type,
+                        "episode_return": episode.episode_return,
+                        "terminated": episode.transitions[-1].terminated,
+                        "truncated": episode.transitions[-1].truncated,
+                        **source.last_episode_diagnostics,
+                    },
+                )
+                sealed = load_rollout_bundle(
+                    rollout_bundle,
+                    expected_policy_identity=policy_identity,
+                )
+                rollout_bundles.append(rollout_bundle)
+                completed += 1
+
+                if args.operation == "collect":
+                    progress.emit(
+                        "episode_collected",
+                        episode=completed,
+                        episodes=args.episodes,
+                        episode_return=episode.episode_return,
+                        rollout_bundle=str(rollout_bundle),
+                        **source.last_episode_diagnostics,
+                    )
+                    continue
+
+                metrics = update_rollout_bundle(
+                    trainer,
+                    sealed,
+                    expected_source_policy=source_policy_contract,
+                )
+                trainer.save_checkpoint(training_state)
+                restored_step = trainer.load_checkpoint(training_state)
+                if restored_step != metrics.update_step:
+                    raise RuntimeError("Trainer checkpoint reload step mismatch")
+                mark_rollout_bundle_consumed(
+                    sealed,
+                    result_policy_identity=trainer.rollout_policy_identity(),
+                    metrics=metrics.as_dict(),
+                    trainer_checkpoint=training_state,
+                )
+                progress.emit(
+                    "episode_updated",
+                    episode=completed,
+                    episodes=args.episodes,
+                    episode_return=episode.episode_return,
+                    terminated=episode.transitions[-1].terminated,
+                    truncated=episode.transitions[-1].truncated,
+                    checkpoint=str(training_state),
+                    rollout_bundle=str(rollout_bundle),
+                    metrics=metrics.as_dict(),
+                    **source.last_episode_diagnostics,
+                )
+
+            if args.operation == "collect":
+                summary = {
+                    "status": "completed",
+                    "operation": "collect",
+                    "job_id": args.job_id,
+                    "episodes": completed,
+                    "base_checkpoint": str(pretrained_dir),
+                    "task_instruction": args.task_instruction,
+                    "robot_type": args.robot_type,
+                    "ppo_config": asdict(config),
+                    "rollout_bundles": [str(path) for path in rollout_bundles],
+                }
+                _atomic_json(output_dir / "summary.json", summary)
+                progress.emit("rollout_completed", **summary)
+                return 0
 
         exported = trainer.export_pretrained_policy(
             pretrained_output,
@@ -733,8 +891,9 @@ def run(args: argparse.Namespace) -> int:
         # The live RobotClient and original 225M-parameter policy are no longer
         # needed. Release them before the strict export reload to avoid doubling
         # GPU memory on a single 5090.
-        source.close()
-        source = None
+        if source is not None:
+            source.close()
+            source = None
         del trainer, value_head, adapter, policy, preprocessor, postprocessor
         gc.collect()
         if device.type == "cuda":
@@ -742,6 +901,7 @@ def run(args: argparse.Namespace) -> int:
         export_contract = _reload_export(exported, device)
         summary = {
             "status": "completed",
+            "operation": args.operation,
             "job_id": args.job_id,
             "episodes": completed,
             "updates": updates,
@@ -765,12 +925,14 @@ def run(args: argparse.Namespace) -> int:
             "actor_sha256": actor_sha256,
             "critic_sha256": critic_sha256,
             "frozen_policy_sha256": frozen_policy_sha256,
+            "rollout_bundles": [str(path) for path in rollout_bundles],
             "run_manifest": str(output_dir / "run_manifest.json"),
         }
         _atomic_json(output_dir / "summary.json", summary)
         run_manifest = {
             "format": ONLINE_BUNDLE_FORMAT,
             "status": "complete",
+            "operation": args.operation,
             "job_id": args.job_id,
             "base_checkpoint": str(pretrained_dir),
             "base_policy_artifacts": base_policy_artifacts,
@@ -801,6 +963,18 @@ def run(args: argparse.Namespace) -> int:
                     "path": "training_state/trainer_state.pt",
                     "sha256": trainer_checkpoint_sha256,
                 },
+                "rollout_bundles": [
+                    {
+                        "path": (
+                            str(path.relative_to(output_dir))
+                            if path.is_relative_to(output_dir)
+                            else str(path)
+                        ),
+                        "manifest_sha256": _file_sha256(path / "manifest.json"),
+                        "consumption_sha256": _file_sha256(path / "consumption.json"),
+                    }
+                    for path in rollout_bundles
+                ],
                 "startup_manifest_path": "startup_manifest.json",
                 "progress_path": "progress.jsonl",
                 "summary_path": "summary.json",
@@ -820,6 +994,7 @@ def run(args: argparse.Namespace) -> int:
             "job_id": args.job_id,
             "message": str(exc),
             "trainer_checkpoint": str(training_state) if training_state.is_file() else "",
+            "rollout_bundles": [str(path) for path in rollout_bundles],
         }
         _atomic_json(output_dir / "summary.json", summary)
         progress.emit("cancelled", message=str(exc))
@@ -830,6 +1005,7 @@ def run(args: argparse.Namespace) -> int:
             "job_id": args.job_id,
             "message": "Flow-SDE PPO stopped by SIGINT/KeyboardInterrupt",
             "trainer_checkpoint": str(training_state) if training_state.is_file() else "",
+            "rollout_bundles": [str(path) for path in rollout_bundles],
         }
         _atomic_json(output_dir / "summary.json", summary)
         progress.emit("stopped", message=summary["message"])
@@ -840,6 +1016,7 @@ def run(args: argparse.Namespace) -> int:
             "job_id": args.job_id,
             "error_type": type(exc).__name__,
             "message": str(exc),
+            "rollout_bundles": [str(path) for path in rollout_bundles],
         }
         _atomic_json(output_dir / "summary.json", summary)
         progress.emit("failed", error_type=type(exc).__name__, message=str(exc))

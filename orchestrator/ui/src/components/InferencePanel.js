@@ -25,6 +25,7 @@ import {
   MdInfoOutline,
   MdPrecisionManufacturing,
   MdSync,
+  MdTimer,
   MdViewInAr,
   MdWarningAmber,
 } from 'react-icons/md';
@@ -51,8 +52,13 @@ import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import {
   requiresInstruction,
   supportsRltInference,
+  supportsTensorRtInference,
+  supportsTtRtcInference,
 } from '../constants/policyCapabilities';
-import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
+import {
+  getInferenceTaskInfoKey,
+  normalizeActionRequestMode,
+} from '../utils/taskInfoSync';
 import {
   getInferenceRecordingFolderName,
   getInferenceRecordingSessionId,
@@ -92,12 +98,16 @@ const InferencePanel = ({
     inferenceStatus.inferencePhase === InferencePhase.INFERENCING;
   const inferenceMode = info.inferenceMode || 'simulation';
   const isRobotMode = inferenceMode === 'robot';
-  const actionRequestMode =
-    String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async';
-  const isGrootModel = info.serviceType === 'groot';
+  const actionRequestMode = normalizeActionRequestMode(info.actionRequestMode);
+  const supportsTensorRt = supportsTensorRtInference(
+    info.serviceType,
+    info.policyType
+  );
   const isRltCapableModel = supportsRltInference(
+    info.serviceType,
+    info.policyType
+  );
+  const isTtRtcCapableModel = supportsTtRtcInference(
     info.serviceType,
     info.policyType
   );
@@ -132,6 +142,25 @@ const InferencePanel = ({
       // the "Update Task Instruction" button below.
       if (field !== 'taskInstruction' && !isEditable) return;
       dispatch(setInferenceTaskInfo({ [field]: value }));
+      dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+    },
+    [isEditable, dispatch]
+  );
+
+  const handleActionRequestModeChange = useCallback(
+    (mode) => {
+      if (!isEditable) return;
+      const next = { actionRequestMode: mode };
+      // The current TensorRT export accepts one batch-wide flow timestep.
+      // TT-RTC needs a clean-prefix timestep per action token, so keep this
+      // path on PyTorch until a separately qualified TT engine is available.
+      if (mode === 'tt_rtc') {
+        next.accelerationMode = 'pytorch';
+        next.accelerationEnginePath = '';
+        next.inferenceHz = 15;
+        next.controlHz = 15;
+      }
+      dispatch(setInferenceTaskInfo(next));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
     [isEditable, dispatch]
@@ -544,7 +573,7 @@ const InferencePanel = ({
     </div>
   ) : null;
 
-  const tensorRtControls = isGrootModel ? (
+  const tensorRtControls = supportsTensorRt ? (
     <div className={isOfflineRL ? 'mt-1 border-t border-[#e2dcd1] pt-2' : ''}>
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -557,15 +586,15 @@ const InferencePanel = ({
           <input
             type="checkbox"
             className={clsx('w-4 h-4', {
-              'cursor-not-allowed opacity-50': !isEditable,
-              'cursor-pointer': isEditable,
+              'cursor-not-allowed opacity-50': !isEditable || actionRequestMode === 'tt_rtc',
+              'cursor-pointer': isEditable && actionRequestMode !== 'tt_rtc',
             })}
             checked={isTensorRtEnabled}
             onChange={(e) => handleChange(
               'accelerationMode',
               e.target.checked ? 'tensorrt_dit' : 'pytorch'
             )}
-            disabled={!isEditable}
+            disabled={!isEditable || actionRequestMode === 'tt_rtc'}
             aria-label="Enable TensorRT"
           />
           <span className={isOfflineRL ? 'text-[10px] text-[#756e63]' : 'text-gray-500'}>
@@ -696,7 +725,9 @@ const InferencePanel = ({
           ? 'border-[#dbcdb9] bg-[#f4eee4] text-[#806f5c]'
           : 'border-amber-200 bg-amber-50 text-amber-700'
       )}>
-        The bundle is preloaded at Start. Switch between GR00T and RLT actions while inference is running. DiT TensorRT can remain enabled.
+        {actionRequestMode === 'tt_rtc'
+          ? 'The bundle is preloaded at Start. Switch between the TT-RTC VLA and MLP continuations while inference is running. TensorRT is disabled for this mode.'
+          : 'The bundle is preloaded at Start. Switch between GR00T and RLT actions while inference is running. DiT TensorRT can remain enabled.'}
       </div>
     </div>
   ) : null;
@@ -891,12 +922,15 @@ const InferencePanel = ({
               </Tooltip>
               <span>Action Request</span>
             </div>
-            <div className="grid grid-cols-2 gap-1 flex-1 min-w-0">
+            <div className={clsx(
+              'grid gap-1 flex-1 min-w-0',
+              isTtRtcCapableModel ? 'grid-cols-3' : 'grid-cols-2'
+            )}>
               <button
                 type="button"
-                onClick={() => handleChange('actionRequestMode', 'async')}
+                onClick={() => handleActionRequestModeChange('async')}
                 disabled={!isEditable}
-                className={actionModeButtonClass(actionRequestMode !== 'sync')}
+                className={actionModeButtonClass(actionRequestMode === 'async')}
                 aria-label="Use async action requests"
                 title="Async"
               >
@@ -905,7 +939,7 @@ const InferencePanel = ({
               </button>
               <button
                 type="button"
-                onClick={() => handleChange('actionRequestMode', 'sync')}
+                onClick={() => handleActionRequestModeChange('sync')}
                 disabled={!isEditable}
                 className={actionModeButtonClass(actionRequestMode === 'sync')}
                 aria-label="Use sync action requests"
@@ -914,6 +948,19 @@ const InferencePanel = ({
                 <MdHourglassEmpty size={16} className="shrink-0" />
                 <span className="truncate">Sync</span>
               </button>
+              {isTtRtcCapableModel && (
+                <button
+                  type="button"
+                  onClick={() => handleActionRequestModeChange('tt_rtc')}
+                  disabled={!isEditable}
+                  className={actionModeButtonClass(actionRequestMode === 'tt_rtc')}
+                  aria-label="Use TT-RTC action requests"
+                  title="TT-RTC"
+                >
+                  <MdTimer size={16} className="shrink-0" />
+                  <span className="truncate">TT-RTC</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -934,7 +981,8 @@ const InferencePanel = ({
                 const v = e.target.value;
                 handleChange('inferenceHz', v === '' ? '' : Number(v));
               }}
-              disabled={!isEditable}
+              disabled={!isEditable || actionRequestMode === 'tt_rtc'}
+              aria-label="Inference Hz"
             />
           </div>
 
@@ -955,7 +1003,8 @@ const InferencePanel = ({
                 const v = e.target.value;
                 handleChange('controlHz', v === '' ? '' : Number(v));
               }}
-              disabled={!isEditable}
+              disabled={!isEditable || actionRequestMode === 'tt_rtc'}
+              aria-label="Control Hz"
             />
           </div>
         </div>

@@ -39,6 +39,25 @@ import cv2
 import numpy as np
 import torch
 
+try:
+    from runtime.tt_rtc import (
+        TT_RTC_ACTION_DIM,
+        TT_RTC_ACTION_HORIZON,
+        TT_RTC_REQUEST_MODE,
+        TT_RTC_RLT_CHUNK_LENGTH,
+        load_tt_rtc_capability,
+        parse_tt_rtc_request,
+    )
+except ModuleNotFoundError:  # pragma: no cover - repository-local import path.
+    from cyclo_brain.policy.groot.runtime.tt_rtc import (
+        TT_RTC_ACTION_DIM,
+        TT_RTC_ACTION_HORIZON,
+        TT_RTC_REQUEST_MODE,
+        TT_RTC_RLT_CHUNK_LENGTH,
+        load_tt_rtc_capability,
+        parse_tt_rtc_request,
+    )
+
 
 # -- robot_client import shim --------------------------------------------------
 # /robot_client_sdk/ is the bind-mount root; the package itself sits at
@@ -241,6 +260,7 @@ class GR00TInference:
         self._loaded_acceleration_engine_path: str = ""
         self._loaded_rlt_enabled: bool = False
         self._loaded_rlt_bundle_path: str = ""
+        self._tt_rtc_capability = None
         self.policy_info: dict = {
             "video": [],       # e.g. ["cam_left_head", "cam_left_wrist", ...]
             "state": [],       # e.g. ["arm_left", "arm_right"]
@@ -279,6 +299,35 @@ class GR00TInference:
             acceleration_mode, acceleration_engine_path, strict_acceleration = (
                 self._resolve_acceleration_request(request, model_path)
             )
+            action_request_mode = str(
+                getattr(request, "action_request_mode", "async") or "async"
+            ).strip().lower()
+            if action_request_mode not in {"sync", "async", TT_RTC_REQUEST_MODE}:
+                raise RuntimeError(
+                    "Unsupported action_request_mode; expected 'sync', 'async', "
+                    "or 'tt_rtc'"
+                )
+            tt_rtc_capability = None
+            if action_request_mode == TT_RTC_REQUEST_MODE:
+                if acceleration_mode != ACCELERATION_PYTORCH:
+                    raise RuntimeError(
+                        "TT-RTC is unavailable with TensorRT: restart GR00T with "
+                        "PyTorch acceleration"
+                    )
+                tt_rtc_capability = load_tt_rtc_capability(model_path)
+                if not callable(getattr(Gr00tPolicy, "get_action_tt_rtc", None)):
+                    raise RuntimeError(
+                        self._missing_tt_rtc_runtime_message("base")
+                    )
+                if rlt_enabled:
+                    from runtime.rlt_adapter import GR00TRLTInferenceAdapter
+
+                    if not callable(
+                        getattr(GR00TRLTInferenceAdapter, "get_action_tt_rtc", None)
+                    ):
+                        raise RuntimeError(
+                            self._missing_tt_rtc_runtime_message("rlt")
+                        )
             if acceleration_mode == ACCELERATION_TENSORRT_FULL_PIPELINE:
                 raise RuntimeError(
                     "acceleration_mode=tensorrt_full_pipeline is not wired into "
@@ -306,6 +355,7 @@ class GR00TInference:
                 self.init_policy_info()
                 self.init_robot_info(robot_type)
                 self.robot.wait_for_ready(timeout=10.0)
+                self._tt_rtc_capability = tt_rtc_capability
                 return {
                     "success": True,
                     "message": self._load_success_message(cached=True),
@@ -329,6 +379,7 @@ class GR00TInference:
                 self._loaded_acceleration_engine_path = ""
                 self._loaded_rlt_enabled = False
                 self._loaded_rlt_bundle_path = ""
+                self._tt_rtc_capability = None
 
             self.logger.info(
                 "Loading GR00T policy from: %s (acceleration=%s)",
@@ -393,6 +444,7 @@ class GR00TInference:
             self._loaded_acceleration_engine_path = acceleration_engine_path
             self._loaded_rlt_enabled = rlt_enabled
             self._loaded_rlt_bundle_path = rlt_bundle_path
+            self._tt_rtc_capability = tt_rtc_capability
 
             return {
                 "success": True,
@@ -405,6 +457,7 @@ class GR00TInference:
             self._loaded_acceleration_engine_path = ""
             self._loaded_rlt_enabled = False
             self._loaded_rlt_bundle_path = ""
+            self._tt_rtc_capability = None
             self._rlt_adapter = None
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
@@ -770,20 +823,108 @@ class GR00TInference:
 
         self.logger.info("Robot info: %s", self.robot_info)
 
+    def _require_tt_rtc_capability(self, action_policy_mode: str) -> None:
+        if self._loaded_acceleration_mode != ACCELERATION_PYTORCH:
+            raise RuntimeError(
+                "TT-RTC is unavailable with TensorRT: the current GR00T engine "
+                "does not carry per-action timestep and clean-prefix inputs. "
+                "Restart GR00T with PyTorch acceleration."
+            )
+        if not self._loaded_model_path:
+            raise RuntimeError("TT-RTC cannot validate an unknown GR00T checkpoint")
+        if self._tt_rtc_capability is None:
+            self._tt_rtc_capability = load_tt_rtc_capability(
+                self._loaded_model_path
+            )
+
+        if action_policy_mode == "rlt":
+            if self._rlt_adapter is None:
+                raise RuntimeError(
+                    "TT-RTC MLP action requested without a preloaded RLT bundle"
+                )
+            validator = getattr(
+                self._rlt_adapter,
+                "require_tt_rtc_capability",
+                None,
+            )
+            if not callable(validator):
+                raise RuntimeError(
+                    "The loaded RLT adapter cannot validate delayed-reference "
+                    "TT-RTC capability"
+                )
+            validator()
+
+    @staticmethod
+    def _missing_tt_rtc_runtime_message(action_policy_mode: str) -> str:
+        output_name = "RLT Action MLP" if action_policy_mode == "rlt" else "GR00T VLA"
+        return (
+            f"TT-RTC {output_name} inference is not available in the installed "
+            "Isaac-GR00T runtime. A paper-faithful implementation must expose "
+            "get_action_tt_rtc(), use a per-action-token flow timestep, and clamp "
+            "the exact clean committed prefix at every denoising step. The legacy "
+            "inference-only RTC option is intentionally not used."
+        )
+
+    def _run_tt_rtc_action(
+        self,
+        observation: dict,
+        tt_request,
+        action_policy_mode: str,
+    ) -> dict:
+        """Invoke only an explicitly TT-RTC-aware policy/adapter entry point."""
+
+        target = self._rlt_adapter if action_policy_mode == "rlt" else self.policy
+        runner = getattr(target, "get_action_tt_rtc", None)
+        if not callable(runner):
+            raise RuntimeError(
+                self._missing_tt_rtc_runtime_message(action_policy_mode)
+            )
+
+        committed_prefix = np.asarray(
+            tt_request.prefix_actions,
+            dtype=np.float32,
+        ).reshape(1, tt_request.delay_steps, tt_request.action_dim)
+        result = runner(
+            observation,
+            committed_action_prefix=committed_prefix,
+            delay_steps=tt_request.delay_steps,
+            action_horizon=TT_RTC_ACTION_HORIZON,
+        )
+        # Match Gr00tPolicy.get_action's public convention while allowing a
+        # focused future TT-RTC adapter to return only the action dictionary.
+        action = result[0] if isinstance(result, tuple) and len(result) == 2 else result
+        if not isinstance(action, dict):
+            raise RuntimeError("TT-RTC policy returned an invalid action mapping")
+        return action
+
+    @staticmethod
+    def _validate_tt_rtc_output(result: dict, action_policy_mode: str) -> dict:
+        if not result.get("success"):
+            return result
+        expected_horizon = (
+            TT_RTC_RLT_CHUNK_LENGTH
+            if action_policy_mode == "rlt"
+            else TT_RTC_ACTION_HORIZON
+        )
+        if int(result.get("chunk_size", -1)) != expected_horizon:
+            return GR00TInference.fail(
+                "TT-RTC output horizon mismatch: expected "
+                f"{expected_horizon}, got {result.get('chunk_size')}"
+            )
+        if int(result.get("action_dim", -1)) != TT_RTC_ACTION_DIM:
+            return GR00TInference.fail(
+                "TT-RTC output action dimension mismatch: expected "
+                f"{TT_RTC_ACTION_DIM}, got "
+                f"{result.get('action_dim')}"
+            )
+        return result
+
     def get_action_chunk(self, request) -> dict:
         """Build observation from RobotClient, run inference, return action chunk."""
         if not self.is_ready:
             return self.fail("Not in inference mode")
 
         try:
-            images = self.robot.get_images(format="rgb")
-            joints = self.robot.get_joint_positions()
-            task = request.task_instruction
-
-            observation = self.preprocess(images, joints, task)
-            if "success" in observation:
-                return observation
-
             action_policy_mode = str(
                 getattr(request, "action_policy_mode", "base") or "base"
             ).strip().lower()
@@ -796,18 +937,45 @@ class GR00TInference:
                     "RLT action requested without a preloaded RLT bundle"
                 )
 
+            tt_request = parse_tt_rtc_request(request)
+            if tt_request is not None:
+                self._require_tt_rtc_capability(action_policy_mode)
+
+            images = self.robot.get_images(format="rgb")
+            joints = self.robot.get_joint_positions()
+            task = request.task_instruction
+
+            observation = self.preprocess(images, joints, task)
+            if "success" in observation:
+                return observation
+
             t0 = time.monotonic()
-            self.logger.info("Running GR00T inference (action=%s)...", action_policy_mode)
-            if action_policy_mode == "rlt":
+            request_mode = "tt_rtc" if tt_request is not None else "standard"
+            self.logger.info(
+                "Running GR00T inference (request=%s, action=%s)...",
+                request_mode,
+                action_policy_mode,
+            )
+            if tt_request is not None:
+                action = self._run_tt_rtc_action(
+                    observation,
+                    tt_request,
+                    action_policy_mode,
+                )
+            elif action_policy_mode == "rlt":
                 action = self._rlt_adapter.get_action(observation)
             else:
                 action, _info = self.policy.get_action(observation)
             self.logger.info(
-                "GR00T inference completed in %.3fs (action=%s)",
+                "GR00T inference completed in %.3fs (request=%s, action=%s)",
                 time.monotonic() - t0,
+                request_mode,
                 action_policy_mode,
             )
-            return self.postprocess_action(action)
+            result = self.postprocess_action(action)
+            if tt_request is not None:
+                return self._validate_tt_rtc_output(result, action_policy_mode)
+            return result
 
         except Exception as e:
             self.logger.error("Inference failed: %s", e, exc_info=True)

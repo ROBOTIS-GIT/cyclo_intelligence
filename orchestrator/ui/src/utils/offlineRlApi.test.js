@@ -1,25 +1,39 @@
 import {
+  cancelOfflineRLTraining,
   deleteOfflineRLDatasetEpisodes,
   getACTTD3CriticWarmupStatus,
   getFlowSDEPPOValueWarmupStatus,
+  getFlowSDEPPOPolicyRolloutStatus,
+  getFlowSDEPPOUpdateStatus,
   getFlowSDEPPOStatus,
   getImitationLearningStatus,
   getOfflineRLDatasetInfo,
   getOfflineRLDatasetEpisodeData,
   getOfflineRLDatasets,
   getOfflineRLStatus,
+  getRLTStage1Status,
+  getRLTStage2Status,
   reserveOfflineRLDataEpoch,
   startACTTD3CriticWarmup,
   startFlowSDEPPOTraining,
   startFlowSDEPPOValueWarmup,
+  startFlowSDEPPOPolicyRollout,
+  startFlowSDEPPOUpdate,
   startImitationLearningTraining,
   startOfflineRLTraining,
+  startRLTStage1Training,
+  startRLTStage2Training,
   stopImitationLearningTraining,
   stopACTTD3CriticWarmup,
   stopFlowSDEPPOTraining,
   stopFlowSDEPPOValueWarmup,
+  stopFlowSDEPPOPolicyRollout,
+  stopFlowSDEPPOUpdate,
   stopOfflineRLTraining,
+  stopRLTStage1Training,
+  stopRLTStage2Training,
   submitFlowSDEPPOOutcome,
+  submitFlowSDEPPOPolicyRolloutOutcome,
 } from './offlineRlApi';
 
 const jsonResponse = (value, { ok = true, status = 200 } = {}) => ({
@@ -90,6 +104,25 @@ describe('offline RL API', () => {
       message: 'Stopping ACT-TD3 training',
     });
     expect(global.fetch).toHaveBeenCalledWith('/api/offline-rl/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-123' }),
+    });
+  });
+
+  test('cancels only the observed stopped offline RL job', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'cancelled',
+      job_id: 'job-123',
+      message: 'Cancelled ACT-TD3 training artifacts',
+    }));
+
+    await expect(cancelOfflineRLTraining('job-123')).resolves.toEqual({
+      status: 'cancelled',
+      job_id: 'job-123',
+      message: 'Cancelled ACT-TD3 training artifacts',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/offline-rl/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: 'job-123' }),
@@ -229,6 +262,154 @@ describe('offline RL API', () => {
     });
   });
 
+  test('starts RLT Stage 1 with frozen-GR00T feature training inputs', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'starting',
+      job_id: 'rlt-stage1-job-123',
+    }));
+    const request = {
+      dataset_paths: [
+        '/workspace/lerobot/data_epoch_0000/task_lerobot_v30',
+        '/workspace/lerobot/data_epoch_0001/task_lerobot_v30',
+      ],
+      groot_checkpoint: '/workspace/model/groot/showroom',
+      steps: 10000,
+      batch_size: 1,
+      save_freq: 1000,
+    };
+
+    await expect(startRLTStage1Training(request)).resolves.toEqual({
+      status: 'starting',
+      job_id: 'rlt-stage1-job-123',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage1/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+  });
+
+  test('reads RLT Stage 1 status without browser caching', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      percentage: 25,
+      reconstruction_loss: 0.012,
+    }));
+
+    await expect(getRLTStage1Status()).resolves.toEqual({
+      status: 'running',
+      percentage: 25,
+      reconstruction_loss: 0.012,
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage1/status', {
+      cache: 'no-store',
+    });
+  });
+
+  test('stops only the observed RLT Stage 1 job', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      job_id: 'rlt-stage1-job-123',
+      message: 'Stopping RLT Stage 1 training',
+    }));
+
+    await expect(stopRLTStage1Training('rlt-stage1-job-123')).resolves.toEqual({
+      status: 'running',
+      job_id: 'rlt-stage1-job-123',
+      message: 'Stopping RLT Stage 1 training',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage1/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: 'rlt-stage1-job-123' }),
+    });
+  });
+
+  test('starts RLT Stage 2 with an explicit initialization contract', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'starting',
+      job_id: 'rlt-stage2-job-123',
+    }));
+    const request = {
+      initialization_mode: 'new',
+      dataset_paths: ['/workspace/lerobot/data_epoch_0000/task_lerobot_v30'],
+      groot_checkpoint: '/workspace/model/groot/showroom',
+      rl_token_encoder_path: '/workspace/checkpoint/rlt/stage1/run/artifacts/rl_token_encoder.pt',
+      rlt_bundle_path: '',
+      steps: 10000,
+      batch_size: 1,
+      save_freq: 1000,
+    };
+
+    await expect(startRLTStage2Training(request)).resolves.toEqual({
+      status: 'starting',
+      job_id: 'rlt-stage2-job-123',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage2/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+  });
+
+  test('starts RLT Stage 2 resume without inventing New-lineage sources', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'starting',
+      job_id: 'rlt-stage2-resume-123',
+    }));
+    const request = {
+      initialization_mode: 'resume',
+      dataset_paths: ['/workspace/lerobot/data_epoch_0001/task_lerobot_v30'],
+      groot_checkpoint: '',
+      rl_token_encoder_path: '',
+      rlt_bundle_path: '/workspace/checkpoint/rlt/stage2/round_0002',
+      steps: 10000,
+      batch_size: 1,
+      save_freq: 1000,
+    };
+
+    await startRLTStage2Training(request);
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage2/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+  });
+
+  test('reads RLT Stage 2 status without browser caching', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      percentage: 25,
+      actor_loss: -0.18,
+    }));
+
+    await expect(getRLTStage2Status()).resolves.toEqual({
+      status: 'running',
+      percentage: 25,
+      actor_loss: -0.18,
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage2/status', {
+      cache: 'no-store',
+    });
+  });
+
+  test('stops only the observed RLT Stage 2 job', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      job_id: 'rlt-stage2-job-123',
+    }));
+
+    await expect(stopRLTStage2Training('rlt-stage2-job-123')).resolves.toEqual({
+      status: 'running',
+      job_id: 'rlt-stage2-job-123',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/rlt-stage2/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: 'rlt-stage2-job-123' }),
+    });
+  });
+
   test('starts live Flow-SDE PPO without an offline dataset payload', async () => {
     global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'flow-job-1' }));
     const request = {
@@ -335,6 +516,84 @@ describe('offline RL API', () => {
       });
     }
   );
+
+  test('uses the dedicated rollout API for on-policy collection', async () => {
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      operation: 'collect',
+      job_id: 'rollout-job-1',
+    }));
+    const request = {
+      policy_checkpoint: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
+      policy_type: 'multi_task_dit',
+      algorithm: 'flow_sde_ppo',
+      robot_type: 'ffw_sg2_rev1',
+      task_instruction: 'Pick up the jelly bag',
+      episodes: 1,
+    };
+
+    await startFlowSDEPPOPolicyRollout(request);
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/rollout/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValue(jsonResponse({ status: 'running' }));
+    await getFlowSDEPPOPolicyRolloutStatus();
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/rollout/status', {
+      cache: 'no-store',
+    });
+    global.fetch.mockClear();
+    await stopFlowSDEPPOPolicyRollout('rollout-job-1');
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/rollout/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: 'rollout-job-1' }),
+    });
+  });
+
+  test.each(['success', 'fail', 'cancel'])(
+    'submits %s only through the rollout outcome API',
+    async (outcome) => {
+      global.fetch.mockResolvedValue(jsonResponse({ status: 'running' }));
+      await submitFlowSDEPPOPolicyRolloutOutcome('rollout-job-1', outcome);
+      expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/rollout/outcome', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: 'rollout-job-1', outcome }),
+      });
+    }
+  );
+
+  test('updates from only the selected sealed rollout bundle', async () => {
+    const bundle = '/workspace/checkpoint/multi_task_dit/flow_sde_ppo/a/rollouts/b';
+    global.fetch.mockResolvedValue(jsonResponse({
+      status: 'running',
+      operation: 'update',
+      job_id: 'update-job-1',
+    }));
+
+    await startFlowSDEPPOUpdate(bundle);
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/update/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rollout_bundle: bundle }),
+    });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValue(jsonResponse({ status: 'running' }));
+    await getFlowSDEPPOUpdateStatus();
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/update/status', {
+      cache: 'no-store',
+    });
+    global.fetch.mockClear();
+    await stopFlowSDEPPOUpdate('update-job-1');
+    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/update/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: 'update-job-1' }),
+    });
+  });
 
   test('starts offline Flow-SDE PPO value warm-up with the selected replay roots', async () => {
     global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'warmup-job-1' }));

@@ -62,6 +62,7 @@ const renderPanel = ({
   serviceType = 'lerobot',
   policyType = 'act',
   accelerationMode = 'pytorch',
+  actionRequestMode = 'async',
   rltEnabled = false,
   rltBundlePath = '',
   rltRobotOverride = false,
@@ -90,6 +91,7 @@ const renderPanel = ({
           serviceType,
           policyType,
           accelerationMode,
+          actionRequestMode,
           rltEnabled,
           rltBundlePath,
           rltRobotOverride,
@@ -282,6 +284,46 @@ describe('InferencePanel RL Recording', () => {
       .not.toBeInTheDocument();
   });
 
+  test('offers TT-RTC only for GR00T N1.7 and stores the selection', () => {
+    const { store } = renderPanel({
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+    });
+
+    const ttRtc = screen.getByRole('button', {
+      name: 'Use TT-RTC action requests',
+    });
+    expect(ttRtc).toBeEnabled();
+    fireEvent.click(ttRtc);
+    expect(store.getState().tasks.inferenceTaskInfo.actionRequestMode)
+      .toBe('tt_rtc');
+    expect(store.getState().tasks.inferenceTaskInfo.accelerationMode)
+      .toBe('pytorch');
+    expect(store.getState().tasks.inferenceTaskInfo.accelerationEnginePath)
+      .toBe('');
+    expect(store.getState().tasks.inferenceTaskInfo.inferenceHz).toBe(15);
+    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(15);
+    expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
+      .toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
+      .not.toBeChecked();
+    expect(screen.getByRole('spinbutton', { name: 'Inference Hz' }))
+      .toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Control Hz' }))
+      .toBeDisabled();
+  });
+
+  test.each([
+    ['ACT', 'lerobot', 'act'],
+    ['unsupported GR00T', 'groot', 'future'],
+  ])('does not offer TT-RTC for %s', (_label, serviceType, policyType) => {
+    renderPanel({ serviceType, policyType });
+    expect(screen.queryByRole('button', {
+      name: 'Use TT-RTC action requests',
+    })).not.toBeInTheDocument();
+  });
+
   test('configures RLT preload and explicit Real Robot opt-in for GR00T N1.7', () => {
     const { store } = renderPanel({
       serviceType: 'groot',
@@ -402,6 +444,18 @@ describe('InferencePanel RL Recording', () => {
 
     expect(screen.queryByText('Task Instruction')).not.toBeInTheDocument();
     expect(screen.queryByText('TensorRT')).not.toBeInTheDocument();
+  });
+
+  test('hides TensorRT for an unsupported policy on the GR00T backend', () => {
+    renderPanel({
+      serviceType: 'groot',
+      policyType: 'future',
+      accelerationMode: 'tensorrt_dit',
+    });
+
+    expect(screen.queryByText('TensorRT')).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Enable TensorRT' }))
+      .not.toBeInTheDocument();
   });
 
   test.each([

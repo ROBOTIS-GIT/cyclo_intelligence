@@ -21,7 +21,12 @@ import { RecordPhase, InferencePhase } from '../../constants/taskPhases';
 import {
   getInferenceTaskInfoKey,
   getRecordTaskInfoKey,
+  normalizeActionRequestMode,
 } from '../../utils/taskInfoSync';
+import {
+  supportsTensorRtInference,
+  supportsTtRtcInference,
+} from '../../constants/policyCapabilities';
 
 const SYNCED_MESSAGE = 'Session task info synced.';
 const CONFLICT_MESSAGE = 'Server task info changed while editing; local draft not synced.';
@@ -155,21 +160,33 @@ const copyRecordTaskInfo = (recordTaskInfo = recordTaskInfoInitialState) => ({
 
 const copyInferenceTaskInfo = (
   inferenceTaskInfo = inferenceTaskInfoInitialState
-) => ({
-  ...inferenceTaskInfoInitialState,
-  ...inferenceTaskInfo,
-  rltEnabled: Boolean(inferenceTaskInfo.rltEnabled),
-  rltBundlePath: String(inferenceTaskInfo.rltBundlePath ?? ''),
-  rltRobotOverride: Boolean(inferenceTaskInfo.rltRobotOverride),
-  actionPolicyMode:
-    String(inferenceTaskInfo.actionPolicyMode || '').trim().toLowerCase() === 'rlt'
-      ? 'rlt'
-      : 'base',
-  actionRequestMode:
-    String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async',
-});
+) => {
+  const serviceType = String(
+    inferenceTaskInfo.serviceType ?? inferenceTaskInfoInitialState.serviceType
+  );
+  const policyType = String(
+    inferenceTaskInfo.policyType ?? inferenceTaskInfoInitialState.policyType
+  );
+  const requestedActionMode = normalizeActionRequestMode(
+    inferenceTaskInfo.actionRequestMode
+  );
+  return {
+    ...inferenceTaskInfoInitialState,
+    ...inferenceTaskInfo,
+    rltEnabled: Boolean(inferenceTaskInfo.rltEnabled),
+    rltBundlePath: String(inferenceTaskInfo.rltBundlePath ?? ''),
+    rltRobotOverride: Boolean(inferenceTaskInfo.rltRobotOverride),
+    actionPolicyMode:
+      String(inferenceTaskInfo.actionPolicyMode || '').trim().toLowerCase() === 'rlt'
+        ? 'rlt'
+        : 'base',
+    actionRequestMode:
+      requestedActionMode === 'tt_rtc' &&
+      !supportsTtRtcInference(serviceType, policyType)
+        ? 'async'
+        : requestedActionMode,
+  };
+};
 
 const selectTasksState = (state) => state.tasks || state;
 
@@ -301,6 +318,17 @@ const applyRecordTaskInfo = (state, taskInfo = {}, options = {}) => {
 
 const applyInferenceTaskInfo = (state, taskInfo = {}) => {
   applySharedTaskInfo(state, taskInfo);
+  const serviceType = String(
+    taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''
+  );
+  const policyType = String(
+    taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'
+  );
+  const supportsTensorRt = supportsTensorRtInference(serviceType, policyType);
+  const supportsTtRtc = supportsTtRtcInference(serviceType, policyType);
+  const requestedActionMode = normalizeActionRequestMode(
+    taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode
+  );
   state.inferenceTaskInfo = {
     ...state.inferenceTaskInfo,
     taskType: 'inference',
@@ -315,23 +343,27 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
-    serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
-    policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
+    serviceType,
+    policyType,
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
     actionRequestMode:
-      String(
-        taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode ?? ''
-      ).trim().toLowerCase() === 'sync'
-        ? 'sync'
-        : 'async',
-    accelerationMode: String(
-      taskInfo.accelerationMode ?? state.inferenceTaskInfo.accelerationMode ?? 'pytorch'
-    ),
-    accelerationEnginePath: String(
-      taskInfo.accelerationEnginePath ?? state.inferenceTaskInfo.accelerationEnginePath ?? ''
-    ),
+      requestedActionMode === 'tt_rtc' && !supportsTtRtc
+        ? 'async'
+        : requestedActionMode,
+    accelerationMode: supportsTensorRt
+      ? String(
+        taskInfo.accelerationMode ?? state.inferenceTaskInfo.accelerationMode ?? 'pytorch'
+      )
+      : 'pytorch',
+    accelerationEnginePath: supportsTensorRt
+      ? String(
+        taskInfo.accelerationEnginePath ??
+          state.inferenceTaskInfo.accelerationEnginePath ??
+          ''
+      )
+      : '',
     rltEnabled: Object.prototype.hasOwnProperty.call(taskInfo, 'rltEnabled')
       ? Boolean(taskInfo.rltEnabled)
       : Boolean(state.inferenceTaskInfo.rltEnabled),
@@ -648,7 +680,9 @@ const taskSlice = createSlice({
           state.inferenceTaskInfoSync.editBaseServerTaskKey =
             state.inferenceTaskInfoSync.serverTaskKey;
         }
-        state.inferenceTaskInfoSync.staleEchoTaskKey = '';
+        // A second edit can begin after the service accepted the first one
+        // but before recording_status echoed it. Keep the original stale
+        // snapshot armed until the current task key is observed on status.
         state.inferenceTaskInfoSync.dirty = true;
         state.inferenceTaskInfoSync.syncStatus = 'pending';
         state.inferenceTaskInfoSync.syncMessage = 'Task info changed; syncing soon...';
@@ -708,12 +742,16 @@ const taskSlice = createSlice({
       const editBaseServerTaskKey =
         state.inferenceTaskInfoSync.editBaseServerTaskKey ||
         state.inferenceTaskInfoSync.serverTaskKey;
+      const originalStaleEchoTaskKey =
+        state.inferenceTaskInfoSync.staleEchoTaskKey;
       state.inferenceTaskInfoSync.serverTaskKey = taskKey;
       state.inferenceTaskInfoSync.editBaseServerTaskKey = taskKey;
       state.inferenceTaskInfoSync.staleEchoTaskKey =
-        editBaseServerTaskKey && editBaseServerTaskKey !== taskKey
-          ? editBaseServerTaskKey
-          : '';
+        originalStaleEchoTaskKey || (
+          editBaseServerTaskKey && editBaseServerTaskKey !== taskKey
+            ? editBaseServerTaskKey
+            : ''
+        );
       state.inferenceTaskInfoSync.dirty = false;
       state.inferenceTaskInfoSync.syncStatus = 'synced';
       state.inferenceTaskInfoSync.syncMessage = SYNCED_MESSAGE;

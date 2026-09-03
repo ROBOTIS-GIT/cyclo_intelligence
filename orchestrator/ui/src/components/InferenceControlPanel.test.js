@@ -478,6 +478,39 @@ describe('InferenceControlPanel deploy safety', () => {
     );
   });
 
+  test('labels the preloaded TT-RTC routes as VLA and MLP actions', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferenceMode: 'simulation',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'groot',
+        policyType: 'n17',
+        actionRequestMode: 'tt_rtc',
+        rltEnabled: true,
+        rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+        actionPolicyMode: 'base',
+      },
+    });
+
+    const vlaButton = screen.getByRole('button', { name: 'Use VLA Action' });
+    const mlpButton = screen.getByRole('button', { name: 'Use MLP Action' });
+    expect(vlaButton).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: 'Use GR00T Action' }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Use RLT Action' }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(mlpButton);
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('set_action_policy', {
+        actionPolicyMode: 'rlt',
+        taskSource: 'inference',
+      });
+      expect(store.getState().tasks.inferenceTaskInfo.actionPolicyMode)
+        .toBe('rlt');
+    });
+  });
+
   test('asks for explicit confirmation before an unapproved Real Robot RLT switch', async () => {
     const { sendRecordCommand } = renderPanel({
       inferenceMode: 'robot',

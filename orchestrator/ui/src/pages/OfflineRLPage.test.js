@@ -181,6 +181,21 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
           >
             Mark IL training complete
           </button>
+          <button
+            type="button"
+            onClick={() => onDeploymentStateChange?.({
+              ready: true,
+              artifactKind: 'rlt_bundle',
+              modelPath: '/workspace/model/groot/showroom',
+              rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0001',
+              serviceType: 'groot',
+              policyType: 'n17',
+              rlEpoch: currentPolicyEpoch + 1,
+              lineageMode: 'advance',
+            })}
+          >
+            Mark RLT training complete
+          </button>
         </div>
       </div>
     );
@@ -392,7 +407,7 @@ test('slides the Replay Buffer data workflow over the mounted environment', () =
   expect(replayButton).toHaveFocus();
 });
 
-test('slides Training from the right without remounting policy state', () => {
+test('keeps Replay Buffer and Training open together and closes them independently', () => {
   renderPage();
 
   const workspace = screen.getByTestId('offline-rl-workspace');
@@ -421,14 +436,18 @@ test('slides Training from the right without remounting policy state', () => {
 
   fireEvent.click(trainingButton);
 
-  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
-  expect(replayDrawer).toHaveAttribute('inert');
-  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'open');
+  expect(replayDrawer).toHaveAttribute('aria-hidden', 'false');
+  expect(replayDrawer).not.toHaveAttribute('inert');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'true');
   expect(replayButton).not.toHaveAttribute('aria-current');
   expect(trainingDrawer).toHaveAttribute('data-panel-state', 'open');
   expect(trainingDrawer).toHaveAttribute('aria-hidden', 'false');
   expect(trainingDrawer).not.toHaveAttribute('inert');
-  expect(trainingDrawer).toHaveClass('absolute', 'lg:w-1/2');
+  expect(replayDrawer).toHaveClass('lg:w-[calc(50%_-_1.5rem)]');
+  expect(trainingDrawer).toHaveClass(
+    'absolute', 'lg:w-[calc(50%_-_1.5rem)]'
+  );
   expect(trainingDrawer).not.toHaveClass('xl:static', 'xl:ml-4');
   expect(within(trainingDrawer).getByRole('heading', { name: 'Training Pipeline' }))
     .toBeInTheDocument();
@@ -456,18 +475,24 @@ test('slides Training from the right without remounting policy state', () => {
   expect(workspace).toBeInTheDocument();
   expect(screen.getByTestId('offline-rl-environment-canvas'))
     .toHaveClass('w-full', 'flex-1');
+  expect(screen.getByTestId('offline-rl-workflow-steps'))
+    .toHaveAttribute('data-panel-state', 'both');
 
-  fireEvent.click(trainingButton);
-  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
-  expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
-  expect(screen.getByRole('button', { name: 'Environment' }))
-    .toHaveAttribute('aria-current', 'page');
-
-  fireEvent.click(trainingButton);
   fireEvent.click(screen.getByRole('button', {
-    name: 'Close Training panel',
+    name: 'Close Replay Buffer panel',
   }));
 
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayDrawer).toHaveAttribute('inert');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'false');
+  expect(replayButton).toHaveFocus();
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'open');
+  expect(trainingButton).toHaveAttribute('aria-expanded', 'true');
+  expect(trainingDrawer).toHaveClass('lg:w-1/2');
+  expect(screen.getByTestId('offline-rl-workflow-steps'))
+    .toHaveAttribute('data-panel-state', 'training');
+
+  fireEvent.click(trainingButton);
   expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
   expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
   expect(trainingButton).toHaveFocus();
@@ -477,10 +502,25 @@ test('slides Training from the right without remounting policy state', () => {
   expect(screen.getByTestId('offline-rl-deployment')).toBe(deployment);
   expect(trainingController).toHaveAttribute('data-active', 'true');
 
+  fireEvent.click(replayButton);
   fireEvent.click(trainingButton);
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'open');
+  expect(replayButton).toHaveAttribute('aria-expanded', 'true');
   expect(trainingButton).toHaveFocus();
+
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(replayButton).toHaveFocus();
+
+  fireEvent.click(replayButton);
+  fireEvent.click(trainingButton);
+  fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+  expect(replayDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(trainingDrawer).toHaveAttribute('data-panel-state', 'closed');
+  expect(screen.getByRole('button', { name: 'Environment' }))
+    .toHaveAttribute('aria-current', 'page');
 });
 
 test('switches the environment between inference and recording workspaces', () => {
@@ -724,6 +764,109 @@ test('deploys a completed model into the shared inference Model path', () => {
   expect(screen.getByRole('button', { name: 'Discard Policy' })).not.toBeDisabled();
 });
 
+test('deploys an RLT bundle without replacing the GR00T policy or TensorRT settings', () => {
+  const { testStore } = renderPage();
+  openTrainingDrawer();
+
+  act(() => {
+    testStore.dispatch(setInferenceTaskInfo({
+      policyPath: '/workspace/model/groot/showroom',
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/showroom/engines/dit.plan',
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0000',
+      rltRobotOverride: true,
+      actionPolicyMode: 'rlt',
+    }));
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Mark RLT training complete' }));
+  const deployButton = screen.getByRole('button', { name: 'Deploy RLT Bundle' });
+  expect(deployButton).not.toBeDisabled();
+  fireEvent.click(deployButton);
+
+  expect(testStore.getState().tasks.inferenceTaskInfo).toMatchObject({
+    policyPath: '/workspace/model/groot/showroom',
+    serviceType: 'groot',
+    policyType: 'n17',
+    accelerationMode: 'tensorrt_dit',
+    accelerationEnginePath: '/workspace/model/groot/showroom/engines/dit.plan',
+    rltEnabled: true,
+    rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0001',
+    rltRobotOverride: false,
+    actionPolicyMode: 'base',
+  });
+  expect(screen.getByRole('button', { name: 'Deploy RLT Bundle' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Discard RLT Bundle' })).not.toBeDisabled();
+});
+
+test('discards a deployed RLT bundle and restores the previous RLT runtime state', () => {
+  const { testStore } = renderPage();
+  openTrainingDrawer();
+
+  act(() => {
+    testStore.dispatch(setInferenceTaskInfo({
+      policyPath: '/workspace/model/groot/showroom',
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/showroom/engines/dit.plan',
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0000',
+      rltRobotOverride: true,
+      actionPolicyMode: 'rlt',
+    }));
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Mark RLT training complete' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Deploy RLT Bundle' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Discard RLT Bundle' }));
+
+  expect(testStore.getState().tasks.inferenceTaskInfo).toMatchObject({
+    policyPath: '/workspace/model/groot/showroom',
+    serviceType: 'groot',
+    policyType: 'n17',
+    accelerationMode: 'tensorrt_dit',
+    accelerationEnginePath: '/workspace/model/groot/showroom/engines/dit.plan',
+    rltEnabled: true,
+    rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0000',
+    rltRobotOverride: true,
+    actionPolicyMode: 'rlt',
+  });
+  expect(screen.getByRole('button', { name: 'Discard Policy' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Deploy RLT Bundle' })).not.toBeDisabled();
+});
+
+test('does not discard an RLT bundle after the user selects another bundle manually', () => {
+  const { testStore } = renderPage();
+  openTrainingDrawer();
+
+  act(() => {
+    testStore.dispatch(setInferenceTaskInfo({
+      policyPath: '/workspace/model/groot/showroom',
+      serviceType: 'groot',
+      policyType: 'n17',
+      rltEnabled: true,
+      rltBundlePath: '/workspace/checkpoint/rlt/stage2/round_0000',
+    }));
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Mark RLT training complete' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Deploy RLT Bundle' }));
+
+  act(() => {
+    testStore.dispatch(setInferenceTaskInfo({
+      rltBundlePath: '/workspace/checkpoint/rlt/stage2/manual_selection',
+    }));
+  });
+
+  expect(screen.getByRole('button', { name: 'Discard Policy' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Discard Policy' }));
+  expect(testStore.getState().tasks.inferenceTaskInfo.rltBundlePath)
+    .toBe('/workspace/checkpoint/rlt/stage2/manual_selection');
+});
+
 test('deploys imitation learning as a new Epoch 0 policy lineage', () => {
   window.sessionStorage.setItem(OFFLINE_RL_LINEAGE_STORAGE_KEY, JSON.stringify({
     policyEpoch: 3,
@@ -860,7 +1003,9 @@ test('deploys MultiTaskDiT as lerobot:multi_task_dit and restores all inference 
     testStore.dispatch(setInferenceTaskInfo({
       policyPath: '/workspace/model/groot/original',
       serviceType: 'groot',
-      policyType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/original/engines/dit.plan',
     }));
   });
   fireEvent.click(screen.getByRole('button', {
@@ -872,6 +1017,8 @@ test('deploys MultiTaskDiT as lerobot:multi_task_dit and restores all inference 
     policyPath: '/workspace/model/multi_task_dit/ppo/pretrained_model',
     serviceType: 'lerobot',
     policyType: 'multi_task_dit',
+    accelerationMode: 'pytorch',
+    accelerationEnginePath: '',
   });
   expect(screen.getByRole('button', { name: 'Deploy Policy' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Discard Policy' })).not.toBeDisabled();
@@ -881,7 +1028,9 @@ test('deploys MultiTaskDiT as lerobot:multi_task_dit and restores all inference 
   expect(testStore.getState().tasks.inferenceTaskInfo).toMatchObject({
     policyPath: '/workspace/model/groot/original',
     serviceType: 'groot',
-    policyType: 'groot',
+    policyType: 'n17',
+    accelerationMode: 'tensorrt_dit',
+    accelerationEnginePath: '/workspace/model/groot/original/engines/dit.plan',
   });
   expect(testStore.getState().tasks.inferenceTaskInfoSync).toMatchObject({
     dirty: true,

@@ -700,8 +700,13 @@ def test_inference_stop_reports_metadata_write_failure(tmp_path):
 
 def test_inference_set_task_info_does_not_create_data_manager():
     service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = None
     service._ensure_data_manager = lambda *_args: (_ for _ in ()).throw(
         AssertionError("DataManager must be lazy for inference")
+    )
+    service._publish_recording_status = lambda: pytest.fail(
+        "status must remain lazy until an inference DataManager exists"
     )
     request = _request(robot_type="ffw_sg2_rev1")
     request.task_info.task_type = "inference"
@@ -710,4 +715,28 @@ def test_inference_set_task_info_does_not_create_data_manager():
     result = service._do_set_task_info(request, response)
 
     assert result.success is True
-    assert "starts on Record" in result.message
+    assert result.message == (
+        "inference task_info acknowledged; DataManager starts on Record"
+    )
+
+
+def test_inference_set_task_info_refreshes_existing_manager_and_status():
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    updates = []
+    published = []
+    service._data_manager = SimpleNamespace(
+        update_task_info=lambda task_info: updates.append(task_info)
+    )
+    service._publish_recording_status = lambda: published.append(True)
+    request = _request(robot_type="ffw_sg2_rev1")
+    request.task_info.task_type = "inference"
+    request.task_info.policy_path = "/workspace/model/lerobot/act"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_set_task_info(request, response)
+
+    assert result.success is True
+    assert result.message == "inference task_info updated"
+    assert updates == [request.task_info]
+    assert published == [True]

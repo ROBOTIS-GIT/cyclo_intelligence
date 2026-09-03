@@ -92,6 +92,10 @@ string acceleration_engine_path
 bool rlt_enabled
 string rlt_bundle_path
 string action_policy_mode
+string action_request_mode
+int32 rtc_delay_steps
+int32 rtc_action_dim
+float64[] rtc_prefix_action_list
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\

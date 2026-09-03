@@ -16,9 +16,12 @@ describe('InferenceModelSelector RLT compatibility', () => {
             ...initialTasks.inferenceTaskInfo,
             serviceType: 'groot',
             policyType: 'n17',
+            accelerationMode: 'tensorrt_dit',
+            accelerationEnginePath: '/workspace/model/groot/showroom_groot/dit.trt',
             rltEnabled: true,
             rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
             rltRobotOverride: true,
+            actionRequestMode: 'tt_rtc',
           },
         },
       },
@@ -37,8 +40,11 @@ describe('InferenceModelSelector RLT compatibility', () => {
     const info = store.getState().tasks.inferenceTaskInfo;
     expect(info.serviceType).toBe('lerobot');
     expect(info.policyType).toBe('act');
+    expect(info.accelerationMode).toBe('pytorch');
+    expect(info.accelerationEnginePath).toBe('');
     expect(info.rltEnabled).toBe(false);
     expect(info.rltRobotOverride).toBe(false);
+    expect(info.actionRequestMode).toBe('async');
     expect(info.rltBundlePath).toBe(
       '/workspace/checkpoint/rlt/showroom_groot_bundle'
     );

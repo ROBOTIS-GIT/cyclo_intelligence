@@ -296,6 +296,36 @@ class FlowSDEValueWarmupOnlineTest(unittest.TestCase):
                     )
                 )
 
+    def test_live_cli_split_operation_contract_is_fail_closed(self):
+        common = [
+            "--base-checkpoint",
+            "/model",
+            "--output-dir",
+            "/output",
+            "--job-id",
+            "job",
+        ]
+        collect = _parse_args([*common, "--operation", "collect", "--episodes", "1"])
+        _validate_args(collect)
+
+        with self.assertRaisesRegex(ValueError, "exactly one episode"):
+            _validate_args(
+                _parse_args([*common, "--operation", "collect", "--episodes", "2"])
+            )
+        with self.assertRaisesRegex(ValueError, "rollout-bundle is required"):
+            _validate_args(_parse_args([*common, "--operation", "update"]))
+
+        update = _parse_args(
+            [
+                *common,
+                "--operation",
+                "update",
+                "--rollout-bundle",
+                "/rollouts/sealed",
+            ]
+        )
+        _validate_args(update)
+
 
 if __name__ == "__main__":
     unittest.main()

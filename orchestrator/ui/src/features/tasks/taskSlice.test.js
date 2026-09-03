@@ -54,6 +54,143 @@ describe('taskSlice task ownership', () => {
     expect(inferenceInfo.actionPolicyMode).toBe('base');
   });
 
+  test('keeps TensorRT only for GR00T N1.7', () => {
+    const groot = reducer(undefined, setInferenceTaskInfo({
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/showroom_groot/dit.trt',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: groot })).toEqual(
+      expect.objectContaining({
+        accelerationMode: 'tensorrt_dit',
+        accelerationEnginePath: '/workspace/model/groot/showroom_groot/dit.trt',
+      })
+    );
+
+    const act = reducer(groot, setInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'act',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: act })).toEqual(
+      expect.objectContaining({
+        accelerationMode: 'pytorch',
+        accelerationEnginePath: '',
+      })
+    );
+
+    const unsupportedGroot = reducer(groot, setInferenceTaskInfo({
+      serviceType: 'groot',
+      policyType: 'future',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: unsupportedGroot })).toEqual(
+      expect.objectContaining({
+        accelerationMode: 'pytorch',
+        accelerationEnginePath: '',
+      })
+    );
+  });
+
+  test('keeps TT-RTC only for GR00T N1.7 and resets it after a model change', () => {
+    const groot = reducer(undefined, setInferenceTaskInfo({
+      serviceType: 'groot',
+      policyType: 'n17',
+      actionRequestMode: 'tt_rtc',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: groot }).actionRequestMode)
+      .toBe('tt_rtc');
+
+    const act = reducer(groot, setInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'act',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: act }).actionRequestMode)
+      .toBe('async');
+
+    const invalid = reducer(act, setInferenceTaskInfo({
+      actionRequestMode: 'tt_rtc',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: invalid }).actionRequestMode)
+      .toBe('async');
+  });
+
+  test('preserves the original stale echo across separately synced local edits', () => {
+    const serverGrootInfo = {
+      taskType: 'inference',
+      taskInstruction: ['pick'],
+      policyPath: '/workspace/model/groot/showroom_groot',
+      serviceType: 'groot',
+      policyType: 'n17',
+      accelerationMode: 'tensorrt_dit',
+      accelerationEnginePath: '/workspace/model/groot/showroom_groot/dit.trt',
+    };
+    const hydrated = reducer(
+      undefined,
+      receiveServerRecordTaskInfo(serverGrootInfo)
+    );
+    const originalServerKey = getInferenceTaskInfoKey(
+      selectInferenceTaskInfo({ tasks: hydrated })
+    );
+    const modelEdited = reducer(
+      reducer(hydrated, setInferenceTaskInfo({
+        serviceType: 'lerobot',
+        policyType: 'act',
+      })),
+      markLocalTaskInfoEdited({ source: 'inference' })
+    );
+    const modelTaskKey = getInferenceTaskInfoKey(
+      selectInferenceTaskInfo({ tasks: modelEdited })
+    );
+    const modelSynced = reducer(
+      modelEdited,
+      markInferenceTaskInfoSyncSuccess({ taskKey: modelTaskKey })
+    );
+    expect(modelSynced.inferenceTaskInfoSync.staleEchoTaskKey)
+      .toBe(originalServerKey);
+
+    const pathEdited = reducer(
+      reducer(modelSynced, setInferenceTaskInfo({
+        policyPath: '/workspace/model/act/new_policy',
+      })),
+      markLocalTaskInfoEdited({ source: 'inference' })
+    );
+    expect(pathEdited.inferenceTaskInfoSync.editBaseServerTaskKey)
+      .toBe(modelTaskKey);
+    expect(pathEdited.inferenceTaskInfoSync.staleEchoTaskKey)
+      .toBe(originalServerKey);
+
+    const editedTaskKey = getInferenceTaskInfoKey(
+      selectInferenceTaskInfo({ tasks: pathEdited })
+    );
+    const synced = reducer(
+      pathEdited,
+      markInferenceTaskInfoSyncSuccess({ taskKey: editedTaskKey })
+    );
+    expect(synced.inferenceTaskInfoSync.staleEchoTaskKey)
+      .toBe(originalServerKey);
+
+    const afterStaleEcho = reducer(
+      synced,
+      receiveServerRecordTaskInfo(serverGrootInfo)
+    );
+    expect(selectInferenceTaskInfo({ tasks: afterStaleEcho })).toEqual(
+      expect.objectContaining({
+        policyPath: '/workspace/model/act/new_policy',
+        serviceType: 'lerobot',
+        policyType: 'act',
+        accelerationMode: 'pytorch',
+        accelerationEnginePath: '',
+      })
+    );
+
+    const currentServerInfo = selectInferenceTaskInfo({ tasks: synced });
+    const afterCurrentEcho = reducer(
+      afterStaleEcho,
+      receiveServerRecordTaskInfo(currentServerInfo)
+    );
+    expect(afterCurrentEcho.inferenceTaskInfoSync.staleEchoTaskKey).toBe('');
+  });
+
   test('stores the staged RLT bundle selection without changing the base policy', () => {
     const initial = reducer(undefined, { type: '@@INIT' });
     const withPolicy = reducer(initial, setInferenceTaskInfo({

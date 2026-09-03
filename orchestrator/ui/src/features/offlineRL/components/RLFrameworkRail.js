@@ -20,6 +20,7 @@ export const RL_FRAMEWORK_SECTIONS = [
 
 export default function RLFrameworkRail({
   activeSection = 'environment',
+  openSections = null,
   collapsed = false,
   onBack = () => {},
   onSectionChange = () => {},
@@ -99,8 +100,13 @@ export default function RLFrameworkRail({
 
       <nav aria-label="Playground sections" className="mt-5 flex flex-col gap-1.5">
         {RL_FRAMEWORK_SECTIONS.map(({ id, label, icon: Icon }) => {
-          const isActive = activeSection === id;
           const controlledPanelId = sectionControls[id];
+          const isExpanded = controlledPanelId
+            ? Boolean(openSections?.[id] ?? (activeSection === id))
+            : undefined;
+          const isActive = controlledPanelId
+            ? isExpanded
+            : activeSection === id;
 
           return (
             <button
@@ -108,9 +114,9 @@ export default function RLFrameworkRail({
               id={`rl-framework-section-${id}`}
               type="button"
               aria-label={label}
-              aria-current={isActive ? 'page' : undefined}
+              aria-current={activeSection === id ? 'page' : undefined}
               aria-controls={controlledPanelId}
-              aria-expanded={controlledPanelId ? isActive : undefined}
+              aria-expanded={isExpanded}
               title={collapsed ? label : undefined}
               onClick={() => onSectionChange(id)}
               className={[
