@@ -11,12 +11,15 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Author: Seongwoo Kim
 
 const INDENT = '  ';
 const WRAP_THRESHOLD = 100;
 
-const SEND_COMMAND_PARAMS_BY_COMMAND = {
+const SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND = {
   LOAD: new Set([
+    'target',
     'command',
     'model',
     'policy_path',
@@ -29,10 +32,13 @@ const SEND_COMMAND_PARAMS_BY_COMMAND = {
     'acceleration_mode',
     'acceleration_engine_path',
   ]),
-  RESUME: new Set(['command', 'task_instruction']),
-  STOP: new Set(['command']),
-  CLEAR: new Set(['command']),
+  RESUME: new Set(['target', 'command', 'task_instruction']),
+  STOP: new Set(['target', 'command']),
+  CLEAR: new Set(['target', 'command']),
 };
+
+const SEND_COMMAND_DOCKER_COMMANDS = new Set(['START', 'STOP', 'RESTART']);
+const SEND_COMMAND_DOCKER_PARAMS = new Set(['target', 'command', 'model']);
 
 function escapeAttr(value) {
   return String(value)
@@ -86,12 +92,26 @@ function attrPairs(el) {
 function paramsForXml(tag, params = {}) {
   if (tag !== 'SendCommand') return params;
 
-  const command = String(params.command || 'LOAD').toUpperCase();
-  const allowed = SEND_COMMAND_PARAMS_BY_COMMAND[command] || new Set(['command']);
-  const out = { command };
+  const target = String(params.target || 'INFERENCE').trim().toUpperCase() === 'DOCKER'
+    ? 'DOCKER'
+    : 'INFERENCE';
+  const requestedCommand = String(
+    params.command || (target === 'DOCKER' ? 'START' : 'LOAD'),
+  ).trim().toUpperCase();
+  const command = target === 'DOCKER'
+    ? (SEND_COMMAND_DOCKER_COMMANDS.has(requestedCommand) ? requestedCommand : 'START')
+    : (
+      SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND[requestedCommand]
+        ? requestedCommand
+        : 'LOAD'
+    );
+  const allowed = target === 'DOCKER'
+    ? SEND_COMMAND_DOCKER_PARAMS
+    : SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND[command];
+  const out = { target, command };
 
   Object.entries(params).forEach(([key, value]) => {
-    if (key === 'command' || !allowed.has(key)) return;
+    if (key === 'target' || key === 'command' || !allowed.has(key)) return;
     if (value === undefined || value === null || value === '') return;
     out[key] = value;
   });
@@ -235,6 +255,13 @@ export function serializeFromGraph(nodes, edges, nodeDataMap) {
 
   const reachableFromMain = mainRoot ? getReachable(mainRoot.id) : new Set();
   const pendingNodes = nodes.filter((n) => !reachableFromMain.has(n.id));
+  const pendingNodeIds = new Set(pendingNodes.map((node) => node.id));
+  // Preserve each disconnected component once. Appending every pending node
+  // here would serialize descendants both under their parent and again as a
+  // top-level element in __pending__.
+  const pendingRoots = pendingNodes.filter((node) => !edges.some((edge) => (
+    edge.target === node.id && pendingNodeIds.has(edge.source)
+  )));
 
   const xmlDoc = new DOMParser().parseFromString('<root/>', 'text/xml');
   const rootEl = xmlDoc.documentElement;
@@ -270,14 +297,17 @@ export function serializeFromGraph(nodes, edges, nodeDataMap) {
   }
   rootEl.appendChild(mainBT);
 
-  if (pendingNodes.length > 0) {
-    const pendingBT = xmlDoc.createElement('BehaviorTree');
-    pendingBT.setAttribute('ID', '__pending__');
-    pendingNodes.forEach((n) => {
+  if (pendingRoots.length > 0) {
+    // BehaviorTree.CPP requires one root node per BehaviorTree. Keep every
+    // disconnected editor component in its own non-executed tree; the parser
+    // accepts both these IDs and the legacy single __pending__ container.
+    pendingRoots.forEach((n, index) => {
+      const pendingBT = xmlDoc.createElement('BehaviorTree');
+      pendingBT.setAttribute('ID', `__pending__${index + 1}`);
       const el = buildEl(n.id);
       if (el) pendingBT.appendChild(el);
+      rootEl.appendChild(pendingBT);
     });
-    rootEl.appendChild(pendingBT);
   }
 
   return serializeBTXml(xmlDoc);

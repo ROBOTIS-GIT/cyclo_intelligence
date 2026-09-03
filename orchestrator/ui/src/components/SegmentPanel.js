@@ -1,7 +1,3 @@
-// Copyright 2025 ROBOTIS CO., LTD.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';

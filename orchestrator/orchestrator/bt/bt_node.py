@@ -28,6 +28,8 @@ from rclpy.node import Node
 from interfaces.srv import GetNodeCatalog
 from interfaces.srv import LoadAndRunTree
 from interfaces.srv import SendCommand
+from shared.robot_configs.schema import BT_SUPPORTED_ROBOT_TYPES
+from shared.robot_configs.schema import is_bt_supported
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
@@ -42,7 +44,34 @@ from orchestrator.bt.node_registry import (  # noqa: I100
 )
 
 
-SUPPORTED_BT_ROBOT_TYPE = 'ffw_sg2_rev1'
+# Default robot type when the parameter is left empty; the supported list
+# itself is owned by shared.robot_configs.schema.
+DEFAULT_BT_ROBOT_TYPE = BT_SUPPORTED_ROBOT_TYPES[0]
+
+# User-authored trees live outside the package (the supervisor API owns the
+# directory). Packaged examples stay under share/orchestrator/bt/trees.
+BT_TREES_DIR_ENV = 'CYCLO_BT_TREES_DIR'
+DEFAULT_BT_TREES_DIR = '/workspace/bt/trees'
+
+
+def resolve_tree_path(tree_xml: str) -> str:
+    """Resolve a tree file name or path for the ``tree_xml`` parameter."""
+    if os.path.isabs(tree_xml):
+        return tree_xml
+    user_dir = os.environ.get(BT_TREES_DIR_ENV) or DEFAULT_BT_TREES_DIR
+    candidates = [os.path.join(user_dir, tree_xml)]
+    try:
+        pkg_share = get_package_share_directory('orchestrator')
+        candidates.append(os.path.join(pkg_share, 'bt', 'trees', tree_xml))
+    except Exception:  # noqa: BLE001 - not installed (editable checkout)
+        pass
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), 'bt', 'trees', tree_xml
+    ))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
 
 
 class BehaviorTreeNode(Node):
@@ -57,18 +86,18 @@ class BehaviorTreeNode(Node):
         self.tree_execution_mode = 'stopped'
         self.main_tree_path = None
 
-        self.declare_parameter('robot_type', SUPPORTED_BT_ROBOT_TYPE)
+        self.declare_parameter('robot_type', DEFAULT_BT_ROBOT_TYPE)
         self.declare_parameter('tree_xml', '')
         self.declare_parameter('tick_rate', 30.0)
 
         robot_type = (
             str(self.get_parameter('robot_type').value or '').strip()
-            or SUPPORTED_BT_ROBOT_TYPE
+            or DEFAULT_BT_ROBOT_TYPE
         )
-        if robot_type != SUPPORTED_BT_ROBOT_TYPE:
+        if not is_bt_supported(robot_type):
             raise ValueError(
                 'BT currently supports only '
-                f'{SUPPORTED_BT_ROBOT_TYPE}; got {robot_type}'
+                f'{", ".join(BT_SUPPORTED_ROBOT_TYPES)}; got {robot_type}'
             )
         tree_xml = self.get_parameter('tree_xml').value
         tick_rate = self.get_parameter('tick_rate').value
@@ -76,8 +105,6 @@ class BehaviorTreeNode(Node):
         self.robot_type = robot_type
         self.joint_names = self._load_joint_order(robot_type)
         self.topic_config = self._load_topic_config(robot_type)
-
-        pkg_share = get_package_share_directory('orchestrator')
 
         self.tree_loader = TreeLoader(
             self,
@@ -87,18 +114,7 @@ class BehaviorTreeNode(Node):
 
         self.root = None
         if tree_xml:
-            self.main_tree_path = os.path.join(
-                pkg_share, 'bt', 'trees', tree_xml
-            )
-            if not os.path.exists(self.main_tree_path):
-                # In-tree fallback for editable checkouts; installed packages
-                # resolve through share/orchestrator/bt/trees above.
-                self.main_tree_path = os.path.join(
-                    os.path.dirname(os.path.dirname(__file__)),
-                    'bt',
-                    'trees',
-                    tree_xml
-                )
+            self.main_tree_path = resolve_tree_path(tree_xml)
 
             try:
                 self.get_logger().info(

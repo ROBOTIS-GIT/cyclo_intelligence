@@ -52,6 +52,10 @@ docker/workspace
 docker/huggingface
 docker/zenoh_cache
 
+# Runtime-authored navigation mission XML.
+# Keep these files local to each robot/workspace; never include them in commits.
+/docker/workspace/navigation/
+
 # Per-backend runtime workspaces — model checkpoints / HF cache
 # downloaded at inference time. Bind-mounted into the policy
 # container at /workspace.

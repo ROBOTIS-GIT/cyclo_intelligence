@@ -2,6 +2,10 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.0 (2026-08-31)
+------------------
+* None
+
 1.3.1 (2026-08-26)
 ------------------
 * Added ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` to the inference command LOAD request.

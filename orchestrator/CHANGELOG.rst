@@ -2,6 +2,14 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.0 (2026-08-31)
+------------------
+* Added the ArmStateGate node, per-joint JointControl selection, and SendCommand inference lifecycle control.
+* Moved ``/bt/list_trees`` out of ``orchestrator_node``; ``bt_node`` owns every ``/bt/*`` interface.
+* Read the supported BT robot types from ``shared.robot_configs.schema`` and added an import-boundary test between the engine and the control plane.
+* Corrected ``package.xml`` dependencies.
+* Contributors: Seongwoo Kim
+
 1.3.1 (2026-08-26)
 ------------------
 * Forwarded action-processing timing from UI and behavior-tree task information to policy LOAD requests.

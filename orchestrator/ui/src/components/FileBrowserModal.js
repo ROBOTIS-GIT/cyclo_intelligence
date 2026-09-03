@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Author: Kiwoong Park
+// Author: Kiwoong Park, Seongwoo Kim
 
 import React, { useState, useCallback } from 'react';
 import clsx from 'clsx';
@@ -35,10 +35,12 @@ export default function FileBrowserModal({
   homePath = null,
   defaultPath = null,
   multiSelect = false,
+  variant = 'legacy',
 }) {
   const [selectedItem, setSelectedItem] = useState(null);
   const [multiSelectedItems, setMultiSelectedItems] = useState([]);
   const [currentPath, setCurrentPath] = useState(initialPath);
+  const autonomyStudioVariant = variant === 'autonomy-studio';
 
   const handleFileSelect = useCallback((item) => {
     if (!multiSelect) {
@@ -107,9 +109,9 @@ export default function FileBrowserModal({
 
   const classModal = clsx(
     'relative',
-    'bg-white',
-    'rounded-lg',
-    'shadow-xl',
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-surface)] text-[var(--mc-text)] rounded-2xl border border-[var(--mc-border)] shadow-[var(--mc-shadow)]'
+      : 'bg-white rounded-lg shadow-xl',
     'max-w-4xl',
     'w-full',
     'max-h-[90vh]',
@@ -124,16 +126,19 @@ export default function FileBrowserModal({
     'px-6',
     'py-4',
     'border-b',
-    'border-gray-200'
+    autonomyStudioVariant ? 'border-[var(--mc-border)]' : 'border-gray-200'
   );
 
-  const classTitle = clsx('text-xl', 'font-semibold', 'text-gray-900');
+  const classTitle = clsx(
+    'font-semibold',
+    autonomyStudioVariant ? 'text-[15px] text-[var(--mc-text)]' : 'text-xl text-gray-900',
+  );
 
   const classCloseButton = clsx(
     'p-2',
-    'text-gray-400',
-    'hover:text-gray-600',
-    'hover:bg-gray-100',
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text-subtle)] hover:text-[var(--mc-text)] hover:bg-[var(--mc-surface-hover)]'
+      : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100',
     'rounded-lg',
     'transition-colors'
   );
@@ -149,11 +154,17 @@ export default function FileBrowserModal({
     'px-6',
     'py-4',
     'border-t',
-    'border-gray-200',
-    'bg-gray-50'
+    autonomyStudioVariant
+      ? 'border-[var(--mc-border)] bg-[var(--mc-surface-2)]'
+      : 'border-gray-200 bg-gray-50'
   );
 
-  const classStatusContainer = clsx('flex', 'items-center', 'text-sm', 'text-gray-600');
+  const classStatusContainer = clsx(
+    'flex',
+    'items-center',
+    'text-sm',
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-gray-600',
+  );
 
   const classStatusRow = clsx('flex', 'items-center');
 
@@ -168,23 +179,21 @@ export default function FileBrowserModal({
   const classCancelButton = clsx(
     'px-4',
     'py-2',
-    'text-gray-700',
-    'bg-white',
     'border',
-    'border-gray-300',
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text-muted)] bg-[var(--mc-surface)] border-[var(--mc-border-strong)] hover:bg-[var(--mc-surface-hover)]'
+      : 'text-gray-700 bg-white border-gray-300 hover:bg-gray-50',
     'rounded-lg',
-    'hover:bg-gray-50',
     'transition-colors'
   );
 
   const classConfirmButton = clsx(
     'px-4',
     'py-2',
-    'bg-blue-600',
-    'text-white',
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-accent)] text-[var(--mc-accent-fg)] hover:bg-[var(--mc-accent-hover)] disabled:bg-[var(--mc-surface-hover)] disabled:text-[var(--mc-text-subtle)]'
+      : 'bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300',
     'rounded-lg',
-    'hover:bg-blue-700',
-    'disabled:bg-gray-300',
     'disabled:cursor-not-allowed',
     'transition-colors'
   );
@@ -220,6 +229,7 @@ export default function FileBrowserModal({
               allowFileSelect={allowFileSelect}
               multiSelect={multiSelect}
               onSelectionChange={handleMultiSelectionChange}
+              variant={variant}
             />
           </div>
 

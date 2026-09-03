@@ -50,8 +50,6 @@ _INTERNAL_KWARGS = frozenset({
     'topic_config',
     'service_name',
     'head_joint_names',
-    'left_joint_names',
-    'right_joint_names',
     'lift_joint_name',
     'position_threshold',
 })

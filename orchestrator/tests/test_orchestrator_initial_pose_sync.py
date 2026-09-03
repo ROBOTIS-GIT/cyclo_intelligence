@@ -176,6 +176,24 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             [InferenceStatus.SYNCING],
         )
 
+    def test_stale_begin_does_not_cancel_replacement_client_timer(self) -> None:
+        replacement_client = FakeInferenceClient()
+        self.node.container_service_client = replacement_client
+        self.node._begin_initial_pose_sync_status(replacement_client, 60.0)
+        replacement_timer = self.node._initial_pose_sync_status_timer
+
+        self.node._begin_initial_pose_sync_status(self.client, 60.0)
+
+        self.assertIs(
+            self.node._initial_pose_sync_status_timer,
+            replacement_timer,
+        )
+        self.assertFalse(replacement_timer.finished.is_set())
+        self.assertEqual(
+            [phase for phase, _robot_type, _error in self.node.communicator.phases],
+            [InferenceStatus.SYNCING],
+        )
+
     def test_pause_hold_failure_stays_syncing_until_retry_succeeds(self) -> None:
         self.client.pause_results = [
             SimpleNamespace(success=False, message="joint state stale"),

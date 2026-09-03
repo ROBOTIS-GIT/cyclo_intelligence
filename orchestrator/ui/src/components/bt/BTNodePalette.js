@@ -24,9 +24,7 @@ export default function BTNodePalette({ canUpdateCatalog = true }) {
   const { catalog, source, refreshCatalog } = useBTNodeCatalog();
   const isUpdating = source === 'loading';
   const isUpdateDisabled = !canUpdateCatalog || isUpdating;
-  const updateTitle = canUpdateCatalog
-    ? 'Update node list from /bt/nodes/catalog'
-    : 'Start BT Node to update the node list';
+  const updateTitle = 'Refresh available task steps';
 
   const grouped = useMemo(() => ({
     control: catalog.filter((n) => n.category === 'control'),
@@ -35,48 +33,47 @@ export default function BTNodePalette({ canUpdateCatalog = true }) {
 
   const handleDragStart = (event, tag) => {
     event.dataTransfer.setData(PALETTE_DRAG_MIME, tag);
-    // Plain-text fallback for browsers that ignore custom MIME types.
     event.dataTransfer.setData('text/plain', tag);
     event.dataTransfer.effectAllowed = 'move';
   };
 
   return (
-    <div className="w-[180px] shrink-0 bg-white border-r border-gray-200 flex flex-col">
-      <div className="px-3 py-3 border-b border-gray-200">
+    <div className="w-[180px] shrink-0 bg-[var(--mc-surface-2)] border-r border-[var(--mc-border)] flex flex-col">
+      {canUpdateCatalog && <div className="px-3 py-3 border-b border-[var(--mc-border)]">
         <button
           type="button"
           onClick={() => refreshCatalog({ force: true })}
           disabled={isUpdateDisabled}
-          className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded text-sm font-medium transition-colors ${
+          className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-[10px] text-sm font-semibold transition-colors ${
             isUpdateDisabled
-              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-              : 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+              ? 'bg-[var(--mc-surface-hover)] text-[var(--mc-text-subtle)] cursor-not-allowed'
+              : 'bg-[var(--mc-surface)] text-[var(--mc-text)] border border-[var(--mc-border-strong)] hover:bg-[var(--mc-surface-hover)]'
           }`}
           title={updateTitle}
-          aria-label="Update node list"
+          aria-label="Refresh task steps"
         >
           <MdRefresh size={17} />
           {isUpdating ? (
-            <span>Updating...</span>
+            <span>Refreshing...</span>
           ) : (
             <span className="leading-tight text-center">
-              <span className="block">Update</span>
-              <span className="block">Node List</span>
+              <span className="block">Refresh</span>
+              <span className="block">Steps</span>
             </span>
           )}
         </button>
-      </div>
+      </div>}
 
       <div className="flex-1 overflow-y-auto py-2">
         <Section
-          title="Controls"
-          accentClass="border-blue-300 text-blue-700"
+          title="Flow Controls"
+          chipClass="border-[#1c1a17] text-[#1c1a17]"
           items={grouped.control}
           onDragStart={handleDragStart}
         />
         <Section
           title="Actions"
-          accentClass="border-green-300 text-green-700"
+          chipClass="border-[#9db89f] text-[#4f7a52]"
           items={grouped.action}
           onDragStart={handleDragStart}
         />
@@ -85,19 +82,19 @@ export default function BTNodePalette({ canUpdateCatalog = true }) {
   );
 }
 
-function Section({ title, items, accentClass, onDragStart }) {
+function Section({ title, items, chipClass, onDragStart }) {
   return (
     <div className="mb-2">
-      <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
+      <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--mc-text-subtle)] font-semibold">
         {title}
       </div>
-      <div className="px-2 space-y-1">
+      <div className="px-2 space-y-1.5">
         {items.map((item) => (
           <div
             key={item.tag}
             draggable
             onDragStart={(e) => onDragStart(e, item.tag)}
-            className={`px-2 py-1.5 border ${accentClass} bg-white rounded text-xs cursor-grab active:cursor-grabbing hover:shadow-sm hover:-translate-y-0.5 transition-all select-none`}
+            className={`px-2.5 py-1.5 border ${chipClass} bg-[var(--mc-surface)] rounded-lg text-xs font-medium cursor-grab active:cursor-grabbing hover:shadow-sm hover:-translate-y-0.5 transition-all select-none`}
             title={item.tag}
           >
             {item.tag}

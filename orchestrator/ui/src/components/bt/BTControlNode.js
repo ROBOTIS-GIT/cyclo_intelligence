@@ -36,30 +36,21 @@ export default function BTControlNode({ id, data }) {
   return (
     <div
       className={clsx(
-        'relative px-4 py-3 rounded-lg border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
-        // Selection ring is independent of active state. Active state on
-        // a Control node bubbles up from any active descendant — we keep
-        // the blue palette to preserve the Control identity and only add
-        // animate-pulse so the user can see "something inside here is
-        // running" (especially useful when the Control is collapsed).
-        isSelected
-          ? 'border-blue-600 bg-blue-100 ring-2 ring-blue-300'
-          : 'border-blue-500 bg-blue-50',
+        'relative px-4 py-3 rounded-xl border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
+        'border-[#1c1a17] bg-white',
+        isSelected && 'ring-2 ring-[#1c1a17]/20',
         isActive && 'animate-pulse',
       )}
     >
-      <Handle type="target" position={Position.Top} className="!bg-blue-500" />
-      <div className="text-xs text-blue-600 font-semibold mb-1">
+      <Handle type="target" position={Position.Top} className="!bg-[#1c1a17]" />
+      <div className="text-xs text-[#6f6a5d] font-semibold mb-1 font-mono">
         {icon} {data.nodeType}
       </div>
-      <div className="text-sm font-medium text-gray-800 truncate">
+      <div className="text-sm font-semibold text-[#1c1a17] truncate">
         {data.label}
       </div>
-      <Handle type="source" position={Position.Bottom} className="!bg-blue-500" />
+      <Handle type="source" position={Position.Bottom} className="!bg-[#1c1a17]" />
 
-      {/* Collapse / expand toggle. stopPropagation so the click doesn't
-          double as a node-select. Disabled when this Control node has no
-          children to hide. */}
       <button
         type="button"
         onClick={(e) => {
@@ -78,15 +69,15 @@ export default function BTControlNode({ id, data }) {
         className={clsx(
           'absolute -right-2 -top-2 w-5 h-5 rounded-full border bg-white shadow text-xs leading-none flex items-center justify-center select-none',
           hasChildren
-            ? 'border-blue-400 text-blue-600 hover:bg-blue-50 cursor-pointer'
-            : 'border-gray-200 text-gray-300 cursor-not-allowed'
+            ? 'border-[#dcd7ca] text-[#6f6a5d] hover:bg-[#f4e5dc] hover:text-[#c96442] cursor-pointer'
+            : 'border-[#e7e3d9] text-[#c3bcac] cursor-not-allowed'
         )}
       >
         {collapsed ? '+' : '−'}
       </button>
 
       {collapsed && hasChildren && (
-        <div className="absolute -bottom-2 right-1 text-[10px] text-gray-600 bg-white border border-gray-200 rounded px-1 leading-tight">
+        <div className="absolute -bottom-2 right-1 text-[10px] text-[#6f6a5d] bg-white border border-[#e7e3d9] rounded px-1 leading-tight">
           {childCount} hidden
         </div>
       )}

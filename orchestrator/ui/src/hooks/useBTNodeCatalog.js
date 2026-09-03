@@ -21,7 +21,7 @@ import {
   catalogFetchFailed,
   catalogFetchStarted,
   catalogFetchSucceeded,
-} from '../features/btmanager/btCatalogSlice';
+} from '../features/actionCanvas/btCatalogSlice';
 import { useRosServiceCaller } from './useRosServiceCaller';
 
 const API_BASE = '/api';
@@ -87,7 +87,7 @@ export function useBTNodeCatalog() {
       const canFetch = await canFetchLiveCatalog();
       if (!canFetch) {
         fetchStarted = false;
-        dispatch(catalogFetchFailed('BT node is stopped. Press BT Node ON to update the live node list.'));
+        dispatch(catalogFetchFailed('Task Engine is off. Turn it on to refresh the task steps.'));
         return;
       }
 

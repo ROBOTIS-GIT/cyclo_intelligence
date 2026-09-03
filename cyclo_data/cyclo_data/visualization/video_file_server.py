@@ -21,8 +21,6 @@ import math
 import mimetypes
 import os
 import re
-import signal
-import subprocess
 import threading
 
 
@@ -30,7 +28,6 @@ import threading
 # on a video file hits this path and re.match() would otherwise recompile
 # the pattern per request.
 _RANGE_RE = re.compile(r'bytes=(\d*)-(\d*)')
-_BT_SUPPORTED_ROBOT_TYPE = 'ffw_sg2_rev1'
 from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -67,9 +64,6 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
     allowed_base_paths = []
     # Replay data handler instance (set by server)
     replay_data_handler = None
-    # BT node subprocess management
-    _bt_process = None
-    _bt_lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         # Don't call super().__init__ here, let it be called by HTTPServer
@@ -114,11 +108,6 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
         # Handle rosbag list requests
         if parsed_path.startswith('/rosbag-list/'):
             self._handle_rosbag_list_request(parsed_path)
-            return
-
-        # Handle BT node status
-        if parsed_path == '/bt/node-status':
-            self._handle_bt_node_status()
             return
 
         # Handle panel layout requests
@@ -372,244 +361,7 @@ class VideoFileHandler(SimpleHTTPRequestHandler):
         parsed_path = urlparse(self.path).path
         parsed_path = unquote(parsed_path)
 
-        if parsed_path == '/bt/launch':
-            self._handle_bt_launch()
-            return
-
-        if parsed_path == '/bt/shutdown':
-            self._handle_bt_shutdown()
-            return
-
-        if parsed_path == '/bt/save_tree':
-            self._handle_bt_save_tree()
-            return
-
         self._send_json_error(404, "Unknown POST endpoint")
-
-    def _handle_bt_node_status(self):
-        """Handle GET /bt/node-status — check if BT node process is alive."""
-        with self._bt_lock:
-            is_running = (
-                self._bt_process is not None
-                and self._bt_process.poll() is None
-            )
-
-        result = json.dumps({'running': is_running}).encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(result)))
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Cache-Control', 'no-cache')
-        self.end_headers()
-        self.wfile.write(result)
-
-    def _handle_bt_launch(self):
-        """Handle POST /bt/launch — launch the BT node process."""
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            robot_type = _BT_SUPPORTED_ROBOT_TYPE
-            if content_length > 0:
-                body = self.rfile.read(content_length)
-                data = json.loads(body.decode('utf-8'))
-                robot_type = data.get('robot_type', robot_type)
-            robot_type = str(robot_type or '').strip()
-            if robot_type != _BT_SUPPORTED_ROBOT_TYPE:
-                self._send_json_error(
-                    400,
-                    'BT currently supports only '
-                    f'{_BT_SUPPORTED_ROBOT_TYPE}',
-                )
-                return
-
-            with self._bt_lock:
-                # Check if already running
-                if (
-                    self._bt_process is not None
-                    and self._bt_process.poll() is None
-                ):
-                    result = json.dumps({
-                        'success': True,
-                        'message': 'BT node already running'
-                    }).encode('utf-8')
-                    self.send_response(200)
-                    self.send_header(
-                        'Content-Type',
-                        'application/json; charset=utf-8'
-                    )
-                    self.send_header('Content-Length', str(len(result)))
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(result)
-                    return
-
-                # Launch BT node from the orchestrator package. Its launch
-                # file lives at orchestrator/bt/bringup/bt_node.launch.py
-                # (installed to share/orchestrator/bt/bringup/).
-                cmd = [
-                    'ros2', 'launch', 'orchestrator',
-                    'bt_node.launch.py',
-                    f'robot_type:={robot_type}',
-                ]
-                VideoFileHandler._bt_process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    preexec_fn=os.setsid,
-                )
-                # Capture pid before releasing the lock — a concurrent
-                # /bt/shutdown could otherwise null _bt_process between
-                # the with-block exit and the .pid read below.
-                launched_pid = VideoFileHandler._bt_process.pid
-
-            result = json.dumps({
-                'success': True,
-                'message': f'BT node launched (PID: {launched_pid})'
-            }).encode('utf-8')
-            self.send_response(200)
-            self.send_header(
-                'Content-Type', 'application/json; charset=utf-8'
-            )
-            self.send_header('Content-Length', str(len(result)))
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(result)
-
-        except Exception as e:
-            self._send_json_error(500, f"Failed to launch BT node: {str(e)}")
-
-    def _handle_bt_save_tree(self):
-        """Handle POST /bt/save_tree — save XML content to the BT trees directory."""
-        import re
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length == 0:
-                self._send_json_error(400, 'Empty request body')
-                return
-
-            body = self.rfile.read(content_length)
-            data = json.loads(body.decode('utf-8'))
-            filename = data.get('filename', '').strip()
-            xml_content = data.get('content', '')
-            overwrite = bool(data.get('overwrite', False))
-
-            # Validate filename: alphanumeric, dash, underscore, dot only; must end with .xml
-            if not filename:
-                self._send_json_error(400, 'filename is required')
-                return
-            if not filename.endswith('.xml'):
-                filename += '.xml'
-            if not re.match(r'^[\w\-]+\.xml$', filename):
-                self._send_json_error(400, f'Invalid filename: {filename!r}')
-                return
-
-            # Resolve trees directory the same way as list_trees_callback
-            import orchestrator as _orch_pkg
-            pkg_root = os.path.dirname(os.path.realpath(_orch_pkg.__file__))
-            trees_dir = os.path.join(pkg_root, 'bt', 'trees')
-
-            if not os.path.isdir(trees_dir):
-                self._send_json_error(500, f'Trees directory not found: {trees_dir}')
-                return
-
-            save_path = os.path.join(trees_dir, filename)
-            if os.path.exists(save_path) and not overwrite:
-                self._send_json_error(
-                    409,
-                    f'Tree already exists: {filename}',
-                    {
-                        'code': 'file_exists',
-                        'filename': filename,
-                        'full_path': save_path,
-                    },
-                )
-                return
-
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(xml_content)
-
-            result = json.dumps({
-                'success': True,
-                'message': f'Saved: {filename}',
-                'full_path': save_path,
-            }).encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', str(len(result)))
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(result)
-
-        except Exception as e:
-            self._send_json_error(500, f'Failed to save tree: {str(e)}')
-
-    def _handle_bt_shutdown(self):
-        """Handle POST /bt/shutdown — shutdown the BT node process."""
-        try:
-            with self._bt_lock:
-                if (
-                    self._bt_process is None
-                    or self._bt_process.poll() is not None
-                ):
-                    VideoFileHandler._bt_process = None
-                    result = json.dumps({
-                        'success': True,
-                        'message': 'BT node not running'
-                    }).encode('utf-8')
-                    self.send_response(200)
-                    self.send_header(
-                        'Content-Type',
-                        'application/json; charset=utf-8'
-                    )
-                    self.send_header('Content-Length', str(len(result)))
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(result)
-                    return
-
-                # Kill the process group (includes ros2 launch children).
-                # ``getpgid`` can raise ``ProcessLookupError`` if the BT
-                # process already exited between the poll() check above
-                # and this signal — treat that as success rather than
-                # leaking the wait below.
-                bt_pid = self._bt_process.pid
-                try:
-                    pgid = os.getpgid(bt_pid)
-                except ProcessLookupError:
-                    pgid = None
-
-                if pgid is not None:
-                    try:
-                        os.killpg(pgid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        self._bt_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(pgid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        self._bt_process.wait(timeout=3)
-
-                VideoFileHandler._bt_process = None
-
-            result = json.dumps({
-                'success': True,
-                'message': 'BT node shutdown'
-            }).encode('utf-8')
-            self.send_response(200)
-            self.send_header(
-                'Content-Type', 'application/json; charset=utf-8'
-            )
-            self.send_header('Content-Length', str(len(result)))
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(result)
-
-        except Exception as e:
-            self._send_json_error(
-                500, f"Failed to shutdown BT node: {str(e)}"
-            )
 
     def do_OPTIONS(self):
         """Handle CORS preflight requests."""
