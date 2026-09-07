@@ -2,6 +2,13 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* Added configurable FAILED marks for Record-page subtask takes through the UI and the physical left trigger while preserving the existing CANCEL behavior at the configured limit.
+* Stored optional failure/recovery events in raw episode metadata and carried them into LeRobot v2.1 and v3.0 annotations with retained-frame ``hint_frame`` values.
+* Updated image support to ``robotis/cyclo-intelligence:1.5.0``; policy images remain at ``robotis/lerobot-zenoh:1.4.1`` and ``robotis/groot-zenoh:1.3.5``.
+* Contributors: Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Added Autonomy Studio: Mission Canvas and Action Canvas replace the Navigation and BT Manager pages.

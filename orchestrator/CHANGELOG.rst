@@ -2,6 +2,12 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* Forwarded Record-page FAILED requests and physical left-trigger timestamps to cyclo_data while preserving the inference-mode CANCEL behavior.
+* Published FAILED action events and event counts for synchronized UI feedback.
+* Contributors: Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Added the ArmStateGate node, per-joint JointControl selection, and SendCommand inference lifecycle control.

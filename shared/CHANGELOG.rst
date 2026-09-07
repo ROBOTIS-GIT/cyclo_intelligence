@@ -2,6 +2,10 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* None
+
 1.4.0 (2026-08-31)
 ------------------
 * Added ``BT_SUPPORTED_ROBOT_TYPES`` and ``is_bt_supported()`` to ``robot_configs.schema``.

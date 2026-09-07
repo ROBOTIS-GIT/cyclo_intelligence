@@ -2,6 +2,13 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* Added ``max_failure_marks`` to ``TaskInfo`` and ``failure_event_count`` to ``RecordingStatus``.
+* Added FAILED-mark commands, source timestamps, discard results, and event counts to the task and recording service interfaces.
+* Changed interface type hashes; Cyclo 1.5.0 interfaces, orchestrator, cyclo_data, and UI must be upgraded together.
+* Contributors: Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * None
