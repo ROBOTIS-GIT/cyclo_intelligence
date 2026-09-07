@@ -178,6 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            orchestrator/tests/bt/test_package_boundary.py \
             orchestrator/tests/bt/test_review_fixes.py \
             orchestrator/tests/test_inference_mode.py \
             orchestrator/tests/data_processing/test_metadata_manager.py \

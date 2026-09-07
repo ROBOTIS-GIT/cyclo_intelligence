@@ -81,7 +81,11 @@ RUN git clone -b jazzy https://github.com/ROBOTIS-GIT/robotis_interfaces.git \
 # rosbag_recorder path explicitly — catkin_pkg's package walker stops
 # at cyclo_data/package.xml and would otherwise miss the C++ package
 # nested under cyclo_data/recorder/.
+# map_msgs is consumed by the supervisor grid cache rather than a ROS package,
+# so it must be declared explicitly outside the rosdep package graph.
 RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ros-${ROS_DISTRO}-map-msgs && \
     rosdep update && \
     rosdep install -i \
       --from-paths src src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder \

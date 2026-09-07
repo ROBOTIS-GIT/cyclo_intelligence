@@ -13,8 +13,47 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Author: Kiwoong Park
+ * Author: Kiwoong Park, Seongwoo Kim
  */
+
+/* Mission Canvas typography (warm-minimal): Hanken Grotesk (UI) + IBM Plex Mono
+ * (data), self-hosted (OFL) so offline robot PCs render them without any network
+ * fetch. Latin subsets; Korean glyphs fall back to Pretendard (declared below). */
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('../public/fonts/hanken-grotesk-400.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('../public/fonts/hanken-grotesk-500.woff2') format('woff2');
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('../public/fonts/hanken-grotesk-600.woff2') format('woff2');
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('../public/fonts/hanken-grotesk-700.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('../public/fonts/hanken-grotesk-800.woff2') format('woff2');
+  font-weight: 800; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('../public/fonts/ibm-plex-mono-400.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('../public/fonts/ibm-plex-mono-500.woff2') format('woff2');
+  font-weight: 500; font-style: normal; font-display: swap;
+}
 
 @font-face {
   font-family: 'Pretendard Variable';
@@ -212,42 +251,73 @@ body {
 .dark .disabled\:text-gray-300:disabled {
   color: #64748b !important;
 }
-.navigation-page {
-  --vscode-foreground: #1f2937;
-  --vscode-descriptionForeground: #6b7280;
-  --vscode-editor-background: #ffffff;
-  --vscode-sideBar-background: #f9fafb;
-  --vscode-sidebar-background: #f9fafb;
-  --vscode-panel-border: #d1d5db;
-  --vscode-focusBorder: #2563eb;
-  --vscode-button-foreground: #ffffff;
-  --vscode-button-background: #2563eb;
-  --vscode-button-secondaryForeground: #374151;
-  --vscode-button-secondaryBackground: #e5e7eb;
-  --vscode-input-foreground: #111827;
-  --vscode-input-background: #ffffff;
-  --vscode-input-border: #d1d5db;
-  --vscode-titleBar-activeBackground: #f3f4f6;
-  --vscode-toolbar-hoverBackground: #e5e7eb;
-  color: var(--vscode-foreground);
-  background: var(--vscode-editor-background);
+/*
+ * Mission Canvas design tokens (warm-minimal palette — clay accent, sage live, warm paper).
+ * `--mc-*` are the source of truth; `--vscode-*` aliases keep shared map
+ * chrome theme-correct without coupling it to a standalone page.
+ */
+.autonomy-studio-page {
+  --mc-bg: #f3f1ea;            /* app / stage fill (warm paper) */
+  --mc-canvas: #efece3;        /* map + behavior-tree canvas */
+  --mc-surface: #ffffff;        /* cards, panels */
+  --mc-surface-2: #f6f4ee;      /* inset surfaces, inputs */
+  --mc-surface-hover: #efece3;  /* hover / active surface */
+  --mc-border: #e7e3d9;         /* hairline borders */
+  --mc-border-strong: #dcd7ca;  /* button / panel borders */
+  --mc-text: #1c1a17;           /* near-black warm ink */
+  --mc-text-muted: #6f6a5d;
+  --mc-text-subtle: #a49d8c;
+  --mc-accent: #c96442;         /* clay */
+  --mc-accent-fg: #ffffff;
+  --mc-accent-hover: #b5563a;
+  --mc-accent-soft: #f4e5dc;    /* clay tint (selected rows, chips) */
+  --mc-success: #5b8266;        /* muted sage — "live" / running-ok */
+  --mc-danger: #b0483a;         /* muted brick */
+  --mc-danger-border: #d1796b;
+  --mc-warning: #b4762f;
+  --mc-focus: #c96442;
+  --mc-shadow: 0 1px 2px rgba(28, 26, 23, 0.05), 0 8px 24px -14px rgba(28, 26, 23, 0.18);
+
+  --vscode-foreground: var(--mc-text);
+  --vscode-descriptionForeground: var(--mc-text-muted);
+  --vscode-editor-background: var(--mc-surface);
+  --vscode-panel-border: var(--mc-border-strong);
+  --vscode-focusBorder: var(--mc-focus);
+  --vscode-button-foreground: var(--mc-accent-fg);
+  --vscode-button-background: var(--mc-accent);
+  --vscode-input-foreground: var(--mc-text);
+  --vscode-input-background: var(--mc-surface);
+  --vscode-input-border: var(--mc-border-strong);
+  --vscode-list-activeSelectionBackground: var(--mc-accent-soft);
+  --vscode-inputValidation-errorBackground: var(--mc-danger);
+  --vscode-inputValidation-errorBorder: var(--mc-danger-border);
+
+  color: var(--mc-text);
 }
 
-.dark .navigation-page {
-  --vscode-foreground: #e5e7eb;
-  --vscode-descriptionForeground: #9ca3af;
-  --vscode-editor-background: #020617;
-  --vscode-sideBar-background: #0f172a;
-  --vscode-sidebar-background: #0f172a;
-  --vscode-panel-border: #334155;
-  --vscode-focusBorder: #60a5fa;
-  --vscode-button-foreground: #ffffff;
-  --vscode-button-background: #2563eb;
-  --vscode-button-secondaryForeground: #e2e8f0;
-  --vscode-button-secondaryBackground: #334155;
-  --vscode-input-foreground: #f8fafc;
-  --vscode-input-background: #0f172a;
-  --vscode-input-border: #475569;
-  --vscode-titleBar-activeBackground: #0f172a;
-  --vscode-toolbar-hoverBackground: #334155;
+
+/* ReactFlow injects its own DOM (BT editor); Tailwind utilities can't reach it.
+ * Warm neutrals to match the paper canvas. */
+.autonomy-studio-page .react-flow__controls-button {
+  background: #faf8f3;
+  border-color: #e7e3d9;
+  color: #6f6a5d;
+  fill: currentColor;
+}
+.autonomy-studio-page .react-flow__controls-button:hover {
+  background: #efece3;
+}
+
+/* ── Typography (scoped): Hanken Grotesk UI, IBM Plex Mono for data —
+ * both fall back to Pretendard / system mono when the webfont is absent. */
+.autonomy-studio-page {
+  font-family: "Hanken Grotesk", "Pretendard Variable", Pretendard, system-ui, sans-serif;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+.autonomy-studio-page .font-mono,
+.autonomy-studio-page code,
+.autonomy-studio-page kbd {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0;
 }

@@ -43,7 +43,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:1.3.1
+    image: robotis/cyclo-intelligence:1.4.0
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -75,6 +75,13 @@ services:
       - CYCLO_VIDEO_SERVER_PORT=${CYCLO_VIDEO_SERVER_PORT:-7082}
       - CYCLO_WEB_VIDEO_SERVER_PORT=${CYCLO_WEB_VIDEO_SERVER_PORT:-7085}
       - CYCLO_SUPERVISOR_API_PORT=${CYCLO_SUPERVISOR_API_PORT:-7100}
+      # Mission Canvas runtime data is owned by cyclo_intelligence and
+      # persisted through the ./workspace bind mount, not the ai_worker source.
+      - CYCLO_NAVIGATION_DATA_DIR=${CYCLO_NAVIGATION_DATA_DIR:-/workspace/navigation}
+      # Action Canvas trees are user data under the same bind mount; the
+      # packaged examples are seeded into it on first use.
+      - CYCLO_BT_TREES_DIR=${CYCLO_BT_TREES_DIR:-/workspace/bt/trees}
+      - CYCLO_BT_EXAMPLE_TREES_DIR=${CYCLO_BT_EXAMPLE_TREES_DIR:-/root/ros2_ws/install/orchestrator/share/orchestrator/bt/trees}
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
@@ -85,6 +92,9 @@ services:
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
+      # Robot config bundle (schema + per-robot yaml) for the supervisor's
+      # capability checks — the same mount the policy containers use.
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
       # Keep s6 ROS/Zenoh env sourcing in sync even when using pre-built images.
       - ./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro
       - ./huggingface:/root/.cache/huggingface

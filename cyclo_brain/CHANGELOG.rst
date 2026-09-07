@@ -2,6 +2,10 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.0 (2026-08-31)
+------------------
+* None
+
 1.3.1 (2026-08-26)
 ------------------
 * Applied LOAD-time ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` values to the shared LeRobot and GR00T ``ActionChunkProcessor`` runtime.

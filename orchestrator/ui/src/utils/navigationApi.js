@@ -2,6 +2,17 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Author: Seongwoo Kim
 
 const API_BASE = '/api/navigation';
 
@@ -35,14 +46,17 @@ export function startNavigation(mode, mapName = 'map') {
   return request('/start', {
     method: 'POST',
     body: JSON.stringify({
-      mode: mode === 'map' ? 'map' : 'nav',
+      mode: mode === 'map' ? 'map' : mode === 'localize' ? 'localize' : 'nav',
       map_name: mapName,
     }),
   });
 }
 
-export function stopNavigation() {
-  return request('/stop', { method: 'POST' });
+export function stopNavigation({ keepalive = false } = {}) {
+  return request('/stop', {
+    method: 'POST',
+    ...(keepalive ? { keepalive: true } : {}),
+  });
 }
 
 export function saveNavigationMap(mapName = 'map') {
@@ -58,6 +72,12 @@ export function getPgmFiles() {
 
 export function getPgmImage(path) {
   return request(`/maps/pgm?path=${encodeURIComponent(path)}`);
+}
+
+export function deletePgmMap(path) {
+  return request(`/maps/pgm?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
+  });
 }
 
 export function savePgmImage(
@@ -79,6 +99,20 @@ export function savePgmImage(
   });
 }
 
+export function getMapAnnotations(path) {
+  return request(`/maps/annotations?path=${encodeURIComponent(path)}`);
+}
+
+export function saveMapAnnotations(path, annotations) {
+  return request('/maps/annotations/save', {
+    method: 'POST',
+    body: JSON.stringify({
+      path,
+      annotations,
+    }),
+  });
+}
+
 export function sendNavigateToPoseGoal(goal) {
   return request('/goal', {
     method: 'POST',
@@ -86,8 +120,49 @@ export function sendNavigateToPoseGoal(goal) {
   });
 }
 
+export function sendNavigateToPoseGoalAndWait(goal, signal) {
+  return request('/goal/wait', {
+    method: 'POST',
+    body: JSON.stringify(goal),
+    signal,
+  });
+}
+
+export function sendNavigateThroughPosesGoalsAndWait(goals, signal) {
+  return request('/goals/wait', {
+    method: 'POST',
+    body: JSON.stringify(goals),
+    signal,
+  });
+}
+
 export function cancelNavigateToPoseGoal() {
   return request('/cancel', { method: 'POST' });
+}
+
+export function sendInitialPoseEstimate({ x, y, yaw, frameId = 'map', mapName }) {
+  return request('/initial-pose', {
+    method: 'POST',
+    body: JSON.stringify({
+      x,
+      y,
+      yaw,
+      frame_id: frameId,
+      ...(mapName ? { map_name: mapName } : {}),
+    }),
+  });
+}
+
+export function requestNoMotionUpdate() {
+  return request('/nomotion-update', { method: 'POST' });
+}
+
+export function requestGlobalLocalization() {
+  return request('/global-localization', { method: 'POST' });
+}
+
+export function configureDesignLocalizationAmcl() {
+  return request('/amcl/design-localization-params', { method: 'POST' });
 }
 
 export function getServiceLogs({ tail = 300, cursor } = {}) {

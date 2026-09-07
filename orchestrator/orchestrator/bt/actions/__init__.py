@@ -21,6 +21,7 @@
 from orchestrator.bt.actions.base_action import BaseAction
 
 __all__ = [
+    'ArmStateGate',
     'BaseAction',
     'JointControl',
     'Rotate',
@@ -44,4 +45,9 @@ def __getattr__(name):
     if name == 'Wait':
         from orchestrator.bt.actions.wait import Wait
         return Wait
+    if name == 'ArmStateGate':
+        from orchestrator.bt.actions.arm_state_gate import (
+            ArmStateGate,
+        )
+        return ArmStateGate
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

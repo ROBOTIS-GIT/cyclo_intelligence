@@ -3,9 +3,17 @@ import {
   buildCameraMonitorTopics,
   isMonitorOnlyStatusMessage,
   shouldAnnounceRecordingStart,
+  shouldShowCameraMonitorAlert,
 } from './recordingStatusMonitor';
+import PageType from '../constants/pageType';
 
 describe('recordingStatusMonitor helpers', () => {
+  test('suppresses camera monitor alerts only on Mission Canvas', () => {
+    expect(shouldShowCameraMonitorAlert(PageType.AUTONOMY_STUDIO)).toBe(false);
+    expect(shouldShowCameraMonitorAlert(PageType.RECORD)).toBe(true);
+    expect(shouldShowCameraMonitorAlert(PageType.INFERENCE)).toBe(true);
+  });
+
   test('builds camera monitor rows from structured backend status', () => {
     const rows = buildCameraMonitorTopics({
       camera_monitor_names: ['cam_left_head'],

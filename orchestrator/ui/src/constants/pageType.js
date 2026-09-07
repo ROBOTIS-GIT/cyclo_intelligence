@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Author: Kiwoong Park
+// Author: Kiwoong Park, Seongwoo Kim
 
 // PageType enum-like object for page types
 // Use this for better code readability and maintainability
@@ -23,8 +23,7 @@ const PageType = {
   INFERENCE: 'inference',
   TRAINING: 'training',
   EDIT_DATASET: 'edit_dataset',
-  BT_MANAGER: 'bt_manager',
-  NAVIGATION: 'navigation',
+  AUTONOMY_STUDIO: 'autonomy_studio',
 };
 
 export default PageType;

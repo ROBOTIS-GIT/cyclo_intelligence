@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Author: Seongwoo Kim
 
 export const FALLBACK_SCHEMA_VERSION = '1.0';
 
@@ -42,9 +44,23 @@ export const FALLBACK_CATALOG = [
       { name: 'head_positions', type: 'string', default: '0.0, 0.0' },
       { name: 'enable_arms', type: 'bool', default: 'false' },
       {
+        name: 'left_joint_names',
+        type: 'string',
+        default:
+          'arm_l_joint1, arm_l_joint2, arm_l_joint3, arm_l_joint4, '
+          + 'arm_l_joint5, arm_l_joint6, arm_l_joint7, gripper_l_joint1',
+      },
+      {
         name: 'left_positions',
         type: 'string',
         default: '0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0',
+      },
+      {
+        name: 'right_joint_names',
+        type: 'string',
+        default:
+          'arm_r_joint1, arm_r_joint2, arm_r_joint3, arm_r_joint4, '
+          + 'arm_r_joint5, arm_r_joint6, arm_r_joint7, gripper_r_joint1',
       },
       {
         name: 'right_positions',
@@ -57,9 +73,37 @@ export const FALLBACK_CATALOG = [
     ],
   },
   {
+    tag: 'ArmStateGate',
+    category: 'action',
+    ports: [
+      { name: 'left_target_joints', type: 'string', default: '' },
+      { name: 'left_target_positions', type: 'string', default: '' },
+      { name: 'right_target_joints', type: 'string', default: '' },
+      { name: 'right_target_positions', type: 'string', default: '' },
+      { name: 'joint_threshold', type: 'number', default: '0.01' },
+      { name: 'detect_left_gripper', type: 'bool', default: 'false' },
+      { name: 'detect_right_gripper', type: 'bool', default: 'false' },
+      {
+        name: 'left_gripper_joint',
+        type: 'string',
+        default: 'gripper_l_joint1',
+      },
+      {
+        name: 'right_gripper_joint',
+        type: 'string',
+        default: 'gripper_r_joint1',
+      },
+      { name: 'gripper_closed_value', type: 'number', default: '1.0' },
+      { name: 'gripper_open_value', type: 'number', default: '0.0' },
+      { name: 'gripper_threshold', type: 'number', default: '0.05' },
+      { name: 'timeout_sec', type: 'number', default: '0.0' },
+    ],
+  },
+  {
     tag: 'SendCommand',
     category: 'action',
     ports: [
+      { name: 'target', type: 'string', default: 'INFERENCE' },
       { name: 'command', type: 'string', default: 'LOAD' },
       { name: 'model', type: 'string', default: 'lerobot:act' },
       { name: 'policy_path', type: 'string', default: '' },

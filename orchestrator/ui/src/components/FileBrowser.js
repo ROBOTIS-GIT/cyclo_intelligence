@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Author: Kiwoong Park
+// Author: Kiwoong Park, Seongwoo Kim
 
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import clsx from 'clsx';
@@ -70,25 +70,30 @@ const FileBrowserHeader = ({
   parentPath,
   homePath,
   defaultPath,
+  variant = 'legacy',
 }) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
   const classHeader = clsx(
     'flex',
     'items-center',
     'justify-between',
     'p-4',
     'border-b',
-    'border-gray-200'
+    autonomyStudioVariant ? 'border-[var(--mc-border)]' : 'border-gray-200'
   );
 
-  const classTitle = clsx('text-lg', 'font-semibold', 'text-gray-900');
+  const classTitle = clsx(
+    'font-semibold',
+    autonomyStudioVariant ? 'text-sm text-[var(--mc-text)]' : 'text-lg text-gray-900',
+  );
 
   const classButtonContainer = clsx('flex', 'items-center', 'space-x-2');
 
   const classButton = clsx(
     'p-2',
-    'text-gray-600',
-    'hover:text-blue-600',
-    'hover:bg-blue-50',
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text-muted)] hover:text-[var(--mc-accent-hover)] hover:bg-[var(--mc-surface-hover)]'
+      : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50',
     'rounded-lg',
     'transition-colors'
   );
@@ -142,22 +147,67 @@ const FileBrowserHeader = ({
   );
 };
 
-const PathInfo = ({ currentPath, homePath, defaultPath, targetFileName }) => {
-  const classContainer = clsx('px-4', 'py-2', 'bg-gray-50', 'border-b', 'border-gray-200');
+const PathInfo = ({
+  currentPath,
+  homePath,
+  defaultPath,
+  targetFileName,
+  variant = 'legacy',
+}) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
+  const classContainer = clsx(
+    'px-4',
+    'py-2',
+    'border-b',
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-surface-2)] border-[var(--mc-border)]'
+      : 'bg-gray-50 border-gray-200',
+  );
 
-  const classPathRow = clsx('flex', 'items-center', 'text-sm', 'text-gray-600');
+  const classPathRow = clsx(
+    'flex',
+    'items-center',
+    'text-sm',
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-gray-600',
+  );
 
   const classLabel = clsx('font-medium');
 
   const classPathValue = clsx('ml-2', 'font-mono', 'break-all');
 
-  const classHomeRow = clsx('flex', 'items-center', 'mt-1', 'text-xs', 'text-purple-600');
+  const classHomeRow = clsx(
+    'flex',
+    'items-center',
+    'mt-1',
+    'text-xs',
+    autonomyStudioVariant ? 'text-[var(--mc-accent)]' : 'text-purple-600',
+  );
 
-  const classHomeBadge = clsx('ml-2', 'font-mono', 'bg-purple-100', 'px-2', 'py-1', 'rounded');
+  const classHomeBadge = clsx(
+    'ml-2',
+    'font-mono',
+    'px-2',
+    'py-1',
+    'rounded',
+    autonomyStudioVariant ? 'bg-[var(--mc-accent-soft)]' : 'bg-purple-100',
+  );
 
-  const classDefaultRow = clsx('flex', 'items-center', 'mt-1', 'text-xs', 'text-orange-600');
+  const classDefaultRow = clsx(
+    'flex',
+    'items-center',
+    'mt-1',
+    'text-xs',
+    autonomyStudioVariant ? 'text-[var(--mc-warning)]' : 'text-orange-600',
+  );
 
-  const classDefaultBadge = clsx('ml-2', 'font-mono', 'bg-orange-100', 'px-2', 'py-1', 'rounded');
+  const classDefaultBadge = clsx(
+    'ml-2',
+    'font-mono',
+    'px-2',
+    'py-1',
+    'rounded',
+    autonomyStudioVariant ? 'bg-[var(--mc-surface-hover)]' : 'bg-orange-100',
+  );
 
   return (
     <div className={classContainer}>
@@ -200,7 +250,9 @@ const FileItem = ({
   onSelect,
   allowDirectorySelect = false,
   allowFileSelect = true,
+  variant = 'legacy',
 }) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
   const classItemContainer = clsx(
     'flex',
     'items-center',
@@ -208,20 +260,43 @@ const FileItem = ({
     'py-3',
     'cursor-pointer',
     'transition-colors',
-    hasTarget ? 'hover:bg-green-50 bg-green-25' : 'hover:bg-blue-50',
+    autonomyStudioVariant
+      ? hasTarget
+        ? 'bg-[var(--mc-surface-2)] hover:bg-[var(--mc-surface-hover)]'
+        : 'hover:bg-[var(--mc-surface-hover)]'
+      : hasTarget ? 'hover:bg-green-50 bg-green-25' : 'hover:bg-blue-50',
     isSelected &&
-      (hasTarget
-        ? 'bg-green-100 border-l-4 border-green-500'
-        : 'bg-blue-100 border-l-4 border-blue-500')
+      (autonomyStudioVariant
+        ? 'bg-[var(--mc-accent-soft)] border-l-4 border-[var(--mc-accent)]'
+        : hasTarget
+          ? 'bg-green-100 border-l-4 border-green-500'
+          : 'bg-blue-100 border-l-4 border-blue-500')
   );
 
   const classIconContainer = clsx('flex-shrink-0', 'mr-3', 'relative');
 
-  const classFolderIcon = clsx('w-5', 'h-5', hasTarget ? 'text-green-500' : 'text-blue-500');
+  const classFolderIcon = clsx(
+    'w-5',
+    'h-5',
+    autonomyStudioVariant
+      ? hasTarget ? 'text-[var(--mc-success)]' : 'text-[var(--mc-accent)]'
+      : hasTarget ? 'text-green-500' : 'text-blue-500',
+  );
 
-  const classStarIcon = clsx('w-3', 'h-3', 'text-yellow-500', 'absolute', '-top-1', '-right-1');
+  const classStarIcon = clsx(
+    'w-3',
+    'h-3',
+    autonomyStudioVariant ? 'text-[var(--mc-warning)]' : 'text-yellow-500',
+    'absolute',
+    '-top-1',
+    '-right-1',
+  );
 
-  const classFileIcon = clsx('w-5', 'h-5', 'text-gray-400');
+  const classFileIcon = clsx(
+    'w-5',
+    'h-5',
+    autonomyStudioVariant ? 'text-[var(--mc-text-subtle)]' : 'text-gray-400',
+  );
 
   const classContentContainer = clsx('flex-1', 'min-w-0');
 
@@ -233,24 +308,45 @@ const FileItem = ({
     'text-sm',
     'font-medium',
     'truncate',
-    hasTarget ? 'text-green-900' : 'text-gray-900'
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text)]'
+      : hasTarget ? 'text-green-900' : 'text-gray-900'
   );
 
   const classTargetBadge = clsx(
     'ml-2',
     'text-xs',
-    'bg-green-100',
-    'text-green-700',
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-surface-hover)] text-[var(--mc-success)]'
+      : 'bg-green-100 text-green-700',
     'px-2',
     'py-1',
     'rounded-full'
   );
 
-  const classCheckIcon = clsx('w-4', 'h-4', 'ml-2', hasTarget ? 'text-green-600' : 'text-blue-600');
+  const classCheckIcon = clsx(
+    'w-4',
+    'h-4',
+    'ml-2',
+    autonomyStudioVariant
+      ? hasTarget ? 'text-[var(--mc-success)]' : 'text-[var(--mc-accent)]'
+      : hasTarget ? 'text-green-600' : 'text-blue-600',
+  );
 
-  const classMetaRow = clsx('flex', 'items-center', 'mt-1', 'text-xs', 'text-gray-500');
+  const classMetaRow = clsx(
+    'flex',
+    'items-center',
+    'mt-1',
+    'text-xs',
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-gray-500',
+  );
 
-  const classArrowIcon = clsx('w-4', 'h-4', 'text-gray-400', 'ml-2');
+  const classArrowIcon = clsx(
+    'w-4',
+    'h-4',
+    'ml-2',
+    autonomyStudioVariant ? 'text-[var(--mc-text-subtle)]' : 'text-gray-400',
+  );
 
   const canSelectDirectory = item.is_directory && allowDirectorySelect;
   const canSelectFile = !item.is_directory && allowFileSelect;
@@ -266,9 +362,13 @@ const FileItem = ({
     'rounded-md',
     'border',
     'transition-colors',
-    isSelected
-      ? 'bg-blue-600 text-white border-blue-600'
-      : 'bg-white text-blue-600 border-blue-300 hover:bg-blue-50'
+    autonomyStudioVariant
+      ? isSelected
+        ? 'bg-[var(--mc-accent)] text-[var(--mc-accent-fg)] border-[var(--mc-accent)]'
+        : 'bg-[var(--mc-surface)] text-[var(--mc-accent)] border-[var(--mc-border-strong)] hover:bg-[var(--mc-surface-hover)]'
+      : isSelected
+        ? 'bg-blue-600 text-white border-blue-600'
+        : 'bg-white text-blue-600 border-blue-300 hover:bg-blue-50'
   );
 
   const handleItemClick = (e) => {
@@ -329,19 +429,34 @@ const FileItem = ({
           {canSelectDirectory && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-blue-600 font-medium">Selectable folder</span>
+              <span className={clsx(
+                'font-medium',
+                autonomyStudioVariant ? 'text-[var(--mc-accent)]' : 'text-blue-600',
+              )}>
+                Selectable folder
+              </span>
             </>
           )}
           {item.is_directory && !allowDirectorySelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">Navigation only</span>
+              <span className={clsx(
+                'font-medium',
+                autonomyStudioVariant ? 'text-[var(--mc-text-subtle)]' : 'text-gray-400',
+              )}>
+                Navigation only
+              </span>
             </>
           )}
           {!item.is_directory && !allowFileSelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">File selection disabled</span>
+              <span className={clsx(
+                'font-medium',
+                autonomyStudioVariant ? 'text-[var(--mc-text-subtle)]' : 'text-gray-400',
+              )}>
+                File selection disabled
+              </span>
             </>
           )}
         </div>
@@ -354,7 +469,8 @@ const FileItem = ({
   );
 };
 
-const LoadingState = () => {
+const LoadingState = ({ variant = 'legacy' }) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
   const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8');
 
   const classSpinner = clsx(
@@ -363,10 +479,13 @@ const LoadingState = () => {
     'h-6',
     'w-6',
     'border-b-2',
-    'border-blue-600'
+    autonomyStudioVariant ? 'border-[var(--mc-accent)]' : 'border-blue-600'
   );
 
-  const classText = clsx('ml-2', 'text-gray-600');
+  const classText = clsx(
+    'ml-2',
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-gray-600',
+  );
 
   return (
     <div className={classContainer}>
@@ -376,8 +495,15 @@ const LoadingState = () => {
   );
 };
 
-const EmptyState = () => {
-  const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8', 'text-gray-500');
+const EmptyState = ({ variant = 'legacy' }) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
+  const classContainer = clsx(
+    'flex',
+    'items-center',
+    'justify-center',
+    'py-8',
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-gray-500',
+  );
 
   return (
     <div className={classContainer}>
@@ -386,10 +512,21 @@ const EmptyState = () => {
   );
 };
 
-const ErrorDisplay = ({ error }) => {
-  const classContainer = clsx('px-4', 'py-3', 'bg-red-50', 'border-b', 'border-red-200');
+const ErrorDisplay = ({ error, variant = 'legacy' }) => {
+  const autonomyStudioVariant = variant === 'autonomy-studio';
+  const classContainer = clsx(
+    'px-4',
+    'py-3',
+    'border-b',
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-surface-2)] border-[var(--mc-danger-border)]'
+      : 'bg-red-50 border-red-200',
+  );
 
-  const classText = clsx('text-sm', 'text-red-600');
+  const classText = clsx(
+    'text-sm',
+    autonomyStudioVariant ? 'text-[var(--mc-danger)]' : 'text-red-600',
+  );
 
   return (
     <div className={classContainer}>
@@ -402,6 +539,7 @@ const SelectedItemInfo = ({
   targetFileName,
   directoriesWithTarget,
   targetFileLabel,
+  variant = 'legacy',
 }) => {
   if (!selectedItem) return null;
 
@@ -409,30 +547,54 @@ const SelectedItemInfo = ({
     targetFileName &&
     selectedItem.is_directory &&
     directoriesWithTarget.has(selectedItem.full_path);
+  const autonomyStudioVariant = variant === 'autonomy-studio';
 
   const classContainer = clsx(
     'px-4',
     'py-3',
     'border-t',
-    isTargetDirectory ? 'bg-green-50 border-green-200' : 'bg-blue-50 border-blue-200'
+    autonomyStudioVariant
+      ? 'bg-[var(--mc-surface-2)] border-[var(--mc-border)]'
+      : isTargetDirectory ? 'bg-green-50 border-green-200' : 'bg-blue-50 border-blue-200'
   );
 
   const classContent = clsx('text-sm');
 
-  const classLabel = clsx('font-medium', isTargetDirectory ? 'text-green-900' : 'text-blue-900');
+  const classLabel = clsx(
+    'font-medium',
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text)]'
+      : isTargetDirectory ? 'text-green-900' : 'text-blue-900',
+  );
 
   const classPath = clsx(
     'font-mono',
     'break-all',
     'mt-1',
-    isTargetDirectory ? 'text-green-700' : 'text-blue-700'
+    autonomyStudioVariant
+      ? 'text-[var(--mc-text-muted)]'
+      : isTargetDirectory ? 'text-green-700' : 'text-blue-700'
   );
 
-  const classTargetInfo = clsx('text-green-600', 'text-xs', 'mt-2', 'flex', 'items-center');
+  const classTargetInfo = clsx(
+    autonomyStudioVariant ? 'text-[var(--mc-success)]' : 'text-green-600',
+    'text-xs',
+    'mt-2',
+    'flex',
+    'items-center',
+  );
 
-  const classFileLabel = clsx('font-medium', 'text-blue-900');
+  const classFileLabel = clsx(
+    'font-medium',
+    autonomyStudioVariant ? 'text-[var(--mc-text)]' : 'text-blue-900',
+  );
 
-  const classFilePath = clsx('text-blue-700', 'font-mono', 'break-all', 'mt-1');
+  const classFilePath = clsx(
+    autonomyStudioVariant ? 'text-[var(--mc-text-muted)]' : 'text-blue-700',
+    'font-mono',
+    'break-all',
+    'mt-1',
+  );
 
   const classStarIcon = clsx('w-3', 'h-3', 'mr-1');
 
@@ -481,8 +643,10 @@ export default function FileBrowser({
   allowFileSelect = true,
   multiSelect = false,
   onSelectionChange = null,
+  variant = 'legacy',
 }) {
   const { browseFile } = useRosServiceCaller();
+  const autonomyStudioVariant = variant === 'autonomy-studio';
   const isInitializedRef = useRef(false);
 
   const [currentPath, setCurrentPath] = useState(initialPath);
@@ -693,16 +857,19 @@ export default function FileBrowser({
     'w-full',
     'flex',
     'flex-col',
-    'bg-white',
+    autonomyStudioVariant ? 'bg-[var(--mc-surface)] text-[var(--mc-text)]' : 'bg-white',
     'border',
-    'border-gray-300',
+    autonomyStudioVariant ? 'border-[var(--mc-border-strong)]' : 'border-gray-300',
     'rounded-lg',
     className
   );
 
   const classScrollContainer = clsx('overflow-y-auto', 'scrollbar-thin');
 
-  const classItemList = clsx('divide-y', 'divide-gray-100');
+  const classItemList = clsx(
+    'divide-y',
+    autonomyStudioVariant ? 'divide-[var(--mc-border)]' : 'divide-gray-100',
+  );
 
   return (
     <div className={classMainContainer}>
@@ -716,6 +883,7 @@ export default function FileBrowser({
         parentPath={parentPath}
         homePath={homePath}
         defaultPath={defaultPath}
+        variant={variant}
       />
 
       <PathInfo
@@ -723,16 +891,17 @@ export default function FileBrowser({
         homePath={homePath}
         defaultPath={defaultPath}
         targetFileName={targetFileName}
+        variant={variant}
       />
 
-      {error && <ErrorDisplay error={error} />}
+      {error && <ErrorDisplay error={error} variant={variant} />}
 
-      {loading && <LoadingState />}
+      {loading && <LoadingState variant={variant} />}
 
       {!loading && (
         <div className={classScrollContainer}>
           {filteredItems.length === 0 ? (
-            <EmptyState />
+            <EmptyState variant={variant} />
           ) : (
             <div className={classItemList}>
               {filteredItems.map((item, index) => {
@@ -758,6 +927,7 @@ export default function FileBrowser({
                     onSelect={handleItemSelect}
                     allowDirectorySelect={allowDirectorySelect}
                     allowFileSelect={allowFileSelect}
+                    variant={variant}
                   />
                 );
               })}
@@ -771,6 +941,7 @@ export default function FileBrowser({
         targetFileName={targetFileName}
         directoriesWithTarget={directoriesWithTarget}
         targetFileLabel={targetFileLabel}
+        variant={variant}
       />
     </div>
   );

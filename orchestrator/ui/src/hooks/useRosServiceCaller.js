@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Author: Kiwoong Park
+// Author: Kiwoong Park, Seongwoo Kim
 
 import { useCallback, useRef, useEffect } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
@@ -477,20 +477,6 @@ export function useRosServiceCaller() {
       return result;
     } catch (error) {
       console.error('Failed to get robot info:', error);
-      throw new Error(`${error.message || error}`);
-    }
-  }, [callService]);
-
-  const getTreeList = useCallback(async () => {
-    try {
-      const result = await callService(
-        '/bt/list_trees',
-        'interfaces/srv/GetTreeList',
-        {}
-      );
-      return result;
-    } catch (error) {
-      console.error('Failed to get BT tree list:', error);
       throw new Error(`${error.message || error}`);
     }
   }, [callService]);
@@ -1027,7 +1013,6 @@ export function useRosServiceCaller() {
     sendRecordCommand,
     getImageTopicList,
     getRobotInfo,
-    getTreeList,
     getNodeCatalog,
     getRobotTypeList,
     setRobotType,

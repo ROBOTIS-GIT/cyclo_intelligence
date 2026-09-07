@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Author: Seongwoo Kim
 
 import { useCallback, useRef, useState } from 'react';
 
@@ -76,5 +78,15 @@ export function useBTHistory({ getSnapshot, applySnapshot, capacity = 50 }) {
     sync();
   }, [sync]);
 
-  return { capture, undo, redo, reset, canUndo, canRedo };
+  // Establish a new durable boundary without applying it immediately. This is
+  // useful when an async save commits the snapshot it started with while newer
+  // edits already exist: Undo should return to that saved snapshot, never to a
+  // document generation from before the save.
+  const rebase = useCallback((snapshot) => {
+    pastRef.current = snapshot == null ? [] : [snapshot];
+    futureRef.current = [];
+    sync();
+  }, [sync]);
+
+  return { capture, undo, redo, reset, rebase, canUndo, canRedo };
 }

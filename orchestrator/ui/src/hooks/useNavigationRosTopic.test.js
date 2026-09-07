@@ -3,10 +3,65 @@ import { configureStore } from '@reduxjs/toolkit';
 import { render } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import {
+  applyNavigationGridEnvelope,
   navigationGridWebSocketUrl,
   useNavigationRosTopic,
   wrapNavigationRosMessage,
 } from './useNavigationRosTopic';
+
+test('merges a costmap dirty rectangle into the cached full grid', () => {
+  const previous = {
+    available: true,
+    data: {
+      header: { frame_id: 'map', stamp: { sec: 1, nanosec: 0 } },
+      info: { width: 4, height: 3, resolution: 0.05 },
+      data: [
+        0, 1, 2, 3,
+        4, 5, 6, 7,
+        8, 9, 10, 11,
+      ],
+    },
+  };
+  const incoming = {
+    available: true,
+    update: {
+      header: { frame_id: 'map', stamp: { sec: 2, nanosec: 0 } },
+      x: 1,
+      y: 1,
+      width: 2,
+      height: 2,
+      data: [50, 60, 90, 100],
+    },
+  };
+
+  expect(applyNavigationGridEnvelope(previous, incoming)).toEqual({
+    available: true,
+    data: {
+      ...previous.data,
+      header: incoming.update.header,
+      data: [
+        0, 1, 2, 3,
+        4, 50, 60, 7,
+        8, 90, 100, 11,
+      ],
+      updateRegion: { x: 1, y: 1, width: 2, height: 2 },
+    },
+  });
+  expect(previous.data.data).toEqual([
+    0, 1, 2, 3,
+    4, 5, 6, 7,
+    8, 9, 10, 11,
+  ]);
+});
+
+test('ignores a costmap update until a valid full grid is available', () => {
+  const incoming = {
+    available: true,
+    update: { x: 0, y: 0, width: 1, height: 1, data: [100] },
+  };
+
+  expect(applyNavigationGridEnvelope(null, incoming)).toBeNull();
+});
 
 test('wraps OccupancyGrid without losing its data and metadata fields', () => {
   const map = {
