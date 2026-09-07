@@ -1,4 +1,4 @@
-import { getPolicyBackendReadiness } from './usePolicyBackendStatus';
+import { getPolicyBackendName, getPolicyBackendReadiness } from './usePolicyBackendStatus';
 
 describe('getPolicyBackendReadiness', () => {
   it('blocks inference start when the backend container image is stale', () => {
@@ -83,4 +83,10 @@ describe('getPolicyBackendReadiness', () => {
       message: 'Backend processes are starting...',
     });
   });
+});
+
+it('routes all policy backends independently', () => {
+  expect(getPolicyBackendName('vitacformer')).toBe('vitacformer');
+  expect(getPolicyBackendName('lerobot')).toBe('lerobot');
+  expect(getPolicyBackendName('groot')).toBe('groot');
 });

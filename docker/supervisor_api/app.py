@@ -331,6 +331,12 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
         "image": f"robotis/lerobot-zenoh:1.4.1-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
+    "vitacformer": {
+        "service": "vitacformer",
+        "container": "vitacformer_server",
+        "image": f"robotis/vitacformer-zenoh:1.0.0-{_BACKEND_ARCH}",
+        "services": ["main-runtime", "engine-process"],
+    },
     "groot": {
         "service": "groot",
         "container": "groot_server",
@@ -385,6 +391,16 @@ def _backend_lifecycle_lock(name: str) -> asyncio.Lock:
     return _BACKEND_LIFECYCLE_LOCKS.setdefault(name, asyncio.Lock())
 
 _REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
+    "vitacformer": (
+        "/workspace",
+        "/zenoh_sdk",
+        "/robot_client_sdk",
+        "/action_chunk_processing_sdk",
+        "/policy_runtime",
+        "/app/vitacformer_engine",
+        "/zenoh_sdk/messages",
+        "/orchestrator_config",
+    ),
     "lerobot": (
         "/workspace",
         "/robot_client_sdk",

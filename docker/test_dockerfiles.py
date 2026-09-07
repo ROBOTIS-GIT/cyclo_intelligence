@@ -304,3 +304,25 @@ def test_groot_amd64_keeps_numpy_compatible_with_opencv():
 
     assert contents.count('"numpy==1.26.4"') >= 3
     assert contents.count('"ml_dtypes==0.5.4"') >= 2
+
+
+def test_vitacformer_compose_uses_shared_mount_contract_and_distinct_image():
+    import yaml
+    compose = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())
+    backend = compose["services"]["vitacformer"]
+    assert backend["container_name"] == "vitacformer_server"
+    assert backend["image"] == "robotis/vitacformer-zenoh:1.0.0-${ARCH:-arm64}"
+    assert backend["build"]["context"] == "../cyclo_brain/policy"
+    volumes = {v.split(":")[1]: v.split(":")[0] for v in backend["volumes"]}
+    assert volumes["/app/vitacformer_engine"].endswith("vitacformer/vitacformer_engine")
+    assert volumes["/policy_runtime"].endswith("common/runtime")
+    assert "/zenoh_sdk/messages" in volumes
+    for arch in ("amd64", "arm64"):
+        dockerfile = REPO_ROOT / f"cyclo_brain/policy/vitacformer/Dockerfile.{arch}"
+        contents = dockerfile.read_text()
+        assert "ENV POLICY_BACKEND=vitacformer" in contents
+        assert "ENV POLICY_ENGINE_MODULE=vitacformer_engine" in contents
+        assert 'ENTRYPOINT ["/init"]' in contents
+        assert "COPY common/s6-services/" in contents
+        assert "COPY lerobot/" not in contents
+        assert "ENV INFERENCE_HZ=30" in contents

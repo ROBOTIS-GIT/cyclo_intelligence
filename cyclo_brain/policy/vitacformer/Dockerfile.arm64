@@ -1,0 +1,85 @@
+# Dedicated ViTacFormer inference image for Jetson Orin.
+# Build context: cyclo_brain/policy/
+
+ARG BASE_IMAGE=dustynv/lerobot:r36.4.0-cu128-24.04
+FROM ${BASE_IMAGE}
+
+ARG S6_OVERLAY_VERSION=3.2.0.2
+
+ENV LANG=en_US.UTF-8
+ENV PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_EXTRA_INDEX_URL=
+
+RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
+      https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz \
+    && curl -fsSL -o /tmp/s6-overlay-aarch64.tar.xz \
+      https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-aarch64.tar.xz \
+    && tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz \
+    && tar -C / -Jxpf /tmp/s6-overlay-aarch64.tar.xz \
+    && rm /tmp/s6-overlay-*.tar.xz
+
+RUN pip install --no-cache-dir \
+      "eclipse-zenoh>=1.6.0,<1.7.0" \
+      "rosbags>=0.11.0" \
+      "GitPython>=3.1.18" \
+      "json5>=0.9.14" \
+      "opencv-python-headless==4.11.0.86" \
+      pyyaml \
+    && python -c "import cv2, torch, torchvision; print(torch.__version__, torchvision.__version__, cv2.__version__)"
+
+# Follow the other policy images: dependencies and s6 units are baked;
+# engine, common runtime, SDKs and robot configuration are mounted by Compose.
+COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
+RUN mkdir -p /app /policy_runtime /zenoh_sdk /robot_client_sdk \
+             /action_chunk_processing_sdk /orchestrator_config /workspace \
+             /root/.cache/zenoh_ros2_sdk \
+    && chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
+             /etc/s6-overlay/s6-rc.d/engine-process/run
+
+ENV HF_HOME=/root/.cache/huggingface
+ENV TORCH_HOME=/root/.cache/torch
+ENV ZENOH_SDK_PATH=/zenoh_sdk
+ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
+ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
+ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/action_chunk_processing_sdk
+
+ENV POLICY_BACKEND=vitacformer
+ENV POLICY_ENGINE_MODULE=vitacformer_engine
+
+ENV VITACFORMER_EXECUTION_HORIZON=20
+ENV ACTION_REQUEST_MODE=async
+ENV INFERENCE_HZ=30
+ENV CONTROL_HZ=100
+ENV TARGET_CHUNK_SIZE=none
+ENV POSTPROCESS_ACTIONS=true
+ENV ACTION_ALIGNMENT_MODE=l2
+ENV CHUNK_ALIGN_WINDOW_S=0.3
+ENV REFILL_MARGIN_S=0.55
+ENV REFILL_LATENCY_WARMUP_SAMPLES=1
+ENV REFILL_LATENCY_SAMPLE_MAX_S=2.0
+ENV GET_ACTION_TIMEOUT_S=10.0
+
+
+RUN { \
+    echo ""; \
+    echo "# Cyclo ROS/Zenoh runtime environment."; \
+    echo "# For a remote Zenoh router, comment the local line and uncomment the remote example."; \
+    echo "export ROS_DOMAIN_ID=30"; \
+    echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp"; \
+    echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'"; \
+    echo "# export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true;mode=\"client\";connect/endpoints=[\"tcp/192.168.60.139:7447\"]'"; \
+    } > /tmp/cyclo_bashrc \
+    && if [ -f /root/.bashrc ]; then cat /root/.bashrc >> /tmp/cyclo_bashrc; fi \
+    && mv /tmp/cyclo_bashrc /root/.bashrc
+
+WORKDIR /app
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
+     && [ -n "$S6_SVSTAT" ] \
+     && "$S6_SVSTAT" /run/service/main-runtime 2>&1 | grep -q "up" \
+     && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     || exit 1
+
+ENTRYPOINT ["/init"]

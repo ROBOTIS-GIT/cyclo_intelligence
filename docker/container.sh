@@ -6,10 +6,12 @@
 # Usage:
 #   docker/container.sh start              # → cyclo_intelligence
 #   docker/container.sh start-lerobot      # → lerobot (idle until LOAD)
+#   docker/container.sh start-vitacformer  # → vitacformer (idle until LOAD)
 #   docker/container.sh start-groot        # → groot (idle until LOAD)
 #   docker/container.sh enter              # → shell in cyclo_intelligence
 #   docker/container.sh build-ui           # → rebuild React UI only
 #   docker/container.sh enter-lerobot      # → shell in lerobot_server
+#   docker/container.sh enter-vitacformer  # → shell in vitacformer_server
 #   docker/container.sh enter-groot        # → shell in groot_server
 #   docker/container.sh logs               # → compose logs -f
 #   docker/container.sh status             # → s6 svstat on all containers
@@ -32,6 +34,8 @@ MAIN_SERVICE="cyclo_intelligence"
 MAIN_CONTAINER="cyclo_intelligence"
 LEROBOT_SERVICE="lerobot"
 LEROBOT_CONTAINER="${LEROBOT_CONTAINER_NAME:-lerobot_server}"
+VITACFORMER_SERVICE="vitacformer"
+VITACFORMER_CONTAINER="${VITACFORMER_CONTAINER_NAME:-vitacformer_server}"
 GROOT_SERVICE="groot"
 GROOT_CONTAINER="${GROOT_CONTAINER_NAME:-groot_server}"
 
@@ -99,6 +103,7 @@ prepare_host_mounts() {
     ensure_host_dir "${workspace_dir}/lerobot"
     ensure_host_dir "${workspace_dir}/model"
     ensure_host_dir "${workspace_dir}/model/lerobot"
+    ensure_host_dir "${workspace_dir}/model/vitacformer"
     ensure_host_dir "${workspace_dir}/model/groot"
     ensure_host_dir "$huggingface_dir"
 
@@ -183,6 +188,7 @@ remove_stale_policy_container() {
 
 remove_stale_policy_containers() {
     remove_stale_policy_container "$LEROBOT_SERVICE" "$LEROBOT_CONTAINER"
+    remove_stale_policy_container "$VITACFORMER_SERVICE" "$VITACFORMER_CONTAINER"
     remove_stale_policy_container "$GROOT_SERVICE" "$GROOT_CONTAINER"
 }
 
@@ -200,6 +206,13 @@ LeRobot policy container:
                    only configures itself once orchestrator dispatches
                    InferenceCommand.LOAD with a robot_type.
   enter-lerobot    Open an interactive bash in lerobot_server
+
+ViTacFormer policy container:
+  start-vitacformer
+                   Build + start the dedicated ViTacFormer backend. Container
+                   boots idle and configures itself on LOAD.
+  enter-vitacformer
+                   Open an interactive bash in vitacformer_server
 
 GR00T policy container:
   start-groot      Build + start groot (N1.7 baseline). Same boot-idle
@@ -403,6 +416,21 @@ start_lerobot() {
     $COMPOSE up -d $BUILD_FLAG "$LEROBOT_SERVICE"
 }
 
+start_vitacformer() {
+    prepare_host_mounts
+    setup_x11
+    if [ -n "$BUILD_FLAG" ]; then
+        echo "[container.sh] Building $VITACFORMER_SERVICE from local Dockerfile; skipping pre-built image pull."
+    else
+        echo "[container.sh] Pulling pre-built images..."
+        echo "[container.sh] Local Dockerfile changes are ignored without --build."
+        $COMPOSE pull --ignore-pull-failures "$VITACFORMER_SERVICE" || true
+    fi
+    remove_stale_policy_container "$VITACFORMER_SERVICE" "$VITACFORMER_CONTAINER"
+    echo "[container.sh] Starting $VITACFORMER_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
+    $COMPOSE up -d $BUILD_FLAG "$VITACFORMER_SERVICE"
+}
+
 start_groot() {
     prepare_host_mounts
     setup_x11
@@ -435,6 +463,14 @@ enter_lerobot() {
     enter_bash "$LEROBOT_CONTAINER"
 }
 
+enter_vitacformer() {
+    if ! container_running "$VITACFORMER_CONTAINER"; then
+        echo "Error: $VITACFORMER_CONTAINER is not running. Run 'start-vitacformer' first." >&2
+        exit 1
+    fi
+    enter_bash "$VITACFORMER_CONTAINER"
+}
+
 enter_groot() {
     if ! container_running "$GROOT_CONTAINER"; then
         echo "Error: $GROOT_CONTAINER is not running. Run 'start-groot' first." >&2
@@ -450,7 +486,7 @@ show_logs() {
 show_status() {
     echo "=== Containers ==="
     docker ps --format '{{.Names}}\t{{.Status}}' \
-        | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${GROOT_CONTAINER})\\b" \
+        | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${VITACFORMER_CONTAINER}|${GROOT_CONTAINER})\\b" \
         || echo "(none running)"
 
     # s6-overlay installs s6-svstat under /package/admin/s6-*/command/
@@ -475,7 +511,7 @@ show_status() {
         " || true
     fi
 
-    for cont in "$LEROBOT_CONTAINER" "$GROOT_CONTAINER"; do
+    for cont in "$LEROBOT_CONTAINER" "$VITACFORMER_CONTAINER" "$GROOT_CONTAINER"; do
         if container_running "$cont"; then
             echo ""
             # Not every policy container uses s6-overlay (e.g. lerobot
@@ -512,9 +548,11 @@ stop_all() {
 case "${1:-help}" in
     start)           start_main ;;
     start-lerobot)   start_lerobot ;;
+    start-vitacformer) start_vitacformer ;;
     start-groot)     start_groot ;;
     enter)           enter_main ;;
     enter-lerobot)   enter_lerobot ;;
+    enter-vitacformer) enter_vitacformer ;;
     enter-groot)     enter_groot ;;
     build-ui)        build_ui ;;
     test-ui)         shift; test_ui "$@" ;;

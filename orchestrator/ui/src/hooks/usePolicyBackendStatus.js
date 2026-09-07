@@ -15,9 +15,11 @@ const POLICY_BACKEND_SERVICE_GROUPS = [
   ['inference-server', 'control-publisher'],
 ];
 
-export const getPolicyBackendName = (serviceType) => (
-  serviceType === 'groot' ? 'groot' : 'lerobot'
-);
+export const getPolicyBackendName = (serviceType) => {
+  if (serviceType === 'groot') return 'groot';
+  if (serviceType === 'vitacformer') return 'vitacformer';
+  return 'lerobot';
+};
 
 export function getPolicyBackendServiceLabel(name) {
   return POLICY_BACKEND_SERVICE_LABELS[name] || name;

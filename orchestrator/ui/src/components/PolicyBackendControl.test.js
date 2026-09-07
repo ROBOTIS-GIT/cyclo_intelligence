@@ -149,6 +149,24 @@ describe('PolicyBackendControl', () => {
       .not.toBeInTheDocument();
   });
 
+  it('uses the dedicated ViTacFormer supervisor endpoint', async () => {
+    global.fetch.mockResolvedValueOnce(mockResponse({
+      name: 'vitacformer',
+      image: 'robotis/vitacformer-zenoh:1.0.0-arm64',
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'running',
+      services: [],
+    }));
+
+    render(<PolicyBackendControl serviceType="vitacformer" />);
+
+    await screen.findByText('ViTacFormer Docker');
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/backends/vitacformer/status'
+    );
+  });
+
   it('lets GR00T users register a Hugging Face token from inference controls', async () => {
     mockRegisterHFUser.mockResolvedValue({ success: true });
     global.fetch.mockResolvedValueOnce(mockResponse({

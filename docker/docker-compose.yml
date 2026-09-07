@@ -1,6 +1,6 @@
 # cyclo_intelligence — Docker Compose
 #
-# Two services:
+# Runtime and policy services:
 #   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
 #                         cyclo_data + UI + nginx + s6-agent. Always
 #                         started first.
@@ -236,6 +236,73 @@ services:
 
     # Policy containers are started on demand by the UI/supervisor API.
     # Do not auto-start them on host boot.
+    restart: "no"
+    runtime: nvidia
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  # ============================================================
+  # Dedicated SH5 ViTacFormer policy container.
+  # Uses the same shared runtime and SDK mounts as LeRobot and GR00T.
+  # ============================================================
+  vitacformer:
+    container_name: vitacformer_server
+    image: robotis/vitacformer-zenoh:1.0.0-${ARCH:-arm64}
+    build:
+      context: ../cyclo_brain/policy
+      dockerfile: vitacformer/Dockerfile.${ARCH:-arm64}
+      network: host
+
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+
+    network_mode: host
+    ipc: host
+
+    environment:
+      - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
+      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
+      - ../cyclo_brain/policy/common/s6-services/main-runtime:/etc/s6-overlay/s6-rc.d/main-runtime:ro
+      - ../cyclo_brain/policy/common/s6-services/engine-process:/etc/s6-overlay/s6-rc.d/engine-process:ro
+      - ../cyclo_brain/policy/common/s6-services/user/contents.d:/etc/s6-overlay/s6-rc.d/user/contents.d:ro
+      - ../cyclo_brain/policy/vitacformer/vitacformer_engine:/app/vitacformer_engine:ro
+      # Ship SH5 message definitions without modifying the SDK submodule.
+      - ../cyclo_brain/policy/vitacformer/messages:/zenoh_sdk/messages:ro
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
     restart: "no"
     runtime: nvidia
     healthcheck:

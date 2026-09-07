@@ -7,6 +7,11 @@ export const DOWNLOAD_MODEL_BACKENDS = [
     path: DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH,
   },
   {
+    value: 'vitacformer',
+    label: 'ViTacFormer',
+    path: DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH,
+  },
+  {
     value: 'groot',
     label: 'GR00T',
     path: DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH,
