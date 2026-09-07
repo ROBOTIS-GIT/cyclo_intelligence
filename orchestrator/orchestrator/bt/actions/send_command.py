@@ -115,10 +115,11 @@ SERVICE_CALL_TIMEOUT_SEC = 30.0
 
 ALLOWED_TARGETS = frozenset({'INFERENCE', 'DOCKER'})
 DOCKER_COMMANDS = frozenset({'START', 'STOP', 'RESTART'})
-ALLOWED_BACKENDS = frozenset({'groot', 'lerobot'})
+ALLOWED_BACKENDS = frozenset({'groot', 'lerobot', 'vitacformer'})
 BACKEND_SERVICES = {
     'groot': frozenset({'main-runtime', 'engine-process'}),
     'lerobot': frozenset({'main-runtime', 'engine-process'}),
+    'vitacformer': frozenset({'main-runtime', 'engine-process'}),
 }
 
 _DEFAULT_SUPERVISOR_PORT = 7100
@@ -143,6 +144,9 @@ MODEL_SERVICE_TYPES = {
     'n1.7': 'groot',
     'lerobot': 'lerobot',
     'lerobot:act': 'lerobot',
+    'vitacformer': 'vitacformer',
+    'vitacformer:vitacformer': 'vitacformer',
+    'lerobot:vitacformer': 'vitacformer',
     'lerobot:diffusion': 'lerobot',
     'lerobot:smolvla': 'lerobot',
     'lerobot:xvla': 'lerobot',

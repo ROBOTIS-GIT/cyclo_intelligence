@@ -156,6 +156,7 @@ function normalizeSendCommandParams(params, nodeType) {
 const ENUM_PARAMS = {
   model: [
     'lerobot:act',
+    'vitacformer:vitacformer',
     'lerobot:diffusion',
     'lerobot:smolvla',
     'lerobot:xvla',
@@ -273,9 +274,9 @@ export default function BTParamPanel({
 
   const policyBrowserPath = useMemo(() => {
     const model = String(localParams.model || '').toLowerCase();
-    return model.startsWith('groot')
-      ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
-      : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
+    if (model.startsWith('groot')) return DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH;
+    if (model.includes('vitacformer')) return DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH;
+    return DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
   }, [localParams.model]);
 
   // Reset local state only when switching to a different node

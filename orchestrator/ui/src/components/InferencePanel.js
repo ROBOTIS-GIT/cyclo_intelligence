@@ -257,6 +257,8 @@ const InferencePanel = () => {
   const policyBrowserPath =
     info.serviceType === 'groot'
       ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
+      : info.serviceType === 'vitacformer'
+        ? DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH
       : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
 
   // Update isEditable state when the disabled prop changes
@@ -536,6 +538,13 @@ const InferencePanel = () => {
           </button>
         </div>
       </div>
+
+      {info.serviceType === 'vitacformer' && (
+        <div className="mb-2.5 ml-28 text-xs text-gray-500">
+          Select an SH5 run folder to load its best checkpoint, or a numbered
+          checkpoint folder to load that step. Keep the action rate at 30 Hz.
+        </div>
+      )}
 
       {isGrootModel && (
         <>
