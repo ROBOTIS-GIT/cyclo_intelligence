@@ -66,10 +66,18 @@ def _make_manager(root: Path, *, subtask_total: int = 2) -> DataManager:
     manager._subtask_instructions = [
         f"subtask {idx}" for idx in range(subtask_total)
     ]
-    manager._task_info = SimpleNamespace(task_num="1234", task_name="archive test")
+    manager._task_info = SimpleNamespace(
+        task_num="1234",
+        task_name="archive test",
+        max_failure_marks=0,
+    )
     manager._robot_type = "test_robot"
     manager._state_lock = threading.Lock()
     manager._saved_subtasks_cache = {}
+    manager._status = "idle"
+    manager._failure_events = []
+    manager._recording_start_time_ns = 0
+    manager._max_failure_marks = 0
     return manager
 
 
@@ -110,6 +118,7 @@ def _write_segment(
     subtask_total: int,
     with_video: bool = True,
     subtask_instruction: str | None = None,
+    failure_events: list[dict] | None = None,
 ) -> Path:
     segment = root / str(full_idx) / "segments" / str(subtask_idx)
     segment.mkdir(parents=True, exist_ok=True)
@@ -163,6 +172,12 @@ def _write_segment(
         "episode_index": subtask_idx,
         "subtask_instruction": subtask_instruction or f"subtask {subtask_idx}",
     }
+    if failure_events:
+        info["failure_recovery_annotation"] = {
+            "schema_version": 1,
+            "review_status": "pending",
+            "events": failure_events,
+        }
     if with_video:
         videos = segment / "videos"
         videos.mkdir()
@@ -217,6 +232,146 @@ def test_archive_marks_episode_without_videos_not_required(tmp_path):
     assert not (out / "segments").exists()
     info = json.loads((out / "episode_info.json").read_text())
     assert info["transcoding_status"] == "not_required"
+    assert "failure_recovery_annotation" not in info
+
+
+def test_archive_merges_failure_events_in_episode_coordinates(tmp_path):
+    root = tmp_path / "Task_1234_archive_MCAP"
+    manager = _make_manager(root, subtask_total=2)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=2,
+        with_video=False,
+        failure_events=[{
+            "event_id": "fr_000",
+            "sub_task_idx": 0,
+            "source_mark": {"source": "left_button", "time_sec": 0.02},
+        }],
+    )
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=1,
+        subtask_total=2,
+        with_video=False,
+        failure_events=[{
+            "event_id": "fr_000",
+            "sub_task_idx": 1,
+            "source_mark": {"source": "ui_failed", "time_sec": 0.03},
+        }],
+    )
+
+    out = manager._archive_full_episode(0)
+    info = json.loads((out / "episode_info.json").read_text())
+    events = info["failure_recovery_annotation"]["events"]
+
+    assert [event["event_id"] for event in events] == ["fr_000", "fr_001"]
+    assert [event["sub_task_idx"] for event in events] == [0, 1]
+    assert [event["source_mark"]["source"] for event in events] == [
+        "left_button",
+        "ui_failed",
+    ]
+    assert events[0]["source_mark"]["time_sec"] == 0.02
+    assert events[1]["source_mark"]["time_sec"] == 0.08
+    assert events[0]["failure"]["frame_duration"] is None
+    assert events[1]["recovery"]["frame_duration"] is None
+
+
+def test_failure_mark_limit_and_take_reset(tmp_path):
+    manager = _make_manager(tmp_path / "Task_1234_archive_MCAP", subtask_total=1)
+    manager._record_episode_count = 0
+    manager._current_full_episode_index = 0
+    manager._current_subtask_index = 0
+    manager._subtask_total = 0
+    manager._task_info.max_failure_marks = 2
+
+    manager.start_recording(start_time_ns=1_000)
+    assert manager.mark_failure("left_button", 1_100) == (
+        True,
+        "Failure marked (1/2)",
+        1,
+    )
+    assert manager.mark_failure("ui_failed", 1_200)[0] is True
+    assert manager.mark_failure("left_button", 1_300) == (
+        False,
+        "Maximum FAILED marks reached",
+        2,
+    )
+
+    manager.discard_recording()
+    manager.start_recording(start_time_ns=2_000)
+    assert manager.failure_event_count() == 0
+    assert manager.mark_failure("ui_failed", 2_100)[0] is True
+    assert manager.failure_event_count() == 1
+
+
+def test_discard_saved_failure_take_drops_event_before_reacquisition(tmp_path):
+    root = tmp_path / "Task_1234_archive_MCAP"
+    manager = _make_manager(root, subtask_total=2)
+    manager._current_full_episode_index = 0
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=2,
+        with_video=False,
+        failure_events=[{
+            "event_id": "fr_000",
+            "sub_task_idx": 0,
+            "source_mark": {"source": "left_button", "time_sec": 0.02},
+        }],
+    )
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=1,
+        subtask_total=2,
+        with_video=False,
+    )
+
+    assert manager.discard_saved_subtask(0) == 1
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=2,
+        with_video=False,
+    )
+
+    out = manager._archive_full_episode(0)
+    info = json.loads((out / "episode_info.json").read_text())
+    assert "failure_recovery_annotation" not in info
+
+
+def test_segment_failure_times_use_rosbag_start_and_duration(tmp_path):
+    root = tmp_path / "Task_1234_archive_MCAP"
+    manager = _make_manager(root, subtask_total=2)
+    manager._current_subtask_index = 1
+    manager._failure_events = [
+        {"source": "left_button", "event_time_ns": 1_200_000_000},
+        {"source": "ui_failed", "event_time_ns": 2_000_000_000},
+    ]
+    manager._recording_start_time_ns = 900_000_000
+    episode_dir = root / "0" / "segments" / "1"
+    episode_dir.mkdir(parents=True)
+    (episode_dir / "metadata.yaml").write_text(
+        yaml.safe_dump({
+            "rosbag2_bagfile_information": {
+                "starting_time": {"nanoseconds_since_epoch": 1_000_000_000},
+                "duration": {"nanoseconds": 500_000_000},
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    annotation = manager._active_failure_annotation(episode_dir)
+    events = annotation["events"]
+
+    assert [event["source_mark"]["time_sec"] for event in events] == [0.2, 0.5]
+    assert [event["sub_task_idx"] for event in events] == [1, 1]
+    assert [event["event_id"] for event in events] == ["fr_000", "fr_001"]
 
 
 def test_archive_preserves_pending_raw_spool(tmp_path):

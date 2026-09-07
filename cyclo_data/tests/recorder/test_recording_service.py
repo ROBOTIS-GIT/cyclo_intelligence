@@ -65,6 +65,8 @@ class _RecordingCommand:
         DISCARD_EPISODE = 14
         SET_TASK_INFO = 15
         CANCEL_SEGMENT = 16
+        MARK_FAILED = 17
+        LEFT_TRIGGER = 18
 
 
 class _Dummy:
@@ -544,3 +546,169 @@ def test_cancel_segment_rejects_when_no_active_recording():
     assert result is response
     assert response.success is False
     assert response.message == "CANCEL_SEGMENT: no active recording"
+
+
+def test_mark_failed_publishes_event_and_returns_shared_count():
+    service, _ = _service_with_logger()
+    published_events = []
+    published_status = []
+    data_manager = SimpleNamespace(
+        _segmented_storage_mode=True,
+        is_recording=lambda: True,
+        get_current_subtask_index=lambda: 1,
+        mark_failure=lambda source, timestamp: (
+            True,
+            f"{source}:{timestamp}",
+            2,
+        ),
+    )
+    service._data_manager = data_manager
+    service._node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=999)
+    )
+    service._rosbag = SimpleNamespace(
+        publish_action_event=lambda event: published_events.append(event)
+    )
+    service._publish_recording_status = lambda: published_status.append(True)
+    request = _request(
+        command=_RecordingCommand.Request.MARK_FAILED,
+        segment_index=1,
+        event_time_ns=123,
+    )
+    response = SimpleNamespace(
+        success=False,
+        message="",
+        recording_discarded=False,
+        failure_event_count=0,
+    )
+
+    result = service._do_mark_failure(request, response)
+
+    assert result.success is True
+    assert result.message == "ui_failed:123"
+    assert result.failure_event_count == 2
+    assert result.recording_discarded is False
+    assert published_events == ["failed"]
+    assert published_status == [True]
+
+
+def test_left_trigger_discards_when_failure_limit_is_reached():
+    service, _ = _service_with_logger()
+    data_manager = SimpleNamespace(
+        _segmented_storage_mode=True,
+        is_recording=lambda: True,
+        get_current_subtask_index=lambda: 0,
+        mark_failure=lambda source, timestamp: (
+            False,
+            "Maximum FAILED marks reached",
+            2,
+        ),
+    )
+    service._data_manager = data_manager
+    service._node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=999)
+    )
+
+    def discard(request, response, event):
+        assert event == "cancel"
+        response.success = True
+        response.message = "Recording discarded"
+        response.recording_discarded = True
+        return response
+
+    service._do_discard = discard
+    request = _request(
+        command=_RecordingCommand.Request.LEFT_TRIGGER,
+        segment_index=0,
+        event_time_ns=456,
+    )
+    response = SimpleNamespace(
+        success=False,
+        message="",
+        recording_discarded=False,
+        failure_event_count=0,
+    )
+
+    result = service._do_mark_failure(request, response)
+
+    assert result.success is True
+    assert result.recording_discarded is True
+    assert result.failure_event_count == 0
+
+
+def test_left_trigger_discards_immediately_when_failure_marks_are_disabled():
+    service, _ = _service_with_logger()
+    data_manager = SimpleNamespace(
+        _segmented_storage_mode=True,
+        is_recording=lambda: True,
+        get_current_subtask_index=lambda: 0,
+        mark_failure=lambda source, timestamp: (
+            False,
+            "FAILED marks are disabled",
+            0,
+        ),
+    )
+    service._data_manager = data_manager
+    service._node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=999)
+    )
+
+    def discard(request, response, event):
+        assert event == "cancel"
+        response.success = True
+        response.message = "Recording discarded"
+        response.recording_discarded = True
+        return response
+
+    service._do_discard = discard
+    request = _request(
+        command=_RecordingCommand.Request.LEFT_TRIGGER,
+        segment_index=0,
+        event_time_ns=456,
+    )
+    response = SimpleNamespace(
+        success=False,
+        message="",
+        recording_discarded=False,
+        failure_event_count=0,
+    )
+
+    result = service._do_mark_failure(request, response)
+
+    assert result.success is True
+    assert result.recording_discarded is True
+    assert result.failure_event_count == 0
+
+
+def test_ui_mark_does_not_discard_when_failure_limit_is_reached():
+    service, _ = _service_with_logger()
+    service._data_manager = SimpleNamespace(
+        _segmented_storage_mode=True,
+        is_recording=lambda: True,
+        get_current_subtask_index=lambda: 0,
+        mark_failure=lambda source, timestamp: (
+            False,
+            "Maximum FAILED marks reached",
+            1,
+        ),
+    )
+    service._node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=999)
+    )
+    request = _request(
+        command=_RecordingCommand.Request.MARK_FAILED,
+        segment_index=0,
+        event_time_ns=456,
+    )
+    response = SimpleNamespace(
+        success=False,
+        message="",
+        recording_discarded=False,
+        failure_event_count=0,
+    )
+
+    result = service._do_mark_failure(request, response)
+
+    assert result.success is False
+    assert result.recording_discarded is False
+    assert result.failure_event_count == 1

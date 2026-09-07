@@ -18,6 +18,11 @@ float64 chunk_align_window_s
 # captures tick this on so the license rides through to HF Hub.
 bool include_robotis_license
 
+# Maximum FAILED marks allowed for each Record-page subtask take. A value of
+# 0 preserves the legacy behavior where the first physical left trigger
+# cancels the active take.
+uint16 max_failure_marks
+
 # Inference backend ("lerobot" / "groot" / ...). Empty falls back to
 # orchestrator._determine_service_prefix step 2 (config.json type
 # detection) for backward compatibility with old UI builds.

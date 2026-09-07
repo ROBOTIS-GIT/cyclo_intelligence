@@ -43,6 +43,7 @@ const TaskCommand = {
   DISCARD_EPISODE: 22,
   SET_TASK_INFO: 23,
   CANCEL_SEGMENT: 24,
+  MARK_FAILED: 25,
 };
 
 export default TaskCommand;

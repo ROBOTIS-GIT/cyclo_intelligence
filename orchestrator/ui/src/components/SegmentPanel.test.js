@@ -172,6 +172,125 @@ describe('SegmentPanel discard episode target', () => {
     });
   });
 
+  test('updates the per-subtask failure limit before acquisition starts', () => {
+    const { store } = renderPanel({
+      taskOverrides: {
+        slotToServerIdx: [-1, -1],
+        recordStatus: {
+          recordPhase: RecordPhase.READY,
+          running: false,
+          currentEpisodeNumber: 0,
+          currentSubtaskIndex: 0,
+          subtaskCount: 2,
+          savedSubtaskIndices: [],
+          topicReceived: true,
+        },
+      },
+    });
+
+    const input = screen.getByLabelText(/max failure marks/i);
+    fireEvent.change(input, { target: { value: '2' } });
+
+    expect(store.getState().tasks.recordTaskInfo.maxFailureMarks).toBe(2);
+  });
+
+  test('allows clearing the failure limit before entering a new value', () => {
+    const { store } = renderPanel({
+      taskOverrides: {
+        slotToServerIdx: [-1, -1],
+        recordStatus: {
+          recordPhase: RecordPhase.READY,
+          running: false,
+          currentEpisodeNumber: 0,
+          currentSubtaskIndex: 0,
+          subtaskCount: 2,
+          savedSubtaskIndices: [],
+          topicReceived: true,
+        },
+      },
+    });
+    const input = screen.getByLabelText(/max failure marks/i);
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: '' } });
+
+    expect(input).toHaveValue(null);
+    expect(store.getState().tasks.recordTaskInfo.maxFailureMarks).toBe(0);
+
+    fireEvent.change(input, { target: { value: '12' } });
+
+    expect(input).toHaveValue(12);
+    expect(store.getState().tasks.recordTaskInfo.maxFailureMarks).toBe(12);
+  });
+
+  test('marks a failure for the active recording and shows the shared count', async () => {
+    const sendRecordCommand = jest.fn().mockResolvedValue({
+      success: true,
+      message: 'Failure marked (2/2)',
+    });
+    renderPanel({
+      sendRecordCommand,
+      taskOverrides: {
+        recordTaskInfo: {
+          ...taskReducer(undefined, { type: '@@INIT' }).recordTaskInfo,
+          taskNum: '1',
+          taskName: 'failed-mark-test',
+          maxFailureMarks: 2,
+        },
+        recordStatus: {
+          recordPhase: RecordPhase.RECORDING,
+          running: true,
+          currentEpisodeNumber: 0,
+          currentSubtaskIndex: 0,
+          subtaskCount: 2,
+          failureEventCount: 1,
+          topicReceived: true,
+        },
+        slotToServerIdx: [-1, -1],
+        activeSlotIndex: 0,
+      },
+    });
+
+    const failedButton = screen.getByRole('button', {
+      name: /mark failed subtask 1/i,
+    });
+    expect(failedButton).toHaveTextContent('FAILED 1/2');
+    fireEvent.click(failedButton);
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith(
+        'mark_failed',
+        expect.objectContaining({
+          segmentIndex: 0,
+          subtaskInstruction: ['pick', 'place'],
+        })
+      );
+    });
+    expect(screen.getByLabelText(/max failure marks/i)).toBeDisabled();
+  });
+
+  test('disables FAILED when max failure marks is zero', () => {
+    renderPanel({
+      taskOverrides: {
+        recordStatus: {
+          recordPhase: RecordPhase.RECORDING,
+          running: true,
+          currentEpisodeNumber: 0,
+          currentSubtaskIndex: 0,
+          subtaskCount: 2,
+          failureEventCount: 0,
+          topicReceived: true,
+        },
+        slotToServerIdx: [-1, -1],
+        activeSlotIndex: 0,
+      },
+    });
+
+    expect(screen.getByRole('button', {
+      name: /mark failed subtask 1/i,
+    })).toBeDisabled();
+  });
+
   test('does not restore saved checkmarks from stale status after discarding episode', async () => {
     const { sendRecordCommand, store } = renderPanel({
       taskOverrides: {

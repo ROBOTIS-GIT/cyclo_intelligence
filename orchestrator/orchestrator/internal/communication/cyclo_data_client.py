@@ -110,6 +110,7 @@ class CycloDataClient:
         topics=None,
         urdf_path: str = '',
         segment_index: int = 0,
+        event_time_ns: int = 0,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
     ) -> CallResult:
         req = RecordingCommand.Request()
@@ -120,6 +121,7 @@ class CycloDataClient:
         req.topics = list(topics or [])
         req.urdf_path = urdf_path
         req.segment_index = int(segment_index)
+        req.event_time_ns = int(event_time_ns)
         return self._call(self._recording, req, timeout_sec, 'recording')
 
     def start_conversion(

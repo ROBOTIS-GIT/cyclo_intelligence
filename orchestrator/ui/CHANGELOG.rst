@@ -2,6 +2,12 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* Added the Record-page ``Max Failure Marks`` setting and active-subtask FAILED control with live event counts.
+* Added concise ``Failure`` TTS feedback and kept empty numeric input editable before validation.
+* Contributors: Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Added Autonomy Studio with the Mission Canvas and the Action Canvas; removed the Navigation and BT Manager pages.

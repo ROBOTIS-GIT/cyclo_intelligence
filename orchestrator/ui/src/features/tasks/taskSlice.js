@@ -97,6 +97,7 @@ const recordTaskInfoInitialState = {
   taskType: 'record',
   subtaskInstruction: [],
   includeRobotisLicense: false,
+  maxFailureMarks: 0,
   warmupTime: 0,
   episodeTime: 0,
   resetTime: 0,
@@ -248,6 +249,12 @@ const applyRecordTaskInfo = (state, taskInfo = {}, options = {}) => {
     includeRobotisLicense: Object.prototype.hasOwnProperty.call(taskInfo, 'includeRobotisLicense')
       ? Boolean(taskInfo.includeRobotisLicense)
       : Boolean(state.recordTaskInfo.includeRobotisLicense),
+    maxFailureMarks: Math.max(
+      0,
+      Math.min(65535, Number(
+        taskInfo.maxFailureMarks ?? state.recordTaskInfo.maxFailureMarks ?? 0
+      ) || 0)
+    ),
     warmupTime: taskInfo.warmupTime ?? state.recordTaskInfo.warmupTime ?? 0,
     episodeTime: taskInfo.episodeTime ?? state.recordTaskInfo.episodeTime ?? 0,
     resetTime: taskInfo.resetTime ?? state.recordTaskInfo.resetTime ?? 0,
@@ -346,6 +353,7 @@ const initialState = {
     currentTaskInstruction: '',
     currentSubtaskIndex: 0,
     subtaskCount: 0,
+    failureEventCount: 0,
     currentSubtaskInstruction: '',
     subtaskInstructions: [],
     savedSubtaskIndices: null,

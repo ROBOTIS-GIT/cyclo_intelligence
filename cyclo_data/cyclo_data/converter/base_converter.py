@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pyarrow as pa  # noqa: F401  (re-exported transitively for legacy callers)
 import pyarrow.parquet as pq  # noqa: F401
+import yaml
 
 from cyclo_data.reader.bag_reader import BagReader
 from cyclo_data.reader.metadata_manager import MetadataManager
@@ -414,6 +415,7 @@ class EpisodeData:
     frame_reuse_reports: List[Dict[str, Any]] = field(default_factory=list)
     observation_state_names: List[str] = field(default_factory=list)
     action_names: List[str] = field(default_factory=list)
+    failure_recovery_annotation: Optional[Dict[str, Any]] = None
 
 
 class RosbagToLerobotConverterBase:
@@ -1088,7 +1090,10 @@ class RosbagToLerobotConverterBase:
                 )
                 return cached_episode
 
-        if self._is_archived_segment_episode(bag_path, episode_info):
+        is_archived_segment_episode = self._is_archived_segment_episode(
+            bag_path, episode_info
+        )
+        if is_archived_segment_episode:
             episode_data = self._convert_archived_segment_episode(
                 bag_path, episode_index, episode_info
             )
@@ -1104,7 +1109,7 @@ class RosbagToLerobotConverterBase:
 
         if (
             self.config.use_videos
-            and not self._is_archived_segment_episode(bag_path, episode_info)
+            and not is_archived_segment_episode
         ):
             video_files = self._find_video_files(bag_path)
             episode_data.video_files = video_files
@@ -1151,6 +1156,19 @@ class RosbagToLerobotConverterBase:
                         episode_data.length = target_frames
         elif not self.config.use_videos:
             episode_data.video_files = {}
+
+        # Video alignment may shorten the retained grid. Resolve failure hints
+        # only after that final length is known so every hint stays in 0..N-1.
+        if not is_archived_segment_episode:
+            episode_data.failure_recovery_annotation = (
+                self._resolve_failure_annotation(
+                    episode_info,
+                    episode_data,
+                    recording_start_sec=self._recording_start_sec(
+                        episode_data.source_path
+                    ),
+                )
+            )
 
         self._assign_subtask_indices(episode_data)
 
@@ -1229,6 +1247,137 @@ class RosbagToLerobotConverterBase:
                     "frame_duration": [start, end],
                 })
             episode_data.subtask_segments = normalized_segments
+
+    @staticmethod
+    def _failure_events(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        annotation = info.get("failure_recovery_annotation") or {}
+        events = (
+            (annotation.get("events") or [])
+            if isinstance(annotation, dict)
+            else []
+        )
+        return [event for event in events if isinstance(event, dict)]
+
+    @staticmethod
+    def _recording_start_sec(
+        path: Optional[Path],
+        filename: str = "",
+    ) -> Optional[float]:
+        if path is None:
+            return None
+        root = Path(path)
+        metadata_path = (
+            root / "metadata.yaml"
+            if root.is_dir()
+            else root.parent / "metadata.yaml"
+        )
+        if not metadata_path.exists():
+            return None
+        try:
+            metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+            bag_info = metadata.get("rosbag2_bagfile_information", {}) or {}
+            if filename:
+                for file_info in bag_info.get("files") or []:
+                    if Path(str(file_info.get("path", ""))).name != filename:
+                        continue
+                    start_ns = int(
+                        (file_info.get("starting_time") or {}).get(
+                            "nanoseconds_since_epoch", 0
+                        ) or 0
+                    )
+                    if start_ns > 0:
+                        return start_ns / 1_000_000_000.0
+            start_ns = int(
+                (bag_info.get("starting_time") or {}).get(
+                    "nanoseconds_since_epoch", 0
+                ) or 0
+            )
+            return start_ns / 1_000_000_000.0 if start_ns > 0 else None
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            return None
+
+    @staticmethod
+    def _nearest_retained_frame(grid: List[float], target: float, length: int) -> int:
+        if length <= 0:
+            return 0
+        values = list(grid[:length])
+        if not values:
+            return 0
+        idx = bisect.bisect_left(values, float(target))
+        if idx <= 0:
+            return 0
+        if idx >= len(values):
+            return min(length - 1, len(values) - 1)
+        before = values[idx - 1]
+        after = values[idx]
+        nearest = idx - 1 if abs(target - before) <= abs(after - target) else idx
+        return max(0, min(length - 1, nearest))
+
+    @staticmethod
+    def _normalized_failure_event(
+        event: Dict[str, Any],
+        hint_frame: int,
+    ) -> Dict[str, Any]:
+        source_mark = event.get("source_mark") or {}
+        try:
+            time_sec = float(source_mark.get("time_sec", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            time_sec = 0.0
+        try:
+            subtask_idx = int(event.get("sub_task_idx", 0) or 0)
+        except (TypeError, ValueError):
+            subtask_idx = 0
+        return {
+            "event_id": str(event.get("event_id", "") or ""),
+            "sub_task_idx": subtask_idx,
+            "annotation_status": str(
+                event.get("annotation_status", "pending") or "pending"
+            ),
+            "source_mark": {
+                "source": str(source_mark.get("source", "") or ""),
+                "time_sec": time_sec,
+                "hint_frame": int(hint_frame),
+            },
+            "failure": {"frame_duration": None},
+            "recovery": {"frame_duration": None},
+        }
+
+    def _resolve_failure_annotation(
+        self,
+        info: Dict[str, Any],
+        episode: EpisodeData,
+        *,
+        recording_start_sec: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        raw_events = self._failure_events(info)
+        if not raw_events or episode.length <= 0:
+            return None
+        events = []
+        for raw_event in raw_events:
+            source_mark = raw_event.get("source_mark") or {}
+            try:
+                time_sec = float(source_mark.get("time_sec", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                time_sec = 0.0
+            if recording_start_sec is not None:
+                target = recording_start_sec + time_sec
+                hint = self._nearest_retained_frame(
+                    episode.grid_log_times_sec, target, episode.length
+                )
+            else:
+                hint = max(
+                    0,
+                    min(
+                        episode.length - 1,
+                        int(round(time_sec * float(self.config.fps or DEFAULT_FPS))),
+                    ),
+                )
+            events.append(self._normalized_failure_event(raw_event, hint))
+        return {
+            "schema_version": 1,
+            "review_status": "pending",
+            "events": events,
+        }
 
     def _prepared_episode_cache_path(
         self,
@@ -1620,6 +1769,7 @@ class RosbagToLerobotConverterBase:
                 segment_episode.subtask_instruction = str(
                     segment.get("sub_task_instruction", "") or ""
                 )
+            segment_episode.subtask_index = subtask_idx
             segment_episodes.append(segment_episode)
 
         if not segment_episodes:
@@ -1627,13 +1777,14 @@ class RosbagToLerobotConverterBase:
 
         if len(segment_episodes) == 1:
             single = segment_episodes[0]
+            original_subtask_idx = int(single.subtask_index)
             single.episode_index = episode_index
             single.source_path = bag_path
             single.recording_mode = "single"
             single.full_episode_index = episode_index
             single.task_name = str(episode_info.get("task_name", "") or "")
-            single.subtask_index = 0
-            single.subtask_total = 1
+            single.subtask_index = original_subtask_idx
+            single.subtask_total = len(segments)
             single.subtask_instructions = [
                 str(segment.get("sub_task_instruction", "") or "").strip()
                 for segment in segments
@@ -1648,15 +1799,25 @@ class RosbagToLerobotConverterBase:
                 )
             )
             single.subtask_instruction = instruction
-            single.subtask_indices = [0] * int(single.length)
+            single.subtask_indices = [original_subtask_idx] * int(single.length)
             single.subtask_segments = [{
-                "subtask_index": 0,
+                "subtask_index": original_subtask_idx,
                 "sub_task_instruction": instruction,
                 "frame_duration": [
                     0.0,
                     int(single.length) / float(self.config.fps or DEFAULT_FPS),
                 ],
             }]
+            single.failure_recovery_annotation = (
+                self._resolve_archived_failure_annotation(
+                    episode_info,
+                    bag_path,
+                    {original_subtask_idx: single},
+                    {original_subtask_idx: 0},
+                    mcap_paths,
+                    single.length,
+                )
+            )
             self._log_info(
                 f"{bag_path.name}: converted 1 archived subtask segment "
                 "without row/video stitching"
@@ -1679,11 +1840,16 @@ class RosbagToLerobotConverterBase:
 
         frame_cursor = 0
         frame_reuse_by_camera: Dict[str, List[Dict[str, Any]]] = {}
-        for subtask_idx, segment_episode in enumerate(segment_episodes):
+        segment_episode_by_index: Dict[int, EpisodeData] = {}
+        frame_offset_by_index: Dict[int, int] = {}
+        for segment_episode in segment_episodes:
+            subtask_idx = int(segment_episode.subtask_index)
             length = int(segment_episode.length)
             if length <= 0:
                 continue
             start_frame = frame_cursor
+            segment_episode_by_index[subtask_idx] = segment_episode
+            frame_offset_by_index[subtask_idx] = start_frame
             if not stitched.observation_state_names:
                 stitched.observation_state_names = list(
                     segment_episode.observation_state_names or []
@@ -1729,6 +1895,16 @@ class RosbagToLerobotConverterBase:
             frame_cursor = end_frame
 
         stitched.length = len(stitched.timestamps)
+        stitched.failure_recovery_annotation = (
+            self._resolve_archived_failure_annotation(
+                episode_info,
+                bag_path,
+                segment_episode_by_index,
+                frame_offset_by_index,
+                mcap_paths,
+                stitched.length,
+            )
+        )
         for camera, reports in frame_reuse_by_camera.items():
             merged = self._merge_frame_reuse_reports(
                 reports,
@@ -1750,6 +1926,82 @@ class RosbagToLerobotConverterBase:
             f"subtask segment(s) into {stitched.length} continuous frames"
         )
         return stitched
+
+    def _resolve_archived_failure_annotation(
+        self,
+        episode_info: Dict[str, Any],
+        bag_path: Path,
+        segment_episodes: Dict[int, EpisodeData],
+        frame_offsets: Dict[int, int],
+        mcap_paths: List[Path],
+        total_length: int,
+    ) -> Optional[Dict[str, Any]]:
+        raw_events = self._failure_events(episode_info)
+        if not raw_events or total_length <= 0:
+            return None
+        segments = episode_info.get("segments") or []
+        events = []
+        for raw_event in raw_events:
+            try:
+                subtask_idx = int(raw_event.get("sub_task_idx", 0) or 0)
+            except (TypeError, ValueError):
+                subtask_idx = 0
+            segment_episode = segment_episodes.get(subtask_idx)
+            if segment_episode is None or segment_episode.length <= 0:
+                continue
+            source_mark = raw_event.get("source_mark") or {}
+            try:
+                episode_time_sec = float(source_mark.get("time_sec", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                episode_time_sec = 0.0
+            raw_segment_start = 0.0
+            if (
+                0 <= subtask_idx < len(segments)
+                and isinstance(segments[subtask_idx], dict)
+            ):
+                duration = segments[subtask_idx].get("frame_duration") or []
+                if isinstance(duration, list) and duration:
+                    try:
+                        raw_segment_start = float(duration[0])
+                    except (TypeError, ValueError):
+                        raw_segment_start = 0.0
+            local_time_sec = max(0.0, episode_time_sec - raw_segment_start)
+            mcap_path = (
+                mcap_paths[subtask_idx]
+                if subtask_idx < len(mcap_paths)
+                else None
+            )
+            recording_start_sec = self._recording_start_sec(
+                bag_path,
+                mcap_path.name if mcap_path is not None else "",
+            )
+            if recording_start_sec is not None:
+                local_hint = self._nearest_retained_frame(
+                    segment_episode.grid_log_times_sec,
+                    recording_start_sec + local_time_sec,
+                    segment_episode.length,
+                )
+            else:
+                local_hint = max(
+                    0,
+                    min(
+                        segment_episode.length - 1,
+                        int(round(
+                            local_time_sec
+                            * float(self.config.fps or DEFAULT_FPS)
+                        )),
+                    ),
+                )
+            hint = frame_offsets.get(subtask_idx, 0) + local_hint
+            hint = max(0, min(total_length - 1, hint))
+            events.append(self._normalized_failure_event(raw_event, hint))
+        if not events:
+            return None
+        return {
+            "schema_version": 1,
+            "review_status": "pending",
+            "events": events,
+        }
 
     def _assign_subtask_indices(self, episode_data: EpisodeData) -> None:
         """Map each output row timestamp to its source subtask segment."""
@@ -1913,7 +2165,12 @@ class RosbagToLerobotConverterBase:
         wrote_any = False
         for episode in episodes_data:
             annotations = self._subtask_annotations_for_episode(episode)
-            if not annotations:
+            failure_annotation = getattr(episode, "failure_recovery_annotation", None)
+            failure_events = (
+                failure_annotation.get("events")
+                if isinstance(failure_annotation, dict) else []
+            )
+            if not annotations and not failure_events:
                 continue
             ep_idx = episode.episode_index
             chunk_idx = self._episode_chunk_index(ep_idx)
@@ -1934,6 +2191,8 @@ class RosbagToLerobotConverterBase:
                 },
                 "sub_task_annotation": annotations,
             }
+            if failure_events:
+                payload["failure_recovery_annotation"] = failure_annotation
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=4, ensure_ascii=False)
             wrote_any = True

@@ -109,6 +109,15 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._loaded_inference_chunk_align_window_s = 0.3
         self.node._loaded_inference_initial_pose_sync = True
         self.node._loaded_inference_initial_pose_sync_duration_s = 5.0
+        self.node._prepared_record_task_info = TaskInfo()
+        self.node._trigger_record_active_segment_index = 1
+        self.node._trigger_record_next_segment_index = 1
+        self.node.on_recording = True
+        self.node.on_inference = False
+        self.node.start_recording_time = 0.0
+        self.node.get_clock = lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=123456)
+        )
 
     def tearDown(self) -> None:
         self.node._cancel_initial_pose_sync_status()
@@ -138,9 +147,63 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         task_info = TaskInfo()
         task_info.initial_pose_sync = True
         task_info.initial_pose_sync_duration_s = 6.0
+        task_info.max_failure_marks = 2
         copied = self.node._copy_task_info(task_info)
         self.assertTrue(copied.initial_pose_sync)
         self.assertEqual(copied.initial_pose_sync_duration_s, 6.0)
+        self.assertEqual(copied.max_failure_marks, 2)
+
+    def test_record_signature_includes_failure_limit(self) -> None:
+        first = TaskInfo()
+        first.task_num = "1"
+        first.task_name = "task"
+        first.max_failure_marks = 1
+        second = self.node._copy_task_info(first)
+        second.max_failure_marks = 2
+
+        self.assertNotEqual(
+            self.node._task_info_record_signature(first),
+            self.node._task_info_record_signature(second),
+        )
+
+    def test_left_trigger_keeps_recording_after_failure_mark(self) -> None:
+        captured = []
+
+        def forward(command, **kwargs):
+            captured.append((command, kwargs))
+            return SimpleNamespace(
+                success=True,
+                response=SimpleNamespace(
+                    success=True,
+                    message="Failure marked",
+                    recording_discarded=False,
+                ),
+                message="",
+            )
+
+        self.node._forward_recording = forward
+
+        self.node._handle_record_left_trigger()
+
+        self.assertTrue(self.node.on_recording)
+        self.assertEqual(captured[0][1]["segment_index"], 1)
+        self.assertEqual(captured[0][1]["event_time_ns"], 123456)
+
+    def test_left_trigger_updates_state_after_atomic_discard(self) -> None:
+        self.node._forward_recording = lambda command, **kwargs: SimpleNamespace(
+            success=True,
+            response=SimpleNamespace(
+                success=True,
+                message="Recording discarded",
+                recording_discarded=True,
+            ),
+            message="",
+        )
+
+        self.node._handle_record_left_trigger()
+
+        self.assertFalse(self.node.on_recording)
+        self.assertEqual(self.node._trigger_record_next_segment_index, 1)
 
     def test_status_sequence_completes_for_the_active_client(self) -> None:
         self.node._publish_inference_phase(InferenceStatus.LOADING)

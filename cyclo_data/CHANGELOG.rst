@@ -2,6 +2,13 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-09-07)
+------------------
+* Added atomic UI and physical-trigger FAILED marking with per-take limits, shared event counts, and cancellation/discard cleanup.
+* Added optional raw ``failure_recovery_annotation`` metadata with episode-relative event times and stable subtask references.
+* Converted failure events into LeRobot v2.1 and v3.0 annotations using retained output frames for trim-aware ``hint_frame`` values.
+* Contributors: Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Removed the BT process and tree-file handlers from the video file server; the supervisor API owns them.
