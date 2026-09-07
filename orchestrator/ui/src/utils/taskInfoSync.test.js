@@ -115,4 +115,15 @@ describe('taskInfoSync echo routing', () => {
     expect(converted.initialPoseSync).toBe(false);
     expect(converted.initialPoseSyncDurationS).toBe(5.0);
   });
+
+  test('restores policy selection and parameter JSON from ROS task info', () => {
+    const converted = rosTaskInfoToUiTaskInfo({
+      policy_id: 'sample:base',
+      policy_parameters_json: '{"temperature":0.25}',
+    });
+
+    expect(converted.policyId).toBe('sample:base');
+    expect(converted.policyParameters).toEqual({ temperature: 0.25 });
+    expect(hasRosTaskInfoPayload({ policy_id: 'sample:base' })).toBe(true);
+  });
 });

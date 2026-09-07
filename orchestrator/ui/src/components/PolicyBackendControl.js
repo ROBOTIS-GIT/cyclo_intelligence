@@ -40,12 +40,6 @@ const stateLabels = {
   unknown: 'Unknown',
 };
 
-const getBackendLabel = (serviceType) => {
-  if (serviceType === 'groot') return 'GR00T Docker';
-  if (serviceType === 'lerobot') return 'LeRobot Docker';
-  return 'Policy Docker';
-};
-
 async function readJsonResponse(response) {
   const text = await response.text();
   if (!text) return {};
@@ -115,11 +109,11 @@ async function readPullStream(response, onProgress) {
   }
 }
 
-export default function PolicyBackendControl({ serviceType }) {
-  const backend = serviceType === 'groot' ? 'groot' : 'lerobot';
+export default function PolicyBackendControl({ serviceType, runtime = null }) {
+  const backend = runtime?.id || String(serviceType || '').trim();
   const label = useMemo(
-    () => getBackendLabel(serviceType),
-    [serviceType]
+    () => `${runtime?.label || 'Policy'} Docker`,
+    [runtime]
   );
 
   const [status, setStatus] = useState(null);
@@ -139,6 +133,7 @@ export default function PolicyBackendControl({ serviceType }) {
   }, [pendingAction, pullProgress]);
 
   const refreshStatus = useCallback(async ({ quiet = false } = {}) => {
+    if (!backend) return;
     if (!quiet) setIsRefreshing(true);
     try {
       const response = await fetch(`${API_BASE}/backends/${backend}/status`);
@@ -167,7 +162,7 @@ export default function PolicyBackendControl({ serviceType }) {
 
   useEffect(() => {
     let cancelled = false;
-    if (backend !== 'groot') return undefined;
+    if (!runtime?.capabilities?.requires_hf_token) return undefined;
     listHFEndpoints()
       .then((result) => {
         if (cancelled || !result?.success) return;
@@ -180,7 +175,7 @@ export default function PolicyBackendControl({ serviceType }) {
     return () => {
       cancelled = true;
     };
-  }, [backend, listHFEndpoints]);
+  }, [listHFEndpoints, runtime]);
 
   const callBackend = useCallback(async (action, successLabel) => {
     setPendingAction(action);
@@ -278,7 +273,7 @@ export default function PolicyBackendControl({ serviceType }) {
   const showUpdateButton = hasStatus && imagePulled && isStaleContainer;
   const showRuntimeControls = !isStaleContainer &&
     (imagePulled || (hasStatus && state !== 'not_created'));
-  const showTokenControl = backend === 'groot';
+  const showTokenControl = Boolean(runtime?.capabilities?.requires_hf_token);
   const readiness = useMemo(() => getPolicyBackendReadiness(status), [status]);
   const isWarming = isRunning && !readiness.ready &&
     (readiness.state === 'checking' || readiness.state === 'warming');

@@ -4,87 +4,87 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""Main process entrypoint.
+"""Central Cyclo Policy Runtime.
 
-Hosts the external ``/<backend>/inference_command`` service and a local control
-loop. Heavy policy imports and sensor reads stay isolated in the Engine process.
+The runtime owns one global policy session and the robot-facing action loop.
+Model frameworks remain isolated in Engine-only worker containers.
 """
 
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 
-_ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk")
+_ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/opt/cyclo/sdk/zenoh_ros2_sdk")
 if os.path.exists(_ZENOH_SDK_PATH) and _ZENOH_SDK_PATH not in sys.path:
     sys.path.insert(0, _ZENOH_SDK_PATH)
 
 _parents = Path(__file__).resolve().parents
-_default_rc = str(_parents[4] / "sdk" / "robot_client") if len(_parents) > 4 else ""
-_ROBOT_CLIENT_PATH = os.environ.get("ROBOT_CLIENT_SDK_PATH", _default_rc)
-if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
-    sys.path.insert(0, _ROBOT_CLIENT_PATH)
+_default_sdk_root = _parents[4] / "sdk" if len(_parents) > 4 else Path("/opt/cyclo/sdk")
+for path in (
+    os.environ.get("ROBOT_CLIENT_SDK_PATH", str(_default_sdk_root / "robot_client")),
+    os.environ.get(
+        "ACTION_CHUNK_PROCESSING_SDK_PATH",
+        str(_default_sdk_root / "action_chunk_processing"),
+    ),
+):
+    if os.path.exists(path) and path not in sys.path:
+        sys.path.insert(0, path)
 
-from zenoh_ros2_sdk import ROS2ServiceServer, get_logger  # noqa: E402
+_POLICY_COMMON_PATH = os.environ.get("POLICY_COMMON_PATH", str(_parents[2]))
+if os.path.exists(_POLICY_COMMON_PATH) and _POLICY_COMMON_PATH not in sys.path:
+    sys.path.insert(0, _POLICY_COMMON_PATH)
+
+from catalog import load_catalog  # noqa: E402
 from robot_client.messages import (  # noqa: E402
     INFERENCE_COMMAND_REQUEST_DEF,
     INFERENCE_COMMAND_RESPONSE_DEF,
 )
+from zenoh_ros2_sdk import ROS2ServiceServer, ROS2Subscriber, get_logger  # noqa: E402
 
 from .control_loop import ControlLoop  # noqa: E402
-from .inference_requester import (  # noqa: E402
-    DEFAULT_LOAD_POLICY_TIMEOUT_S,
-    InferenceRequester,
-)
+from .runtime_control import RuntimeControlServer  # noqa: E402
 from .service_handler import ServiceHandler  # noqa: E402
 from .session_state import SessionState  # noqa: E402
-from .zenoh_client import ZenohEngineCommandClient  # noqa: E402
+from .worker_registry import (  # noqa: E402
+    WorkerRegistry,
+    runtime_health_failure_reason,
+)
 
 
-logger = get_logger("main_runtime")
+logger = get_logger("policy_runtime")
 
 
-class MainRuntime:
+class PolicyRuntime:
     def __init__(
         self,
-        backend: str,
         router_ip: str,
         router_port: int,
         domain_id: int,
         namespace: str = "/",
     ) -> None:
-        self._backend = backend
         self._router_ip = router_ip
-        self._router_port = router_port
-        self._domain_id = domain_id
+        self._router_port = int(router_port)
+        self._domain_id = int(domain_id)
         self._namespace = namespace
-        self._node_name = f"{backend}_main_process"
-
-        engine_client = ZenohEngineCommandClient(
-            service_name=f"/{backend}/engine_command",
+        policy_root = Path(os.environ.get("CYCLO_POLICY_ROOT", "/opt/cyclo/policy"))
+        self._catalog = load_catalog(policy_root)
+        self._workers = WorkerRegistry(
+            self._catalog,
             router_ip=router_ip,
             router_port=router_port,
             domain_id=domain_id,
-            node_name=f"{backend}_engine_client",
             namespace=namespace,
-        )
-        self._requester = InferenceRequester(
-            engine_client,
-            get_action_timeout_s=float(os.environ.get("GET_ACTION_TIMEOUT_S", "5.0")),
-            load_policy_timeout_s=float(
-                os.environ.get(
-                    "LOAD_POLICY_TIMEOUT_S",
-                    str(DEFAULT_LOAD_POLICY_TIMEOUT_S),
-                )
-            ),
         )
         self._session = SessionState()
         self._control_loop = ControlLoop(
-            self._requester,
+            None,
             inference_hz=float(os.environ.get("INFERENCE_HZ", "15.0")),
             control_hz=float(os.environ.get("CONTROL_HZ", "100.0")),
             chunk_align_window_s=float(os.environ.get("CHUNK_ALIGN_WINDOW_S", "0.3")),
@@ -100,75 +100,243 @@ class MainRuntime:
             ),
             action_request_mode=os.environ.get("ACTION_REQUEST_MODE", "async"),
         )
-        self._engine_client = engine_client
-        self._command_srv = None
+        self._response_class: dict[str, Any] = {}
+        self._handler = ServiceHandler(
+            self._session,
+            None,
+            self._control_loop,
+            lambda **kwargs: self._response_class["class"](**kwargs),
+            catalog=self._catalog,
+            worker_registry=self._workers,
+        )
+        self._control_loop.set_fault_callback(self._handler.on_control_fault)
+        self._services: list[Any] = []
+        self._subscribers: list[Any] = []
+        self._control_server = RuntimeControlServer(
+            self._handle_control_request,
+            os.environ.get(
+                "POLICY_RUNTIME_CONTROL_SOCKET",
+                "/run/cyclo/policy-runtime.sock",
+            ),
+        )
         self._shutdown = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._orchestrator_last_seen = time.monotonic()
+        self._active_since: float | None = None
 
     def start(self) -> None:
-        self._wait_for_engine_ready()
         self._control_loop.run_background()
-
-        def _response_factory(**kwargs):
-            ResponseClass = self._command_srv.response_msg_class
-            return ResponseClass(**kwargs)
-
-        handler = ServiceHandler(
-            self._session,
-            self._requester,
-            self._control_loop,
-            _response_factory,
+        self._start_services()
+        self._start_heartbeat_subscribers()
+        self._control_server.start()
+        self._write_ready_marker()
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_health,
+            daemon=True,
+            name="policy-runtime-health",
         )
-        self._command_srv = ROS2ServiceServer(
-            service_name=f"/{self._backend}/inference_command",
+        self._monitor_thread.start()
+        logger.info("Policy Runtime ready at /policy/inference_command")
+        while not self._shutdown.is_set():
+            self._shutdown.wait(timeout=1.0)
+
+    def shutdown(self) -> None:
+        snapshot = self._handler.runtime_snapshot()
+        if snapshot["runtime_state"] in {"running", "syncing", "error"}:
+            for _ in range(3):
+                if self._handler.fail_safe("policy runtime shutting down"):
+                    break
+                time.sleep(0.1)
+        self._shutdown.set()
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=2.0)
+            self._monitor_thread = None
+        self._control_server.close()
+        for subscriber in self._subscribers:
+            try:
+                subscriber.close()
+            except Exception:
+                pass
+        self._subscribers.clear()
+        for service in self._services:
+            try:
+                service.close()
+            except Exception:
+                pass
+        self._services.clear()
+        self._control_loop.shutdown()
+        self._workers.close()
+        self._remove_ready_marker()
+
+    def request_shutdown(self, *_args) -> None:
+        self._shutdown.set()
+
+    def _start_services(self) -> None:
+        central = self._make_service("/policy/inference_command")
+        self._response_class["class"] = central.response_msg_class
+        self._services.append(central)
+        for runtime_id in self._workers.runtime_ids:
+            self._services.append(
+                self._make_service(
+                    f"/{runtime_id}/inference_command",
+                    backend_override=runtime_id,
+                )
+            )
+        logger.info(
+            "legacy inference aliases enabled for: %s",
+            ", ".join(self._workers.runtime_ids),
+        )
+
+    def _make_service(
+        self,
+        service_name: str,
+        *,
+        backend_override: str = "",
+    ) -> Any:
+        def callback(request):
+            self._orchestrator_last_seen = time.monotonic()
+            return self._handler.handle(request, backend_override=backend_override)
+
+        return ROS2ServiceServer(
+            service_name=service_name,
             srv_type="interfaces/srv/InferenceCommand",
-            callback=handler.handle,
+            callback=callback,
             request_definition=INFERENCE_COMMAND_REQUEST_DEF,
             response_definition=INFERENCE_COMMAND_RESPONSE_DEF,
             router_ip=self._router_ip,
             router_port=self._router_port,
             domain_id=self._domain_id,
-            node_name=self._node_name,
+            node_name="cyclo_policy_runtime",
             namespace=self._namespace,
         )
-        logger.info("InferenceCommand service up at /%s/inference_command", self._backend)
-        logger.info("ZENOH_SUB_READY")
-        while not self._shutdown.is_set():
-            self._shutdown.wait(timeout=1.0)
 
-    def _wait_for_engine_ready(self) -> None:
-        timeout_s = float(os.environ.get("ENGINE_READY_TIMEOUT_S", "120.0"))
-        ping_timeout_s = float(os.environ.get("ENGINE_READY_PING_TIMEOUT_S", "1.0"))
-        deadline = time.monotonic() + timeout_s
-        last_error = "not ready"
-        while time.monotonic() < deadline:
-            try:
-                if self._engine_client.ping(timeout_s=ping_timeout_s):
-                    logger.info(
-                        "EngineCommand service ready at /%s/engine_command",
-                        self._backend,
-                    )
-                    return
-            except Exception as e:
-                last_error = str(e)
-                try:
-                    self._engine_client.reconnect()
-                except Exception as reconnect_error:
-                    last_error = f"{last_error}; reconnect failed: {reconnect_error}"
-            time.sleep(0.5)
-        raise RuntimeError(
-            f"EngineCommand service not ready after {timeout_s:.1f}s: {last_error}"
+    def _start_heartbeat_subscribers(self) -> None:
+        self._subscribers.append(
+            ROS2Subscriber(
+                topic="/heartbeat",
+                msg_type="std_msgs/msg/Empty",
+                callback=lambda _msg: self._record_orchestrator_heartbeat(),
+                router_ip=self._router_ip,
+                router_port=self._router_port,
+                domain_id=self._domain_id,
+                node_name="policy_runtime_orchestrator_watchdog",
+                namespace=self._namespace,
+            )
+        )
+        for runtime_id in self._workers.runtime_ids:
+            self._subscribers.append(
+                ROS2Subscriber(
+                    topic=f"/{runtime_id}/worker_heartbeat",
+                    msg_type="std_msgs/msg/String",
+                    msg_definition="string data\n",
+                    callback=lambda msg, rid=runtime_id: self._workers.record_heartbeat(
+                        rid,
+                        str(getattr(msg, "data", "")),
+                    ),
+                    router_ip=self._router_ip,
+                    router_port=self._router_port,
+                    domain_id=self._domain_id,
+                    node_name=f"policy_runtime_{runtime_id}_watchdog",
+                    namespace=self._namespace,
+                )
+            )
+
+    def _record_orchestrator_heartbeat(self) -> None:
+        self._orchestrator_last_seen = time.monotonic()
+
+    def _monitor_health(self) -> None:
+        worker_timeout = max(
+            0.5,
+            float(os.environ.get("WORKER_HEARTBEAT_TIMEOUT_S", "2.0")),
+        )
+        orchestrator_timeout = max(
+            1.0,
+            float(os.environ.get("ORCHESTRATOR_HEARTBEAT_TIMEOUT_S", "3.0")),
+        )
+        while not self._shutdown.wait(0.25):
+            snapshot = self._handler.runtime_snapshot()
+            active = snapshot["runtime_state"] in {"running", "syncing"}
+            if not active:
+                self._active_since = None
+                continue
+            now = time.monotonic()
+            if self._active_since is None:
+                self._active_since = now
+            runtime_id = snapshot["runtime_id"]
+            age = self._workers.heartbeat_age(runtime_id)
+            orchestrator_age = now - self._orchestrator_last_seen
+            reason = runtime_health_failure_reason(
+                runtime_id,
+                active_for_s=now - self._active_since,
+                worker_heartbeat_age_s=age,
+                worker_instance_changed=self._workers.worker_instance_changed(
+                    runtime_id
+                ),
+                orchestrator_heartbeat_age_s=orchestrator_age,
+                worker_timeout_s=worker_timeout,
+                orchestrator_timeout_s=orchestrator_timeout,
+            )
+            if reason:
+                self._handler.fail_safe(reason)
+
+    def _handle_control_request(self, request: dict) -> dict:
+        operation = str(request.get("operation", "status"))
+        if operation == "status":
+            return {"ok": True, **self._handler.runtime_snapshot()}
+        if operation == "can_mutate_worker":
+            runtime_id = str(request.get("runtime_id", ""))
+            self._require_runtime_id(runtime_id)
+            allowed, reason = self._handler.can_mutate_worker(runtime_id)
+            return {"ok": True, "allowed": allowed, "reason": reason}
+        if operation == "begin_worker_mutation":
+            runtime_id = str(request.get("runtime_id", ""))
+            self._require_runtime_id(runtime_id)
+            allowed, reason, token = self._handler.begin_worker_mutation(runtime_id)
+            return {
+                "ok": True,
+                "allowed": allowed,
+                "reason": reason,
+                "token": token,
+            }
+        if operation == "end_worker_mutation":
+            runtime_id = str(request.get("runtime_id", ""))
+            self._require_runtime_id(runtime_id)
+            released = self._handler.end_worker_mutation(
+                runtime_id,
+                str(request.get("token", "")),
+            )
+            if released:
+                return {"ok": True}
+            return {"ok": False, "error": "invalid worker mutation token"}
+        if operation == "worker_status":
+            runtime_id = str(request.get("runtime_id", ""))
+            self._require_runtime_id(runtime_id)
+            return {"ok": True, **self._workers.describe(runtime_id)}
+        return {"ok": False, "error": f"unknown operation: {operation}"}
+
+    def _require_runtime_id(self, runtime_id: str) -> None:
+        if runtime_id not in self._workers.runtime_ids:
+            raise ValueError(f"unknown policy runtime: {runtime_id!r}")
+
+    @staticmethod
+    def _ready_marker_path() -> Path:
+        return Path(
+            os.environ.get(
+                "POLICY_RUNTIME_READY_MARKER",
+                "/run/cyclo/policy-runtime.ready",
+            )
         )
 
-    def shutdown(self) -> None:
-        self._shutdown.set()
-        self._control_loop.shutdown()
-        if self._command_srv is not None:
-            try:
-                self._command_srv.close()
-            except Exception:
-                pass
-            self._command_srv = None
-        self._engine_client.close()
+    def _write_ready_marker(self) -> None:
+        marker = self._ready_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ready\n", encoding="utf-8")
+
+    def _remove_ready_marker(self) -> None:
+        try:
+            self._ready_marker_path().unlink()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def _bool_env(name: str, default: bool) -> bool:
@@ -192,23 +360,22 @@ class MainRuntime:
         return float(raw)
 
 
+MainRuntime = PolicyRuntime
+
+
 def main() -> None:  # pragma: no cover - container entrypoint.
-    backend = os.environ.get("POLICY_BACKEND", "").strip()
-    if not backend:
-        raise RuntimeError("POLICY_BACKEND env var is required")
-    runtime = MainRuntime(
-        backend=backend,
+    runtime = PolicyRuntime(
         router_ip=os.environ.get("ZENOH_ROUTER_IP", "127.0.0.1"),
         router_port=int(os.environ.get("ZENOH_ROUTER_PORT", "7447")),
         domain_id=int(os.environ.get("ROS_DOMAIN_ID", "30")),
     )
+    signal.signal(signal.SIGTERM, runtime.request_shutdown)
+    signal.signal(signal.SIGINT, runtime.request_shutdown)
     try:
         runtime.start()
-    except KeyboardInterrupt:
-        logger.info("shutdown via SIGINT")
     finally:
         runtime.shutdown()
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()

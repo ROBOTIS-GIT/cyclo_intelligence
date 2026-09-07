@@ -12,6 +12,13 @@ def _copy_container_script(tmp_path):
     docker_dir.mkdir()
     shutil.copy2(REPO_ROOT / "docker" / "container.sh", docker_dir / "container.sh")
     (docker_dir / "container.sh").chmod(0o755)
+    for runtime in ("lerobot", "groot"):
+        target = tmp_path / "cyclo_brain" / "policy" / runtime
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            REPO_ROOT / "cyclo_brain" / "policy" / runtime / "manifest.yaml",
+            target / "manifest.yaml",
+        )
     return docker_dir
 
 
@@ -24,8 +31,11 @@ def _write_start_stub(tmp_path):
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
+        "  *' config --services '*)\n"
+        "    printf '%s\\n' cyclo_intelligence lerobot groot\n"
+        "    ;;\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    ;;\n"
         "esac\n"
         "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
@@ -45,6 +55,10 @@ def _write_enter_stub(tmp_path, running_container):
     docker_stub.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
+        "case \" $* \" in\n"
+        "  *' config --services '*) printf '%s\\n' cyclo_intelligence lerobot groot; exit 0 ;;\n"
+        "  *' config --format json '*) printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\"},\"groot\":{\"container_name\":\"groot_server\"}}}'; exit 0 ;;\n"
+        "esac\n"
         "if [ \"$1\" = ps ]; then\n"
         f"  printf '%s\\n' '{running_container}'\n"
         "fi\n"
@@ -61,6 +75,17 @@ def _stub_env(tmp_path, log_path):
         "DOCKER_STUB_LOG": str(log_path),
         "CYCLO_AGENT_SOCKETS_DIR": str(tmp_path / "agent_sockets"),
     }
+
+
+def test_ui_commands_use_external_non_root_node_builder():
+    script = (REPO_ROOT / "docker" / "container.sh").read_text()
+
+    assert "run_ui_npm()" not in script
+    assert "run_ui_npm_external ci --legacy-peer-deps" in script
+    assert "run_ui_npm_external run build" in script
+    assert "run_ui_npm_in_main" not in script
+    assert '--user "$(id -u):$(id -g)"' in script
+    assert '-v "${dir}:/ui"' in script
 
 
 def test_start_does_not_create_legacy_runtime_env_file_from_default(tmp_path):
@@ -100,6 +125,28 @@ def test_start_creates_repo_local_mount_directories(tmp_path):
     assert (docker_dir / "workspace" / "model" / "lerobot").is_dir()
     assert (docker_dir / "workspace" / "model" / "groot").is_dir()
     assert (docker_dir / "huggingface").is_dir()
+
+
+def test_start_creates_checkpoint_root_for_new_manifest_runtime(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    runtime = tmp_path / "cyclo_brain" / "policy" / "sample"
+    runtime.mkdir(parents=True)
+    (runtime / "manifest.yaml").write_text(
+        "runtime:\n  checkpoint_root: /workspace/model/sample/nested\n",
+        encoding="utf-8",
+    )
+    log_path = _write_start_stub(tmp_path)
+
+    subprocess.run(
+        [str(docker_dir / "container.sh"), "start"],
+        cwd=tmp_path,
+        env=_stub_env(tmp_path, log_path),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert (docker_dir / "workspace" / "model" / "sample" / "nested").is_dir()
 
 
 def test_start_preserves_existing_legacy_runtime_env_file_without_touching(tmp_path):
@@ -150,7 +197,7 @@ def test_start_pulls_main_image_only(tmp_path):
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    ;;\n"
         "esac\n"
         "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
@@ -201,6 +248,25 @@ def test_start_groot_build_skips_prebuilt_pull(tmp_path):
     docker_calls = log_path.read_text().splitlines()
     assert not any("pull --ignore-pull-failures groot" in call for call in docker_calls)
     assert any("up -d --build groot" in call for call in docker_calls)
+
+
+def test_start_policy_uses_manifest_backed_runtime(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log_path = _write_start_stub(tmp_path)
+
+    subprocess.run(
+        [str(docker_dir / "container.sh"), "start-policy", "lerobot", "--build"],
+        cwd=tmp_path,
+        env=_stub_env(tmp_path, log_path),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert any(
+        "up -d --build lerobot" in call
+        for call in log_path.read_text().splitlines()
+    )
 
 
 def test_start_does_not_remove_policy_container_with_stale_workspace_mount(tmp_path):
@@ -269,7 +335,7 @@ def test_start_lerobot_removes_stale_workspace_mount(tmp_path):
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    exit 0\n"
         "    ;;\n"
         "esac\n"

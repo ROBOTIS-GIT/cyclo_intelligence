@@ -1,85 +1,97 @@
 # cyclo_brain
 
-Everything related to policy training and inference lives under this folder.
+`cyclo_brain` contains policy inference adapters, the shared Policy Runtime,
+and the SDKs used to connect models to Cyclo robot I/O.
 
-`cyclo_brain` intentionally uses the old shared policy runtime architecture:
-each backend container runs the same two process layout, and backend-specific
-code only implements model loading, preprocessing, prediction, and cleanup.
+## Runtime Architecture
 
-- `sdk/` contains host- and container-shared Python assets such as
-  `robot_client`, `action_chunk_processing`, and `zenoh_ros2_sdk`.
-- `policy/common/runtime/` contains the shared Main Runtime and Engine Process.
-- `policy/<backend>/<backend>_engine/` contains backend-specific policy code.
-- `policy/common/s6-services/` provides the shared `main-runtime` and
-  `engine-process` longruns used by LeRobot and GR00T.
+The robot-facing runtime is part of the `cyclo_intelligence` image. Model
+frameworks remain isolated in Engine-only worker images.
 
-See [`STRUCTURE.md`](STRUCTURE.md) and
-[`docs/architecture.html`](docs/architecture.html) for the full architecture.
+```text
+UI / BT
+   |
+   v
+Orchestrator
+   |  /policy/inference_command
+   v
+Policy Runtime (cyclo_intelligence)
+   |  /<runtime>/engine_command
+   v
+Engine Process (lerobot_server or groot_server)
+   |  direct ROS2/Zenoh observation subscriptions
+   v
+Model inference -> action chunk -> Policy Runtime -> robot command
+```
 
-## Runtime Contract
+The Policy Runtime owns the single global inference session, lifecycle,
+`ControlLoop`, `ActionChunkProcessor`, initial-pose synchronization, command
+publishing, and safety stops. An Engine Process owns model dependencies,
+checkpoint loading, observation preprocessing, and action-chunk inference. It
+never publishes robot commands.
 
-Every backend follows the same service shape:
-
-1. The UI, orchestrator, BT, or CLI calls `/<backend>/inference_command`.
-2. The Main Runtime owns session state, action buffering, command publishing,
-   and the control loop.
-3. The Engine Process owns model loading, observation reads, and model
-   inference.
-4. The Engine Process returns an `action_list` shaped `(T, D)`.
-5. The Main Runtime buffers the action list and pops at the control cadence.
-
-The Engine Process never publishes robot commands. Robot command output always
-goes through the Main Runtime and `RobotClient`.
-
-## Safety Modes
-
-Inference commands include a robot-publish gate:
-
-- `publish_to_robot = false`: simulation / dry-run mode. The runtime publishes
-  `/inference/trajectory_preview` for the 3D viewer and does not publish robot
-  command topics.
-- `publish_to_robot = true`: robot mode. The runtime publishes the same 3D
-  preview and also publishes configured robot command topics.
-
-When the action buffer is empty, `ActionChunkProcessor.pop_action()` returns
-`None`; the control loop does not repeat the previous action. Pause, stop,
-unload, and output-mode changes clear buffered actions so a stale command cannot
-jump into the robot after a mode switch.
-
-## Backend Layout
+## Layout
 
 ```text
 cyclo_brain/
-├── sdk/
-│   ├── action_chunk_processing/
-│   ├── robot_client/
-│   └── zenoh_ros2_sdk/
-└── policy/
-    ├── common/
-    │   ├── runtime/
-    │   │   ├── main_runtime/
-    │   │   └── engine_process/
-    │   └── s6-services/
-    │       ├── main-runtime/
-    │       └── engine-process/
-    ├── lerobot/
-    │   ├── Dockerfile.{arm64,amd64}
-    │   ├── lerobot/
-    │   └── lerobot_engine/
-    └── groot/
-        ├── Dockerfile.{arm64,amd64}
-        ├── Isaac-GR00T/
-        └── groot_engine/
+├── policy/
+│   ├── common/
+│   │   ├── catalog/               # manifest loading and validation
+│   │   └── runtime/
+│   │       ├── main_runtime/      # central Policy Runtime package
+│   │       └── engine_process/    # code copied into each worker image
+│   ├── lerobot/
+│   │   ├── manifest.yaml
+│   │   ├── lerobot/               # upstream fork submodule
+│   │   └── lerobot_engine/        # InferenceEngine adapter
+│   └── groot/
+│       ├── manifest.yaml
+│       ├── Isaac-GR00T/           # upstream submodule
+│       └── groot_engine/          # InferenceEngine adapter
+└── sdk/
+    ├── action_chunk_processing/
+    ├── robot_client/
+    └── zenoh_ros2_sdk/
 ```
 
-## Adding A Backend
+The Python package is still named `main_runtime` for source compatibility,
+but it runs only as the central `policy-runtime` s6 service in the Cyclo
+container. Worker images contain only `engine-process`.
 
-1. Add `policy/<backend>/<backend>_engine/`.
-2. Implement the shared `InferenceEngine` contract:
-   `load_policy`, `get_action_chunk`, `cleanup`, and `is_ready`.
-3. Use `policy/common/runtime` and `policy/common/s6-services`; do not create
-   backend-specific runtime processes unless the architecture itself changes.
-4. Add the backend service to `docker/docker-compose.yml` and
-   `docker/supervisor_api/app.py`.
-5. If runtime structure changes, update `STRUCTURE.md` and
-   `docs/architecture.html` in the same change.
+## External And Worker APIs
+
+- `/policy/inference_command`: canonical external lifecycle service.
+- `/lerobot/inference_command` and `/groot/inference_command`: temporary
+  compatibility aliases backed by the same global session.
+- `/<runtime>/engine_command`: internal Worker API with `DESCRIBE`, `LOAD`,
+  `GET_ACTION`, `UNLOAD`, and `STATUS`.
+- `/<runtime>/worker_heartbeat`: Worker instance and engine-state heartbeat.
+
+`policy_id` uses a namespaced value such as `lerobot:act` or `groot:n17`.
+The Runtime validates the repository manifest against Worker `DESCRIBE` before
+LOAD. Incompatible protocol major versions, policy sets, or capabilities are
+rejected.
+
+## Policy Catalog
+
+Each independently deployed runtime owns one `manifest.yaml`. It declares its
+runtime ID, Compose service, checkpoint root, supported policies,
+capabilities, and model-specific UI parameters. The catalog is the common
+source for the Inference UI, BT model selector, Supervisor API, and Runtime
+request validation. Docker image names and mounts remain owned by Compose.
+
+## Deployment Units
+
+| Change | Images to rebuild |
+|---|---|
+| UI or Orchestrator | Cyclo |
+| Control loop, safety, sync/async, or Runtime catalog | Cyclo |
+| LeRobot model adapter or dependency | LeRobot Worker |
+| GR00T model adapter or dependency | GR00T Worker |
+| Engine wire protocol or shared Worker SDK | Cyclo and affected Workers |
+
+Compose runs image contents without source bind mounts. Rebuild the affected
+image with `--build`; for React-only iteration, use `docker/container.sh build-ui`.
+
+See [`STRUCTURE.md`](STRUCTURE.md) for module ownership and
+[`docs/architecture.html`](docs/architecture.html) for the visual architecture.

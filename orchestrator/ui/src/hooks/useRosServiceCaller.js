@@ -121,6 +121,17 @@ export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
   };
 }
 
+export function buildPolicySelectionTaskInfo(taskInfo = {}) {
+  const parameters = Object.fromEntries(
+    Object.entries(taskInfo.policyParameters || {})
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+  return {
+    policy_id: String(taskInfo.policyId || ''),
+    policy_parameters_json: JSON.stringify(parameters),
+  };
+}
+
 export function useRosServiceCaller() {
   const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -314,6 +325,9 @@ export function useRosServiceCaller() {
           case 'cancel_segment':
             command_enum = TaskCommand.CANCEL_SEGMENT;
             break;
+          case 'get_inference_status':
+            command_enum = TaskCommand.GET_INFERENCE_STATUS;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }
@@ -370,12 +384,10 @@ export function useRosServiceCaller() {
         const imageResize = options.imageResize || null;
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
         const policyPath = String(taskInfo.policyPath || '').trim();
-        const accelerationMode = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationMode || 'pytorch').trim()
-          : 'pytorch';
-        const accelerationEnginePath = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationEnginePath || '').trim()
-          : '';
+        const accelerationMode = String(taskInfo.accelerationMode || 'pytorch').trim();
+        const accelerationEnginePath = accelerationMode === 'pytorch'
+          ? ''
+          : String(taskInfo.accelerationEnginePath || '').trim();
         const actionRequestMode = (
           String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
             ? 'sync'
@@ -404,6 +416,7 @@ export function useRosServiceCaller() {
             action_request_mode: actionRequestMode,
             acceleration_mode: accelerationMode || 'pytorch',
             acceleration_engine_path: accelerationEnginePath,
+            ...buildPolicySelectionTaskInfo(taskInfo),
             ...buildInitialPoseSyncTaskInfo(taskInfo),
           },
           command: Number(command_enum),
@@ -444,6 +457,14 @@ export function useRosServiceCaller() {
       }
     },
     [callService]
+  );
+
+  const getInferenceStatus = useCallback(
+    () => sendRecordCommand('get_inference_status', {
+      autofillEmptyTaskFields: false,
+      serviceTimeoutMs: 4000,
+    }),
+    [sendRecordCommand]
   );
 
   const getImageTopicList = useCallback(async () => {
@@ -1018,6 +1039,7 @@ export function useRosServiceCaller() {
   return {
     callService,
     sendRecordCommand,
+    getInferenceStatus,
     getImageTopicList,
     getRobotInfo,
     getTreeList,

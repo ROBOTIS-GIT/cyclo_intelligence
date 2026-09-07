@@ -53,7 +53,7 @@ string job_id
 """
 
 # --- InferenceCommand (interfaces/srv/InferenceCommand.srv) ---
-# Unified policy-session service hosted by the Main process. Command enum
+# Unified policy-session service hosted by the central Policy Runtime. Command enum
 # values must match interfaces/srv/InferenceCommand.srv.
 INFERENCE_COMMAND_REQUEST_DEF = """\
 uint8 command
@@ -70,36 +70,28 @@ uint16 inference_hz
 float64 chunk_align_window_s
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+string policy_id
+string policy_parameters_json
 """
 
 INFERENCE_COMMAND_RESPONSE_DEF = """\
 bool success
 string message
 string[] action_keys
-"""
-
-# --- EngineCommand (interfaces/srv/EngineCommand.srv) ---
-# Internal Main -> Engine process service. seq_id is echoed so the Main
-# process can discard late/stale responses after a timeout.
-ENGINE_COMMAND_REQUEST_DEF = """\
-uint8 command
-uint64 seq_id
-string model_path
-string embodiment_tag
-string robot_type
-string task_instruction
-string acceleration_mode
-string acceleration_engine_path
-"""
-
-ENGINE_COMMAND_RESPONSE_DEF = """\
-uint64 seq_id
-bool success
-string message
-string[] action_keys
-int32 chunk_size
-int32 action_dim
-float64[] action_list
+string runtime_state
+string loaded_model_path
+string loaded_policy_id
+string loaded_policy_parameters_json
+bool publish_to_robot
+string loaded_action_request_mode
+string loaded_acceleration_mode
+string loaded_acceleration_engine_path
+uint16 loaded_control_hz
+uint16 loaded_inference_hz
+float64 loaded_chunk_align_window_s
+bool loaded_initial_pose_sync
+float64 loaded_initial_pose_sync_duration_s
+string runtime_error
 """
 
 # --- StopTraining (interfaces/srv/StopTraining.srv) ---

@@ -150,7 +150,20 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir --break-system-packages \
         setuptools==68.1.2 'numpy<2' \
         psutil matplotlib pandas huggingface_hub \
-        mcap mcap-ros2-support pyarrow==24.0.0
+        mcap mcap-ros2-support pyarrow==24.0.0 \
+        "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" \
+        "GitPython>=3.1.18" "json5>=0.9.14" pyyaml
+
+# Central Policy Runtime. Model frameworks remain in their worker images.
+COPY cyclo_brain/policy/common /opt/cyclo/policy/common
+COPY cyclo_brain/policy/lerobot/manifest.yaml /opt/cyclo/policy/lerobot/manifest.yaml
+COPY cyclo_brain/policy/groot/manifest.yaml /opt/cyclo/policy/groot/manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk /opt/cyclo/sdk/zenoh_ros2_sdk
+COPY cyclo_brain/sdk/robot_client /opt/cyclo/sdk/robot_client
+COPY cyclo_brain/sdk/action_chunk_processing /opt/cyclo/sdk/action_chunk_processing
+RUN mkdir -p /orchestrator_config /run/cyclo && \
+    cp ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs/*.yaml /orchestrator_config/ && \
+    cp ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs/schema.py /orchestrator_config/
 
 # colcon build the full workspace.
 # Use --paths (explicit package list) instead of --base-paths
@@ -216,12 +229,15 @@ RUN mkdir -p /var/run/agent && chmod 777 /var/run/agent
 # to align with the cyclo_* family). Provides the FastAPI app that the
 # s6-agent service wraps.
 RUN git clone -b main https://github.com/ROBOTIS-GIT/cyclo_manager.git /opt/cyclo_manager
-ENV PYTHONPATH=/opt/cyclo_manager:${PYTHONPATH}
+ENV PYTHONPATH=/opt/cyclo_manager
 RUN pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
 
 # UI static build from stage 1
 COPY --from=ui-builder /ui/build /usr/share/nginx/html
 COPY orchestrator/ui/nginx.conf /etc/nginx/conf.d/default.conf
+COPY shared/shared/robot_configs/urdf/ /usr/share/nginx/html/urdf/urdf/
+COPY shared/shared/robot_configs/ffw_description/ /usr/share/nginx/html/urdf/ffw_description/
+COPY shared/shared/robot_configs/open_manipulator_description/ /usr/share/nginx/html/urdf/open_manipulator_description/
 RUN rm -f /etc/nginx/sites-enabled/default
 
 # s6 services — s6-agent + orchestrator + cyclo_data longruns with
@@ -236,7 +252,8 @@ RUN mkdir -p /usr/local/lib/s6-services && \
     cp /etc/s6-overlay/s6-rc.d/common/ros2_service_finish.sh /usr/local/lib/s6-services/ && \
     rm -rf /etc/s6-overlay/s6-rc.d/common && \
     chmod +x /usr/local/lib/s6-services/ros2_service_run.sh \
-             /usr/local/lib/s6-services/ros2_service_finish.sh
+             /usr/local/lib/s6-services/ros2_service_finish.sh \
+             /etc/s6-overlay/s6-rc.d/policy-runtime/run
 
 # Log directories — logutil-service runs as 'nobody' by default
 RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node && \
@@ -248,6 +265,7 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
 # /api/backends/* endpoints for lerobot / groot lifecycle are still
 # 501 stubs until the §4.8 follow-up adds docker-py.
 COPY docker/supervisor_api /opt/supervisor_api
+COPY docker/docker-compose.yml docker/docker-compose.override.yml /opt/cyclo/docker/
 RUN pip install --no-cache-dir --break-system-packages \
         -r /opt/supervisor_api/requirements.txt
 

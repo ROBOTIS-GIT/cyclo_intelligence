@@ -54,7 +54,8 @@ def _walk_share_dir(src_subdir):
 
 # shared/robot_configs/*_config.yaml      (per-robot ROS2 params loaded by
 #                                          orchestrator launch + read directly
-#                                          by policy main_runtime containers)
+#                                          by the central Policy Runtime and
+#                                          model Worker containers)
 # shared/robot_configs/urdf/*.urdf        (per-robot URDF XML)
 # shared/robot_configs/ffw_description/** (mesh tree, recursive)
 # shared/robot_configs/open_manipulator_description/**

@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cyclo Brain Policy Runtime 구조 변경 상세 보고서</title>
+  <style>
+    :root {
+      --ink:#172129;--muted:#5b6770;--paper:#f4f6f5;--surface:#fff;
+      --line:#cbd3d7;--line-strong:#89969e;--cyclo:#126b5c;
+      --cyclo-soft:#e7f4f0;--worker:#245f9d;--worker-soft:#eaf1f8;
+      --robot:#8c4a31;--robot-soft:#faeee9;--control:#775618;
+      --control-soft:#f8f1df;--risk:#a33636;--risk-soft:#fbecec;
+      --code:#182a35;--ok:#18704f;--pending:#9a6800;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;color:var(--ink);background:var(--paper);font-family:Pretendard,"Noto Sans KR",Arial,sans-serif;font-size:15px;line-height:1.62;overflow-x:hidden}
+    button{font:inherit} code,pre{font-family:"SFMono-Regular",Consolas,monospace}
+    code{padding:1px 4px;color:#153b50;background:#edf1f3;border-radius:3px;overflow-wrap:anywhere}
+    .shell{width:calc(100% - 32px);max-width:1240px;min-width:0;margin:0 auto}
+    header{padding:34px 0 28px;color:#fff;background:#1c3038;border-bottom:5px solid var(--cyclo)}
+    .eyebrow{margin-bottom:7px;color:#9ed6ca;font-size:12px;font-weight:800;text-transform:uppercase}
+    h1{max-width:940px;margin:0;font-size:42px;line-height:1.16;letter-spacing:0}
+    header p{max-width:900px;margin:14px 0 0;color:#d9e4e7}
+    h2{margin:0 0 8px;font-size:28px;line-height:1.3;letter-spacing:0}
+    h3{margin:0 0 7px;font-size:18px;line-height:1.4;letter-spacing:0}
+    p{margin:0 0 11px} ul{margin:8px 0 0;padding-left:20px} li+li{margin-top:5px}
+    .tabs{position:sticky;top:0;z-index:30;display:flex;gap:5px;overflow-x:auto;padding:10px max(16px,calc((100vw - 1240px)/2));background:rgba(244,246,245,.97);border-bottom:1px solid var(--line);scrollbar-width:thin}
+    .tab,.sequence-button{flex:0 0 auto;min-height:40px;padding:8px 13px;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:5px;cursor:pointer;font-weight:750}
+    .tab:hover,.sequence-button:hover{border-color:var(--worker)}
+    .tab[aria-selected="true"]{color:#fff;background:var(--worker);border-color:var(--worker)}
+    main{padding:28px 0 58px}.panel{display:none}.panel.active{display:block}
+    .lead{max-width:960px;color:var(--muted);font-size:16px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:18px 0}
+    .grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .card{min-width:0;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:6px}
+    .card p:last-child,.card ul:last-child{margin-bottom:0}
+    .metric{min-height:146px;border-top:4px solid var(--cyclo)}.metric.worker{border-top-color:var(--worker)}.metric.control{border-top-color:var(--control)}
+    .metric strong{display:block;margin-bottom:5px;font-size:20px}
+    .badge{display:inline-flex;align-items:center;min-height:24px;margin-bottom:8px;padding:2px 8px;color:#fff;background:var(--line-strong);border-radius:4px;font-size:12px;font-weight:800}
+    .badge.ok{background:var(--ok)}.badge.pending{background:var(--pending)}.badge.risk{background:var(--risk)}.badge.cyclo{background:var(--cyclo)}.badge.worker{background:var(--worker)}
+    .callout{margin:18px 0;padding:14px 16px;background:var(--control-soft);border-left:5px solid var(--control)}
+    .callout.info{background:var(--worker-soft);border-left-color:var(--worker)}.callout.risk{background:var(--risk-soft);border-left-color:var(--risk)}
+    .diagram{margin:20px 0;padding:18px;background:#eef1f1;border:1px solid var(--line);border-radius:6px;overflow-x:auto}
+    .architecture{display:grid;grid-template-columns:minmax(190px,.8fr) 54px minmax(360px,1.5fr) 54px minmax(250px,1fr);gap:10px;align-items:stretch;min-width:970px}
+    .lane{min-width:0;padding:12px;background:#fff;border:2px solid var(--line-strong);border-radius:6px}
+    .lane.cyclo{border-color:var(--cyclo);background:var(--cyclo-soft)}.lane.worker{border-color:var(--worker);background:var(--worker-soft)}.lane.robot{border-color:var(--robot);background:var(--robot-soft)}
+    .lane-title{display:flex;justify-content:space-between;gap:8px;padding-bottom:8px;border-bottom:1px solid rgba(23,33,41,.2);font-weight:850}
+    .node{margin-top:9px;padding:9px 10px;background:rgba(255,255,255,.9);border:1px solid var(--line);border-radius:4px}
+    .node strong,.node small{display:block}.node small{color:var(--muted);line-height:1.45}
+    .connector{display:grid;place-items:center;min-width:54px;color:var(--muted);text-align:center;font-size:12px;font-weight:750}
+    .connector:before{content:"";width:100%;height:2px;background:var(--line-strong)}.connector span{padding:4px 2px;background:#eef1f1}
+    .flow-key{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:13px}.key-item{display:inline-flex;align-items:center;gap:6px}.key-line{width:28px;height:3px;background:var(--worker)}.key-line.topic{background:var(--robot)}.key-line.http{background:var(--control)}
+    .compare{display:grid;grid-template-columns:minmax(0,1fr) 56px minmax(0,1fr);gap:12px;align-items:stretch;margin:20px 0}
+    .compare-side{padding:16px;background:#fff;border:2px solid var(--risk);border-radius:6px}.compare-side.after{border-color:var(--ok)}
+    .compare-arrow{display:grid;place-items:center;color:var(--worker);font-size:30px;font-weight:900}
+    .stack{display:grid;gap:8px;margin-top:12px}.stack-item{padding:10px;background:#f9faf9;border:1px solid var(--line);border-radius:4px}
+    .sequence-controls{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 12px}.sequence-button[aria-pressed="true"]{color:#fff;background:var(--cyclo);border-color:var(--cyclo)}
+    .sequence{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:14px 0}
+    .sequence-step{position:relative;min-height:146px;padding:12px;background:#fff;border:1px solid var(--line);border-top:4px solid var(--cyclo);border-radius:5px}
+    .sequence-step:not(:last-child):after{content:">";position:absolute;top:42%;right:-15px;z-index:2;color:var(--worker);font-size:22px;font-weight:900}
+    .sequence-step b{display:grid;place-items:center;width:26px;height:26px;margin-bottom:8px;color:#fff;background:var(--cyclo);border-radius:50%}.sequence-step strong{display:block;margin-bottom:5px}.sequence-step small{color:var(--muted)}
+    .sequence-detail{min-height:116px;padding:15px;background:#fff;border:1px solid var(--line);border-left:5px solid var(--cyclo);border-radius:5px}
+    .table-wrap{overflow-x:auto;margin:16px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
+    table{width:100%;min-width:840px;border-collapse:collapse}th,td{padding:11px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#e7ecee;font-size:13px;white-space:nowrap}tr:last-child td{border-bottom:0}td.good{color:var(--ok);font-weight:750}td.cost{color:var(--risk);font-weight:750}
+    pre{margin:14px 0;padding:16px;overflow-x:auto;color:#edf4f6;background:var(--code);border-radius:6px;line-height:1.5;tab-size:2}.file-tree{color:#d9edf4}.file-tree .new{color:#8ee0bf}.file-tree .moved{color:#ffd383}
+    details{margin:8px 0;background:#fff;border:1px solid var(--line);border-radius:5px}summary{padding:11px 13px;cursor:pointer;font-weight:800}details>div{padding:0 13px 13px}
+    .responsibility{display:grid;grid-template-columns:190px minmax(0,1fr) 230px;gap:12px;align-items:start;padding:12px 0;border-bottom:1px solid var(--line)}.responsibility:last-child{border-bottom:0}.owner{font-weight:850}.path{color:var(--muted);font-size:13px}
+    .boundary{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;color:#33434d;background:#edf1f3;border:1px solid #d8dfe2;border-radius:3px;font-size:12px;font-weight:700}
+    .status-list{display:grid;gap:8px;margin:16px 0}.status-item{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;padding:12px;background:#fff;border:1px solid var(--line);border-radius:5px}
+    footer{padding:22px 0 34px;color:var(--muted);border-top:1px solid var(--line);font-size:13px}
+    @media(max-width:900px){h1{font-size:34px}.grid,.grid.three{grid-template-columns:1fr}.compare{grid-template-columns:1fr}.compare-arrow{transform:rotate(90deg);min-height:40px}.sequence{grid-template-columns:1fr}.sequence-step{min-height:0}.sequence-step:not(:last-child):after{content:"v";top:auto;right:auto;bottom:-19px;left:50%}.responsibility{grid-template-columns:1fr;gap:4px}}
+    @media(max-width:560px){h1{font-size:29px}h2{font-size:24px}.shell{width:calc(100% - 22px)}header{padding:28px 0 24px}main{padding-top:22px}.card,.diagram{padding:13px}.status-item{grid-template-columns:1fr;gap:5px}}
+  </style>
+</head>
+<body>
+  <header><div class="shell"><div class="eyebrow">Actual Working Tree / 2026-09-07</div><h1>Cyclo Brain Policy Runtime<br>구조 변경 상세 보고서</h1><p>현재 작업 트리에 구현된 코드를 기준으로 이전 구조와 달라진 점, 각 모듈의 책임, inference 데이터 흐름, 배포 효과, 검증 결과와 남은 위험을 설명합니다.</p></div></header>
+  <nav class="tabs" role="tablist" aria-label="보고서 섹션">
+    <button class="tab" role="tab" aria-selected="true" data-target="overview">한눈에 보기</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="comparison">전후 비교</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="modules">모듈 책임</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="dataflow">데이터 흐름</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="lifecycle">실행 순서</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="folders">폴더 구조</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="catalog">Catalog와 UI</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="docker">Docker와 배포</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="assessment">객관적 평가</button>
+  </nav>
+  <main class="shell">
+    <section class="panel active" id="overview" role="tabpanel">
+      <h2>핵심 결론</h2>
+      <p class="lead">기존에는 LeRobot과 GR00T 컨테이너가 각각 모델 추론뿐 아니라 action buffer, 제어 주기, 로봇 command 발행과 안전 정지까지 소유했습니다. 지금은 공통 제어 계층을 <strong>Cyclo 컨테이너의 중앙 Policy Runtime</strong>으로 옮기고 모델 컨테이너는 <strong>Engine-only Worker</strong>로 줄였습니다.</p>
+      <div class="grid three">
+        <article class="card metric"><span class="badge cyclo">Centralized</span><strong>제어 계층 1개</strong><p>session, ControlLoop, action chunk 처리, initial pose sync, 안전 정지를 Cyclo가 한 번만 구현합니다.</p></article>
+        <article class="card metric worker"><span class="badge worker">Isolated</span><strong>모델 Worker 분리</strong><p>LeRobot과 GR00T는 framework dependency, 모델 load, 관측 전처리와 추론만 담당합니다.</p></article>
+        <article class="card metric control"><span class="badge ok">Catalog-driven</span><strong>정책 정보 단일화</strong><p>정책 목록, capability와 UI parameter를 manifest에 선언하고 UI와 Supervisor가 같은 catalog를 사용합니다.</p></article>
+      </div>
+      <div class="diagram" aria-label="현재 전체 구조">
+        <div class="architecture">
+          <div class="lane"><div class="lane-title"><span>사용자 계층</span><span>Browser</span></div><div class="node"><strong>Inference UI</strong><small>정책, checkpoint, timing, sync/async, robot/simulation 선택</small></div><div class="node"><strong>Backend Control</strong><small>Worker pull, start, stop, recreate, 상태 확인</small></div></div>
+          <div class="connector"><span>ROS / HTTP</span></div>
+          <div class="lane cyclo"><div class="lane-title"><span>cyclo_intelligence</span><span>Control Plane</span></div><div class="node"><strong>Orchestrator</strong><small>UI 요청 정규화, TaskInfo 관리, 중앙 inference service 호출</small></div><div class="node"><strong>Policy Runtime</strong><small>단일 session, Worker routing, ControlLoop, action buffer, safety</small></div><div class="node"><strong>Supervisor API</strong><small>Catalog 제공, Docker lifecycle, UDS interlock</small></div></div>
+          <div class="connector"><span>Zenoh service</span></div>
+          <div><div class="lane worker"><div class="lane-title"><span>lerobot_server</span><span>Worker</span></div><div class="node"><strong>Engine Process</strong><small>ACT 등 LeRobot 정책 load, observation 전처리, action chunk 추론</small></div></div><div class="lane worker" style="margin-top:10px"><div class="lane-title"><span>groot_server</span><span>Worker</span></div><div class="node"><strong>Engine Process</strong><small>GR00T N1.7 load, observation 전처리, action chunk 추론</small></div></div><div class="lane robot" style="margin-top:10px"><div class="lane-title"><span>Robot</span><span>ROS2 / Zenoh</span></div><div class="node"><strong>Observation topics</strong><small>camera, joint_states, odom</small></div><div class="node"><strong>Command topics</strong><small>joint trajectory, cmd_vel</small></div></div></div>
+        </div>
+        <div class="flow-key"><span class="key-item"><span class="key-line"></span>Lifecycle/action chunk: Zenoh service</span><span class="key-item"><span class="key-line topic"></span>Robot data: Zenoh topic</span><span class="key-item"><span class="key-line http"></span>Container lifecycle: HTTP + Docker API</span></div>
+      </div>
+      <div class="callout info"><strong>중요:</strong> 관측 이미지를 Cyclo가 받아 Worker에 다시 넘기는 Gateway 구조로 바꾸지 않았습니다. Worker가 로봇의 camera/state topic을 직접 구독하므로 observation 경로에 HTTP, NPZ 또는 추가 복사 단계가 생기지 않았습니다.</div>
+      <div class="callout"><strong>현재 상태:</strong> 이 문서는 commit된 릴리스가 아니라 현재의 큰 미커밋 작업 트리를 설명합니다. 구조 전환은 AMD64에서 기동했지만 ARM64, 실제 GR00T checkpoint와 아래 readiness 항목은 완료 전 검증 또는 보완 대상입니다.</div>
+    </section>
+
+    <section class="panel" id="comparison" role="tabpanel">
+      <h2>이전과 현재의 차이</h2><p class="lead">겉으로는 여전히 세 컨테이너이지만 컨테이너 내부의 책임과 inference service의 주인이 달라졌습니다.</p>
+      <div class="compare">
+        <article class="compare-side"><span class="badge risk">이전 구조</span><h3>Worker마다 Main Runtime 복제</h3><div class="stack"><div class="stack-item"><strong>cyclo_intelligence</strong><br>UI + Orchestrator + Supervisor</div><div class="stack-item"><strong>lerobot_server</strong><br>Main Runtime + ControlLoop + command + LeRobot Engine</div><div class="stack-item"><strong>groot_server</strong><br>Main Runtime + ControlLoop + command + GR00T Engine</div></div><ul><li>공통 제어 수정 시 두 모델 이미지를 모두 재빌드</li><li>backend별 session과 command ownership이 분산</li><li>UI와 Supervisor에 정책 정보가 별도 하드코딩</li></ul></article>
+        <div class="compare-arrow">&gt;</div>
+        <article class="compare-side after"><span class="badge ok">현재 구조</span><h3>Cyclo Runtime 1개 + Engine Worker</h3><div class="stack"><div class="stack-item"><strong>cyclo_intelligence</strong><br>UI + Orchestrator + Supervisor + Policy Runtime + command</div><div class="stack-item"><strong>lerobot_server</strong><br>LeRobot Engine Process only</div><div class="stack-item"><strong>groot_server</strong><br>GR00T Engine Process only</div></div><ul><li>공통 제어 변경은 Cyclo 이미지에만 반영</li><li>global inference session을 한 곳에서 관리</li><li>manifest가 UI, routing, Supervisor의 공통 정보원</li></ul></article>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>관점</th><th>이전</th><th>현재</th><th>효과</th></tr></thead><tbody>
+        <tr><td>외부 endpoint</td><td><code>/lerobot/inference_command</code><br><code>/groot/inference_command</code></td><td><code>/policy/inference_command</code> 중심, 기존 주소는 임시 alias</td><td class="good">Orchestrator routing 단순화</td></tr>
+        <tr><td>공통 제어 코드</td><td>각 Worker 이미지</td><td>Cyclo의 독립 s6 service</td><td class="good">Worker 재빌드 감소</td></tr>
+        <tr><td>모델 컨테이너</td><td>Main + Engine</td><td>Engine Process only</td><td class="good">모델 dependency 경계 선명</td></tr>
+        <tr><td>정책 목록</td><td>UI 상수, Supervisor dict 등에 분산</td><td><code>manifest.yaml</code>에서 catalog 생성</td><td class="good">중복 수정 감소</td></tr>
+        <tr><td>관측 경로</td><td>Engine이 topic 직접 구독</td><td>동일</td><td>추가 hop 없음</td></tr>
+        <tr><td>command 발행</td><td>Worker의 Main Runtime</td><td>Cyclo Policy Runtime</td><td class="good">안전과 command ownership 단일화</td></tr>
+        <tr><td>호환성 검사</td><td>process up 중심</td><td>ready marker + heartbeat + DESCRIBE</td><td class="good">잘못된 조합을 LOAD 전에 차단</td></tr>
+        <tr><td>wire 변경</td><td>backend 내부 영향</td><td>Cyclo와 영향 Worker 동시 변경</td><td class="cost">호환 릴리스 관리 필요</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="panel" id="modules" role="tabpanel">
+      <h2>각 모듈이 담당하는 일</h2><p class="lead">실제로 어떤 상태를 소유하고 어느 경계를 넘는지 기준으로 정리했습니다.</p>
+      <details open><summary>1. Cyclo 컨테이너의 중앙 Policy Runtime</summary><div>
+        <div class="responsibility"><div><div class="owner">PolicyRuntime</div><div class="path">main_runtime/main.py</div></div><div>전체 조립점입니다. Catalog, WorkerRegistry, SessionState, ControlLoop, ServiceHandler를 만들고 중앙 service, heartbeat subscriber와 UDS server를 기동합니다. 종료 시 fail-safe를 먼저 시도합니다.</div><div><span class="boundary">process lifetime</span><span class="boundary">watchdog</span><span class="boundary">ready marker</span></div></div>
+        <div class="responsibility"><div><div class="owner">ServiceHandler</div><div class="path">main_runtime/service_handler.py</div></div><div><code>LOAD/START/PAUSE/RESUME/STOP/UNLOAD/STATUS</code> 상태 전이를 실행합니다. policy ID와 parameter를 검증하고 Worker를 선택하며 LOAD 성공 후 ControlLoop를 구성합니다.</div><div><span class="boundary">lifecycle</span><span class="boundary">validation</span><span class="boundary">rollback</span></div></div>
+        <div class="responsibility"><div><div class="owner">SessionState</div><div class="path">main_runtime/session_state.py</div></div><div>한 개의 global session을 저장합니다. loaded/running/paused/error, model path, policy ID, timing, action mode와 initial pose sync 설정이 UI STATUS 복원의 기준입니다.</div><div><span class="boundary">single session</span><span class="boundary">snapshot</span></div></div>
+        <div class="responsibility"><div><div class="owner">ControlLoop</div><div class="path">main_runtime/control_loop.py</div></div><div>control tick, action 요청, buffer, preview와 실제 command 발행을 담당합니다. sync/async refill, initial pose sync, 현재 자세 hold와 emergency stop도 소유합니다.</div><div><span class="boundary">action buffer</span><span class="boundary">robot command</span><span class="boundary">safety</span></div></div>
+        <div class="responsibility"><div><div class="owner">InferenceRequester</div><div class="path">main_runtime/inference_requester.py</div></div><div>EngineCommand에 <code>seq_id</code>를 붙이고 timeout 뒤 도착한 stale response를 거부합니다. 중복 GET_ACTION도 막습니다.</div><div><span class="boundary">timeout</span><span class="boundary">stale guard</span></div></div>
+        <div class="responsibility"><div><div class="owner">WorkerRegistry</div><div class="path">main_runtime/worker_registry.py</div></div><div>policy ID prefix로 Worker client를 만들고 DESCRIBE를 Catalog와 비교합니다. protocol major, runtime ID, policy 목록, capability, instance와 heartbeat를 추적합니다.</div><div><span class="boundary">routing</span><span class="boundary">compatibility</span><span class="boundary">heartbeat</span></div></div>
+        <div class="responsibility"><div><div class="owner">RuntimeControlServer</div><div class="path">main_runtime/runtime_control.py</div></div><div>로컬 Unix socket으로 Supervisor에 runtime 상태와 Worker 변경 가능 여부를 제공합니다. active session 중 stop/recreate/update 경쟁을 막는 token을 발급합니다.</div><div><span class="boundary">local UDS</span><span class="boundary">interlock</span></div></div>
+      </div></details>
+      <details open><summary>2. LeRobot / GR00T Worker</summary><div>
+        <div class="responsibility"><div><div class="owner">EngineWorker</div><div class="path">runtime/engine_process/worker.py</div></div><div>Worker 공통 service shell입니다. backend의 <code>create_engine()</code>을 호출하고 EngineCommand를 concrete engine으로 전달합니다. DESCRIBE, STATUS, heartbeat, instance ID와 ready marker도 제공합니다.</div><div><span class="boundary">EngineCommand</span><span class="boundary">metadata</span></div></div>
+        <div class="responsibility"><div><div class="owner">InferenceEngine</div><div class="path">runtime/engine.py</div></div><div>backend가 구현하는 최소 interface입니다. <code>load_policy()</code>, <code>get_action_chunk()</code>, <code>cleanup()</code>만 정의하며 ControlLoop와 robot command를 모릅니다.</div><div><span class="boundary">backend contract</span></div></div>
+        <div class="responsibility"><div><div class="owner">LeRobotEngine</div><div class="path">lerobot/lerobot_engine/</div></div><div>checkpoint config에서 policy class와 input feature를 읽고 model을 load합니다. RobotClient의 camera/state를 tensor로 바꾸고 LeRobot policy의 action chunk를 반환합니다.</div><div><span class="boundary">PyTorch</span><span class="boundary">pre/postprocess</span></div></div>
+        <div class="responsibility"><div><div class="owner">GR00T Engine</div><div class="path">groot/groot_engine/ + runtime/</div></div><div>GR00T N1.7, embodiment/modality config와 선택적 TensorRT DiT를 소유하며 동일한 InferenceEngine 계약으로 action chunk를 반환합니다.</div><div><span class="boundary">GR00T</span><span class="boundary">TensorRT</span></div></div>
+        <div class="responsibility"><div><div class="owner">Worker RobotClient</div><div class="path">sdk/robot_client/robot_client.py</div></div><div>camera, joint state와 odom을 직접 구독하고 최신 observation을 보관합니다. command publisher를 만들지 않는 read-only 역할입니다.</div><div><span class="boundary">observation only</span><span class="boundary">Zenoh topic</span></div></div>
+      </div></details>
+      <details open><summary>3. Orchestrator, UI, Supervisor</summary><div>
+        <div class="responsibility"><div><div class="owner">Orchestrator</div><div class="path">orchestrator_node.py</div></div><div>UI task command를 받아 TaskInfo를 만들고 JSON 문법과 크기를 정규화한 뒤 <code>/policy/inference_command</code>로 전달합니다. parameter 의미와 범위는 Runtime이 검증합니다.</div><div><span class="boundary">UI to runtime</span><span class="boundary">status publish</span></div></div>
+        <div class="responsibility"><div><div class="owner">PolicyCatalogContext</div><div class="path">ui/src/contexts/PolicyCatalogContext.js</div></div><div><code>/api/policies/catalog</code>을 UI 전체에 제공합니다. Catalog 실패 시 정적 fallback으로 시작하지 않고 오류와 Retry를 표시하며 inference를 차단합니다.</div><div><span class="boundary">catalog loading</span><span class="boundary">fail closed</span></div></div>
+        <div class="responsibility"><div><div class="owner">PolicyParameterFields</div><div class="path">ui/src/components/PolicyParameterFields.js</div></div><div>manifest schema를 text/path/number/integer/select/toggle control로 렌더링합니다. 모델 변경 시 default를 적용하고 알 수 없는 parameter key를 제거합니다.</div><div><span class="boundary">dynamic UI</span><span class="boundary">conditions</span></div></div>
+        <div class="responsibility"><div><div class="owner">Supervisor API</div><div class="path">docker/supervisor_api/app.py</div></div><div>Catalog API와 Worker pull/start/stop/recreate/status를 제공합니다. Compose와 실행 container를 비교하고 UDS token으로 active Worker 변경을 차단합니다.</div><div><span class="boundary">FastAPI</span><span class="boundary">Docker socket</span><span class="boundary">UDS</span></div></div>
+      </div></details>
+    </section>
+
+    <section class="panel" id="dataflow" role="tabpanel">
+      <h2>데이터는 어디로 움직이는가</h2><p class="lead">제어 요청, observation, action chunk와 robot command는 서로 다른 경로를 사용합니다.</p>
+      <div class="grid three"><article class="card"><span class="badge worker">Control request</span><h3>UI에서 모델 실행까지</h3><p>UI → Orchestrator → Policy Runtime → Worker입니다. 작은 lifecycle request와 action chunk만 service를 통과합니다.</p></article><article class="card"><span class="badge risk">Observation</span><h3>Robot에서 모델까지</h3><p>Robot topic → Worker RobotClient → preprocessing입니다. Cyclo를 경유하지 않습니다.</p></article><article class="card"><span class="badge cyclo">Command</span><h3>모델 결과에서 로봇까지</h3><p>Worker action chunk → Runtime buffer/보간 → Cyclo RobotClient → command topic입니다.</p></article></div>
+      <h3>정상 inference 전체 흐름</h3>
+      <pre>Browser UI
+  |  task command / policy_id / timing / parameters
+  v
+Orchestrator
+  |  InferenceCommand: LOAD, START, ...
+  |  /policy/inference_command
+  v
+Cyclo Policy Runtime
+  +-- Catalog validation + WorkerRegistry routing
+  +-- SessionState owns one global session
+  +-- ControlLoop owns action buffer and timing
+  |
+  |  EngineCommand: LOAD_POLICY / GET_ACTION / UNLOAD / DESCRIBE / STATUS
+  v
+Selected Engine Worker                         Robot
+  +-- RobotClient &lt;--- camera / joint / odom topics ---+
+  +-- preprocessing                                   |
+  +-- model inference                                 |
+  +-- action chunk ------&gt; ControlLoop                |
+                              +-- resample / align    |
+                              +-- preview topic       |
+                              +-- joint/cmd_vel ------&gt;</pre>
+      <h3>구독이 실제로 몇 군데 생기는가</h3>
+      <div class="table-wrap"><table><thead><tr><th>상황</th><th>Worker</th><th>Policy Runtime</th><th>Cyclo Data</th><th>이유</th></tr></thead><tbody>
+        <tr><td>Simulation inference</td><td>camera + state + sensor</td><td>observation 없음</td><td>꺼져 있으면 없음</td><td>Worker만 모델 입력을 읽고 Runtime은 preview만 발행</td></tr>
+        <tr><td>Real robot inference</td><td>camera + state + sensor</td><td>joint state만</td><td>꺼져 있으면 없음</td><td>현재 자세 hold와 안전 정지에 joint state 필요</td></tr>
+        <tr><td>Inference + recording</td><td>모델 입력</td><td>안전용 joint state</td><td>bag 저장용 전체 topic</td><td>추론, 안전, 기록 목적이 달라 의도된 중복</td></tr>
+      </tbody></table></div>
+      <div class="callout info"><strong>복사가 늘어난 부분:</strong> action chunk는 Worker에서 Cyclo Runtime으로 컨테이너 경계를 한 번 넘습니다. 이미지를 중계하는 것은 아니며 작은 수치 배열을 전달하는 대신 제어 코드 중앙화 이점을 얻습니다.</div>
+    </section>
+
+    <section class="panel" id="lifecycle" role="tabpanel">
+      <h2>명령별 실행 순서</h2><p class="lead">버튼을 눌러 각 명령에서 어떤 모듈이 차례로 동작하는지 볼 수 있습니다.</p>
+      <div class="sequence-controls"><button class="sequence-button" aria-pressed="true" data-sequence="load">LOAD</button><button class="sequence-button" aria-pressed="false" data-sequence="start">START</button><button class="sequence-button" aria-pressed="false" data-sequence="loop">CONTROL LOOP</button><button class="sequence-button" aria-pressed="false" data-sequence="stop">STOP / UNLOAD</button><button class="sequence-button" aria-pressed="false" data-sequence="fault">FAIL-SAFE</button></div>
+      <div class="sequence" id="sequenceSteps" aria-live="polite"></div><div class="sequence-detail" id="sequenceDetail"></div>
+      <h3 style="margin-top:22px">상태 모델</h3>
+      <pre>unloaded --LOAD--&gt; loaded --START--&gt; syncing(optional) --&gt; running
+                         ^                                  |    |
+                         |                                  |    +-- PAUSE --&gt; paused -- RESUME
+                         +-- UNLOAD &lt;-- stopped &lt;-- STOP ---+
+
+worker/action/heartbeat fault --&gt; buffer clear + hold attempt --&gt; error</pre>
+      <div class="callout"><strong>호환 endpoint:</strong> 주 endpoint는 <code>/policy/inference_command</code>입니다. <code>/lerobot/inference_command</code>와 <code>/groot/inference_command</code>도 같은 handler를 호출하는 임시 alias로 남아 있습니다.</div>
+    </section>
+
+    <section class="panel" id="folders" role="tabpanel">
+      <h2>폴더 구조와 실행 코드 연결</h2><p class="lead">대규모 이동 대신 기존 디렉터리를 유지하며 중앙 runtime과 catalog를 추가했습니다.</p>
+      <pre class="file-tree">cyclo_brain/
++-- policy/
+|  +-- common/
+|  |  +-- <span class="new">catalog/</span>
+|  |  |  +-- catalog.py                # manifest와 parameter 검증
+|  |  +-- runtime/
+|  |     +-- engine.py                 # InferenceEngine 계약
+|  |     +-- <span class="moved">engine_process/</span>           # Worker 공통 service shell
+|  |     |  +-- protocol.py            # EngineCommand wire 정의
+|  |     |  +-- worker.py              # 명령, DESCRIBE, heartbeat
+|  |     +-- <span class="new">main_runtime/</span>             # Cyclo image에서 실행
+|  |        +-- main.py                # PolicyRuntime 조립과 watchdog
+|  |        +-- service_handler.py     # lifecycle
+|  |        +-- session_state.py       # global session
+|  |        +-- control_loop.py        # timing, buffer, command, safety
+|  |        +-- inference_requester.py # seq, timeout, stale guard
+|  |        +-- worker_registry.py     # routing과 호환성
+|  |        +-- runtime_control.py     # Supervisor용 UDS
+|  +-- lerobot/
+|  |  +-- <span class="new">manifest.yaml</span>
+|  |  +-- lerobot/                     # lerobot-cyclo submodule
+|  |  +-- lerobot_engine/              # adapter와 inference
+|  |  +-- Dockerfile.*                 # Engine-only image
+|  +-- groot/
+|     +-- <span class="new">manifest.yaml</span>
+|     +-- Isaac-GR00T/                 # upstream submodule
+|     +-- groot_engine/ + runtime/
+|     +-- Dockerfile.*                 # Engine-only image
++-- sdk/
+   +-- zenoh_ros2_sdk/                 # Zenoh topic/service
+   +-- robot_client/                   # observation/command abstraction
+   +-- action_chunk_processing/        # 보간, 정렬, buffer
+
+docker/
++-- docker-compose.yml                 # production-like 선언
++-- docker-compose.override.yml        # local no-GPU Cyclo override
++-- Dockerfile.amd64 / arm64           # 중앙 Runtime 포함
++-- s6-services/<span class="new">policy-runtime/</span>        # 독립 longrun
++-- supervisor_api/                    # catalog + Worker lifecycle
+
+interfaces/
++-- msg/TaskInfo.msg
++-- srv/InferenceCommand.srv           # 외부 lifecycle와 STATUS
++-- srv/<span class="new">EngineCommand.srv</span>              # Runtime과 Worker 계약
+
+orchestrator/
++-- orchestrator/...                   # 중앙 endpoint와 상태 동기화
++-- ui/src/contexts/<span class="new">PolicyCatalogContext.js</span>
++-- ui/src/components/<span class="new">PolicyParameterFields.js</span></pre>
+      <div class="grid"><article class="card"><h3><code>main_runtime</code> 이름이 남은 이유</h3><p>디렉터리명은 기존 공통 runtime을 재사용해 남았지만 실행 위치는 Worker가 아니라 Cyclo입니다. 실제 s6 service 이름은 <code>policy-runtime</code>이며 기능상 중복 runtime은 아닙니다.</p></article><article class="card"><h3>삭제된 Worker service</h3><p>LeRobot과 GR00T에서 <code>main-runtime</code> s6 definition이 제거됐습니다. Worker healthcheck도 <code>engine-process</code>와 ready marker를 검사합니다.</p></article></div>
+    </section>
+
+    <section class="panel" id="catalog" role="tabpanel">
+      <h2>Policy Catalog와 동적 UI</h2><p class="lead">모델 실행 코드는 Worker에 있지만 어떤 모델을 보여주고 어떤 parameter를 받을지는 Cyclo manifest에서 결정합니다.</p>
+      <div class="sequence"><article class="sequence-step"><b>1</b><strong>manifest</strong><small>runtime, policy, capability, parameter 선언</small></article><article class="sequence-step"><b>2</b><strong>Loader</strong><small>형식, 중복 ID, Compose와 범위 검증</small></article><article class="sequence-step"><b>3</b><strong>Supervisor</strong><small><code>/api/policies/catalog</code> 제공</small></article><article class="sequence-step"><b>4</b><strong>React UI</strong><small>selector와 field 생성</small></article><article class="sequence-step"><b>5</b><strong>Runtime</strong><small>JSON canonicalize와 schema 검증</small></article><article class="sequence-step"><b>6</b><strong>DESCRIBE</strong><small>Worker 실제 capability 대조</small></article></div>
+      <div class="grid"><article class="card"><span class="badge ok">전역 ID</span><h3><code>lerobot:act</code>, <code>groot:n17</code></h3><p>콜론 앞은 runtime, 뒤는 model입니다. manifest의 model alias는 예전 bare ID를 읽기 위한 호환 기능입니다.</p></article><article class="card"><span class="badge worker">Parameter schema</span><h3>모델별 UI를 선언으로 생성</h3><p>text/path/number/integer/select/toggle, default, 범위와 <code>visible_when</code>을 지원합니다. GR00T TensorRT가 실제 예입니다.</p></article></div>
+      <pre>models:
+  - id: n17
+    label: N1.7
+    requires_instruction: true
+    parameters:
+      - key: acceleration_mode
+        control: select
+        binding: task_info.accelerationMode
+        default: pytorch
+        options: [pytorch, tensorrt_dit]
+      - key: acceleration_engine_path
+        control: path
+        binding: task_info.accelerationEnginePath
+        visible_when: {acceleration_mode: tensorrt_dit}</pre>
+      <div class="callout info"><strong>Policy alias의 범위:</strong> manifest의 <code>aliases: [act]</code>는 예전 policy 이름을 해석하기 위한 호환 정보입니다. Robot config에는 별도의 camera alias 계층을 두지 않으며, checkpoint key와 camera 이름의 일반적인 prefix 및 side/part 표기 차이만 shared resolver가 정규화합니다.</div>
+      <h3>신규 runtime 추가 범위</h3>
+      <div class="table-wrap"><table><thead><tr><th>작업</th><th>추가 위치</th><th>공통 코드 수정</th></tr></thead><tbody>
+        <tr><td>InferenceEngine adapter</td><td><code>policy/&lt;runtime&gt;/&lt;runtime&gt;_engine/</code></td><td>원칙적으로 없음</td></tr><tr><td>정책/capability</td><td><code>manifest.yaml</code></td><td>없음</td></tr><tr><td>dependency image</td><td><code>Dockerfile.*</code></td><td>없음</td></tr><tr><td>운영 service</td><td><code>docker-compose.yml</code></td><td class="cost">한 항목 필요</td></tr><tr><td>UI selector/parameter</td><td>manifest에서 생성</td><td class="good">React 목록 수정 없음</td></tr><tr><td>Supervisor backend 목록</td><td>catalog + Compose</td><td class="good">Python dict 수정 없음</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="panel" id="docker" role="tabpanel">
+      <h2>Docker 파일과 배포 범위</h2><p class="lead">Compose는 image 내용을 운영 기준으로 사용하고 Dockerfile별 build context는 필요한 파일로 제한합니다.</p>
+      <div class="table-wrap"><table><thead><tr><th>파일</th><th>역할</th><th>분리 이유</th></tr></thead><tbody>
+        <tr><td><code>docker-compose.yml</code></td><td>세 service 운영 선언</td><td>image 내부 코드가 기준이며 source mount 없음</td></tr><tr><td><code>docker-compose.override.yml</code></td><td>현재 PC의 no-GPU Cyclo 보정</td><td>Worker GPU 요구와 UI/data container 조건 분리</td></tr><tr><td><code>Dockerfile.amd64/arm64</code></td><td>architecture별 image</td><td>ROS/CUDA base와 설치 차이</td></tr><tr><td><code>Dockerfile.*.dockerignore</code></td><td>build context allowlist</td><td>거대한 모델 submodule과 무관 디렉터리 전송 차단</td></tr>
+      </tbody></table></div>
+      <h3>변경 종류별 재빌드</h3>
+      <div class="table-wrap"><table><thead><tr><th>변경</th><th>Cyclo</th><th>LeRobot</th><th>GR00T</th><th>비고</th></tr></thead><tbody>
+        <tr><td>React UI</td><td class="good">빌드 또는 build-ui</td><td>불필요</td><td>불필요</td><td>개발 중 정적 파일만 교체 가능</td></tr><tr><td>Orchestrator</td><td class="good">재빌드</td><td>불필요</td><td>불필요</td><td>ROS package는 Cyclo 소유</td></tr><tr><td>ControlLoop/safety/sync/async</td><td class="good">재빌드</td><td>불필요</td><td>불필요</td><td>핵심 개선</td></tr><tr><td>LeRobot adapter/policy</td><td>불필요</td><td class="good">재빌드</td><td>불필요</td><td>해당 Worker만</td></tr><tr><td>GR00T adapter/policy</td><td>불필요</td><td>불필요</td><td class="good">재빌드</td><td>해당 Worker만</td></tr><tr><td>EngineCommand wire</td><td class="cost">재빌드</td><td class="cost">재빌드</td><td class="cost">재빌드</td><td>호환 세트 필요</td></tr><tr><td>RobotClient 계약</td><td class="cost">영향 확인</td><td class="cost">재빌드</td><td class="cost">재빌드</td><td>공유 SDK</td></tr>
+      </tbody></table></div>
+      <div class="callout"><strong>첫 전환은 예외:</strong> Worker에서 Main Runtime을 제거하고 EngineCommand를 확장했으므로 최초 배포에서는 Cyclo, LeRobot, GR00T를 함께 교체해야 합니다. 이후부터 독립 빌드 효과를 얻습니다.</div>
+    </section>
+
+    <section class="panel" id="assessment" role="tabpanel">
+      <h2>객관적 개선점과 남은 위험</h2><p class="lead">구조가 새로워졌다는 사실 자체가 개선은 아닙니다. 중복, 배포, 통신, 장애 격리와 운영 복잡도를 나누어 평가했습니다.</p>
+      <div class="grid"><article class="card"><span class="badge ok">개선</span><h3>공통 제어 중복 제거</h3><p>ControlLoop와 safety가 Worker마다 복제되지 않아 모델 수가 늘수록 효과가 커집니다.</p></article><article class="card"><span class="badge ok">개선</span><h3>command ownership 단일화</h3><p>한 global session과 한 Runtime이 command를 발행해 backend 간 제어 경합을 한 곳에서 차단합니다.</p></article><article class="card"><span class="badge ok">개선</span><h3>모델 추가 시 UI 수정 감소</h3><p>정책 표시, instruction과 parameter를 manifest로 옮겨 React/Python 하드코딩을 줄였습니다.</p></article><article class="card"><span class="badge ok">개선</span><h3>운영 image 재현성</h3><p>기본 Compose에서 source mount를 제거해 host checkout이 image를 암묵적으로 바꾸는 문제를 줄였습니다.</p></article><article class="card"><span class="badge pending">비용</span><h3>action chunk의 container hop</h3><p>작은 수치 배열이 Worker에서 Cyclo로 이동합니다. image 중계보다 부담은 작지만 latency 측정은 필요합니다.</p></article><article class="card"><span class="badge pending">비용</span><h3>protocol 호환성 관리</h3><p>EngineCommand 변경 시 Cyclo와 Worker version 조합을 함께 관리해야 합니다.</p></article></div>
+      <h3>현재까지 직접 확인한 상태</h3>
+      <div class="status-list">
+        <div class="status-item"><span class="badge ok">확인</span><div><strong>세 container</strong><br><code>cyclo_intelligence</code>, <code>lerobot_server</code>, <code>groot_server</code>가 AMD64에서 healthy입니다.</div></div>
+        <div class="status-item"><span class="badge ok">확인</span><div><strong>Catalog와 Worker 계약</strong><br>Live API가 두 manifest를 반환하고 두 Worker가 protocol 1.0 compatible입니다.</div></div>
+        <div class="status-item"><span class="badge ok">확인</span><div><strong>LeRobot ACT action path</strong><br>실제 robot topic은 camera 3개와 joint_states 약 14 Hz로 수신됐고 Engine 직접 GET_ACTION에서 <code>100 x 22</code> chunk가 반환됐습니다.</div></div>
+        <div class="status-item"><span class="badge pending">보완</span><div><strong>Sensor readiness</strong><br>LeRobot load가 <code>wait_for_ready()</code> 실패를 무시해 일시적으로 joint가 없는데도 성공할 수 있습니다. 모든 config camera를 기다려 policy가 쓰지 않는 <code>cam_right_head</code>도 경고합니다.</div></div>
+        <div class="status-item"><span class="badge pending">보완</span><div><strong>Worker status timeout</strong><br>모델 작업 중 DESCRIBE 조회가 2초 timeout으로 보일 수 있습니다. action timeout과 별개지만 status 경로를 비차단 또는 cache 기반으로 다듬어야 합니다.</div></div>
+        <div class="status-item"><span class="badge pending">검증</span><div><strong>ARM64와 실제 GR00T</strong><br>실제 checkpoint LOAD, observation, action chunk와 fault를 target robot에서 확인해야 완료입니다.</div></div>
+      </div>
+      <h3>남은 구조적 한계</h3>
+      <div class="table-wrap"><table><thead><tr><th>한계</th><th>영향</th><th>판단</th></tr></thead><tbody>
+        <tr><td>한 global session</td><td>다중 로봇/정책 동시 실행 불가</td><td>현재 한 대 운용에는 적합, 확장 시 session key 필요</td></tr><tr><td>Worker가 robot config와 Zenoh SDK에 의존</td><td>완전한 framework-only 원격 server는 아님</td><td>동일 PC와 낮은 observation latency 목표에는 현실적</td></tr><tr><td>Compose service 수동 선언</td><td>runtime마다 YAML 한 항목 필요</td><td>배포 topology를 명시하는 의도된 제약</td></tr><tr><td>Catalog가 Cyclo와 Worker에 복사</td><td>manifest 불일치 시 LOAD 차단</td><td>fail closed지만 release 동기화 필요</td></tr><tr><td>소프트웨어 hold 한계</td><td>전원 차단 시 command 불가</td><td>robot controller watchdog이 최종 안전장치</td></tr>
+      </tbody></table></div>
+      <div class="callout risk"><strong>결론:</strong> 여러 모델을 빠르게 추가하고 공통 inference 기능을 자주 바꾸려는 목표에는 이전 구조보다 적합합니다. 다만 sensor readiness와 status timeout을 해결하고 ARM64, GR00T와 실제 fail-safe를 통과하기 전에는 최종 배포 완료로 판단하면 안 됩니다.</div>
+    </section>
+  </main>
+  <footer><div class="shell">Source of truth: current working tree at 2026-09-07. No version bump, commit, push or deployment is implied.</div></footer>
+  <script>
+    const tabs=[...document.querySelectorAll('.tab')],panels=[...document.querySelectorAll('.panel')];
+    function showPanel(id,hash=true){tabs.forEach(t=>t.setAttribute('aria-selected',String(t.dataset.target===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(hash)history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'auto'})}
+    tabs.forEach(t=>t.addEventListener('click',()=>showPanel(t.dataset.target)));
+    const sequences={
+      load:{detail:'<h3>LOAD: 모델과 제어 경로 준비</h3><p>Catalog로 policy와 parameter를 검증하고 Worker DESCRIBE를 대조합니다. Worker가 모델과 observation RobotClient를 준비해 action_keys를 돌려주면 Runtime이 command RobotClient와 ActionChunkProcessor를 구성합니다.</p>',steps:[['UI','policy ID, path, timing, parameter'],['Orchestrator','JSON 정규화와 LOAD'],['Runtime','Catalog 검증과 routing'],['Worker','DESCRIBE와 model load'],['Engine','observation subscriber 준비'],['Runtime','ControlLoop와 session 구성']]},
+      start:{detail:'<h3>START: 실행 허가와 첫 action</h3><p>Simulation이면 preview만, robot mode이면 command 발행을 허용합니다. Initial Pose Sync가 켜지면 첫 action으로 천천히 이동한 뒤 새 chunk를 요청합니다.</p>',steps:[['UI','START와 실행 mode'],['Orchestrator','InferenceCommand START'],['Handler','loaded와 safety 확인'],['ControlLoop','선택적 pose sync'],['Worker','첫 GET_ACTION'],['Session','syncing 또는 running']]},
+      loop:{detail:'<h3>CONTROL LOOP: 작은 action 배열만 왕복</h3><p>Worker는 최신 observation으로 chunk를 계산합니다. Runtime은 Dataset FPS와 Control Hz로 보간하고 한 action씩 꺼냅니다. async는 미리 refill하고 sync는 buffer가 빈 뒤 요청합니다.</p>',steps:[['Robot','camera/state/odom'],['Worker','직접 구독과 tensor'],['Model','action chunk 추론'],['Runtime','seq 검증과 수신'],['Processor','align, resample, buffer'],['RobotClient','preview 또는 command']]},
+      stop:{detail:'<h3>STOP / UNLOAD: 제어와 GPU 자원 분리</h3><p>STOP은 loop를 멈추고 모델은 유지합니다. UNLOAD는 running 또는 hold pending이면 거부되며 안전하게 멈춘 뒤 Worker cleanup과 Runtime deconfigure를 수행합니다.</p>',steps:[['UI','STOP 또는 CLEAR'],['Runtime','buffer와 generation 무효화'],['Safety','필요 시 현재 자세 hold'],['Session','stopped 기록'],['Worker','model cleanup'],['Runtime','RobotClient 해제']]},
+      fault:{detail:'<h3>FAIL-SAFE: 늦은 action 재사용 금지</h3><p>GET_ACTION 실패, heartbeat 단절 또는 Worker 교체를 감지하면 buffer를 비웁니다. Real robot이면 zero Twist와 fresh joint state 기반 hold를 시도하고 error로 전환합니다.</p>',steps:[['Monitor','fault 감지'],['ControlLoop','running false와 clear'],['Requester','stale seq 폐기'],['RobotClient','zero Twist와 hold'],['Session','error 원인 저장'],['Supervisor','Worker 변경 차단']]}
+    };
+    const seqButtons=[...document.querySelectorAll('.sequence-button')],steps=document.getElementById('sequenceSteps'),detail=document.getElementById('sequenceDetail');
+    function renderSequence(name){const data=sequences[name];seqButtons.forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.sequence===name)));steps.innerHTML=data.steps.map((s,i)=>`<article class="sequence-step"><b>${i+1}</b><strong>${s[0]}</strong><small>${s[1]}</small></article>`).join('');detail.innerHTML=data.detail}
+    seqButtons.forEach(b=>b.addEventListener('click',()=>renderSequence(b.dataset.sequence)));renderSequence('load');
+    const initial=location.hash.slice(1);if(initial&&panels.some(p=>p.id===initial))showPanel(initial,false);
+  </script>
+</body>
+</html>

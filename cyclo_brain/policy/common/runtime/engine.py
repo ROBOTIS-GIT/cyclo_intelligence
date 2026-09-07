@@ -64,7 +64,8 @@ class InferenceEngine(ABC):
 
         ``request`` carries the InferenceCommand srv body:
         ``request.model_path``, ``request.robot_type``,
-        ``request.task_instruction``.
+        ``request.task_instruction``, ``request.policy_id``, and validated
+        canonical ``request.policy_parameters_json``.
         """
 
     @abstractmethod

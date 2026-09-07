@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -243,6 +244,8 @@ class BackendStatus(BaseModel):
     container_id: Optional[str] = None
     raw_state: Optional[str] = None
     services: List[ServiceStatus] = Field(default_factory=list)
+    worker_compatible: Optional[bool] = None
+    worker_message: str = ""
 
 
 class TrtBuildRequest(BaseModel):
@@ -270,24 +273,16 @@ class TrtEngineStatus(BaseModel):
 # -- Backend (policy container) wiring -----------------------------------------
 
 
-# Compose file + repo-mount paths inside this container — the cyclo_intelligence
-# service bind-mounts the repo root at /root/ros2_ws/src/cyclo_intelligence by
-# default (live edits during dev). Override both with env vars when the mount
-# point differs (e.g. running supervisor_api on the host for debugging).
+# Production reads the Compose and catalog copies baked into the Cyclo image.
+# The repository mount remains an optional development-only fallback.
 _CYCLO_REPO_MOUNT = os.environ.get(
     "CYCLO_SUPERVISOR_API_REPO_MOUNT",
     "/root/ros2_ws/src/cyclo_intelligence",
 )
 _COMPOSE_FILE_IN_CONTAINER = os.environ.get(
     "CYCLO_SUPERVISOR_API_COMPOSE_FILE",
-    f"{_CYCLO_REPO_MOUNT}/docker/docker-compose.yml",
+    "/opt/cyclo/docker/docker-compose.yml",
 )
-_COMPOSE_OVERRIDE_IN_CONTAINER = os.path.join(
-    os.path.dirname(_COMPOSE_FILE_IN_CONTAINER),
-    "docker-compose.override.yml",
-)
-
-
 def _detect_arch() -> str:
     machine = os.uname().machine
     return "arm64" if machine in ("aarch64", "arm64") else "amd64"
@@ -295,47 +290,163 @@ def _detect_arch() -> str:
 
 _BACKEND_ARCH = os.environ.get("ARCH", _detect_arch())
 
+_LOCAL_REPO_ROOT = Path(__file__).resolve().parents[2]
+_POLICY_ROOT = Path(
+    os.environ.get(
+        "CYCLO_POLICY_ROOT",
+        "/opt/cyclo/policy",
+    )
+)
+try:
+    _policy_root_available = _POLICY_ROOT.is_dir()
+except OSError:
+    _policy_root_available = False
+if not _policy_root_available:
+    _POLICY_ROOT = _LOCAL_REPO_ROOT / "cyclo_brain" / "policy"
 
-# Image versions are hardcoded per backend below since each service has
-# its own release cadence. ARCH still falls back to a uname-based sniff
-# because compose only interpolates env vars on the host invocation, so
-# inside the container the env var isn't set.
-_BACKENDS: Dict[str, Dict[str, str]] = {
-    "lerobot": {
-        "service": "lerobot",
-        "container": "lerobot_server",
-        "image": f"robotis/lerobot-zenoh:1.4.1-{_BACKEND_ARCH}",
-        "services": ["main-runtime", "engine-process"],
-    },
-    "groot": {
-        "service": "groot",
-        "container": "groot_server",
-        "image": f"robotis/groot-zenoh:1.3.5-{_BACKEND_ARCH}",
-        "services": ["main-runtime", "engine-process"],
-    },
-}
+_CATALOG_PATH = _POLICY_ROOT / "common" / "catalog" / "catalog.py"
+_CATALOG_SPEC = importlib.util.spec_from_file_location(
+    "cyclo_policy_catalog_impl",
+    _CATALOG_PATH,
+)
+if _CATALOG_SPEC is None or _CATALOG_SPEC.loader is None:
+    raise ImportError(f"Cannot load policy catalog from {_CATALOG_PATH}")
+_catalog_module = importlib.util.module_from_spec(_CATALOG_SPEC)
+sys.modules[_CATALOG_SPEC.name] = _catalog_module
+_CATALOG_SPEC.loader.exec_module(_catalog_module)
 
-_REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
-    "lerobot": (
-        "/workspace",
-        "/robot_client_sdk",
-        "/action_chunk_processing_sdk",
-        "/policy_runtime",
-        "/app/lerobot_engine",
-        "/orchestrator_config",
-    ),
-    "groot": (
-        "/workspace",
-        "/robot_client_sdk",
-        "/action_chunk_processing_sdk",
-        "/policy_runtime",
-        "/app/groot_engine",
-        "/app/runtime",
-        "/orchestrator_config",
-    ),
-}
 
-_GROOT_MODEL_ROOT = "/workspace/model/groot"
+def _catalog_compose_path() -> Path:
+    path = Path(_COMPOSE_FILE_IN_CONTAINER)
+    try:
+        available = path.is_file()
+    except OSError:
+        available = False
+    if available:
+        return path
+    return _LOCAL_REPO_ROOT / "docker" / "docker-compose.yml"
+
+
+def _compose_paths() -> List[Path]:
+    compose_path = _catalog_compose_path()
+    paths = [compose_path]
+    override_path = compose_path.with_name("docker-compose.override.yml")
+    if override_path.is_file():
+        paths.append(override_path)
+    return paths
+
+
+def _load_compose_configuration() -> dict:
+    command = ["docker", "compose"]
+    for compose_path in _compose_paths():
+        command.extend(["-f", str(compose_path)])
+    command.extend(["config", "--format", "json"])
+
+    env = os.environ.copy()
+    env.setdefault("ARCH", _BACKEND_ARCH)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"could not render Docker Compose configuration: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            "could not render Docker Compose configuration"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        compose = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"docker compose config returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(compose, dict) or not isinstance(compose.get("services"), dict):
+        raise RuntimeError("docker compose config did not contain a services mapping")
+    return compose
+
+
+def _interpolate_compose_value(value: str) -> str:
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+    def replace(match):
+        name, default = match.group(1), match.group(2)
+        if name == "ARCH":
+            return _BACKEND_ARCH
+        return os.environ.get(name, default or "")
+
+    return pattern.sub(replace, value)
+
+
+def _compose_mount_targets(service: dict) -> tuple[str, ...]:
+    targets = []
+    for volume in service.get("volumes", []) or []:
+        if isinstance(volume, dict):
+            target = volume.get("target")
+        else:
+            parts = str(volume).split(":")
+            target = parts[1] if len(parts) >= 2 else parts[0]
+        if target and target not in targets:
+            targets.append(target)
+    return tuple(targets)
+
+
+def _load_backend_configuration():
+    compose_services = _load_compose_configuration()["services"]
+    catalog = _catalog_module.load_catalog(
+        _POLICY_ROOT,
+        compose_services=compose_services,
+    )
+    backends = {}
+    required_mounts = {}
+    for runtime in catalog["runtimes"]:
+        service_name = runtime["compose_service"]
+        service = compose_services[service_name]
+        container_name = service.get("container_name")
+        image = service.get("image")
+        if not container_name or not image:
+            raise RuntimeError(
+                f"Compose service {service_name!r} requires container_name and image"
+            )
+        backends[runtime["id"]] = {
+            "service": service_name,
+            "container": _interpolate_compose_value(str(container_name)),
+            "image": _interpolate_compose_value(str(image)),
+            "services": list(runtime["services"]),
+            "checkpoint_root": runtime["checkpoint_root"],
+            "capabilities": dict(runtime["capabilities"]),
+        }
+        required_mounts[runtime["id"]] = _compose_mount_targets(service)
+    return catalog, backends, required_mounts
+
+
+_POLICY_CATALOG, _BACKENDS, _REQUIRED_BACKEND_MOUNTS = (
+    _load_backend_configuration()
+)
+
+
+def _runtime_with_operation(operation: str) -> dict:
+    matches = [
+        runtime
+        for runtime in _POLICY_CATALOG["runtimes"]
+        if operation in runtime["capabilities"].get("operations", [])
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one policy runtime with operation {operation!r}"
+        )
+    return matches[0]
+
+
+_GROOT_RUNTIME = _runtime_with_operation("groot_trt")
+_GROOT_BACKEND_ID = _GROOT_RUNTIME["id"]
+_GROOT_MODEL_ROOT = _GROOT_RUNTIME["checkpoint_root"]
 
 
 @dataclass
@@ -357,6 +468,64 @@ _TRT_BUILD_LOCK = threading.Lock()
 
 def _docker_client() -> docker.DockerClient:
     return docker.from_env()
+
+
+def _runtime_control_request(payload: dict, timeout_s: float = 2.5) -> dict:
+    path = os.environ.get(
+        "POLICY_RUNTIME_CONTROL_SOCKET",
+        "/run/cyclo/policy-runtime.sock",
+    )
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout_s)
+    try:
+        client.connect(path)
+        client.sendall(json.dumps(payload).encode("utf-8"))
+        client.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except (OSError, socket.timeout) as exc:
+        raise RuntimeError(f"Policy Runtime control socket unavailable: {exc}") from exc
+    finally:
+        client.close()
+    try:
+        response = json.loads(b"".join(chunks).decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Policy Runtime returned invalid control data") from exc
+    if not isinstance(response, dict) or not response.get("ok"):
+        raise RuntimeError(str(response.get("error", "Policy Runtime request failed")))
+    return response
+
+
+def _begin_worker_mutation(runtime_id: str) -> str:
+    response = _runtime_control_request(
+        {"operation": "begin_worker_mutation", "runtime_id": runtime_id}
+    )
+    if not response.get("allowed"):
+        raise HTTPException(
+            409,
+            f"Cannot change {runtime_id} worker: {response.get('reason', 'in use')}",
+        )
+    token = str(response.get("token", ""))
+    if not token:
+        raise HTTPException(503, "Policy Runtime did not issue a mutation token")
+    return token
+
+
+def _end_worker_mutation(runtime_id: str, token: str) -> None:
+    try:
+        _runtime_control_request(
+            {
+                "operation": "end_worker_mutation",
+                "runtime_id": runtime_id,
+                "token": token,
+            }
+        )
+    except Exception as exc:
+        logger.error("failed to release %s worker mutation token: %s", runtime_id, exc)
 
 
 def _require_known_backend(name: str) -> Dict[str, str]:
@@ -439,15 +608,22 @@ def _host_project_dir() -> Optional[str]:
         except DockerException as e:
             logger.warning("self-inspect failed for %s: %s", own_id, e)
             continue
+        mounts = ctr.attrs.get("Mounts", [])
         host_repo = _mount_source_for_destination(
-            ctr.attrs.get("Mounts", []),
+            mounts,
             _CYCLO_REPO_MOUNT,
         )
         if host_repo:
             _HOST_PROJECT_DIR_CACHE = os.path.join(host_repo, "docker")
             return _HOST_PROJECT_DIR_CACHE
+        host_workspace = _mount_source_for_destination(mounts, "/workspace")
+        if host_workspace:
+            # The canonical data mount is <repo>/docker/workspace. Its parent
+            # is therefore the host project directory needed by Compose.
+            _HOST_PROJECT_DIR_CACHE = os.path.dirname(host_workspace)
+            return _HOST_PROJECT_DIR_CACHE
     logger.warning(
-        "no mount found for %s — compose CLI relative paths will resolve "
+        "no mount found for %s or /workspace — compose CLI relative paths will resolve "
         "against the in-container path, which the host docker daemon "
         "cannot satisfy",
         _CYCLO_REPO_MOUNT,
@@ -546,9 +722,8 @@ def _compose_base_cmd() -> List[str]:
     project_dir = _host_project_dir()
     if project_dir:
         cmd += ["--project-directory", project_dir]
-    cmd += ["-f", _COMPOSE_FILE_IN_CONTAINER]
-    if os.path.exists(_COMPOSE_OVERRIDE_IN_CONTAINER):
-        cmd += ["-f", _COMPOSE_OVERRIDE_IN_CONTAINER]
+    for compose_path in _compose_paths():
+        cmd += ["-f", str(compose_path)]
     return cmd
 
 
@@ -847,7 +1022,7 @@ def _start_trt_build_job(
     cmd = [
         "docker",
         "exec",
-        _BACKENDS["groot"]["container"],
+        _BACKENDS[_GROOT_BACKEND_ID]["container"],
         "python3",
         "-m",
         "runtime.prepare_trt_engine",
@@ -974,7 +1149,7 @@ def _backend_service_statuses(
     raw_state: str,
     service_names: List[str],
 ) -> List[ServiceStatus]:
-    """Inspect the two s6-managed policy runtime processes."""
+    """Inspect the s6-managed services declared by one Worker manifest."""
     if raw_state != "running":
         return []
 
@@ -1084,6 +1259,12 @@ async def health() -> HealthResponse:
     container = os.environ.get("HOSTNAME", "unknown")
     s6_ready = os.path.isdir("/run/service")
     return HealthResponse(ok=True, container=container, s6_ready=s6_ready)
+
+
+@app.get("/policies/catalog")
+async def policy_catalog() -> dict:
+    """Return the validated policy/runtime catalog used by this process."""
+    return _POLICY_CATALOG
 
 
 @app.get("/workspace", response_model=WorkspaceMountResponse)
@@ -1203,8 +1384,12 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
     if not os.path.isdir(model):
         raise HTTPException(404, f"model_path does not exist: {model}")
 
-    spec = _require_known_backend("groot")
-    await asyncio.to_thread(_assert_backend_container_running, "groot", spec)
+    spec = _require_known_backend(_GROOT_BACKEND_ID)
+    await asyncio.to_thread(
+        _assert_backend_container_running,
+        _GROOT_BACKEND_ID,
+        spec,
+    )
 
     current = _trt_status(model, engine)
     if current.status == "ready" and not request.force:
@@ -1228,33 +1413,37 @@ async def backend_pull(name: str) -> StreamingResponse:
     image = spec["image"]
 
     def generate():
+        token = ""
         try:
+            token = _begin_worker_mutation(name)
             client = _docker_client()
-        except DockerException as e:
-            payload = json.dumps({"message": f"docker init failed: {e}"})
+        except Exception as e:
+            detail = e.detail if isinstance(e, HTTPException) else str(e)
+            payload = json.dumps({"message": detail})
             yield f"event: error\ndata: {payload}\n\n"
             return
 
         try:
-            for chunk in client.api.pull(image, stream=True, decode=True):
-                yield f"data: {json.dumps(chunk)}\n\n"
-        except DockerException as e:
-            payload = json.dumps({"image": image, "message": str(e)})
-            yield f"event: error\ndata: {payload}\n\n"
-            return
+            try:
+                for chunk in client.api.pull(image, stream=True, decode=True):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except DockerException as e:
+                payload = json.dumps({"image": image, "message": str(e)})
+                yield f"event: error\ndata: {payload}\n\n"
+                return
 
-        # Verify the image is actually present after the pull stream ends —
-        # the daemon sometimes ends the stream on a 'manifest unknown' error
-        # without raising on the iterator side.
-        try:
-            client.images.get(image)
-            done = json.dumps({"image": image, "ok": True})
-            yield f"event: done\ndata: {done}\n\n"
-        except ImageNotFound:
-            payload = json.dumps(
-                {"image": image, "message": "pull stream ended but image missing"}
-            )
-            yield f"event: error\ndata: {payload}\n\n"
+            # Docker may end a pull stream after reporting a manifest error.
+            try:
+                client.images.get(image)
+                done = json.dumps({"image": image, "ok": True})
+                yield f"event: done\ndata: {done}\n\n"
+            except ImageNotFound:
+                payload = json.dumps(
+                    {"image": image, "message": "pull stream ended but image missing"}
+                )
+                yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            _end_worker_mutation(name, token)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -1262,18 +1451,27 @@ async def backend_pull(name: str) -> StreamingResponse:
 @app.post("/backends/{name}/start", response_model=ActionResult)
 async def backend_start(name: str) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(name, spec, restart_running=False)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
+    try:
+        return await _ensure_backend_running(name, spec, restart_running=False)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/restart", response_model=ActionResult)
 async def backend_restart(name: str) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(name, spec, restart_running=True)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
+    try:
+        return await _ensure_backend_running(name, spec, restart_running=True)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/recreate", response_model=ActionResult)
 async def backend_recreate(name: str) -> ActionResult:
     spec = _require_known_backend(name)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
 
     def _remove_existing() -> tuple[str, str]:
         try:
@@ -1302,22 +1500,26 @@ async def backend_recreate(name: str) -> ActionResult:
                 raise HTTPException(500, f"remove failed: {e}")
         return local_image, removed
 
-    local_image, removed = await asyncio.to_thread(_remove_existing)
-    cmd = _compose_base_cmd() + ["create", "--no-build", spec["service"]]
-    result = await _run(*cmd, timeout=60.0, env=_compose_env())
-    ok = result.rc == 0
-    msg = result.stderr or result.stdout or f"rc={result.rc}"
-    if ok:
-        msg = (
-            f"{spec['container']} recreated from {local_image} "
-            f"({removed}). {msg}"
-        )
-    return ActionResult(ok=ok, message=msg)
+    try:
+        local_image, removed = await asyncio.to_thread(_remove_existing)
+        cmd = _compose_base_cmd() + ["create", "--no-build", spec["service"]]
+        result = await _run(*cmd, timeout=60.0, env=_compose_env())
+        ok = result.rc == 0
+        msg = result.stderr or result.stdout or f"rc={result.rc}"
+        if ok:
+            msg = (
+                f"{spec['container']} recreated from {local_image} "
+                f"({removed}). {msg}"
+            )
+        return ActionResult(ok=ok, message=msg)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/stop", response_model=ActionResult)
 async def backend_stop(name: str) -> ActionResult:
     spec = _require_known_backend(name)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
     container_name = spec["container"]
 
     def _stop_existing() -> tuple[bool, str]:
@@ -1343,8 +1545,11 @@ async def backend_stop(name: str) -> ActionResult:
         except DockerException as e:
             return False, f"stop failed: {e}"
 
-    ok, msg = await asyncio.to_thread(_stop_existing)
-    return ActionResult(ok=ok, message=msg)
+    try:
+        ok, msg = await asyncio.to_thread(_stop_existing)
+        return ActionResult(ok=ok, message=msg)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 async def _ensure_backend_running(
@@ -1471,11 +1676,38 @@ async def backend_status(name: str) -> BackendStatus:
             mapped = "exited"
         else:
             mapped = "unknown"
-        service_names = spec.get("services", ["main-runtime", "engine-process"])
+        service_names = spec.get("services", ["engine-process"])
         services = _backend_service_statuses(ctr, raw, service_names)
         return pulled, image_status, mapped, ctr.id, raw, services
 
     pulled, image_status, container_state, container_id, raw, services = await asyncio.to_thread(_inspect)
+    worker_compatible: Optional[bool] = None
+    worker_message = ""
+    if container_state == "running" and all(
+        service.state == "up" for service in services
+    ):
+        try:
+            worker = await asyncio.to_thread(
+                _runtime_control_request,
+                {"operation": "worker_status", "runtime_id": name},
+            )
+            heartbeat_age = worker.get("heartbeat_age_s")
+            timeout_s = float(os.environ.get("WORKER_HEARTBEAT_TIMEOUT_S", "2.0"))
+            if heartbeat_age is None:
+                worker_compatible = False
+                worker_message = "Worker heartbeat has not been received"
+            elif float(heartbeat_age) > timeout_s:
+                worker_compatible = False
+                worker_message = f"Worker heartbeat is stale ({heartbeat_age:.2f}s)"
+            else:
+                worker_compatible = True
+                worker_message = (
+                    f"Protocol {worker.get('protocol_version', '')}; "
+                    f"state {worker.get('engine_state', '')}"
+                )
+        except Exception as exc:
+            worker_compatible = False
+            worker_message = str(exc)
     return BackendStatus(
         name=name,
         image=spec["image"],
@@ -1485,4 +1717,6 @@ async def backend_status(name: str) -> BackendStatus:
         container_id=container_id,
         raw_state=raw,
         services=services,
+        worker_compatible=worker_compatible,
+        worker_message=worker_message,
     )

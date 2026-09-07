@@ -20,6 +20,23 @@ const actionRequestModeOrDefault = (value) => (
   String(value ?? '').trim().toLowerCase() === 'sync' ? 'sync' : 'async'
 );
 
+const policyParametersObject = (value) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return { ...value };
+  }
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed
+        : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+  return {};
+};
+
 export const normalizeRecordTaskInfo = (taskInfo = {}) => ({
   taskNum: String(taskInfo.taskNum ?? '').trim(),
   taskName: String(taskInfo.taskName ?? '').trim(),
@@ -50,6 +67,8 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   ),
   serviceType: String(taskInfo.serviceType ?? '').trim(),
   policyType: String(taskInfo.policyType ?? '').trim(),
+  policyId: String(taskInfo.policyId ?? '').trim(),
+  policyParameters: policyParametersObject(taskInfo.policyParameters),
   inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
   actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
   accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
@@ -80,6 +99,8 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   actionRequestMode: actionRequestModeOrDefault(taskInfo.action_request_mode),
   accelerationMode: taskInfo.acceleration_mode || 'pytorch',
   accelerationEnginePath: taskInfo.acceleration_engine_path || '',
+  policyId: taskInfo.policy_id || '',
+  policyParameters: policyParametersObject(taskInfo.policy_parameters_json),
   initialPoseSync: Boolean(taskInfo.initial_pose_sync),
   initialPoseSyncDurationS: numberOrDefault(
     taskInfo.initial_pose_sync_duration_s,
@@ -110,6 +131,7 @@ export const hasRosTaskInfoPayload = (taskInfo = {}) => {
     hasText(taskInfo.task_type) ||
     hasText(taskInfo.policy_path) ||
     hasText(taskInfo.service_type) ||
+    hasText(taskInfo.policy_id) ||
     hasTextArray(taskInfo.task_instruction) ||
     hasTextArray(taskInfo.subtask_instruction)
   );

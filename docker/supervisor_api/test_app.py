@@ -50,6 +50,7 @@ _mount_source_for_destination = app._mount_source_for_destination
 _backend_container_image_mismatch = app._backend_container_image_mismatch
 _backend_container_stale_reason = app._backend_container_stale_reason
 _compose_env = app._compose_env
+_load_compose_configuration = app._load_compose_configuration
 _host_workspace_dir = app._host_workspace_dir
 _require_known_service = app._require_known_service
 _validate_bt_robot_type = app._validate_bt_robot_type
@@ -570,6 +571,55 @@ def test_groot_backend_uses_current_release_image():
     )
 
 
+def test_policy_catalog_endpoint_exposes_validated_runtimes():
+    catalog = asyncio.run(app.policy_catalog())
+
+    assert catalog["schema_version"] == 1
+    assert {runtime["id"] for runtime in catalog["runtimes"]} == {
+        "groot",
+        "lerobot",
+    }
+    assert "lerobot:act" in {
+        model["policy_id"]
+        for runtime in catalog["runtimes"]
+        for model in runtime["models"]
+    }
+
+
+def test_compose_configuration_uses_override_and_arch(monkeypatch, tmp_path):
+    compose_path = tmp_path / "docker-compose.yml"
+    override_path = tmp_path / "docker-compose.override.yml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    override_path.write_text("services: {}\n", encoding="utf-8")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"services":{"sample":{}}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(app, "_catalog_compose_path", lambda: compose_path)
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+
+    assert _load_compose_configuration() == {"services": {"sample": {}}}
+    assert captured["command"] == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_path),
+        "-f",
+        str(override_path),
+        "config",
+        "--format",
+        "json",
+    ]
+    assert captured["env"]["ARCH"] == app._BACKEND_ARCH
+
+
 def test_backend_status_model_exposes_stale_image_status():
     status = app.BackendStatus(
         name="groot",
@@ -607,6 +657,16 @@ def test_backend_start_keeps_running_container(monkeypatch):
         lambda *_args: None,
     )
     monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-1",
+        },
+    )
 
     result = asyncio.run(app.backend_start("lerobot"))
 
@@ -614,6 +674,10 @@ def test_backend_start_keeps_running_container(monkeypatch):
     assert result.message == "lerobot_server already running"
     assert container.started is False
     assert container.restarted is False
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
 
 
 def test_backend_restart_restarts_running_container(monkeypatch):
@@ -636,12 +700,113 @@ def test_backend_restart_restarts_running_container(monkeypatch):
         lambda *_args: None,
     )
     monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-2",
+        },
+    )
 
     result = asyncio.run(app.backend_restart("lerobot"))
 
     assert result.ok is True
     assert result.message == "lerobot_server restarted"
     assert container.restart_timeout == 10
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
+
+
+def test_backend_start_releases_worker_lease_when_start_fails(monkeypatch):
+    async def fail_start(*_args, **_kwargs):
+        raise RuntimeError("start failed")
+
+    control_calls = []
+    monkeypatch.setattr(app, "_ensure_backend_running", fail_start)
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-failure",
+        },
+    )
+
+    try:
+        asyncio.run(app.backend_start("lerobot"))
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("backend_start should propagate the start failure")
+
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
+
+
+def test_backend_stop_uses_worker_lease(monkeypatch):
+    class FakeContainer:
+        def __init__(self):
+            self.stop_timeout = None
+
+        def stop(self, timeout):
+            self.stop_timeout = timeout
+
+    container = FakeContainer()
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _name: container),
+        ),
+    )
+    monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-stop",
+        },
+    )
+
+    result = asyncio.run(app.backend_stop("lerobot"))
+
+    assert result.ok is True
+    assert container.stop_timeout == 10
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
+
+
+def test_begin_worker_mutation_rejects_active_worker(monkeypatch):
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda _payload: {
+            "ok": True,
+            "allowed": False,
+            "reason": "UNLOAD the active policy before changing its worker",
+        },
+    )
+
+    try:
+        app._begin_worker_mutation("lerobot")
+    except app.HTTPException as exc:
+        assert exc.status_code == 409
+        assert "UNLOAD" in exc.detail
+    else:
+        raise AssertionError("active worker mutation should be rejected")
 
 
 def test_host_project_dir_falls_back_to_compose_container_name(monkeypatch):

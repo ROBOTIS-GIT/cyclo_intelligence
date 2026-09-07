@@ -4,9 +4,9 @@
 # This image is inference-focused. GR00T training/finetuning is owned by the
 # forked Isaac-GR00T repo and its official entrypoints.
 #
-# Build context: cyclo_intelligence/cyclo_brain/policy/groot/
+# Build context: cyclo_intelligence repository root
 # Usage:
-#   docker build --network host -f Dockerfile.arm64 -t robotis/groot-zenoh:1.3.5-arm64 .
+#   docker build --network host -f cyclo_brain/policy/groot/Dockerfile.arm64 -t robotis/groot-zenoh:1.3.5-arm64 .
 
 ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${BASE_IMAGE}
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends locales \
 ENV LANG=en_US.UTF-8
 
 # System dependencies for GR00T N1.7 Orin install, torchcodec fallback build,
-# TensorRT/CUDA runtime paths, and the Cyclo two-process runtime.
+# TensorRT/CUDA runtime paths, and the Cyclo Engine worker.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     autoconf \
     automake \
@@ -72,7 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     yasm \
     && rm -rf /var/lib/apt/lists/*
 
-# s6-overlay supervises main-runtime and engine-process.
+# s6-overlay supervises engine-process.
 RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
       https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz \
     && curl -fsSL -o /tmp/s6-overlay-aarch64.tar.xz \
@@ -87,7 +87,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 WORKDIR /gr00t
 
 # Copy the pinned N1.7 Isaac-GR00T checkout from the submodule.
-COPY Isaac-GR00T/ ./
+COPY cyclo_brain/policy/groot/Isaac-GR00T/ ./
 
 # Use the official Orin-specific N1.7 dependency manifest instead of manually
 # listing torch / triton / flash-attn versions in this Dockerfile.
@@ -126,26 +126,29 @@ RUN TORCHCODEC_WHL="$(find /gr00t/scripts/deployment/orin/wheels -name 'torchcod
         && rm -rf /tmp/torchcodec; \
     fi
 
-# Zenoh + Cyclo runtime Python dependencies. SDKs are mounted as volumes at
-# runtime, matching docker/docker-compose.yml.
+# Zenoh + Cyclo Engine worker Python dependencies.
 RUN uv pip install --python /gr00t/.venv/bin/python --no-cache \
     "eclipse-zenoh>=1.6.0,<1.7.0" \
     "rosbags>=0.11.0" \
     "GitPython>=3.1.18" \
     "json5>=0.9.14" \
     pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk \
+    && mkdir -p /zenoh_sdk /robot_client_sdk \
                 /orchestrator_config /policy_runtime
 
-# Cyclo two-process runtime. Compose also bind-mounts these directories during
-# development, but copying them keeps the image runnable by itself.
+# Cyclo Engine runtime. Development can shadow it through the dev override.
 WORKDIR /app
-COPY runtime/ /app/runtime/
-COPY groot_engine/ /app/groot_engine/
-COPY scripts/ /app/scripts/
-COPY s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
-             /etc/s6-overlay/s6-rc.d/engine-process/run \
+COPY cyclo_brain/policy/groot/runtime/ /app/runtime/
+COPY cyclo_brain/policy/groot/groot_engine/ /app/groot_engine/
+COPY cyclo_brain/policy/groot/scripts/ /app/scripts/
+COPY cyclo_brain/policy/common/runtime/__init__.py cyclo_brain/policy/common/runtime/engine.py cyclo_brain/policy/common/runtime/hf_token_sync.py /policy_runtime/
+COPY cyclo_brain/policy/common/runtime/engine_process/ /policy_runtime/engine_process/
+COPY cyclo_brain/policy/groot/manifest.yaml /app/policy_manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
+COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
+COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
+COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
     && chmod +x /app/scripts/smoke_groot_n17.py
 
 # EGL configuration for headless rendering / TensorRT paths used by GR00T.
@@ -165,7 +168,6 @@ ENV TORCH_HOME=/root/.cache/torch
 ENV ZENOH_SDK_PATH=/zenoh_sdk
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
 ENV GROOT_VERSION=N1.7
@@ -196,8 +198,8 @@ WORKDIR /gr00t
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
      && [ -n "$S6_SVSTAT" ] \
-     && "$S6_SVSTAT" /run/service/main-runtime 2>&1 | grep -q "up" \
      && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     && test -s /run/cyclo/engine-process.ready \
      || exit 1
 
 ENTRYPOINT ["/init"]

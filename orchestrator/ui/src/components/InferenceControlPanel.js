@@ -36,7 +36,7 @@ import {
   setInferenceMode,
   setInferenceStatus,
 } from '../features/tasks/taskSlice';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import { findPolicy, usePolicyCatalog } from '../contexts/PolicyCatalogContext';
 import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
@@ -50,13 +50,13 @@ const phaseGuideMessages = {
   [InferencePhase.SYNCING]: 'Synchronizing initial robot pose...',
 };
 
-const buildRequiredFields = (serviceType, policyType) => {
+const buildRequiredFields = (model) => {
   const fields = [
     { key: 'policyPath', label: 'Policy Path' },
     { key: 'inferenceHz', label: 'Dataset FPS' },
     { key: 'controlHz', label: 'Control Hz' },
   ];
-  if (requiresInstruction(serviceType, policyType)) {
+  if (model?.requires_instruction) {
     fields.unshift({ key: 'taskInstruction', label: 'Task Instruction' });
   }
   return fields;
@@ -87,14 +87,21 @@ export default function InferenceControlPanel() {
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
   const rosHost = useSelector((state) => state.ros.rosHost);
+  const { catalog, status: catalogStatus, error: catalogError } = usePolicyCatalog();
+  const selectedPolicy = findPolicy(
+    catalog,
+    taskInfo.policyId,
+    taskInfo.serviceType,
+    taskInfo.policyType
+  );
+  const selectedRuntime = selectedPolicy?.runtime;
 
   const [hovered, setHovered] = useState(null);
   const [pressed, setPressed] = useState(null);
-  const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand, getInferenceStatus } = useRosServiceCaller();
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -105,14 +112,25 @@ export default function InferenceControlPanel() {
   const isInferencing = phase === InferencePhase.INFERENCING;
   const isPaused = phase === InferencePhase.PAUSED;
   const isSyncing = phase === InferencePhase.SYNCING;
+  const isStatusKnown = Boolean(inferenceStatus.topicReceived);
+  const runtimeState = String(inferenceStatus.runtimeState || 'unknown');
+  const hasRuntimeError = runtimeState === 'error';
+  const loadedModelPath = String(inferenceStatus.loadedModelPath || '');
   const inferencePhaseRef = useRef(phase);
-  const isModelLoaded = isInferencing || isPaused || isSyncing;
-  const shouldCheckBackend = isIdle || isPaused;
+  const statusFailureCountRef = useRef(0);
+  const isModelLoaded = ['loaded', 'syncing', 'running', 'paused', 'error'].includes(
+    runtimeState
+  ) || isInferencing || isPaused || isSyncing;
+  const canResume = isPaused &&
+    runtimeState === 'paused' &&
+    taskInfo.policyPath === loadedModelPath;
+  const shouldCheckBackend = isStatusKnown && (isIdle || isPaused) &&
+    catalogStatus === 'ready' && Boolean(selectedPolicy);
 
   const {
     readiness: backendReadiness,
     refreshStatus: refreshBackendStatus,
-  } = usePolicyBackendStatus(taskInfo.serviceType, {
+  } = usePolicyBackendStatus(selectedRuntime?.id || taskInfo.serviceType, {
     enabled: shouldCheckBackend,
     intervalMs: 2000,
   });
@@ -124,6 +142,73 @@ export default function InferenceControlPanel() {
   useEffect(() => {
     inferencePhaseRef.current = phase;
   }, [phase]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timerId = null;
+    let inFlight = false;
+    statusFailureCountRef.current = 0;
+
+    const scheduleNext = () => {
+      if (!disposed) {
+        timerId = setTimeout(pollRuntimeStatus, 2000);
+      }
+    };
+
+    const pollRuntimeStatus = async () => {
+      if (disposed || inFlight || inferencePhaseRef.current === InferencePhase.LOADING) {
+        scheduleNext();
+        return;
+      }
+      const phaseAtRequest = inferencePhaseRef.current;
+      inFlight = true;
+      try {
+        const result = await getInferenceStatus();
+        if (disposed) return;
+        if (result?.success && result?.inference_status_known) {
+          statusFailureCountRef.current = 0;
+          const runtimePhase = Number(result.inference_phase || 0);
+          // A request issued before a lifecycle command may return its old
+          // snapshot after the command's phase topic has already arrived.
+          if (inferencePhaseRef.current !== phaseAtRequest) {
+            return;
+          }
+          dispatch(setInferenceStatus({
+            inferencePhase: runtimePhase,
+            error: String(result.inference_error || ''),
+            topicReceived: true,
+            runtimeState: String(result.inference_runtime_state || 'unknown'),
+            loadedModelPath: String(result.inference_model_path || ''),
+            loadedPolicyId: String(result.inference_policy_id || ''),
+            publishToRobot: Boolean(result.inference_publish_to_robot),
+          }));
+        } else {
+          throw new Error(result?.message || 'Inference runtime status unavailable');
+        }
+      } catch (error) {
+        // A stopped or warming backend has no STATUS service yet. Two
+        // consecutive failures avoid flicker on a transient timeout while
+        // ensuring stale READY/RUNNING controls do not remain authoritative.
+        statusFailureCountRef.current += 1;
+        if (!disposed && statusFailureCountRef.current >= 2) {
+          dispatch(setInferenceStatus({
+            topicReceived: false,
+            runtimeState: 'unknown',
+          }));
+        }
+        console.debug('Inference runtime status unavailable:', error);
+      } finally {
+        inFlight = false;
+        scheduleNext();
+      }
+    };
+
+    pollRuntimeStatus();
+    return () => {
+      disposed = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [dispatch, getInferenceStatus, selectedRuntime?.id]);
 
   useEffect(() => {
     toasts
@@ -150,7 +235,7 @@ export default function InferenceControlPanel() {
 
   const validateTaskInfo = useCallback(() => {
     const missingFields = [];
-    const fields = buildRequiredFields(taskInfo.serviceType, taskInfo.policyType);
+    const fields = buildRequiredFields(selectedPolicy);
     for (const field of fields) {
       const value = taskInfo[field.key];
       if (
@@ -176,12 +261,28 @@ export default function InferenceControlPanel() {
         missingFields.push(field.label);
       }
     }
+    const parameterValues = Object.fromEntries(
+      (selectedPolicy?.parameters || []).map((parameter) => {
+        const value = parameter.binding.startsWith('task_info.')
+          ? taskInfo[parameter.binding.slice('task_info.'.length)]
+          : taskInfo.policyParameters?.[parameter.key];
+        return [parameter.key, value];
+      })
+    );
+    (selectedPolicy?.parameters || []).forEach((parameter) => {
+      const isVisible = Object.entries(parameter.visible_when || {})
+        .every(([key, expected]) => parameterValues[key] === expected);
+      const value = parameterValues[parameter.key];
+      if (isVisible && parameter.required && (value === '' || value == null)) {
+        missingFields.push(parameter.label);
+      }
+    });
     return { isValid: missingFields.length === 0, missingFields };
-  }, [taskInfo]);
+  }, [selectedPolicy, taskInfo]);
 
   const ensureTensorRtReady = useCallback(async () => {
     if (
-      taskInfo.serviceType !== 'groot' ||
+      !selectedRuntime?.capabilities?.operations?.includes('groot_trt') ||
       taskInfo.accelerationMode !== 'tensorrt_dit'
     ) {
       return true;
@@ -209,7 +310,7 @@ export default function InferenceControlPanel() {
       return false;
     }
   }, [
-    taskInfo.serviceType,
+    selectedRuntime,
     taskInfo.accelerationMode,
     taskInfo.policyPath,
     taskInfo.accelerationEnginePath,
@@ -280,9 +381,6 @@ export default function InferenceControlPanel() {
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {
     if (!intent) return;
-    if (intent.policyPath) {
-      setLastPolicyPath(intent.policyPath);
-    }
     await executeCommand(intent.commandName, intent.commandString, {
       inferenceMode,
     });
@@ -305,7 +403,7 @@ export default function InferenceControlPanel() {
     }
 
     let startIntent;
-    if (isPaused && taskInfo.policyPath === lastPolicyPath) {
+    if (canResume) {
       startIntent = {
         commandName: 'Resume',
         commandString: 'resume_inference',
@@ -363,14 +461,13 @@ export default function InferenceControlPanel() {
   }, [
     backendReadiness,
     refreshBackendStatus,
-    isPaused,
+    canResume,
     taskInfo.policyPath,
     taskInfo.inferenceMode,
     taskInfo.initialPoseSync,
     taskInfo.initialPoseSyncDurationS,
     taskInfo.inferenceHz,
     taskInfo.controlHz,
-    lastPolicyPath,
     executeStartIntent,
     ensureTensorRtReady,
     validateTaskInfo,
@@ -399,25 +496,39 @@ export default function InferenceControlPanel() {
   }, [executeCommand]);
 
   const handleClear = useCallback(async () => {
-    const result = await executeCommand('Clear', 'finish');
-    if (result && result.success === true) {
-      setLastPolicyPath('');
-    }
+    await executeCommand('Clear', 'finish');
   }, [executeCommand]);
 
-  const startEnabled = shouldCheckBackend && backendReadiness.ready;
+  const catalogReady = catalogStatus === 'ready' && Boolean(selectedPolicy);
+  const catalogBlockingMessage = catalogStatus === 'ready'
+    ? 'Selected policy is not available in the policy catalog'
+    : (catalogError || 'Policy catalog is unavailable');
+  const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
+    backendReadiness.ready && !hasRuntimeError;
   const stopEnabled = isInferencing || isSyncing;
   const clearEnabled = isModelLoaded;
-  const startDescription = isBackendStartBlocked
+  const startDescription = !isStatusKnown
+    ? 'Checking inference session status'
+    : !catalogReady
+    ? catalogBlockingMessage
+    : hasRuntimeError
+    ? 'Clear the failed policy session before restarting'
+    : isBackendStartBlocked
     ? backendReadiness.message
-    : isPaused
+    : canResume
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = isBackendStartBlocked
+  const guideMessage = !isStatusKnown
+    ? 'Checking inference session...'
+    : !catalogReady
+    ? catalogBlockingMessage
+    : hasRuntimeError
+    ? (inferenceStatus.error || 'Policy Runtime failed. Clear the session before restarting.')
+    : isBackendStartBlocked
     ? backendReadiness.message
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner =
-    isInferencing || isLoading || isSyncing || isBackendWarming;
+    !isStatusKnown || isInferencing || isLoading || isSyncing || isBackendWarming;
 
   const handleKeyAction = useCallback(
     (e) => {

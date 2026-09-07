@@ -179,6 +179,9 @@ class RobotClient:
         domain_id: Optional[int] = None,
         enable_command_publishers: bool = False,
         enable_preview_publisher: bool = False,
+        subscribe_images: bool = True,
+        subscribe_state: bool = True,
+        subscribe_sensors: bool = True,
     ):
         section = robot_schema.load_robot_section(robot_type)
         # Phase 4: yaml is VLA-semantic (observation.images / state +
@@ -195,6 +198,9 @@ class RobotClient:
         self._domain_id = domain_id
         self._enable_command_publishers = bool(enable_command_publishers)
         self._enable_preview_publisher = bool(enable_preview_publisher)
+        self._subscribe_images = bool(subscribe_images)
+        self._subscribe_state = bool(subscribe_state)
+        self._subscribe_sensors = bool(subscribe_sensors)
         self._action_groups = robot_schema.get_action_groups(section)
 
         # Thread-safe data stores
@@ -212,6 +218,7 @@ class RobotClient:
         self._task_instruction: str = ""
 
         self._subscribers: list = []
+        self._state_subscribers: list = []
         self._command_publishers: dict[str, ROS2Publisher] = {}
         self._preview_publisher: Optional[ROS2Publisher] = None
         self._command_msg_types: dict[str, str] = {}
@@ -268,14 +275,15 @@ class RobotClient:
         by name-based slicing inside the callback.
         """
         # Cameras
-        for cam_name, cam_cfg in self._config.get("cameras", {}).items():
-            sub = ROS2Subscriber(
-                topic=cam_cfg["topic"],
-                msg_type=cam_cfg["msg_type"],
-                callback=lambda msg, name=cam_name: self._update_image(name, msg),
-            )
-            self._subscribers.append(sub)
-            logger.debug(f"Subscribed camera: {cam_name} -> {cam_cfg['topic']}")
+        if self._subscribe_images:
+            for cam_name, cam_cfg in self._config.get("cameras", {}).items():
+                sub = ROS2Subscriber(
+                    topic=cam_cfg["topic"],
+                    msg_type=cam_cfg["msg_type"],
+                    callback=lambda msg, name=cam_name: self._update_image(name, msg),
+                )
+                self._subscribers.append(sub)
+                logger.debug(f"Subscribed camera: {cam_name} -> {cam_cfg['topic']}")
 
         # Index parent → list of child group names so the upper-body
         # callback knows which slices to populate per message.
@@ -285,7 +293,29 @@ class RobotClient:
             if parent:
                 self._joint_children.setdefault(parent, []).append(child_name)
 
-        # Joint groups — only those with their own physical topic.
+        if self._subscribe_state:
+            self._init_state_subscriptions()
+
+        # Additional sensors. ``sensor_cfg`` may carry an optional
+        # ``type_hash`` override — escape hatch for messages where
+        # zenoh_ros2_sdk's hash computation needs to be pinned to a known
+        # wire hash. Default is auto-compute via the SDK.
+        if self._subscribe_sensors:
+            for sensor_name, sensor_cfg in self._config.get("sensors", {}).items():
+                sub_kwargs = dict(
+                    topic=sensor_cfg["topic"],
+                    msg_type=sensor_cfg["msg_type"],
+                    callback=lambda msg, name=sensor_name: self._update_sensor(name, msg),
+                )
+                if sensor_cfg.get("type_hash"):
+                    sub_kwargs["type_hash"] = sensor_cfg["type_hash"]
+                sub = ROS2Subscriber(**sub_kwargs)
+                self._subscribers.append(sub)
+                logger.debug(f"Subscribed sensor: {sensor_name} -> {sensor_cfg['topic']}")
+
+    def _init_state_subscriptions(self) -> None:
+        if self._state_subscribers:
+            return
         for group_name, group_cfg in self._config.get("joint_groups", {}).items():
             if group_cfg.get("parent"):
                 logger.debug(
@@ -293,29 +323,44 @@ class RobotClient:
                     f"(synthetic view of {group_cfg['parent']})"
                 )
                 continue
-            sub = ROS2Subscriber(
+            subscriber = ROS2Subscriber(
                 topic=group_cfg["topic"],
                 msg_type=group_cfg["msg_type"],
                 callback=lambda msg, name=group_name: self._update_joint(name, msg),
             )
-            self._subscribers.append(sub)
+            self._state_subscribers.append(subscriber)
+            self._subscribers.append(subscriber)
             logger.debug(f"Subscribed joint: {group_name} -> {group_cfg['topic']}")
 
-        # Additional sensors. ``sensor_cfg`` may carry an optional
-        # ``type_hash`` override — escape hatch for messages where
-        # zenoh_ros2_sdk's hash computation needs to be pinned to a known
-        # wire hash. Default is auto-compute via the SDK.
-        for sensor_name, sensor_cfg in self._config.get("sensors", {}).items():
-            sub_kwargs = dict(
-                topic=sensor_cfg["topic"],
-                msg_type=sensor_cfg["msg_type"],
-                callback=lambda msg, name=sensor_name: self._update_sensor(name, msg),
-            )
-            if sensor_cfg.get("type_hash"):
-                sub_kwargs["type_hash"] = sensor_cfg["type_hash"]
-            sub = ROS2Subscriber(**sub_kwargs)
-            self._subscribers.append(sub)
-            logger.debug(f"Subscribed sensor: {sensor_name} -> {sensor_cfg['topic']}")
+    def set_state_subscription(self, enabled: bool) -> None:
+        """Enable or disable the joint-state subscription used for safe hold."""
+        enabled = bool(enabled)
+        if enabled == self._subscribe_state:
+            return
+        self._subscribe_state = enabled
+        if enabled:
+            self._init_state_subscriptions()
+            return
+
+        subscribers = list(self._state_subscribers)
+        self._state_subscribers.clear()
+        self._subscribers = [
+            subscriber
+            for subscriber in self._subscribers
+            if subscriber not in subscribers
+        ]
+        for subscriber in subscribers:
+            try:
+                subscriber.close()
+            except Exception as exc:
+                logger.debug(f"Error closing state subscriber: {exc}")
+        with self._lock:
+            self._joint_positions.clear()
+            self._joint_velocities.clear()
+            self._joint_efforts.clear()
+            self._joint_timestamps.clear()
+            self._joint_positions_by_name.clear()
+            self._joint_position_timestamps_by_name.clear()
 
     def _init_command_publishers(self):
         """Create publishers for configured action topics."""
@@ -1034,10 +1079,10 @@ class RobotClient:
 
     def _all_ready(self) -> bool:
         with self._lock:
-            for cam in self._config.get("cameras", {}):
+            for cam in self._config.get("cameras", {}) if self._subscribe_images else ():
                 if cam not in self._images:
                     return False
-            for group in self._config.get("joint_groups", {}):
+            for group in self._config.get("joint_groups", {}) if self._subscribe_state else ():
                 if group not in self._joint_positions:
                     return False
             return True
@@ -1045,10 +1090,10 @@ class RobotClient:
     def _get_missing(self) -> list[str]:
         missing = []
         with self._lock:
-            for cam in self._config.get("cameras", {}):
+            for cam in self._config.get("cameras", {}) if self._subscribe_images else ():
                 if cam not in self._images:
                     missing.append(f"camera:{cam}")
-            for group in self._config.get("joint_groups", {}):
+            for group in self._config.get("joint_groups", {}) if self._subscribe_state else ():
                 if group not in self._joint_positions:
                     missing.append(f"joint:{group}")
         return missing

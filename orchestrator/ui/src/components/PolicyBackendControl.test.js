@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import PolicyBackendControl from './PolicyBackendControl';
+import { testRuntime } from '../testUtils/policyCatalog';
 
 jest.mock('react-hot-toast', () => ({
   success: jest.fn(),
@@ -55,7 +56,7 @@ describe('PolicyBackendControl', () => {
         services: [],
       }));
 
-    render(<PolicyBackendControl serviceType="groot" />);
+    render(<PolicyBackendControl serviceType="groot" runtime={testRuntime('groot')} />);
 
     const pullButton = await screen.findByRole('button', {
       name: 'GR00T Docker pull image',
@@ -101,7 +102,7 @@ describe('PolicyBackendControl', () => {
         services: [],
       }));
 
-    render(<PolicyBackendControl serviceType="groot" />);
+    render(<PolicyBackendControl serviceType="groot" runtime={testRuntime('groot')} />);
 
     const updateButton = await screen.findByRole('button', {
       name: 'GR00T Docker update container',
@@ -135,7 +136,7 @@ describe('PolicyBackendControl', () => {
       services: [],
     }));
 
-    render(<PolicyBackendControl serviceType="lerobot" />);
+    render(<PolicyBackendControl serviceType="lerobot" runtime={testRuntime('lerobot')} />);
 
     await screen.findByRole('button', {
       name: 'LeRobot Docker update container',
@@ -160,7 +161,7 @@ describe('PolicyBackendControl', () => {
       services: [],
     }));
 
-    render(<PolicyBackendControl serviceType="groot" />);
+    render(<PolicyBackendControl serviceType="groot" runtime={testRuntime('groot')} />);
 
     const tokenButton = await screen.findByRole('button', {
       name: 'GR00T Docker Hugging Face token',

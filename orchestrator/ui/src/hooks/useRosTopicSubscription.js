@@ -463,6 +463,20 @@ export function useRosTopicSubscription() {
             inferencePhase: msg.inference_phase || 0,
             error: msg.error || '',
             topicReceived: true,
+            runtimeState: {
+              [InferencePhase.READY]: 'unloaded',
+              [InferencePhase.LOADING]: 'loading',
+              [InferencePhase.INFERENCING]: 'running',
+              [InferencePhase.PAUSED]: 'paused',
+              [InferencePhase.SYNCING]: 'syncing',
+            }[msg.inference_phase || 0] || 'unknown',
+            ...((msg.inference_phase || 0) === InferencePhase.READY
+              ? {
+                  loadedModelPath: '',
+                  loadedPolicyId: '',
+                  publishToRobot: false,
+                }
+              : {}),
           })
         );
       });

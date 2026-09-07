@@ -185,11 +185,14 @@ jobs:
             orchestrator/tests/data_processing/test_episode_editor.py \
             orchestrator/tests/data_processing/test_replay_handler.py
 
-      - name: Run shared policy runtime tests
+      - name: Run shared policy catalog and runtime tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONPATH: cyclo_brain/policy/common
-        run: python -m pytest cyclo_brain/policy/common/runtime/tests
+        run: |
+          python -m pytest \
+            cyclo_brain/policy/common/catalog/tests \
+            cyclo_brain/policy/common/runtime/tests
 
       - name: Run GR00T policy tests
         env:
@@ -206,6 +209,17 @@ jobs:
           python -m pytest \
             cyclo_brain/policy/lerobot/tests \
             cyclo_brain/policy/lerobot/lerobot_engine/tests
+
+      - name: Run policy SDK tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            cyclo_brain/sdk/action_chunk_processing/tests \
+            cyclo_brain/sdk/robot_client/tests/test_camera_feature_mapping.py \
+            cyclo_brain/sdk/robot_client/tests/test_inference_command_definition.py \
+            cyclo_brain/sdk/robot_client/tests/test_initial_pose_sync.py
 
   docker-supervisor-tests:
     name: Docker supervisor tests
@@ -257,6 +271,10 @@ jobs:
       - name: Install dependencies
         working-directory: orchestrator/ui
         run: npm ci --legacy-peer-deps
+
+      - name: Test UI
+        working-directory: orchestrator/ui
+        run: npm test -- --runInBand --watchAll=false
 
       - name: Build UI
         working-directory: orchestrator/ui

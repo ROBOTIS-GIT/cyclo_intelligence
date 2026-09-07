@@ -5,6 +5,8 @@ import InferencePanel from './InferencePanel';
 import taskReducer from '../features/tasks/taskSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
+import { testPolicyCatalog } from '../testUtils/policyCatalog';
 
 jest.mock('react-hot-toast', () => ({
   __esModule: true,
@@ -46,6 +48,7 @@ const renderPanel = ({
           initialPoseSyncDurationS: 5.0,
           inferenceHz,
           controlHz,
+          policyId: 'lerobot:act',
         },
         taskInfo: {
           ...initialTasks.taskInfo,
@@ -54,6 +57,7 @@ const renderPanel = ({
           initialPoseSyncDurationS: 5.0,
           inferenceHz,
           controlHz,
+          policyId: 'lerobot:act',
         },
         inferenceStatus: {
           ...initialTasks.inferenceStatus,
@@ -64,9 +68,11 @@ const renderPanel = ({
   });
 
   render(
-    <Provider store={store}>
-      <InferencePanel />
-    </Provider>
+    <PolicyCatalogProvider initialCatalog={testPolicyCatalog}>
+      <Provider store={store}>
+        <InferencePanel />
+      </Provider>
+    </PolicyCatalogProvider>
   );
   return { store, sendRecordCommand };
 };

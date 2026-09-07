@@ -186,8 +186,8 @@ class Communicator:
         # in Step 3 Part C2d-1/-5. cyclo_data owns the recording lifecycle.
 
         # /inference/trajectory_preview is owned by the policy runtime.
-        # Action chunks flow from main_runtime to engine_process over Zenoh;
-        # orchestrator no longer sees them, so it can't republish.
+        # The selected Engine returns action chunks to the central Policy
+        # Runtime over Zenoh; orchestrator never receives or republishes them.
 
         # Heartbeat publisher
         self.heartbeat_publisher = self.node.create_publisher(

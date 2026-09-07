@@ -19,21 +19,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
-# Standard docker-compose override convention. Auto-discovery is
-# disabled when -f is passed explicitly (above), so we re-enable it
-# manually: if a sibling docker-compose.override.yml exists, layer it
-# on top. Lets developers shadow image tags / mounts locally without
-# editing the canonical compose file.
-[ -f "${SCRIPT_DIR}/docker-compose.override.yml" ] \
-    && COMPOSE="${COMPOSE} -f ${SCRIPT_DIR}/docker-compose.override.yml"
 
 MAIN_SERVICE="cyclo_intelligence"
 MAIN_CONTAINER="cyclo_intelligence"
-LEROBOT_SERVICE="lerobot"
-LEROBOT_CONTAINER="${LEROBOT_CONTAINER_NAME:-lerobot_server}"
-GROOT_SERVICE="groot"
-GROOT_CONTAINER="${GROOT_CONTAINER_NAME:-groot_server}"
+POLICY_ROOT="${SCRIPT_DIR}/../cyclo_brain/policy"
 
 # Auto-detect host architecture for Dockerfile / image tag selection
 MACHINE_ARCH=$(uname -m)
@@ -56,6 +45,12 @@ for arg in "$@"; do
     esac
 done
 set -- "${NEW_ARGS[@]}"
+
+COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
+# Keep the canonical local override (for example, no-GPU main-container
+# settings) separate from opt-in source mounts.
+[ -f "${SCRIPT_DIR}/docker-compose.override.yml" ] \
+    && COMPOSE="${COMPOSE} -f ${SCRIPT_DIR}/docker-compose.override.yml"
 
 # Pre-create host bind-mount targets so docker doesn't auto-create them
 # as root-owned directories (which then can't be written to from the
@@ -98,8 +93,36 @@ prepare_host_mounts() {
     ensure_host_dir "${workspace_dir}/rosbag2"
     ensure_host_dir "${workspace_dir}/lerobot"
     ensure_host_dir "${workspace_dir}/model"
-    ensure_host_dir "${workspace_dir}/model/lerobot"
-    ensure_host_dir "${workspace_dir}/model/groot"
+    local manifest
+    local checkpoint_root
+    local checkpoint_relative
+    while IFS= read -r manifest; do
+        checkpoint_root="$(
+            sed -n 's/^[[:space:]]*checkpoint_root:[[:space:]]*//p' "$manifest" \
+                | head -n 1
+        )"
+        checkpoint_root="${checkpoint_root%\"}"
+        checkpoint_root="${checkpoint_root#\"}"
+        checkpoint_root="${checkpoint_root%\'}"
+        checkpoint_root="${checkpoint_root#\'}"
+        case "$checkpoint_root" in
+            /workspace) continue ;;
+            /workspace/*)
+                checkpoint_relative="${checkpoint_root#/workspace/}"
+                case "/${checkpoint_relative}/" in
+                    */../*)
+                        echo "[container.sh] Error: invalid checkpoint_root in $manifest" >&2
+                        exit 1
+                        ;;
+                esac
+                ensure_host_dir "${workspace_dir}/${checkpoint_relative}"
+                ;;
+            *)
+                echo "[container.sh] Error: checkpoint_root must be under /workspace in $manifest" >&2
+                exit 1
+                ;;
+        esac
+    done < <(find "$POLICY_ROOT" -mindepth 2 -maxdepth 2 -name manifest.yaml | sort)
     ensure_host_dir "$huggingface_dir"
 
     workspace_real="$(canonical_path "$workspace_dir")"
@@ -131,6 +154,30 @@ compose_service_image() {
     local service="$1"
     $COMPOSE config --format json 2>/dev/null \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service"
+}
+
+policy_container_name() {
+    local runtime="$1"
+    $COMPOSE config --format json 2>/dev/null \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["container_name"])' "$runtime"
+}
+
+require_policy_runtime() {
+    local runtime="$1"
+    if [ ! -f "${POLICY_ROOT}/${runtime}/manifest.yaml" ]; then
+        echo "Error: unknown policy runtime '$runtime' (manifest not found)." >&2
+        exit 1
+    fi
+    if ! $COMPOSE config --format json 2>/dev/null \
+        | python3 -c 'import json, sys; raise SystemExit(0 if sys.argv[1] in json.load(sys.stdin)["services"] else 1)' "$runtime"; then
+        echo "Error: policy runtime '$runtime' has no Compose service." >&2
+        exit 1
+    fi
+}
+
+policy_runtimes() {
+    find "$POLICY_ROOT" -mindepth 2 -maxdepth 2 -name manifest.yaml -printf '%h\n' \
+        | sed 's#.*/##' | sort
 }
 
 container_workspace_source() {
@@ -181,11 +228,6 @@ remove_stale_policy_container() {
     fi
 }
 
-remove_stale_policy_containers() {
-    remove_stale_policy_container "$LEROBOT_SERVICE" "$LEROBOT_CONTAINER"
-    remove_stale_policy_container "$GROOT_SERVICE" "$GROOT_CONTAINER"
-}
-
 show_help() {
     cat <<EOF
 Usage: $0 <command>
@@ -195,16 +237,13 @@ Main image (cyclo_intelligence):
   enter            Open an interactive bash in cyclo_intelligence
   logs             Tail cyclo_intelligence logs
 
-LeRobot policy container:
-  start-lerobot    Build + start lerobot. Container boots idle and
-                   only configures itself once orchestrator dispatches
-                   InferenceCommand.LOAD with a robot_type.
-  enter-lerobot    Open an interactive bash in lerobot_server
-
-GR00T policy container:
-  start-groot      Build + start groot (N1.7 baseline). Same boot-idle
-                   + LOAD-time configure pattern as lerobot.
-  enter-groot      Open an interactive bash in groot_server
+Policy containers:
+  start-policy <runtime>
+                   Build + start a manifest-backed policy runtime.
+  enter-policy <runtime>
+                   Open an interactive bash in that runtime container.
+  start-lerobot, start-groot, enter-lerobot, enter-groot
+                   Backward-compatible aliases.
 
 Lifecycle:
   status           s6-svstat on all containers (when running)
@@ -213,16 +252,16 @@ Lifecycle:
 
 UI development:
   build-ui         Rebuild only orchestrator/ui and copy the static build into
-                   the running cyclo_intelligence nginx root. Uses npm inside
-                   cyclo_intelligence when available, with a node:22 fallback.
+                   the running cyclo_intelligence nginx root. Uses an external
+                   node:22 builder with the current host UID/GID.
   test-ui [args]   Run React tests. Extra args are passed after npm test,
                    e.g. test-ui -- --watchAll=false
 
 Flags (any start* command):
   --build, -b      Rebuild image from local Dockerfile instead of using
-                   the pre-built image pulled from Docker Hub. Default
-                   is to use the pulled image (fast, no source build
-                   required). Use this only when iterating on Dockerfile.
+                    the pre-built image pulled from Docker Hub. Default
+                    is to use the pulled image (fast, no source build
+                    required). Use this only when iterating on Dockerfile.
 
 Environment:
   GPU_ARCH         default | blackwell   (optional, amd64 only)
@@ -250,27 +289,9 @@ ui_dir() {
     canonical_path "${SCRIPT_DIR}/../orchestrator/ui"
 }
 
-main_ui_dir() {
-    printf '%s\n' "/root/ros2_ws/src/cyclo_intelligence/orchestrator/ui"
-}
-
-main_container_has_npm() {
-    container_running "$MAIN_CONTAINER" \
-        && docker exec "$MAIN_CONTAINER" sh -lc 'command -v npm >/dev/null 2>&1'
-}
-
 enter_bash() {
     local container="$1"
     docker exec -it "$container" bash
-}
-
-run_ui_npm_in_main() {
-    docker exec \
-        -u "$(id -u):$(id -g)" \
-        -e HOME=/tmp \
-        -w "$(main_ui_dir)" \
-        "$MAIN_CONTAINER" \
-        npm "$@"
 }
 
 run_ui_npm_external() {
@@ -285,42 +306,19 @@ run_ui_npm_external() {
         npm "$@"
 }
 
-run_ui_npm() {
-    if main_container_has_npm; then
-        run_ui_npm_in_main "$@"
-    else
-        run_ui_npm_external "$@"
-    fi
-}
-
 ensure_ui_dependencies() {
     local dir
-    if main_container_has_npm; then
-        if docker exec "$MAIN_CONTAINER" test -x "$(main_ui_dir)/node_modules/.bin/react-scripts"; then
-            return 0
-        fi
-
-        echo "[container.sh] Installing UI dependencies inside ${MAIN_CONTAINER}..."
-        run_ui_npm_in_main ci --legacy-peer-deps
-        return 0
-    fi
-
     dir="$(ui_dir)"
     if [ -x "${dir}/node_modules/.bin/react-scripts" ]; then
         return 0
     fi
 
     echo "[container.sh] Installing UI dependencies with ${CYCLO_UI_NODE_IMAGE:-node:22}..."
-    run_ui_npm ci --legacy-peer-deps
+    run_ui_npm_external ci --legacy-peer-deps
 }
 
 clean_ui_build_dir() {
     local dir
-    if container_running "$MAIN_CONTAINER"; then
-        docker exec "$MAIN_CONTAINER" sh -lc "rm -rf '$(main_ui_dir)/build'"
-        return 0
-    fi
-
     dir="$(ui_dir)"
     docker run --rm --network none \
         -v "${dir}:/ui" \
@@ -336,7 +334,7 @@ build_ui() {
 
     echo "[container.sh] Building React UI only..."
     clean_ui_build_dir
-    run_ui_npm run build
+    run_ui_npm_external run build
 
     if ! container_running "$MAIN_CONTAINER"; then
         echo "[container.sh] UI build complete: ${dir}/build"
@@ -354,9 +352,9 @@ test_ui() {
     ensure_ui_dependencies
     echo "[container.sh] Running React UI tests..."
     if [ "$#" -eq 0 ]; then
-        run_ui_npm test -- --watchAll=false
+        run_ui_npm_external test -- --watchAll=false
     else
-        run_ui_npm test "$@"
+        run_ui_npm_external test "$@"
     fi
 }
 
@@ -375,34 +373,23 @@ start_main() {
     echo "[container.sh] Done. 'docker/container.sh status' to check s6 services."
 }
 
-start_lerobot() {
+start_policy() {
+    local runtime="$1"
+    local container
+    require_policy_runtime "$runtime"
+    container="$(policy_container_name "$runtime")"
     prepare_host_mounts
     setup_x11
     if [ -n "$BUILD_FLAG" ]; then
-        echo "[container.sh] Building $LEROBOT_SERVICE from local Dockerfile; skipping pre-built image pull."
+        echo "[container.sh] Building $runtime from local Dockerfile; skipping pre-built image pull."
     else
         echo "[container.sh] Pulling pre-built images..."
         echo "[container.sh] Local Dockerfile/s6 changes are ignored without --build."
-        $COMPOSE pull --ignore-pull-failures "$LEROBOT_SERVICE" || true
+        $COMPOSE pull --ignore-pull-failures "$runtime" || true
     fi
-    remove_stale_policy_container "$LEROBOT_SERVICE" "$LEROBOT_CONTAINER"
-    echo "[container.sh] Starting $LEROBOT_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
-    $COMPOSE up -d $BUILD_FLAG "$LEROBOT_SERVICE"
-}
-
-start_groot() {
-    prepare_host_mounts
-    setup_x11
-    if [ -n "$BUILD_FLAG" ]; then
-        echo "[container.sh] Building $GROOT_SERVICE from local Dockerfile; skipping pre-built image pull."
-    else
-        echo "[container.sh] Pulling pre-built images..."
-        echo "[container.sh] Local Dockerfile/s6 changes are ignored without --build."
-        $COMPOSE pull --ignore-pull-failures "$GROOT_SERVICE" || true
-    fi
-    remove_stale_policy_container "$GROOT_SERVICE" "$GROOT_CONTAINER"
-    echo "[container.sh] Starting $GROOT_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
-    $COMPOSE up -d $BUILD_FLAG "$GROOT_SERVICE"
+    remove_stale_policy_container "$runtime" "$container"
+    echo "[container.sh] Starting $runtime (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
+    $COMPOSE up -d $BUILD_FLAG "$runtime"
 }
 
 enter_main() {
@@ -414,20 +401,16 @@ enter_main() {
     enter_bash "$MAIN_CONTAINER"
 }
 
-enter_lerobot() {
-    if ! container_running "$LEROBOT_CONTAINER"; then
-        echo "Error: $LEROBOT_CONTAINER is not running. Run 'start-lerobot' first." >&2
+enter_policy() {
+    local runtime="$1"
+    local container
+    require_policy_runtime "$runtime"
+    container="$(policy_container_name "$runtime")"
+    if ! container_running "$container"; then
+        echo "Error: $container is not running. Run 'start-policy $runtime' first." >&2
         exit 1
     fi
-    enter_bash "$LEROBOT_CONTAINER"
-}
-
-enter_groot() {
-    if ! container_running "$GROOT_CONTAINER"; then
-        echo "Error: $GROOT_CONTAINER is not running. Run 'start-groot' first." >&2
-        exit 1
-    fi
-    enter_bash "$GROOT_CONTAINER"
+    enter_bash "$container"
 }
 
 show_logs() {
@@ -435,9 +418,18 @@ show_logs() {
 }
 
 show_status() {
+    local runtime
+    local cont
+    local container_pattern="$MAIN_CONTAINER"
+    while IFS= read -r runtime; do
+        [ -n "$runtime" ] || continue
+        cont="$(policy_container_name "$runtime" 2>/dev/null || true)"
+        [ -n "$cont" ] && container_pattern="${container_pattern}|${cont}"
+    done < <(policy_runtimes)
+
     echo "=== Containers ==="
     docker ps --format '{{.Names}}\t{{.Status}}' \
-        | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${GROOT_CONTAINER})\\b" \
+        | grep -E "^(${container_pattern})\\b" \
         || echo "(none running)"
 
     # s6-overlay installs s6-svstat under /package/admin/s6-*/command/
@@ -462,12 +454,14 @@ show_status() {
         " || true
     fi
 
-    for cont in "$LEROBOT_CONTAINER" "$GROOT_CONTAINER"; do
+    while IFS= read -r runtime; do
+        [ -n "$runtime" ] || continue
+        cont="$(policy_container_name "$runtime" 2>/dev/null || true)"
+        [ -n "$cont" ] || continue
         if container_running "$cont"; then
             echo ""
-            # Not every policy container uses s6-overlay (e.g. lerobot
-            # has PID 1 running executor.py directly). Detect /run/service
-            # first; fall back to top-level process list otherwise.
+            # Future policy runtimes may not use s6-overlay. Detect the service
+            # directory first and fall back to a short process list.
             if docker exec "$cont" sh -c '[ -d /run/service ]' 2>/dev/null; then
                 echo "=== ${cont} s6 services ==="
                 docker exec "$cont" sh -c "
@@ -482,7 +476,7 @@ show_status() {
                 docker exec "$cont" sh -c 'ps -eo pid,user,comm,args | head -8' || true
             fi
         fi
-    done
+    done < <(policy_runtimes)
 }
 
 stop_all() {
@@ -498,11 +492,13 @@ stop_all() {
 
 case "${1:-help}" in
     start)           start_main ;;
-    start-lerobot)   start_lerobot ;;
-    start-groot)     start_groot ;;
+    start-policy)    [ -n "${2:-}" ] || { echo "Error: runtime is required" >&2; exit 1; }; start_policy "$2" ;;
+    start-lerobot)   start_policy lerobot ;;
+    start-groot)     start_policy groot ;;
     enter)           enter_main ;;
-    enter-lerobot)   enter_lerobot ;;
-    enter-groot)     enter_groot ;;
+    enter-policy)    [ -n "${2:-}" ] || { echo "Error: runtime is required" >&2; exit 1; }; enter_policy "$2" ;;
+    enter-lerobot)   enter_policy lerobot ;;
+    enter-groot)     enter_policy groot ;;
     build-ui)        build_ui ;;
     test-ui)         shift; test_ui "$@" ;;
     logs)            show_logs ;;

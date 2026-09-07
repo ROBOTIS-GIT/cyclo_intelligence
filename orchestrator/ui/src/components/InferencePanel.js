@@ -29,6 +29,7 @@ import {
 } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
+import PolicyParameterFields from './PolicyParameterFields';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -45,7 +46,7 @@ import {
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import { findPolicy, usePolicyCatalog } from '../contexts/PolicyCatalogContext';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
 import {
   getInferenceTimingWarnings,
@@ -61,7 +62,15 @@ const InferencePanel = () => {
   const taskInfoSync = useSelector((state) => state.tasks.inferenceTaskInfoSync);
   const robotType = useSelector((state) => state.tasks.robotType);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
-  const showInstruction = requiresInstruction(info.serviceType, info.policyType);
+  const { catalog, status: catalogStatus, error: catalogError, retry: retryCatalog } = usePolicyCatalog();
+  const selectedPolicy = findPolicy(
+    catalog,
+    info.policyId,
+    info.serviceType,
+    info.policyType
+  );
+  const selectedRuntime = selectedPolicy?.runtime;
+  const showInstruction = Boolean(selectedPolicy?.requires_instruction);
 
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
   const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
@@ -78,8 +87,9 @@ const InferencePanel = () => {
     String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
       : 'async';
-  const isGrootModel = info.serviceType === 'groot';
   const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
+  const isTensorRtCapable = selectedRuntime?.capabilities?.operations?.includes('groot_trt');
+  const actionRequestModes = selectedRuntime?.capabilities?.action_request_modes || [];
   const initialPoseSyncEnabled = Boolean(info.initialPoseSync);
   const timingInputIncomplete = hasIncompleteInferenceTiming(info);
   const timingWarnings = getInferenceTimingWarnings({
@@ -94,7 +104,7 @@ const InferencePanel = () => {
     InferencePhase.PAUSED,
     InferencePhase.SYNCING,
   ].includes(inferenceStatus.inferencePhase);
-  const disabled = isTaskRunning;
+  const disabled = isTaskRunning || catalogStatus !== 'ready' || !selectedPolicy;
   const [isEditable, setIsEditable] = useState(!disabled);
   const [isUpdatingInstruction, setIsUpdatingInstruction] = useState(false);
   const syncGenerationRef = useRef(0);
@@ -254,10 +264,7 @@ const InferencePanel = () => {
     setShowPolicyBrowser(false);
   }, [isEditable, dispatch]);
 
-  const policyBrowserPath =
-    info.serviceType === 'groot'
-      ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
-      : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
+  const policyBrowserPath = selectedRuntime?.checkpoint_root || '/workspace/model';
 
   // Update isEditable state when the disabled prop changes
   useEffect(() => {
@@ -415,10 +422,24 @@ const InferencePanel = () => {
         Task Information
       </div>
 
+      {catalogStatus === 'error' && (
+        <div className="mb-3 border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+          <div>{catalogError || 'Policy catalog is unavailable.'}</div>
+          <button
+            type="button"
+            className="mt-2 text-blue-600 underline"
+            onClick={retryCatalog}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       <InferenceModelSelector readonly={!isEditable} />
 
       <PolicyBackendControl
         serviceType={info.serviceType}
+        runtime={selectedRuntime}
       />
 
       <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 p-2">
@@ -477,8 +498,7 @@ const InferencePanel = () => {
         )}
       </div>
 
-      {/* Task Instruction — only shown for language-conditioned policies.
-          Whitelist lives in constants/policyCapabilities.js. */}
+      {/* Task Instruction is shown when the selected catalog model requires it. */}
       {showInstruction && (
         <>
           <div className={clsx('flex', 'items-start', 'mb-1')}>
@@ -537,42 +557,26 @@ const InferencePanel = () => {
         </div>
       </div>
 
-      {isGrootModel && (
+      <PolicyParameterFields
+        model={selectedPolicy}
+        info={info}
+        disabled={!isEditable}
+        labelClassName={classLabel}
+        onTaskInfoChange={handleChange}
+        onPolicyParametersChange={(value) => handleChange('policyParameters', value)}
+        excludedBindings={isTensorRtCapable ? ['task_info.accelerationEnginePath'] : []}
+      />
+
+      {isTensorRtCapable && isTensorRtEnabled && (
         <>
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-              <Tooltip content="Run GR00T with DiT TensorRT acceleration." position="bottom">
-                <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
-              </Tooltip>
-              <span>TensorRT</span>
-            </div>
-            <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
-              <input
-                type="checkbox"
-                className={clsx('w-4 h-4', {
-                  'cursor-not-allowed opacity-50': !isEditable,
-                  'cursor-pointer': isEditable,
-                })}
-                checked={isTensorRtEnabled}
-                onChange={(e) => handleChange(
-                  'accelerationMode',
-                  e.target.checked ? 'tensorrt_dit' : 'pytorch'
-                )}
-                disabled={!isEditable}
-              />
-              <span className="text-gray-500">Enable</span>
-            </label>
-          </div>
-          {isTensorRtEnabled && (
-            <TrtEngineControl
-              modelPath={info.policyPath}
-              enginePath={info.accelerationEnginePath}
-              robotType={robotType}
-              taskInstruction={trtTaskInstruction}
-              disabled={!isEditable}
-              labelClassName={classLabel}
-            />
-          )}
+          <TrtEngineControl
+            modelPath={info.policyPath}
+            enginePath={info.accelerationEnginePath}
+            robotType={robotType}
+            taskInstruction={trtTaskInstruction}
+            disabled={!isEditable}
+            labelClassName={classLabel}
+          />
         </>
       )}
 
@@ -586,7 +590,7 @@ const InferencePanel = () => {
           <span>Action Request</span>
         </div>
         <div className="grid grid-cols-2 gap-1 flex-1 min-w-0">
-          <button
+          {actionRequestModes.includes('async') && <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'async')}
             disabled={!isEditable}
@@ -596,8 +600,8 @@ const InferencePanel = () => {
           >
             <MdSync size={16} className="shrink-0" />
             <span className="truncate">Async</span>
-          </button>
-          <button
+          </button>}
+          {actionRequestModes.includes('sync') && <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'sync')}
             disabled={!isEditable}
@@ -607,7 +611,7 @@ const InferencePanel = () => {
           >
             <MdHourglassEmpty size={16} className="shrink-0" />
             <span className="truncate">Sync</span>
-          </button>
+          </button>}
         </div>
       </div>
 

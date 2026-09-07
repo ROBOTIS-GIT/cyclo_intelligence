@@ -33,8 +33,13 @@ so a downstream BT node never starts running against a half-loaded or
 mid-transition policy.
 """
 
+import importlib.util
+import os
+import sys
 import threading
 import time
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
@@ -96,43 +101,64 @@ COMMAND_STAGES = {
 
 SERVICE_CALL_TIMEOUT_SEC = 30.0
 
-MODEL_SERVICE_TYPES = {
-    'groot': 'groot',
-    'groot:n17': 'groot',
-    'n17': 'groot',
-    'n1.7': 'groot',
-    'lerobot': 'lerobot',
-    'lerobot:act': 'lerobot',
-    'lerobot:diffusion': 'lerobot',
-    'lerobot:smolvla': 'lerobot',
-    'lerobot:xvla': 'lerobot',
-    'lerobot:pi0': 'lerobot',
-    'lerobot:pi05': 'lerobot',
-    'lerobot:molmoact2': 'lerobot',
-    'lerobot:vla_jepa': 'lerobot',
-    'lerobot:fastwam': 'lerobot',
-    'act': 'lerobot',
-    'diffusion': 'lerobot',
-    'smolvla': 'lerobot',
-    'xvla': 'lerobot',
-    'pi0': 'lerobot',
-    'pi05': 'lerobot',
-    'molmoact2': 'lerobot',
-    'vla_jepa': 'lerobot',
-    'fastwam': 'lerobot',
-}
+def _policy_root_candidates() -> list[Path]:
+    candidates = []
+    configured = os.environ.get('CYCLO_POLICY_ROOT', '').strip()
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(Path('/opt/cyclo/policy'))
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / 'cyclo_brain' / 'policy')
+    candidates.append(
+        Path('/root/ros2_ws/src/cyclo_intelligence/cyclo_brain/policy')
+    )
+    return list(dict.fromkeys(candidates))
+
+
+@lru_cache(maxsize=1)
+def _load_policy_catalog():
+    for root in _policy_root_candidates():
+        module_path = root / 'common' / 'catalog' / 'catalog.py'
+        try:
+            available = module_path.is_file()
+        except OSError:
+            available = False
+        if not available:
+            continue
+        spec = importlib.util.spec_from_file_location(
+            'cyclo_policy_catalog_bt',
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module, module.load_catalog(root)
+    raise RuntimeError('Cyclo policy catalog is unavailable')
+
+
+def _policy_selection_from_model(model: str) -> tuple[str, str]:
+    """Resolve namespaced IDs and legacy bare aliases through manifests."""
+    value = (model or '').strip().lower()
+    if not value:
+        return '', ''
+    module, catalog = _load_policy_catalog()
+    for runtime in catalog['runtimes']:
+        if runtime['id'] == value:
+            return runtime['id'], ''
+    try:
+        runtime, policy = module.resolve_policy(catalog, value)
+        return runtime['id'], policy['policy_id']
+    except module.CatalogError:
+        pass
+    if ':' in value:
+        return value.split(':', 1)[0].strip(), value
+    return value, ''
 
 
 def _service_type_from_model(model: str) -> str:
-    """Map UI model selections onto TaskInfo.service_type backends."""
-    value = (model or '').strip().lower()
-    if not value:
-        return ''
-    if value in MODEL_SERVICE_TYPES:
-        return MODEL_SERVICE_TYPES[value]
-    if ':' in value:
-        return value.split(':', 1)[0].strip()
-    return value
+    return _policy_selection_from_model(model)[0]
 
 
 def _normalize_action_request_mode(value: str) -> str:
@@ -437,7 +463,12 @@ class SendCommand(BaseAction):
         ti = TaskInfo()
         ti.task_type = 'inference'
         ti.policy_path = self.policy_path
-        ti.service_type = _service_type_from_model(self.model)
+        service_type, policy_id = _policy_selection_from_model(self.model)
+        ti.service_type = service_type
+        if hasattr(ti, 'policy_id'):
+            ti.policy_id = policy_id
+        if hasattr(ti, 'policy_parameters_json'):
+            ti.policy_parameters_json = '{}'
         if self.command_str == 'LOAD' and hasattr(ti, 'inference_mode'):
             ti.inference_mode = self.inference_mode
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):

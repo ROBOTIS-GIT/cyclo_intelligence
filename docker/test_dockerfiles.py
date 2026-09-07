@@ -20,13 +20,18 @@ def test_main_dockerfiles_install_compose_v2():
         )
 
 
-def test_main_compose_mounts_shared_s6_runner():
-    contents = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
+def test_production_compose_does_not_bind_mount_runtime_sources():
+    production = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
 
-    assert (
-        "./s6-services/common/ros2_service_run.sh:"
-        "/usr/local/lib/s6-services/ros2_service_run.sh:ro"
-    ) in contents
+    source_mounts = (
+        "./s6-services/common/ros2_service_run.sh:",
+        "../cyclo_brain/policy/common:",
+        "../cyclo_brain/sdk/robot_client:",
+        "../shared/shared/robot_configs:/orchestrator_config:ro",
+    )
+    for mount in source_mounts:
+        assert mount not in production
+    assert not (REPO_ROOT / "docker" / "docker-compose.dev.yml").exists()
 
 
 def test_interactive_bashrc_includes_simple_ros_zenoh_block():
@@ -88,10 +93,8 @@ def test_ros_zenoh_runtime_env_file_is_not_referenced_by_images_or_s6():
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.arm64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.amd64",
         REPO_ROOT / "docker" / "s6-services" / "common" / "ros2_service_run.sh",
-        REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "main-runtime" / "run",
+        REPO_ROOT / "docker" / "s6-services" / "policy-runtime" / "run",
         REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "engine-process" / "run",
-        REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "s6-services" / "main-runtime" / "run",
-        REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "s6-services" / "engine-process" / "run",
     )
 
     for path in paths:
@@ -103,10 +106,8 @@ def test_ros_zenoh_runtime_env_file_is_not_referenced_by_images_or_s6():
 def test_s6_services_run_through_interactive_bashrc_shell():
     paths = (
         REPO_ROOT / "docker" / "s6-services" / "common" / "ros2_service_run.sh",
-        REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "main-runtime" / "run",
+        REPO_ROOT / "docker" / "s6-services" / "policy-runtime" / "run",
         REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "engine-process" / "run",
-        REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "s6-services" / "main-runtime" / "run",
-        REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "s6-services" / "engine-process" / "run",
     )
 
     for path in paths:
@@ -275,7 +276,7 @@ def test_policy_compose_keeps_image_defaults_in_images():
         contents = dockerfile.read_text()
         assert "ENV ZENOH_SDK_PATH=/zenoh_sdk" in contents
         assert "ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk" in contents
-        assert "ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk" in contents
+        assert "ACTION_CHUNK_PROCESSING_SDK_PATH" not in contents
 
 
 def test_lerobot_images_install_new_policy_inference_extras():
@@ -294,6 +295,68 @@ def test_lerobot_images_install_new_policy_inference_extras():
         install_line = install_lines[0]
         for extra in ("molmoact2", "vla_jepa", "fastwam"):
             assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
+
+
+def test_policy_build_contexts_use_runtime_specific_ignore_files():
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
+    assert compose.count("context: ..") == 3
+
+    main_ignores = []
+    policy_root = REPO_ROOT / "cyclo_brain" / "policy"
+    for arch in ("amd64", "arm64"):
+        main_ignore = (
+            REPO_ROOT / "docker" / f"Dockerfile.{arch}.dockerignore"
+        ).read_text()
+        lerobot_ignore = (
+            policy_root / "lerobot" / f"Dockerfile.{arch}.dockerignore"
+        ).read_text()
+        groot_ignore = (
+            policy_root / "groot" / f"Dockerfile.{arch}.dockerignore"
+        ).read_text()
+
+        assert "!cyclo_brain/policy/common/runtime/engine_process/**" in lerobot_ignore
+        assert "!cyclo_brain/policy/common/s6-services/**" in lerobot_ignore
+        assert "!cyclo_brain/policy/lerobot/lerobot/**" in lerobot_ignore
+        assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" not in lerobot_ignore
+        assert "!cyclo_brain/policy/common/runtime/engine_process/**" in groot_ignore
+        assert "!cyclo_brain/policy/common/s6-services/**" in groot_ignore
+        assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" in groot_ignore
+        assert "!cyclo_brain/policy/lerobot/lerobot/**" not in groot_ignore
+
+        main_ignores.append(main_ignore)
+        for required in (
+            "!orchestrator/**",
+            "!cyclo_data/**",
+            "!interfaces/**",
+            "!shared/**",
+            "!cyclo_brain/policy/common/**",
+            "!cyclo_brain/sdk/zenoh_ros2_sdk/**",
+            "!cyclo_brain/sdk/robot_client/**",
+            "!cyclo_brain/sdk/action_chunk_processing/**",
+            "!docker/s6-services/**",
+            "!docker/supervisor_api/**",
+        ):
+            assert required in main_ignore
+        assert "!docker/**" not in main_ignore
+        assert "!cyclo_brain/policy/lerobot/lerobot/**" not in main_ignore
+        assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" not in main_ignore
+
+    assert main_ignores[0] == main_ignores[1]
+
+
+def test_policy_workers_install_only_the_shared_engine_service():
+    policy_root = REPO_ROOT / "cyclo_brain" / "policy"
+    assert not (policy_root / "common" / "s6-services" / "main-runtime").exists()
+    assert not (policy_root / "groot" / "s6-services").exists()
+
+    for backend in ("lerobot", "groot"):
+        for arch in ("amd64", "arm64"):
+            contents = (policy_root / backend / f"Dockerfile.{arch}").read_text()
+            assert (
+                "COPY cyclo_brain/policy/common/s6-services/ "
+                "/etc/s6-overlay/s6-rc.d/"
+            ) in contents
+            assert "main-runtime" not in contents
 
 
 def test_groot_amd64_keeps_numpy_compatible_with_opencv():

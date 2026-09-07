@@ -69,6 +69,7 @@ from orchestrator.internal.communication.container_service_client import (
     ContainerServiceClient,
 )
 from orchestrator.internal.communication.inference_mode import (
+    canonical_policy_parameters_json,
     inference_runtime_signature,
     inference_timing_from_task_info,
     publish_to_robot_from_task_info,
@@ -200,6 +201,8 @@ class OrchestratorNode(Node):
         # LOAD / START / PAUSE / RESUME / STOP / UNLOAD from UI commands.
         self.container_service_client: Optional[ContainerServiceClient] = None
         self._loaded_inference_policy_path: str = ''
+        self._loaded_inference_policy_id: str = ''
+        self._loaded_inference_policy_parameters_json: str = '{}'
         self._loaded_inference_publish_to_robot: bool = False
         self._loaded_inference_acceleration_mode: str = 'pytorch'
         self._loaded_inference_acceleration_engine_path: str = ''
@@ -413,6 +416,8 @@ class OrchestratorNode(Node):
             'acceleration_engine_path',
             'initial_pose_sync',
             'initial_pose_sync_duration_s',
+            'policy_id',
+            'policy_parameters_json',
         ):
             value = getattr(task_info, field_name)
             if isinstance(value, list):
@@ -575,7 +580,7 @@ class OrchestratorNode(Node):
 
     def _setup_timer_callbacks(self):
         # Inference no longer needs an orchestrator-side 100 Hz timer.
-        # The policy main_runtime owns the control loop. orchestrator publishes
+        # The central Policy Runtime owns the control loop. orchestrator publishes
         # InferenceStatus on
         # command transitions (LOAD / START / PAUSE / RESUME / STOP)
         # instead of from a polling timer.
@@ -910,11 +915,150 @@ class OrchestratorNode(Node):
             error=error,
         )
 
+    @staticmethod
+    def _runtime_state_to_inference_phase(runtime_state: str) -> int:
+        state = str(runtime_state or '').strip().lower()
+        if state == 'syncing':
+            return InferenceStatus.SYNCING
+        if state == 'running':
+            return InferenceStatus.INFERENCING
+        if state in {'loaded', 'paused'}:
+            return InferenceStatus.PAUSED
+        if state == 'error':
+            return InferenceStatus.PAUSED
+        return InferenceStatus.READY
+
+    def _query_inference_runtime_status(self, task_info):
+        """Read the central Policy Runtime session without mutating it.
+
+        The active client wins over the UI's selected runtime so another tab
+        cannot hide a running session by selecting a different policy. After
+        an orchestrator restart there is no active client, so task_info is
+        used to reconnect to the selected runtime and recover its session.
+        """
+        with self._state_lock:
+            client = self.container_service_client
+        owns_client = client is None
+        if client is None:
+            service_prefix = self._determine_service_prefix(task_info)
+            client = ContainerServiceClient(
+                node=self,
+                service_prefix=service_prefix,
+                callback_group=self._client_cb_group,
+            )
+            if not client.connect():
+                return None, 'Failed to create policy runtime status client'
+
+        result = client.inference_command(
+            ContainerServiceClient.CMD_STATUS,
+            timeout_sec=2.0,
+        )
+        if not result.success:
+            if owns_client:
+                client.disconnect()
+            return None, result.message or 'Policy runtime status unavailable'
+
+        runtime_state = str(result.data.get('runtime_state', '') or '').lower()
+        if runtime_state not in {
+            'unloaded', 'loaded', 'syncing', 'running', 'paused', 'error'
+        }:
+            if owns_client:
+                client.disconnect()
+            return None, f'Invalid policy runtime state: {runtime_state!r}'
+
+        if runtime_state != 'unloaded':
+            with self._state_lock:
+                if self.container_service_client is None:
+                    self.container_service_client = client
+                    owns_client = False
+                self._loaded_inference_policy_path = str(
+                    result.data.get('loaded_model_path', '') or ''
+                )
+                self._loaded_inference_policy_id = str(
+                    result.data.get('loaded_policy_id', '') or ''
+                )
+                self._loaded_inference_policy_parameters_json = str(
+                    result.data.get('loaded_policy_parameters_json', '{}') or '{}'
+                )
+                self._loaded_inference_publish_to_robot = bool(
+                    result.data.get('publish_to_robot', False)
+                )
+                self._loaded_inference_acceleration_mode = str(
+                    result.data.get('loaded_acceleration_mode', '') or ''
+                )
+                self._loaded_inference_acceleration_engine_path = (
+                    str(result.data.get(
+                        'loaded_acceleration_engine_path', '') or ''
+                    )
+                )
+                self._loaded_inference_action_request_mode = str(
+                    result.data.get('loaded_action_request_mode', '') or ''
+                )
+                self._loaded_inference_control_hz = int(
+                    result.data.get('loaded_control_hz', 0) or 0
+                )
+                self._loaded_inference_inference_hz = int(
+                    result.data.get('loaded_inference_hz', 0) or 0
+                )
+                self._loaded_inference_chunk_align_window_s = (
+                    float(result.data.get(
+                        'loaded_chunk_align_window_s', 0.0
+                    ) or 0.0)
+                )
+                self._loaded_inference_initial_pose_sync = bool(result.data.get(
+                    'loaded_initial_pose_sync', False
+                ))
+                self._loaded_inference_initial_pose_sync_duration_s = float(
+                    result.data.get(
+                        'loaded_initial_pose_sync_duration_s', 0.0
+                    ) or 0.0
+                )
+            self._set_session_active(on_inference=True)
+        else:
+            self._set_session_active(on_inference=False)
+
+        if owns_client:
+            client.disconnect()
+        return result, ''
+
+    def _handle_get_inference_status(self, task_info, response):
+        result, error = self._query_inference_runtime_status(task_info)
+        if result is None:
+            response.success = False
+            response.message = error
+            response.inference_status_known = False
+            return response
+
+        runtime_state = str(result.data['runtime_state'])
+        response.success = True
+        response.message = runtime_state
+        response.inference_status_known = True
+        response.inference_phase = self._runtime_state_to_inference_phase(
+            runtime_state
+        )
+        response.inference_runtime_state = runtime_state
+        response.inference_model_path = str(
+            result.data.get('loaded_model_path', '') or ''
+        )
+        response.inference_policy_id = str(
+            result.data.get('loaded_policy_id', '') or ''
+        )
+        response.inference_publish_to_robot = bool(
+            result.data.get('publish_to_robot', False)
+        )
+        response.inference_error = str(
+            result.data.get('runtime_error', '') or ''
+        )
+        if runtime_state == 'error':
+            response.message = response.inference_error or 'Policy Runtime error'
+        return response
+
     def _begin_initial_pose_sync_status(
         self,
         client: ContainerServiceClient,
-        duration_s: float,
+        _duration_s: float,
     ) -> None:
+        """Publish SYNCING until the central Runtime reports its real state."""
         self._cancel_initial_pose_sync_status()
         with self._state_lock:
             if self.container_service_client is not client:
@@ -923,22 +1067,57 @@ class OrchestratorNode(Node):
             self._initial_pose_sync_status_generation += 1
             generation = self._initial_pose_sync_status_generation
 
-            def _complete_sync_status():
-                with self._state_lock:
-                    if (
-                        generation != self._initial_pose_sync_status_generation
-                        or self.container_service_client is not client
-                    ):
-                        return
-                    self._initial_pose_sync_status_timer = None
-                    self._initial_pose_sync_hold_pending = False
-                self._publish_inference_phase(InferenceStatus.INFERENCING)
-
-            timer = threading.Timer(float(duration_s), _complete_sync_status)
+        def _schedule_poll(delay_s: float = 0.1) -> None:
+            timer = threading.Timer(delay_s, _poll_runtime_status)
             timer.daemon = True
-            self._initial_pose_sync_status_timer = timer
+            with self._state_lock:
+                if (
+                    generation != self._initial_pose_sync_status_generation
+                    or self.container_service_client is not client
+                ):
+                    return
+                self._initial_pose_sync_status_timer = timer
+            timer.start()
+
+        def _poll_runtime_status() -> None:
+            try:
+                result = client.inference_command(
+                    ContainerServiceClient.CMD_STATUS,
+                    timeout_sec=1.0,
+                )
+            except Exception:
+                result = None
+
+            data = getattr(result, 'data', {}) or {}
+            runtime_state = str(
+                data.get('runtime_state', getattr(result, 'message', '')) or ''
+            ).strip().lower()
+            result_success = bool(getattr(result, 'success', False))
+
+            if not result_success or runtime_state == 'syncing':
+                _schedule_poll()
+                return
+
+            if runtime_state not in {
+                'unloaded', 'loaded', 'running', 'paused', 'error'
+            }:
+                _schedule_poll()
+                return
+
+            error = str(data.get('runtime_error', '') or '')
+            phase = self._runtime_state_to_inference_phase(runtime_state)
+            with self._state_lock:
+                if (
+                    generation != self._initial_pose_sync_status_generation
+                    or self.container_service_client is not client
+                ):
+                    return
+                self._initial_pose_sync_status_timer = None
+                self._initial_pose_sync_hold_pending = False
+            self._publish_inference_phase(phase, error=error)
+
         self._publish_inference_phase(InferenceStatus.SYNCING)
-        timer.start()
+        _schedule_poll()
 
     def _cancel_initial_pose_sync_status(self) -> bool:
         with self._state_lock:
@@ -1389,6 +1568,12 @@ class OrchestratorNode(Node):
                 )
                 self._apply_cyclo_data_response(cd_result, response)
 
+            elif request.command == SendCommand.Request.GET_INFERENCE_STATUS:
+                return self._handle_get_inference_status(
+                    request.task_info,
+                    response,
+                )
+
             elif request.command in (
                 SendCommand.Request.STOP_SEGMENT,
                 SendCommand.Request.CANCEL_SEGMENT,
@@ -1489,9 +1674,21 @@ class OrchestratorNode(Node):
                 requested_policy_path = self._normalize_policy_path(
                     task_info.policy_path
                 )
+                requested_policy_id = str(
+                    getattr(task_info, 'policy_id', '') or ''
+                ).strip()
+                requested_policy_parameters_json = (
+                    canonical_policy_parameters_json(
+                        getattr(task_info, 'policy_parameters_json', '')
+                    )
+                )
                 with self._state_lock:
                     existing_client = self.container_service_client
                     loaded_policy_path = self._loaded_inference_policy_path
+                    loaded_policy_id = self._loaded_inference_policy_id
+                    loaded_policy_parameters_json = (
+                        self._loaded_inference_policy_parameters_json
+                    )
                     loaded_acceleration_mode = (
                         self._loaded_inference_acceleration_mode
                     )
@@ -1527,6 +1724,8 @@ class OrchestratorNode(Node):
                         loaded_chunk_align_window_s,
                         loaded_initial_pose_sync,
                         loaded_initial_pose_sync_duration_s,
+                        policy_id=loaded_policy_id,
+                        policy_parameters_json=loaded_policy_parameters_json,
                     )
                     requested_signature = inference_runtime_signature(
                         requested_policy_path,
@@ -1538,6 +1737,8 @@ class OrchestratorNode(Node):
                         requested_chunk_align_window_s,
                         requested_initial_pose_sync,
                         requested_initial_pose_sync_duration_s,
+                        policy_id=requested_policy_id,
+                        policy_parameters_json=requested_policy_parameters_json,
                     )
                     if (
                         requested_policy_path
@@ -1662,6 +1863,10 @@ class OrchestratorNode(Node):
                                     initial_pose_sync_duration_s=(
                                         requested_initial_pose_sync_duration_s
                                     ),
+                                    policy_id=requested_policy_id,
+                                    policy_parameters_json=(
+                                        requested_policy_parameters_json
+                                    ),
                                 )
 
                             with self._inference_lifecycle_lock:
@@ -1744,6 +1949,12 @@ class OrchestratorNode(Node):
 
                                     self._loaded_inference_policy_path = (
                                         normalized_model_path
+                                    )
+                                    self._loaded_inference_policy_id = (
+                                        requested_policy_id
+                                    )
+                                    self._loaded_inference_policy_parameters_json = (
+                                        requested_policy_parameters_json
                                     )
                                     self._loaded_inference_publish_to_robot = (
                                         publish_to_robot
@@ -2705,13 +2916,6 @@ class OrchestratorNode(Node):
             response.items = []
             return response
 
-    # LeRobot policy types (used for service_prefix detection)
-    LEROBOT_POLICIES = {
-        'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
-        'smolvla', 'xvla', 'gaussian_actor',
-        'molmoact2', 'vla_jepa', 'fastwam',
-    }
-
     @staticmethod
     def _normalize_policy_path(policy_path: str) -> str:
         """Normalize policy paths for same-checkpoint comparisons."""
@@ -2779,40 +2983,24 @@ class OrchestratorNode(Node):
     def _determine_service_prefix(self, task_info) -> str:
         """Determine inference service prefix from task_info or policy config.
 
-        1. If task_info has service_type field, use it directly.
-        2. Otherwise, read policy_path/config.json to detect policy type.
-        3. LeRobot policy types -> "/lerobot", default -> "/groot".
+        1. If policy_id is namespaced, route by its runtime component.
+        2. If task_info has service_type field, use it directly.
+        3. Otherwise, use the historical GR00T default.
         """
+        policy_id = str(getattr(task_info, 'policy_id', '') or '').strip()
+        if ':' in policy_id:
+            runtime_id = policy_id.split(':', 1)[0].strip().strip('/')
+            if runtime_id:
+                prefix = f'/{runtime_id}'
+                self.get_logger().info(f'Service prefix from policy_id: {prefix}')
+                return prefix
+
         # Check for explicit service_type in task_info
         service_type = getattr(task_info, 'service_type', None)
         if service_type:
             prefix = f'/{service_type.strip("/")}'
             self.get_logger().info(f'Service prefix from task_info: {prefix}')
             return prefix
-
-        # Detect from policy config. LeRobot training output nests the
-        # checkpoint under <root>/pretrained_model/ — try that path too
-        # so users who paste the training root still get the right routing.
-        policy_path = getattr(task_info, 'policy_path', '')
-        if policy_path:
-            root = Path(policy_path)
-            config_path = root / 'config.json'
-            if not config_path.exists() and (root / 'pretrained_model' / 'config.json').exists():
-                config_path = root / 'pretrained_model' / 'config.json'
-            if config_path.exists():
-                try:
-                    with open(config_path) as f:
-                        config = json.load(f)
-                    policy_type = config.get('type', '')
-                    if policy_type in self.LEROBOT_POLICIES:
-                        self.get_logger().info(
-                            f'Detected LeRobot policy type: {policy_type}'
-                        )
-                        return '/lerobot'
-                except Exception as e:
-                    self.get_logger().warning(
-                        f'Failed to read policy config: {e}'
-                    )
 
         # Default to groot for backward compatibility
         return '/groot'
@@ -2870,6 +3058,8 @@ class OrchestratorNode(Node):
             self._initial_pose_sync_status_generation += 1
             self.container_service_client = None
             self._loaded_inference_policy_path = ''
+            self._loaded_inference_policy_id = ''
+            self._loaded_inference_policy_parameters_json = '{}'
             self._loaded_inference_publish_to_robot = False
             self._loaded_inference_acceleration_mode = 'pytorch'
             self._loaded_inference_acceleration_engine_path = ''

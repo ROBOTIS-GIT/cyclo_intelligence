@@ -18,14 +18,14 @@ float64 chunk_align_window_s
 # captures tick this on so the license rides through to HF Hub.
 bool include_robotis_license
 
-# Inference backend ("lerobot" / "groot" / ...). Empty falls back to
-# orchestrator._determine_service_prefix step 2 (config.json type
-# detection) for backward compatibility with old UI builds.
+# Inference runtime ("lerobot" / "groot" / ...). Legacy clients should set
+# this when policy_id is empty; an entirely empty selection keeps the
+# historical GR00T routing default.
 string service_type
 
 # Inference output mode. "simulation" runs policy inference and publishes
 # preview-only trajectories for the 3D viewer. "robot" permits the policy
-# container Main runtime to publish robot command topics.
+# Runtime in cyclo_intelligence to publish robot command topics.
 string inference_mode
 
 # Action chunk request scheduling. "async" requests the next chunk while the
@@ -44,3 +44,9 @@ string acceleration_engine_path
 # action of the first chunk as a slow initial pose target before normal control.
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+
+# Globally unique policy selection (for example "lerobot:act" or
+# "groot:n17") and model-specific parameters. Empty values preserve the
+# legacy checkpoint-based policy detection and mean an empty JSON object.
+string policy_id
+string policy_parameters_json

@@ -116,6 +116,8 @@ const inferenceTaskInfoInitialState = {
   chunkAlignWindowS: 0.3,
   serviceType: 'lerobot',
   policyType: 'act',
+  policyId: '',
+  policyParameters: {},
   inferenceMode: 'simulation',
   actionRequestMode: 'async',
   accelerationMode: 'pytorch',
@@ -143,6 +145,9 @@ const copyInferenceTaskInfo = (
 ) => ({
   ...inferenceTaskInfoInitialState,
   ...inferenceTaskInfo,
+  policyParameters: {
+    ...(inferenceTaskInfo.policyParameters || {}),
+  },
   actionRequestMode:
     String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
@@ -292,6 +297,10 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
     serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
     policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
+    policyId: String(taskInfo.policyId ?? state.inferenceTaskInfo.policyId ?? ''),
+    policyParameters: {
+      ...(taskInfo.policyParameters ?? state.inferenceTaskInfo.policyParameters ?? {}),
+    },
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
@@ -368,6 +377,10 @@ const initialState = {
     inferencePhase: InferencePhase.READY,
     error: '',
     topicReceived: false,
+    runtimeState: 'unknown',
+    loadedModelPath: '',
+    loadedPolicyId: '',
+    publishToRobot: false,
   },
 
   availableRobots: [],

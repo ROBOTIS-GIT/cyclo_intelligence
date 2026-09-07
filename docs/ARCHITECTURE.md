@@ -1,87 +1,71 @@
 # Architecture - cyclo_intelligence
 
-As-built runtime topology after `docker/container.sh start`.
+As-built inference topology after `docker/container.sh start`.
 
-Visual map: [`cyclo_brain/docs/architecture.html`](../cyclo_brain/docs/architecture.html)
-
-When runtime structure changes, update both
-[`cyclo_brain/STRUCTURE.md`](../cyclo_brain/STRUCTURE.md) and the visual map in
-`cyclo_brain/docs/`.
+- Detailed code map: [`cyclo_brain/STRUCTURE.md`](../cyclo_brain/STRUCTURE.md)
+- Visual map: [`cyclo_brain/docs/architecture.html`](../cyclo_brain/docs/architecture.html)
+- Refactoring report: [`cyclo_brain/docs/policy_runtime_refactoring_implementation.html`](../cyclo_brain/docs/policy_runtime_refactoring_implementation.html)
 
 ## Container Topology
 
 ```text
-Host
-├── cyclo_intelligence container
-│   ├── UI / nginx
-│   ├── supervisor_api
-│   ├── orchestrator
-│   ├── standalone CLI
-│   └── cyclo_data
-│
-└── policy container per backend
-    ├── main-runtime
-    └── engine-process
+cyclo_intelligence
+├── UI / nginx
+├── supervisor_api
+├── orchestrator
+├── cyclo_data
+└── policy-runtime
+    ├── lifecycle and global session
+    ├── action chunk processing
+    ├── safety and initial pose sync
+    └── robot command publishers
+
+lerobot_server                   groot_server
+└── engine-process               └── engine-process
+    ├── observation subscribers      ├── observation subscribers
+    ├── LeRobot policy               ├── GR00T policy
+    └── action chunk inference       └── action chunk inference
 ```
 
-Policy containers are backend-isolated so each opensource model can own its
-Dockerfile, Python dependencies, and upstream submodule.
+The central Policy Runtime owns control behavior once. Worker containers own
+only framework-specific model dependencies, observation preprocessing, and
+inference.
 
-## Policy Container
+## Data Flow
 
 ```text
-UI / orchestrator or standalone CLI
-  │
-  │ command args or /<backend>/inference_command
-  ▼
-main-runtime
-  ├── ServiceHandler
-  ├── SessionState
-  ├── InferenceRequester
-  ├── ActionChunkProcessor
-  ├── ControlLoop
-  └── RobotClient command publishers
-       │
-       │ /cmd_vel, /leader/*/joint_trajectory
-       ▼
-     Robot
-
-main-runtime
-  │
-  │ /<backend>/engine_command
-  ▼
-engine-process
-  ├── PolicyLoader
-  ├── optional Optimizer
-  ├── Preprocessor
-  ├── Predictor
-  └── RobotClient observation subscribers
+UI / BT
+  -> Orchestrator
+  -> /policy/inference_command
+  -> Policy Runtime
+  -> /<runtime>/engine_command
+  -> selected Engine Worker
+  -> action chunk
+  -> Policy Runtime buffer/control loop
+  -> RobotClient command publishers
+  -> Robot
 ```
 
-Main owns session flow and robot command publishing. Engine owns model loading,
-sensor/state reads, preprocessing, and inference.
+Workers subscribe to camera, state, and sensor topics directly over
+ROS2/Zenoh. Images are not relayed through the Cyclo container. Policy Runtime
+subscribes only to joint state when robot command safety or initial pose sync
+requires it.
 
-## Key Services
+## Contracts
 
-| Service | Owner | Purpose |
+| Contract | Owner | Purpose |
 |---|---|---|
-| `/<backend>/inference_command` | Main | External LOAD/START/PAUSE/RESUME/STOP/UNLOAD |
-| `/<backend>/engine_command` | Engine | Internal LOAD_POLICY/GET_ACTION/UNLOAD_POLICY |
+| `/policy/inference_command` | Policy Runtime | Public policy lifecycle and session control |
+| `/<runtime>/inference_command` | Policy Runtime | Temporary compatibility aliases |
+| `/<runtime>/engine_command` | Engine Worker | Internal model load, action, describe, status, unload |
+| `policy/<runtime>/manifest.yaml` | Catalog | Policy IDs, capabilities, UI parameters, checkpoint root |
 
-`EngineCommand` echoes `seq_id`. Main uses it to discard stale responses after
-timeout.
+`EngineCommand` echoes `seq_id` so late responses can be discarded after a
+timeout. Its protocol and each Worker descriptor are checked before LOAD.
 
-## Code Map
+## Deployment Boundary
 
-| Concern | Source |
-|---|---|
-| Target structure | [`cyclo_brain/STRUCTURE.md`](../cyclo_brain/STRUCTURE.md) |
-| Common runtime | [`cyclo_brain/policy/common/runtime/`](../cyclo_brain/policy/common/runtime/) |
-| Main process | [`main_runtime`](../cyclo_brain/policy/common/runtime/main_runtime/) |
-| Engine process | [`engine_process`](../cyclo_brain/policy/common/runtime/engine_process/) |
-| LeRobot engine | [`lerobot_engine`](../cyclo_brain/policy/lerobot/lerobot_engine/) |
-| GR00T engine | [`groot_engine`](../cyclo_brain/policy/groot/groot_engine/) |
-| Robot client | [`robot_client`](../cyclo_brain/sdk/robot_client/) |
-| Action processing | [`action_chunk_processing`](../cyclo_brain/sdk/action_chunk_processing/) |
-| Interfaces | [`interfaces`](../interfaces/) |
-| Compose | [`docker/docker-compose.yml`](../docker/docker-compose.yml) |
+UI, Orchestrator, control loop, safety, and action processing changes rebuild
+the Cyclo image. A model adapter or framework dependency change rebuilds only
+its Worker image. Wire-protocol changes require Cyclo and affected Workers to
+be released as one compatible set.

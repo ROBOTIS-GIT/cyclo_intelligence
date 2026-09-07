@@ -1,8 +1,8 @@
 # cyclo_intelligence — Docker Compose
 #
-# Two services:
+# Three services:
 #   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
-#                         cyclo_data + UI + nginx + s6-agent. Always
+#                         cyclo_data + UI + nginx + Policy Runtime. Always
 #                         started first.
 #   lerobot              policy container (PLAN §4.8) — pulled /
 #                         started on demand by the UI via
@@ -75,41 +75,28 @@ services:
       - CYCLO_VIDEO_SERVER_PORT=${CYCLO_VIDEO_SERVER_PORT:-7082}
       - CYCLO_WEB_VIDEO_SERVER_PORT=${CYCLO_WEB_VIDEO_SERVER_PORT:-7085}
       - CYCLO_SUPERVISOR_API_PORT=${CYCLO_SUPERVISOR_API_PORT:-7100}
+      - CYCLO_POLICY_ROOT=/opt/cyclo/policy
+      - CYCLO_SUPERVISOR_API_COMPOSE_FILE=/opt/cyclo/docker/docker-compose.yml
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
       - INFERENCE_LOAD_TIMEOUT_SEC=${INFERENCE_LOAD_TIMEOUT_SEC:-7200}
+      - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
+      - CMD_VEL_LINEAR_DEADBAND=0.02
+      - CMD_VEL_ANGULAR_DEADBAND=0.02
       - PYTHONUNBUFFERED=1
 
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
-      # Keep s6 ROS/Zenoh env sourcing in sync even when using pre-built images.
-      - ./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro
       - ./huggingface:/root/.cache/huggingface
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
       # Model dropboxes live under /workspace/model/{lerobot,groot}.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      # Live-edit the ROS2 workspace at runtime so a 'colcon build'
-      # inside the container sees host-side edits. The container copy
-      # at build time still lives in the image; this mount shadows it.
-      - ..:/root/ros2_ws/src/cyclo_intelligence
-      # URDF + mesh assets for the UI's 3D viewer. Source of truth is
-      # shared/robot_configs/ (consolidated from the legacy
-      # rosbag_recorder/config/ location — URDFs describe the robot,
-      # not the recorder, so they belong with the other shared
-      # robot-config assets next to parameter_loader.py). nginx serves
-      # /urdf/* from /usr/share/nginx/html/urdf/, so these have to be
-      # bind-mounted at request time (not baked).
-      - ../shared/shared/robot_configs/urdf:/usr/share/nginx/html/urdf/urdf:ro
-      - ../shared/shared/robot_configs/ffw_description:/usr/share/nginx/html/urdf/ffw_description:ro
-      - ../shared/shared/robot_configs/open_manipulator_description:/usr/share/nginx/html/urdf/open_manipulator_description:ro
       # supervisor_api manages lerobot / groot lifecycle via Docker SDK
       # (PLAN §4.8). Socket mount makes that possible without DinD.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Live-edit supervisor_api so lifecycle logic stays in sync with this
-      # compose file without rebuilding the full cyclo image.
-      - ./supervisor_api:/opt/supervisor_api:ro
       # s6-agent UDS — cyclo_manager FastAPI listens here for
       # system-wide control requests from the host side.
       - ${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}:/var/run/agent
@@ -123,7 +110,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/nginx | grep -q up && \"$$S6_SVSTAT\" /run/service/supervisor_api | grep -q up && \"$$S6_SVSTAT\" /run/service/s6-agent | grep -q up",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/nginx | grep -q up && \"$$S6_SVSTAT\" /run/service/supervisor_api | grep -q up && \"$$S6_SVSTAT\" /run/service/s6-agent | grep -q up && \"$$S6_SVSTAT\" /run/service/policy-runtime | grep -q up && test -s /run/cyclo/policy-runtime.ready",
         ]
       interval: 30s
       timeout: 10s
@@ -137,9 +124,7 @@ services:
               capabilities: [gpu]
 
   # ============================================================
-  # LeRobot two-process policy container.
-  # s6-overlay supervises main-runtime and engine-process; Main talks to
-  # Engine through an internal Zenoh service and publishes robot commands.
+  # LeRobot Engine-only policy worker.
   # Not in depends_on — PLAN §4.8 says lerobot is pulled/started
   # on demand.
   # ============================================================
@@ -147,37 +132,21 @@ services:
     container_name: lerobot_server
     image: robotis/lerobot-zenoh:1.4.1-${ARCH:-arm64}
     build:
-      # Build context bumped one level up so the Dockerfile can
-      # COPY common/s6-services/ (shared across all policy backends)
-      # alongside lerobot/lerobot/. Per-policy Dockerfile path moved
-      # under lerobot/.
-      context: ../cyclo_brain/policy
-      dockerfile: lerobot/Dockerfile.${ARCH:-arm64}
+      context: ..
+      dockerfile: cyclo_brain/policy/lerobot/Dockerfile.${ARCH:-arm64}
       # See cyclo_intelligence.build.network for why.
       network: host
       args:
         GPU_ARCH: ${GPU_ARCH:-default}
 
-    # Main runtime's control loop tries SCHED_FIFO — let the kernel grant it.
-    cap_add:
-      - SYS_NICE
-    ulimits:
-      rtprio: 99
-      rttime: -1
-      memlock: 8428281856
-
-    # Share host network + IPC so rmw_zenoh can reach orchestrator on
-    # the same host, and /dev/shm is shared for Zenoh shared-memory
-    # transport between the two in-container processes.
+    # Share host network + IPC so rmw_zenoh can reach the central Runtime and
+    # robot topics on the same host. /dev/shm enables Zenoh shared memory.
     network_mode: host
     ipc: host
 
-    # robot_type is *not* baked here. Main receives it on
-    # InferenceCommand.LOAD, then configures its local RobotClient command path.
+    # The Worker owns model observation and inference only. Robot commands are
+    # published by the Policy Runtime in cyclo_intelligence.
     environment:
-      # Main-runtime waits on the local engine process while weights and
-      # first-time gated backbones download/load.
-      - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
@@ -188,39 +157,12 @@ services:
       - ./workspace:/workspace
       # User-visible LeRobot models live under /workspace/model/lerobot.
       - ./huggingface:/root/.cache/huggingface
-      # Live-edit SDKs (mounted read-only so the container can't mutate
-      # the host tree accidentally).
-      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
-      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
-      - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
-      # Common policy runtime (main-runtime + engine-process + Engine ABC).
-      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
-      # Live-edit app-level s6 services while keeping s6-overlay's built-in
-      # bundles from the image intact.
-      - ../cyclo_brain/policy/common/s6-services/main-runtime:/etc/s6-overlay/s6-rc.d/main-runtime:ro
-      - ../cyclo_brain/policy/common/s6-services/engine-process:/etc/s6-overlay/s6-rc.d/engine-process:ro
-      - ../cyclo_brain/policy/common/s6-services/user/contents.d:/etc/s6-overlay/s6-rc.d/user/contents.d:ro
-      # Per-policy engine — implements InferenceEngine (load_policy +
-      # get_action_chunk + cleanup). The only directory unique to this
-      # backend; bind-mounted so we can iterate on inference logic
-      # without rebuilding the image. The package's __init__.py
-      # re-exports LeRobotEngine + create_engine, so Engine process
-      # ``importlib.import_module("lerobot_engine")`` keeps resolving
-      # the same way it did when this was a single file.
-      - ../cyclo_brain/policy/lerobot/lerobot_engine:/app/lerobot_engine:ro
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
       # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
       # doesn't have to git-fetch the upstream `master` branch (gone)
-      # and so docker-cp ownership games go away. Two containers share
+      # and so docker-cp ownership games go away. All runtime containers share
       # one cache.
       - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
-      # orchestrator keeps the canonical command_topic_list / joint_order
-      # YAML. Main runtime's RobotClient reads it on LOAD.
-      # Per-robot YAMLs moved to shared/robot_configs/ (consolidated with
-      # URDF + meshes under one robot-description tree). The mount destination
-      # /orchestrator_config stays because RobotClient reads robot configs
-      # from that mount.
-      - ../shared/shared/robot_configs:/orchestrator_config:ro
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
@@ -232,7 +174,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up ' && test -s /run/cyclo/engine-process.ready",
         ]
       interval: 30s
       timeout: 10s
@@ -246,8 +188,7 @@ services:
               capabilities: [gpu]
 
   # ============================================================
-  # GR00T N1.7 two-process policy container.
-  # Mirrors lerobot's s6-overlay layout (main-runtime + engine-process).
+  # GR00T N1.7 Engine-only policy worker.
   # Pulled / started on demand by the UI
   # via supervisor_api (PLAN §4.8).
   # ============================================================
@@ -255,8 +196,8 @@ services:
     container_name: groot_server
     image: robotis/groot-zenoh:1.3.5-${ARCH:-arm64}
     build:
-      context: ../cyclo_brain/policy/groot
-      dockerfile: Dockerfile.${ARCH:-arm64}
+      context: ..
+      dockerfile: cyclo_brain/policy/groot/Dockerfile.${ARCH:-arm64}
       # See cyclo_intelligence.build.network for why.
       network: host
       args:
@@ -265,26 +206,12 @@ services:
         FLASH_ATTN_NVCC_THREADS: ${FLASH_ATTN_NVCC_THREADS:-1}
         FLASH_ATTN_CUDA_ARCHS: ${FLASH_ATTN_CUDA_ARCHS:-120}
 
-    # Main runtime's control loop tries SCHED_FIFO — let the kernel grant it.
-    cap_add:
-      - SYS_NICE
-    ulimits:
-      rtprio: 99
-      rttime: -1
-      memlock: 8428281856
-
-    # Share host network + IPC so rmw_zenoh can reach orchestrator on
-    # the same host, and /dev/shm is shared for Zenoh shared-memory
-    # transport between the two in-container processes.
+    # Share host network + IPC so rmw_zenoh can reach the central Runtime and
+    # robot topics on the same host. /dev/shm enables Zenoh shared memory.
     network_mode: host
     ipc: host
 
     environment:
-      # Main-runtime waits on the local engine process while weights and
-      # first-time gated backbones download/load.
-      - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
-      - CMD_VEL_LINEAR_DEADBAND=0.02
-      - CMD_VEL_ANGULAR_DEADBAND=0.02
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
@@ -295,34 +222,12 @@ services:
       - ./workspace:/workspace
       - ./huggingface:/root/.cache/huggingface
       # User-visible GR00T models live under /workspace/model/groot.
-      # Live-edit SDKs (mounted read-only so the container can't mutate
-      # the host tree accidentally).
-      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
-      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
-      - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
-      # Common policy runtime shared with LeRobot.
-      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
-      # GR00T keeps backend-local app services, while preserving the image's
-      # s6-overlay built-in bundles.
-      - ../cyclo_brain/policy/groot/s6-services/main-runtime:/etc/s6-overlay/s6-rc.d/main-runtime:ro
-      - ../cyclo_brain/policy/groot/s6-services/engine-process:/etc/s6-overlay/s6-rc.d/engine-process:ro
-      - ../cyclo_brain/policy/groot/s6-services/user/contents.d:/etc/s6-overlay/s6-rc.d/user/contents.d:ro
-      # Live-edit GR00T engine code.
-      - ../cyclo_brain/policy/groot/groot_engine:/app/groot_engine:ro
-      - ../cyclo_brain/policy/groot/runtime:/app/runtime:ro
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
       # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
       # doesn't have to git-fetch the upstream `master` branch (gone)
       # and so docker-cp ownership games go away. Two containers share
       # one cache.
       - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
-      # orchestrator keeps the canonical command_topic_list / joint_order
-      # YAML. Main runtime's RobotClient reads it on LOAD.
-      # Per-robot YAMLs moved to shared/robot_configs/ (consolidated with
-      # URDF + meshes under one robot-description tree). The mount destination
-      # /orchestrator_config stays because RobotClient reads robot configs
-      # from that mount.
-      - ../shared/shared/robot_configs:/orchestrator_config:ro
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
@@ -334,7 +239,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up ' && test -s /run/cyclo/engine-process.ready",
         ]
       interval: 30s
       timeout: 10s

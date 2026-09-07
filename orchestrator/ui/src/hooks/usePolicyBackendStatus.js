@@ -11,12 +11,13 @@ export const POLICY_BACKEND_SERVICE_LABELS = {
 };
 
 const POLICY_BACKEND_SERVICE_GROUPS = [
+  ['engine-process'],
   ['main-runtime', 'engine-process'],
   ['inference-server', 'control-publisher'],
 ];
 
 export const getPolicyBackendName = (serviceType) => (
-  serviceType === 'groot' ? 'groot' : 'lerobot'
+  String(serviceType || '').trim()
 );
 
 export function getPolicyBackendServiceLabel(name) {
@@ -117,6 +118,13 @@ export function getPolicyBackendReadiness(status) {
       message: 'Backend processes are starting...',
     };
   }
+  if (status.worker_compatible === false) {
+    return {
+      ready: false,
+      state: 'warming',
+      message: status.worker_message || 'Waiting for a compatible model worker...',
+    };
+  }
 
   return {
     ready: true,
@@ -135,7 +143,7 @@ export default function usePolicyBackendStatus(
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const refreshStatus = useCallback(async ({ quiet = true } = {}) => {
-    if (!enabled) return null;
+    if (!enabled || !backend) return null;
     if (!quiet) setIsRefreshing(true);
     try {
       const response = await fetch(`${API_BASE}/backends/${backend}/status`);

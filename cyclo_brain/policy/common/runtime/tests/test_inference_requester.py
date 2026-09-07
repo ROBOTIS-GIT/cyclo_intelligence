@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -49,6 +51,8 @@ class InferenceRequesterTests(unittest.TestCase):
             "model_path": "/models/policy",
             "acceleration_mode": "tensorrt_dit",
             "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
+            "policy_id": "sample:base",
+            "policy_parameters_json": '{"gain":0.5}',
         })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
@@ -56,6 +60,11 @@ class InferenceRequesterTests(unittest.TestCase):
         self.assertEqual(
             client.calls[0][0].acceleration_engine_path,
             "/models/policy/dit_model_bf16.trt",
+        )
+        self.assertEqual(client.calls[0][0].policy_id, "sample:base")
+        self.assertEqual(
+            client.calls[0][0].policy_parameters_json,
+            '{"gain":0.5}',
         )
 
     def test_get_action_uses_monotonic_seq_id(self) -> None:
@@ -120,6 +129,34 @@ class InferenceRequesterTests(unittest.TestCase):
         self.assertIn("stale", response.message)
         self.assertEqual(response.action_list, [])
         self.assertFalse(requester.has_pending_get_action())
+
+    def test_unload_waits_for_in_flight_get_action_on_shared_client(self) -> None:
+        entered = []
+        action_started = threading.Event()
+        release_action = threading.Event()
+
+        class BlockingClient:
+            def call(self, request, timeout_s):
+                entered.append(request.command)
+                if len(entered) == 1:
+                    action_started.set()
+                    release_action.wait(timeout=1.0)
+                return EngineCommandResponse(success=True, seq_id=request.seq_id)
+
+        requester = InferenceRequester(BlockingClient())
+        action_thread = threading.Thread(target=requester.get_action, args=("pick",))
+        unload_thread = threading.Thread(target=requester.unload_policy)
+
+        action_thread.start()
+        self.assertTrue(action_started.wait(timeout=0.5))
+        unload_thread.start()
+        time.sleep(0.02)
+        self.assertEqual(len(entered), 1)
+
+        release_action.set()
+        action_thread.join(timeout=1.0)
+        unload_thread.join(timeout=1.0)
+        self.assertEqual(len(entered), 2)
 
 
 if __name__ == "__main__":

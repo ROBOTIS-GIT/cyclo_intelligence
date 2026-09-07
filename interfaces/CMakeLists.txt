@@ -47,6 +47,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CheckpointList.srv"
   "srv/ModelList.srv"
   "srv/PolicyList.srv"
+  "srv/EngineCommand.srv"
   "srv/InferenceCommand.srv"
   "srv/StopTraining.srv"
   "srv/TrainModel.srv"

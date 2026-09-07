@@ -1,190 +1,103 @@
-# LeRobot Integration for Cyclo Intelligence
+# LeRobot Worker
 
-## Overview
+This directory provides the LeRobot Engine-only Worker used by Cyclo.
+Training remains available through the LeRobot CLI, while inference lifecycle,
+action processing, safety, and robot command publication are owned by the
+central Policy Runtime in `cyclo_intelligence`.
 
-LeRobot integration for Cyclo Intelligence. This folder contains the executor and Docker configuration for running LeRobot training and inference via Zenoh communication.
+## Layout
 
-## Folder Structure
-
-```
-cyclo_brain/policy/lerobot/
-├── lerobot/                 # LeRobot repository (git submodule)
-│   └── (HuggingFace LeRobot source code)
-├── executor.py              # Zenoh communication + train/infer execution
-├── Dockerfile               # Container build file
-├── entrypoint.sh            # Container entrypoint
-├── workspace/               # Dataset/Model/Results (gitignore)
-├── test_executor.py         # Unit tests
-├── README.md                # This document
-└── INTEGRATION_REPORT.md    # Integration detail report
+```text
+policy/lerobot/
+├── manifest.yaml              # policies and runtime capabilities
+├── lerobot/                   # ROBOTIS LeRobot fork submodule
+├── lerobot_engine/            # InferenceEngine adapter
+├── Dockerfile.amd64
+├── Dockerfile.arm64
+└── tests/
 ```
 
-## Prerequisites
+The container starts only the `engine-process` s6 service. It hosts
+`/lerobot/engine_command`, publishes `/lerobot/worker_heartbeat`, subscribes
+to the observations required by the selected checkpoint, and returns action
+chunks. It does not own `ControlLoop` and does not publish robot commands.
 
-- Docker with NVIDIA GPU support
-- NVIDIA GPU (CUDA 12.1+)
-- Cyclo Intelligence repository
+## Build And Start
 
-## Quick Start
-
-### 1. Clone LeRobot (if not already done)
+From the repository root:
 
 ```bash
-cd cyclo_intelligence/cyclo_brain/policy/lerobot
-git clone https://github.com/huggingface/lerobot.git lerobot
+./docker/container.sh start-policy lerobot --build
+./docker/container.sh enter-policy lerobot
 ```
 
-### 2. Build Docker Image
+The compatibility commands remain available:
 
 ```bash
-cd cyclo_intelligence
-docker compose -f docker/docker-compose.yml build lerobot
+./docker/container.sh start-lerobot --build
+./docker/container.sh enter-lerobot
 ```
 
-### 3. Download Test Dataset
+The container executes files baked into the image. Use `--build` after Worker
+source or dependency changes.
+
+## Models And Data
+
+The shared host directory `docker/workspace` is mounted at `/workspace`.
+LeRobot checkpoints are selected under `/workspace/model/lerobot`. The list of
+policies shown by Cyclo comes from `manifest.yaml`; the Worker `DESCRIBE`
+response must match that manifest before LOAD is accepted.
+
+Inference is called externally through `/policy/inference_command` with a
+namespaced policy ID such as `lerobot:act`. `/lerobot/inference_command` is a
+temporary compatibility alias hosted by the central Runtime, not by this
+Worker.
+
+## ROS And Zenoh
+
+Edit the Cyclo block near the top of the Worker's `/root/.bashrc`, then restart
+the container so s6 starts `engine-process` with the new settings:
 
 ```bash
-# Create workspace directory
-mkdir -p cyclo_brain/policy/lerobot/workspace
-
-# Download lerobot/pusht dataset
-huggingface-cli download lerobot/pusht \
-  --local-dir cyclo_brain/policy/lerobot/workspace/lerobot/pusht \
-  --repo-type dataset
+export ROS_DOMAIN_ID=30
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 ```
 
-### 4. Run Container
+For a remote router, use the commented client endpoint example already present
+in the image bashrc. `docker restart` preserves a container-local edit;
+recreate/update resets it to the image default.
+
+## Training
+
+Enter the Worker and use the version-pinned LeRobot CLI. For example:
 
 ```bash
-docker compose -f docker/docker-compose.yml up lerobot
+lerobot-train \
+  --dataset.repo_id=<dataset_repo_id> \
+  --dataset.root=/workspace/lerobot/<dataset_folder> \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --output_dir=/workspace/model/lerobot/<output_folder>
 ```
 
-## Architecture
+Training output placed below `/workspace/model/lerobot` is immediately visible
+to the Cyclo model browser.
 
-```
-Cyclo Intelligence Web UI (React UI)
-        │
-        ▼ WebSocket (7090)
-Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
-        │
-        ▼ Zenoh Protocol (7447)
-LeRobot Executor (Docker Container)
-        │
-        ▼
-LeRobot Training/Inference APIs
-```
-
-## Supported Policies
-
-| Policy | Category | Description |
-|--------|----------|-------------|
-| act | Imitation Learning | Action Chunking Transformer |
-| diffusion | Imitation Learning | Diffusion Policy |
-| vqbet | Imitation Learning | VQ-BeT |
-| tdmpc | RL | TD-MPC |
-| pi0 | VLA | Physical Intelligence VLA |
-| pi0_fast | VLA | Optimized Pi0 |
-| smolvla | VLA | SmolVLA |
-| sac | RL | Soft Actor-Critic |
-
-## ROS2 Services (via Zenoh)
-
-| Service | Description |
-|---------|-------------|
-| /lerobot/train | Start training |
-| /lerobot/infer | Start inference |
-| /lerobot/stop | Stop current task |
-| /lerobot/status | Get status |
-| /lerobot/policy_list | List available policies |
-| /lerobot/checkpoint_list | List checkpoints |
-| /lerobot/model_list | List cached models |
-
-## ROS2 Topics (via Zenoh)
-
-| Topic | Direction | Description |
-|-------|-----------|-------------|
-| /lerobot/progress | Published | Training metrics (step, loss, epoch) |
-| /lerobot/action | Published | Inference action outputs |
-
-## Docker Configuration
-
-### Volume Mappings
-
-| Host Path | Container Path | Purpose |
-|-----------|----------------|---------|
-| cyclo_brain/policy/lerobot/workspace | /workspace | Dataset/Model storage |
-| cyclo_brain/sdk/zenoh_ros2_sdk | /zenoh_sdk | Zenoh SDK |
-
-### Environment Variables
-
-| Variable | Value | Description |
-|----------|-------|-------------|
-| RMW_IMPLEMENTATION | rmw_zenoh_cpp | ROS2 Zenoh middleware |
-| ROS_DOMAIN_ID | 30 | ROS2 domain |
-| ZENOH_CONFIG_OVERRIDE | local shared-memory default or remote router example in `/root/.bashrc` | Zenoh client configuration |
-
-At runtime, `lerobot_server` sources `/root/.bashrc` before starting
-`main-runtime` and `engine-process`. Enter the container, edit the Cyclo
-ROS/Zenoh block near the top of `/root/.bashrc`, and choose either the local
-`ZENOH_CONFIG_OVERRIDE` line or the commented remote router example. Then restart
-`lerobot_server`. `docker restart` preserves the edit;
-recreating or updating the container resets `/root/.bashrc` to the image
-default.
-
-## Testing
-
-### Unit Tests
+## Validation
 
 ```bash
-cd cyclo_intelligence/cyclo_brain/policy/lerobot
-python -m pytest test_executor.py -v
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  cyclo_brain/policy/lerobot/tests \
+  cyclo_brain/policy/lerobot/lerobot_engine/tests
 ```
 
-### Integration Test
-
-```bash
-# Start container
-docker compose -f docker/docker-compose.yml up -d lerobot
-
-# Enter container
-docker exec -it lerobot_server bash
-
-# Test import
-python -c "from executor import LeRobotExecutor; print('OK')"
-```
-
-## Troubleshooting
-
-### GPU not detected
-
-```bash
-# Check NVIDIA driver
-nvidia-smi
-
-# Check Docker GPU support
-docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
-```
-
-### Zenoh connection failed
-
-```bash
-# Ensure the externally managed Zenoh router is running on the endpoint in ZENOH_CONFIG_OVERRIDE.
-ss -ltnp 'sport = :7447'
-```
-
-### LeRobot import error
-
-```bash
-# Check LeRobot is properly cloned
-ls -la cyclo_brain/policy/lerobot/lerobot/
-
-# Ensure PYTHONPATH includes lerobot
-export PYTHONPATH="/app/lerobot:$PYTHONPATH"
-```
+Container readiness requires `engine-process` and its ready marker. Cyclo's
+Supervisor additionally verifies fresh heartbeat and a compatible `DESCRIBE`
+response before reporting `Backend ready`.
 
 ## References
 
-- [LeRobot GitHub](https://github.com/huggingface/lerobot)
-- [LeRobot Documentation](https://huggingface.co/lerobot)
-- [Zenoh ROS2 SDK](https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk)
-- [Cyclo Intelligence Workflow](../../ai_system_agents/opensource_integration_workflow/)
+- [LeRobot](https://github.com/huggingface/lerobot)
+- [Cyclo architecture](../../docs/architecture.html)

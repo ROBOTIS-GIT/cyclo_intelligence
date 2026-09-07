@@ -15,9 +15,12 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from engine_process.protocol import (  # noqa: E402
+    CMD_DESCRIBE,
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
+    CMD_STATUS,
     CMD_UNLOAD_POLICY,
+    ENGINE_PROTOCOL_VERSION,
     EngineCommandRequest,
 )
 from engine_process.worker import EngineWorker  # noqa: E402
@@ -57,6 +60,60 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_describe_reports_worker_contract_without_loading_model(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(
+            engine,
+            runtime_id="lerobot",
+            supported_policy_ids=["lerobot:act"],
+            capabilities={"action_request_modes": ["async", "sync"]},
+        )
+
+        response = worker.handle(
+            EngineCommandRequest(command=CMD_DESCRIBE, seq_id=9)
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.protocol_version, ENGINE_PROTOCOL_VERSION)
+        self.assertEqual(response.runtime_id, "lerobot")
+        self.assertEqual(response.supported_policy_ids, ["lerobot:act"])
+        self.assertEqual(response.engine_state, "unloaded")
+        self.assertTrue(response.worker_instance_id)
+        self.assertIsNone(engine.loaded_with)
+
+    def test_status_tracks_load_and_unload(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(engine, runtime_id="lerobot")
+        worker.handle(
+            EngineCommandRequest(command=CMD_LOAD_POLICY, seq_id=1)
+        )
+        loaded = worker.handle(EngineCommandRequest(command=CMD_STATUS, seq_id=2))
+        worker.handle(EngineCommandRequest(command=CMD_UNLOAD_POLICY, seq_id=3))
+        unloaded = worker.handle(EngineCommandRequest(command=CMD_STATUS, seq_id=4))
+
+        self.assertEqual(loaded.engine_state, "loaded")
+        self.assertEqual(unloaded.engine_state, "unloaded")
+
+    def test_load_rejects_policy_not_declared_by_worker(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(
+            engine,
+            runtime_id="lerobot",
+            supported_policy_ids=["lerobot:act"],
+        )
+
+        response = worker.handle(
+            EngineCommandRequest(
+                command=CMD_LOAD_POLICY,
+                seq_id=10,
+                policy_id="groot:n17",
+            )
+        )
+
+        self.assertFalse(response.success)
+        self.assertIn("not supported", response.message)
+        self.assertIsNone(engine.loaded_with)
+
     def test_load_policy_delegates_to_engine(self) -> None:
         engine = FakeEngine()
         worker = EngineWorker(engine)
@@ -70,6 +127,8 @@ class EngineWorkerTests(unittest.TestCase):
                 task_instruction="pick",
                 acceleration_mode="tensorrt_dit",
                 acceleration_engine_path="/models/policy/dit_model_bf16.trt",
+                policy_id="sample:base",
+                policy_parameters_json='{"gain":0.5}',
             )
         )
 
@@ -82,6 +141,11 @@ class EngineWorkerTests(unittest.TestCase):
         self.assertEqual(
             engine.loaded_with.acceleration_engine_path,
             "/models/policy/dit_model_bf16.trt",
+        )
+        self.assertEqual(engine.loaded_with.policy_id, "sample:base")
+        self.assertEqual(
+            engine.loaded_with.policy_parameters_json,
+            '{"gain":0.5}',
         )
 
     def test_get_action_returns_flat_action_list(self) -> None:

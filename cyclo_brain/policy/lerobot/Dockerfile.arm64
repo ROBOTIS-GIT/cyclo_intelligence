@@ -1,12 +1,10 @@
 # LeRobot Docker Container for Jetson (ARM64).
 #
-# Two-process policy runtime: s6-overlay supervises main-runtime
-# and engine-process over Zenoh. Runtime Python source and the per-policy
-# lerobot_engine package are bind-mounted at runtime; this image only bakes
-# LeRobot dependencies and generic s6 unit files.
+# Engine-only policy worker. Lifecycle, action processing, and robot command
+# publication live in the central Policy Runtime inside cyclo_intelligence.
 #
-# Build context: cyclo_brain/policy/
-# Usage:         docker build -f lerobot/Dockerfile.arm64 \
+# Build context: repository root
+# Usage:         docker build -f cyclo_brain/policy/lerobot/Dockerfile.arm64 \
 #                  -t robotis/lerobot-zenoh:1.4.1-arm64 .
 
 # Jetson LeRobot base image. This already carries Python 3.12 plus
@@ -26,7 +24,7 @@ ENV LANG=en_US.UTF-8
 ENV PIP_INDEX_URL=https://pypi.org/simple
 ENV PIP_EXTRA_INDEX_URL=
 
-# s6-overlay supervises the two runtime processes.
+# s6-overlay supervises the Engine worker.
 RUN curl -fsSL -o /tmp/s6-overlay-noarch.tar.xz \
       https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz \
     && curl -fsSL -o /tmp/s6-overlay-aarch64.tar.xz \
@@ -42,27 +40,30 @@ WORKDIR /lerobot
 RUN pip uninstall -y lerobot || true \
     && rm -rf /opt/lerobot
 
-# Copy LeRobot source. Paths are relative to the cyclo_brain/policy/ build
-# context used by docker-compose.yml.
-COPY lerobot/lerobot/setup.py lerobot/lerobot/pyproject.toml lerobot/lerobot/README.md lerobot/lerobot/MANIFEST.in ./
-COPY lerobot/lerobot/src/ ./src/
+# Copy the repository-pinned LeRobot source.
+COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
+COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 
 # Install training/inference + VLA extras. The base image's CUDA PyTorch
 # already satisfies LeRobot's torch constraints.
 RUN pip install --no-cache-dir ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,hilserl,async,peft]"
 
-COPY lerobot/lerobot/ ./
+COPY cyclo_brain/policy/lerobot/lerobot/ ./
 
-# Zenoh + runtime deps. SDKs are bind-mounted (see docker-compose.yml).
+# Zenoh + Engine dependencies.
 RUN pip install --no-cache-dir "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" "GitPython>=3.1.18" "json5>=0.9.14" pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk /orchestrator_config \
-                /policy_runtime /app
+    && mkdir -p /zenoh_sdk /robot_client_sdk /orchestrator_config /policy_runtime /app
 
-# s6 unit files come from cyclo_brain/policy/common/. Generic across all
-# policy backends.
-COPY common/s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
-             /etc/s6-overlay/s6-rc.d/engine-process/run
+# Production contains the Engine protocol, adapter, SDKs, and robot config.
+COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
+COPY cyclo_brain/policy/common/runtime/__init__.py cyclo_brain/policy/common/runtime/engine.py cyclo_brain/policy/common/runtime/hf_token_sync.py /policy_runtime/
+COPY cyclo_brain/policy/common/runtime/engine_process/ /policy_runtime/engine_process/
+COPY cyclo_brain/policy/lerobot/lerobot_engine/ /app/lerobot_engine/
+COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
+COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
+COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
 
 # HuggingFace cache
 ENV HF_HOME=/root/.cache/huggingface
@@ -73,7 +74,6 @@ ENV TORCH_HOME=/root/.cache/torch
 ENV ZENOH_SDK_PATH=/zenoh_sdk
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
 # Common runtime dispatch
@@ -97,8 +97,8 @@ WORKDIR /lerobot
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
      && [ -n "$S6_SVSTAT" ] \
-     && "$S6_SVSTAT" /run/service/main-runtime 2>&1 | grep -q "up" \
      && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     && test -s /run/cyclo/engine-process.ready \
      || exit 1
 
 ENTRYPOINT ["/init"]

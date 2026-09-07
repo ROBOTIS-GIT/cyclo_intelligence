@@ -4,7 +4,7 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""Client-side EngineCommand helper used by the Main process."""
+"""Client-side EngineCommand helper used by the central Policy Runtime."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import threading
 from typing import Any
 
 from engine_process.protocol import (
+    CMD_DESCRIBE,
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
+    CMD_STATUS,
     CMD_UNLOAD_POLICY,
     EngineCommandRequest,
     EngineCommandResponse,
@@ -38,6 +40,7 @@ class InferenceRequester:
         self._load_policy_timeout_s = float(load_policy_timeout_s)
         self._seq_id = 0
         self._lock = threading.Lock()
+        self._call_lock = threading.Lock()
         self._get_action_in_flight = False
 
     def has_pending_get_action(self) -> bool:
@@ -56,6 +59,10 @@ class InferenceRequester:
             acceleration_mode=str(getattr(request, "acceleration_mode", "") or ""),
             acceleration_engine_path=str(
                 getattr(request, "acceleration_engine_path", "") or ""
+            ),
+            policy_id=str(getattr(request, "policy_id", "") or ""),
+            policy_parameters_json=str(
+                getattr(request, "policy_parameters_json", "") or ""
             ),
         )
         return self._call(
@@ -95,6 +102,26 @@ class InferenceRequester:
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
+    def describe(self, timeout_s: float = 2.0) -> EngineCommandResponse:
+        request = EngineCommandRequest(
+            command=CMD_DESCRIBE,
+            seq_id=self._next_seq_id(),
+        )
+        return self._call(request, timeout_s)
+
+    def status(self, timeout_s: float = 1.0) -> EngineCommandResponse:
+        request = EngineCommandRequest(
+            command=CMD_STATUS,
+            seq_id=self._next_seq_id(),
+        )
+        return self._call(request, timeout_s)
+
+    def close(self) -> None:
+        with self._call_lock:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+
     def _next_seq_id(self) -> int:
         with self._lock:
             return self._next_seq_id_locked()
@@ -105,7 +132,8 @@ class InferenceRequester:
 
     def _call(self, request: EngineCommandRequest, timeout_s: float) -> EngineCommandResponse:
         try:
-            response = self._client.call(request, timeout_s=timeout_s)
+            with self._call_lock:
+                response = self._client.call(request, timeout_s=timeout_s)
         except TimeoutError:
             return EngineCommandResponse(
                 success=False,

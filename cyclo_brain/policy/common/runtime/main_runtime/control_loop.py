@@ -4,7 +4,7 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""Robot-facing control loop owned by the Main process."""
+"""Robot-facing control loop owned by the central Policy Runtime."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -83,6 +83,7 @@ class ControlLoop:
         latency_warmup_samples: int = 1,
         max_refill_latency_s: Optional[float] = 2.0,
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
+        fault_callback: Optional[Callable[[str, bool], None]] = None,
     ) -> None:
         self._requester = requester
         self._default_inference_hz = positive_finite_or_default(inference_hz, 15.0)
@@ -110,6 +111,7 @@ class ControlLoop:
             action_request_mode
         )
         self._action_request_mode = self._default_action_request_mode
+        self._fault_callback = fault_callback
 
         self._lock = threading.RLock()
         self._robot: Optional[RobotClient] = None
@@ -167,6 +169,9 @@ class ControlLoop:
                 robot_type,
                 enable_command_publishers=True,
                 enable_preview_publisher=True,
+                subscribe_images=False,
+                subscribe_state=bool(publish_to_robot),
+                subscribe_sensors=False,
             )
             self._processor = ActionChunkProcessor(
                 inference_hz=self._inference_hz,
@@ -204,7 +209,7 @@ class ControlLoop:
                 )
             )
             logger.info(config_message)
-            print(f"[main-runtime] {config_message}", flush=True)
+            print(f"[policy-runtime] {config_message}", flush=True)
 
     def deconfigure(self) -> None:
         with self._lock:
@@ -339,6 +344,67 @@ class ControlLoop:
     def stop(self) -> bool:
         return self.pause()
 
+    def set_requester(self, requester) -> None:
+        with self._lock:
+            if self._running:
+                raise RuntimeError("cannot switch policy worker while running")
+            self._requester = requester
+
+    def set_fault_callback(
+        self,
+        callback: Optional[Callable[[str, bool], None]],
+    ) -> None:
+        with self._lock:
+            self._fault_callback = callback
+
+    def configuration_snapshot(self) -> dict:
+        """Return the normalized LOAD-time settings currently in use."""
+        with self._lock:
+            return {
+                "action_request_mode": self._action_request_mode,
+                "control_hz": int(self._control_hz),
+                "inference_hz": int(self._inference_hz),
+                "chunk_align_window_s": float(self._chunk_align_window_s),
+                "initial_pose_sync": self._initial_pose_sync_enabled,
+                "initial_pose_sync_duration_s": self._initial_pose_sync_duration_s,
+            }
+
+    def emergency_stop(self, reason: str) -> bool:
+        """Clear queued commands and hold the latest real-robot joint pose."""
+        robot = None
+        action_keys: list[str] = []
+        with self._lock:
+            self._running = False
+            if self._processor is not None:
+                self._processor.clear()
+            self._generation += 1
+            self._initial_pose_sync_deadline = None
+            should_hold = (
+                self._publish_to_robot
+                and self._robot is not None
+            )
+            if should_hold:
+                robot = self._robot
+                action_keys = list(self._action_keys)
+                self._initial_pose_sync_hold_pending = True
+            else:
+                self._initial_pose_sync_in_progress = False
+                self._initial_pose_sync_hold_pending = False
+        logger.error("policy runtime safety stop: %s", reason)
+        if robot is None:
+            return True
+        try:
+            robot.publish_current_pose_hold(action_keys, duration_s=0.1)
+        except Exception as e:
+            logger.error("policy runtime current-pose hold failed: %s", e)
+            return False
+        with self._lock:
+            if robot is not self._robot:
+                return False
+            self._initial_pose_sync_in_progress = False
+            self._initial_pose_sync_hold_pending = False
+        return True
+
     def initial_pose_sync_hold_required(self) -> bool:
         with self._lock:
             return (
@@ -353,6 +419,14 @@ class ControlLoop:
     def _set_publish_to_robot_locked(self, publish_to_robot: bool) -> None:
         if self._publish_to_robot == publish_to_robot:
             return
+        if self._robot is not None:
+            set_state_subscription = getattr(
+                self._robot,
+                "set_state_subscription",
+                None,
+            )
+            if callable(set_state_subscription):
+                set_state_subscription(publish_to_robot)
         self._publish_to_robot = publish_to_robot
         if self._processor is not None:
             self._processor.clear()
@@ -464,6 +538,7 @@ class ControlLoop:
             latency_s = time.monotonic() - started_at
             self._record_request_latency(latency_s)
             logger.warning("get_action raised: %s", e)
+            self._report_fault(f"get_action raised: {e}")
             return
         latency_s = time.monotonic() - started_at
         self._record_request_latency(latency_s)
@@ -471,6 +546,7 @@ class ControlLoop:
             chunk = self._decode_action_response(response)
         except ValueError as e:
             logger.warning("get_action response rejected: %s", e)
+            self._report_fault(f"get_action failed: {e}")
             return
         with self._lock:
             if (
@@ -509,6 +585,14 @@ class ControlLoop:
                     buffer_delay_s,
                     scheduled_start_text,
                 )
+
+    def _report_fault(self, reason: str) -> None:
+        hold_ok = self.emergency_stop(reason)
+        if self._fault_callback is not None:
+            try:
+                self._fault_callback(reason, hold_ok)
+            except Exception as e:
+                logger.error("policy runtime fault callback failed: %s", e)
 
     @staticmethod
     def _decode_action_response(response) -> np.ndarray:

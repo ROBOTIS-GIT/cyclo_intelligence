@@ -3,8 +3,8 @@
 # forked Isaac-GR00T repo and its official entrypoints.
 #
 # Based on official NVIDIA GR00T Dockerfile with Cyclo Intelligence integration
-# Build context: cyclo_intelligence/cyclo_brain/policy/groot/
-# Usage: docker build -f Dockerfile.amd64 -t robotis/groot-zenoh:1.3.5-amd64 .
+# Build context: cyclo_intelligence repository root
+# Usage: docker build -f cyclo_brain/policy/groot/Dockerfile.amd64 -t robotis/groot-zenoh:1.3.5-amd64 .
 
 # NVIDIA PyTorch base image (same as official GR00T Dockerfile)
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.04-py3
@@ -15,8 +15,7 @@ ARG GPU_ARCH=default
 ARG FLASH_ATTN_BUILD_JOBS=1
 ARG FLASH_ATTN_NVCC_THREADS=1
 
-# s6-overlay version (D10-groot — supervises the two-process runtime,
-# matches lerobot/Dockerfile.amd64 ARG).
+# s6-overlay version. This worker runs only engine-process.
 ARG S6_OVERLAY_VERSION=3.2.0.2
 
 # Prevent interactive prompts during package installation
@@ -50,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install s6-overlay (supervises main-runtime and engine-process).
+# Install s6-overlay (supervises engine-process).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl xz-utils \
     && rm -rf /var/lib/apt/lists/* \
@@ -134,9 +133,8 @@ RUN pip install --no-cache-dir \
 # Create working directory for GR00T
 WORKDIR /gr00t
 
-# Copy GR00T source from submodule
-# Build context is cyclo_brain/policy/groot/, so paths are relative to that
-COPY Isaac-GR00T/ ./
+# Copy GR00T source from the pinned submodule.
+COPY cyclo_brain/policy/groot/Isaac-GR00T/ ./
 
 # Patch pyproject.toml to allow Python 3.12 (base image uses 3.12)
 # GR00T officially requires 3.10 but code is compatible with 3.12
@@ -183,12 +181,11 @@ RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
         "torchcodec==0.13.0"; \
     fi
 
-# Zenoh + runtime Python dependencies. zenoh_ros2_sdk / robot_client /
-# action_chunk_processing are mounted as volumes (see docker-compose.yml).
+# Zenoh + Engine worker Python dependencies.
 # IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled zenoh-c version (1.6.x)
 # Mismatched versions (e.g., 1.7.x vs 1.6.x) cause service call failures despite discovery working
 RUN pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk /orchestrator_config \
+    && mkdir -p /zenoh_sdk /robot_client_sdk /orchestrator_config \
                 /policy_runtime
 
 # Re-apply dependency bounds after unpinned installs. Torch/TorchVision may
@@ -203,18 +200,23 @@ RUN PIP_CONSTRAINT= pip install --no-cache-dir --upgrade \
     "typing_extensions>=4.15.0" \
     "fsspec[http]<=2025.3.0,>=2023.1.0"
 
-# Create application directory for the two-process runtime
+# Create application directory for the Engine worker.
 WORKDIR /app
 
-# Copy the two-process runtime into the image
-COPY runtime/ /app/runtime/
-COPY groot_engine/ /app/groot_engine/
-COPY scripts/ /app/scripts/
+# Bake every source dependency required by the Engine worker.
+COPY cyclo_brain/policy/groot/runtime/ /app/runtime/
+COPY cyclo_brain/policy/groot/groot_engine/ /app/groot_engine/
+COPY cyclo_brain/policy/groot/scripts/ /app/scripts/
+COPY cyclo_brain/policy/common/runtime/__init__.py cyclo_brain/policy/common/runtime/engine.py cyclo_brain/policy/common/runtime/hf_token_sync.py /policy_runtime/
+COPY cyclo_brain/policy/common/runtime/engine_process/ /policy_runtime/engine_process/
+COPY cyclo_brain/policy/groot/manifest.yaml /app/policy_manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
+COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
+COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
 
-# Copy the s6 service definitions
-COPY s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/main-runtime/run \
-             /etc/s6-overlay/s6-rc.d/engine-process/run \
+# Copy the shared Engine worker service definition.
+COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
     && chmod +x /app/scripts/smoke_groot_n17.py
 
 # Setup EGL/Vulkan configuration (from official GR00T Dockerfile)
@@ -248,7 +250,6 @@ ENV ZENOH_SDK_PATH=/zenoh_sdk
 
 # Runtime SDK paths. Match docker-compose.yml volume mounts.
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
-ENV ACTION_CHUNK_PROCESSING_SDK_PATH=/action_chunk_processing_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 
 # GR00T workspace configuration
@@ -275,13 +276,13 @@ RUN { \
 # Default working directory
 WORKDIR /gr00t
 
-# Healthcheck — both supervised processes must be up.
+# Healthcheck — the Engine service must be registered and ready.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
      && [ -n "$S6_SVSTAT" ] \
-     && "$S6_SVSTAT" /run/service/main-runtime 2>&1 | grep -q "up" \
      && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     && test -s /run/cyclo/engine-process.ready \
      || exit 1
 
-# s6-overlay init — launches both supervised services in parallel.
+# s6-overlay init — launches the Engine worker.
 ENTRYPOINT ["/init"]

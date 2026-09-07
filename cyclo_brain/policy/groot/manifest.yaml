@@ -1,0 +1,34 @@
+schema_version: 1
+runtime:
+  id: groot
+  label: GR00T
+  compose_service: groot
+  service_prefix: groot
+  checkpoint_root: /workspace/model/groot
+  source:
+    kind: submodule
+    location: Isaac-GR00T
+  services: [engine-process]
+  capabilities:
+    action_request_modes: [async, sync]
+    requires_hf_token: true
+    operations: [groot_trt]
+models:
+  - id: n17
+    label: N1.7
+    aliases: [groot, n17, n1.7]
+    requires_instruction: true
+    parameters:
+      - key: acceleration_mode
+        label: Acceleration
+        control: select
+        binding: task_info.accelerationMode
+        default: pytorch
+        options: [pytorch, tensorrt_dit]
+      - key: acceleration_engine_path
+        label: TensorRT Engine Path
+        control: path
+        binding: task_info.accelerationEnginePath
+        default: ""
+        visible_when:
+          acceleration_mode: tensorrt_dit

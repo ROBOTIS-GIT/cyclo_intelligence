@@ -37,6 +37,10 @@ uint8 FINISH_EPISODE = 21
 uint8 DISCARD_EPISODE = 22
 uint8 SET_TASK_INFO = 23
 uint8 CANCEL_SEGMENT = 24
+# Read the current central Policy Runtime session without changing it. The
+# orchestrator uses task_info to select the runtime only when it has no active
+# inference client (for example after an orchestrator restart).
+uint8 GET_INFERENCE_STATUS = 25
 
 uint8 command
 TaskInfo task_info
@@ -73,3 +77,12 @@ string[] selected_joints
 ---
 bool success
 string message
+# GET_INFERENCE_STATUS response. Other commands leave these fields at their
+# defaults; phase values match InferenceStatus.msg.
+bool inference_status_known
+uint8 inference_phase
+string inference_runtime_state
+string inference_model_path
+string inference_policy_id
+bool inference_publish_to_robot
+string inference_error

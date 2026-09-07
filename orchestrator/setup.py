@@ -1,4 +1,5 @@
 from glob import glob
+from pathlib import Path
 
 from setuptools import setup
 
@@ -49,6 +50,12 @@ packages = [
     f'{package_name}.timer',
     f'{package_name}.training',
 ]
+
+
+def files_in(directory):
+    return [path for path in glob(f'{directory}/*') if Path(path).is_file()]
+
+
 setup(
     name=package_name,
     version='1.3.1',
@@ -76,7 +83,7 @@ setup(
         ),
         (
             'share/' + package_name + '/bt/templates',
-            glob(f'{package_name}/bt/templates/*'),
+            files_in(f'{package_name}/bt/templates'),
         ),
     ],
     install_requires=[

@@ -1,9 +1,9 @@
 ########################################
 # Constants — inference lifecycle commands
 ########################################
-# Sent by orchestrator to a cyclo_brain/policy/<backend> container's Main
-# process to drive the policy session. Main forwards model work to the Engine
-# process over EngineCommand and owns the robot-facing control loop.
+# Sent by orchestrator to the central Policy Runtime at
+# /policy/inference_command. The Runtime forwards model work to the selected
+# Worker over EngineCommand and owns the robot-facing control loop.
 #
 # Replaces the old StartInference.srv + the SendCommand.srv inference
 # branches (START_INFERENCE / STOP_INFERENCE / RESUME_INFERENCE /
@@ -11,7 +11,7 @@
 # as the UI-facing entry point; orchestrator translates into this srv.
 
 uint8 LOAD               = 0   # Load model_path in Engine. Returns action_keys.
-uint8 START              = 1   # Start Main control loop publishing/refilling.
+uint8 START              = 1   # Start Policy Runtime control loop publishing/refilling.
 uint8 PAUSE              = 2   # Pause command publishing; keep policy loaded.
 uint8 RESUME             = 3
 uint8 STOP               = 4   # Stop loop; keep model in GPU memory.
@@ -19,6 +19,7 @@ uint8 UNLOAD             = 5   # Free GPU memory.
 uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
                                # Requires LOAD + START already issued. Touches
                                # task_instruction only — no lifecycle change.
+uint8 STATUS             = 7   # Read-only Policy Runtime session snapshot.
 
 uint8 command
 
@@ -30,7 +31,7 @@ string robot_type
 # LOAD (training-time conditioning) and refreshed on RESUME (online
 # re-conditioning without re-loading the model).
 string task_instruction
-# Safety gate. false means dry-run / 3D preview only; true permits Main runtime
+# Safety gate. false means dry-run / 3D preview only; true permits Policy Runtime
 # to publish robot command topics. Default false for regenerated clients.
 bool publish_to_robot
 # Action chunk request scheduling at LOAD time. Empty / "async" preserves the
@@ -43,8 +44,8 @@ string acceleration_mode
 # Optional engine file/directory. Empty lets the backend use its model-local
 # default path.
 string acceleration_engine_path
-# Main-runtime timing configured at LOAD time. Zero values preserve the
-# policy container's environment/default settings.
+# Policy Runtime timing configured at LOAD time. Zero values preserve the
+# Cyclo container's environment/default settings.
 uint16 control_hz
 uint16 inference_hz
 float64 chunk_align_window_s
@@ -52,10 +53,31 @@ float64 chunk_align_window_s
 # publish_to_robot is true.
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+# Globally unique policy selection and canonical model-specific parameters.
+# Empty values preserve legacy checkpoint-based policy detection and {}.
+string policy_id
+string policy_parameters_json
 ---
 bool success
 string message
 # Populated only by LOAD: ordered action modality keys from the model's
-# modality_config (e.g. ["arm_left", "arm_right", "gripper"]). Main uses this
+# modality_config (e.g. ["arm_left", "arm_right", "gripper"]). Runtime uses this
 # order when publishing a flat action vector through RobotClient.
 string[] action_keys
+# Current Policy Runtime session state. Returned for every command so callers can
+# reconcile their local view after a reconnect; STATUS performs no mutation.
+# Values: unloaded, loaded, syncing, running, paused, error.
+string runtime_state
+string loaded_model_path
+string loaded_policy_id
+string loaded_policy_parameters_json
+bool publish_to_robot
+string loaded_action_request_mode
+string loaded_acceleration_mode
+string loaded_acceleration_engine_path
+uint16 loaded_control_hz
+uint16 loaded_inference_hz
+float64 loaded_chunk_align_window_s
+bool loaded_initial_pose_sync
+float64 loaded_initial_pose_sync_duration_s
+string runtime_error

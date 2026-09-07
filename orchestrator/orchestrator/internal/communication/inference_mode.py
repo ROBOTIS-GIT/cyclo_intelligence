@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 
@@ -16,6 +17,38 @@ ROBOT_MODE = "robot"
 DEFAULT_CONTROL_HZ = 100
 DEFAULT_INFERENCE_HZ = 15
 DEFAULT_CHUNK_ALIGN_WINDOW_S = 0.3
+MAX_POLICY_PARAMETERS_BYTES = 64 * 1024
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"invalid constant {value}")
+
+
+def canonical_policy_parameters_json(value) -> str:
+    """Validate syntax/size and return stable JSON without interpreting keys."""
+    raw = str(value or "")
+    if len(raw.encode("utf-8")) > MAX_POLICY_PARAMETERS_BYTES:
+        raise ValueError(
+            f"policy_parameters_json exceeds {MAX_POLICY_PARAMETERS_BYTES} bytes"
+        )
+    if not raw:
+        payload = {}
+    else:
+        try:
+            payload = json.loads(raw, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            detail = getattr(exc, "msg", str(exc))
+            raise ValueError(
+                f"policy_parameters_json is invalid JSON: {detail}"
+            ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError("policy_parameters_json must contain a JSON object")
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def _positive_number(value, default, cast):
@@ -54,6 +87,8 @@ def inference_runtime_signature(
     chunk_align_window_s: float,
     initial_pose_sync: bool = False,
     initial_pose_sync_duration_s: float = 5.0,
+    policy_id: str = "",
+    policy_parameters_json: str = "{}",
 ) -> tuple:
     """Return the LOAD-only values that determine policy runtime reuse."""
     return (
@@ -66,6 +101,8 @@ def inference_runtime_signature(
         chunk_align_window_s,
         initial_pose_sync,
         initial_pose_sync_duration_s if initial_pose_sync else 0.0,
+        policy_id,
+        policy_parameters_json,
     )
 
 

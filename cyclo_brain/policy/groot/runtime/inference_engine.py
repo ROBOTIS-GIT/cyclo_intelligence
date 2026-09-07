@@ -16,13 +16,12 @@
 #
 # Author: Dongyun Kim
 
-"""GR00T N1.6 inference engine.
+"""GR00T inference engine.
 
 Encapsulates Gr00tPolicy loading, RobotClient setup, observation
-preprocessing, and action chunk postprocessing. Imported by
-runtime/inference_server.py (Process A) which slots it into the
-cyclo_intelligence two-process pattern (LOAD srv → configure broadcast
-→ Zenoh trigger/chunk).
+preprocessing, and action chunk postprocessing. The Engine-only Worker hosts
+it behind ``/<runtime>/engine_command`` and returns chunks to the central
+Policy Runtime in the Cyclo container.
 
 Original Step 1 location: cyclo_brain/policy/groot/inference.py.
 Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
@@ -41,8 +40,8 @@ import torch
 
 
 # -- robot_client import shim --------------------------------------------------
-# /robot_client_sdk/ is the bind-mount root; the package itself sits at
-# /robot_client_sdk/robot_client/ so the parent dir goes onto sys.path.
+# /robot_client_sdk/ contains the shared package in production images and is
+# replaced by a read-only source mount only in development mode.
 _ROBOT_CLIENT_PATH = os.environ.get("ROBOT_CLIENT_SDK_PATH", "/robot_client_sdk")
 if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
     sys.path.insert(0, _ROBOT_CLIENT_PATH)

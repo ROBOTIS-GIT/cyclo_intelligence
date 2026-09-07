@@ -16,6 +16,7 @@
 
 import sys
 import types
+from pathlib import Path
 
 
 class _QoSProfile:
@@ -56,6 +57,8 @@ def _install_ros_stubs():
         action_request_mode = ''
         acceleration_mode = ''
         acceleration_engine_path = ''
+        policy_id = ''
+        policy_parameters_json = ''
 
     class _SendCommandRequest:
         START_INFERENCE = 1
@@ -84,8 +87,15 @@ def _install_ros_stubs():
 _install_ros_stubs()
 
 from orchestrator.bt.actions.joint_control import _coerce_positions  # noqa: E402
-from orchestrator.bt.actions.send_command import SendCommand  # noqa: E402
+from orchestrator.bt.actions.send_command import (  # noqa: E402
+    SendCommand,
+    _policy_root_candidates,
+)
 from orchestrator.bt.node_registry import _annotation_to_port_type  # noqa: E402
+
+
+def test_policy_catalog_candidates_include_baked_image_path():
+    assert Path('/opt/cyclo/policy') in _policy_root_candidates()
 
 
 class _DummyNode:
@@ -151,6 +161,23 @@ def test_load_send_command_sets_acceleration_mode():
     assert action.acceleration_mode == 'tensorrt_dit'
     assert task_info.acceleration_mode == 'tensorrt_dit'
     assert task_info.acceleration_engine_path == 'custom.trt'
+    if hasattr(task_info, 'policy_id'):
+        assert task_info.policy_id == 'groot:n17'
+
+
+def test_load_send_command_resolves_legacy_bare_policy_alias():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {'command': 'LOAD', 'model': 'act'},
+    )
+    task_info = action._build_task_info()
+
+    assert task_info.service_type == 'lerobot'
+    if hasattr(task_info, 'policy_id'):
+        assert task_info.policy_id == 'lerobot:act'
 
 
 def test_load_send_command_sets_action_request_mode():

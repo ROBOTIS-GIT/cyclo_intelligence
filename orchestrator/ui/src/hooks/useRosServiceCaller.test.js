@@ -1,8 +1,28 @@
 import {
   buildInitialPoseSyncTaskInfo,
+  buildPolicySelectionTaskInfo,
   getRecordCommandServiceTimeoutMs,
   transformReplayDataResult,
 } from './useRosServiceCaller';
+
+describe('buildPolicySelectionTaskInfo', () => {
+  test('serializes policy id and stable parameter JSON for TaskInfo', () => {
+    expect(buildPolicySelectionTaskInfo({
+      policyId: 'sample:base',
+      policyParameters: { z: true, gain: 0.5 },
+    })).toEqual({
+      policy_id: 'sample:base',
+      policy_parameters_json: '{"gain":0.5,"z":true}',
+    });
+  });
+
+  test('uses legacy-compatible empty defaults', () => {
+    expect(buildPolicySelectionTaskInfo()).toEqual({
+      policy_id: '',
+      policy_parameters_json: '{}',
+    });
+  });
+});
 
 describe('buildInitialPoseSyncTaskInfo', () => {
   test('converts UI settings to ROS task info fields', () => {

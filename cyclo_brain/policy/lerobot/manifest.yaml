@@ -1,0 +1,52 @@
+schema_version: 1
+runtime:
+  id: lerobot
+  label: LeRobot
+  compose_service: lerobot
+  service_prefix: lerobot
+  checkpoint_root: /workspace/model/lerobot
+  source:
+    kind: submodule
+    location: lerobot
+  services: [engine-process]
+  capabilities:
+    action_request_modes: [async, sync]
+    requires_hf_token: false
+    operations: []
+models:
+  - id: act
+    label: ACT
+    aliases: [act]
+    requires_instruction: false
+  - id: diffusion
+    label: Diffusion
+    aliases: [diffusion]
+    requires_instruction: false
+  - id: smolvla
+    label: SmolVLA
+    aliases: [smolvla]
+    requires_instruction: true
+  - id: xvla
+    label: XVLA
+    aliases: [xvla]
+    requires_instruction: true
+  - id: pi0
+    label: Pi0
+    aliases: [pi0, pi0_fast]
+    requires_instruction: true
+  - id: pi05
+    label: Pi0.5
+    aliases: [pi05]
+    requires_instruction: true
+  - id: molmoact2
+    label: MolmoAct2
+    aliases: [molmoact2]
+    requires_instruction: true
+  - id: vla_jepa
+    label: VLA-JEPA
+    aliases: [vla_jepa]
+    requires_instruction: true
+  - id: fastwam
+    label: FastWAM
+    aliases: [fastwam]
+    requires_instruction: true

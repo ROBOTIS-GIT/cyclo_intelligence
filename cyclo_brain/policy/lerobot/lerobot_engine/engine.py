@@ -12,15 +12,14 @@
 
 Implements ``InferenceEngine`` (cyclo_brain.policy.common.runtime.engine)
 on top of upstream LeRobot's pretrained-policy + processor-pipeline
-APIs. Bind-mounted into the policy container as the ``/app/lerobot_engine/``
-package; the common Engine process imports it via
+APIs. Installed into the Worker image as the ``/app/lerobot_engine/`` package;
+the common Engine process imports it via
 ``POLICY_ENGINE_MODULE=lerobot_engine`` (the package's ``__init__.py``
 re-exports ``LeRobotEngine`` + ``create_engine``).
 
 Mirrors groot's ``inference_engine.py`` structure (RobotClient owns
-sensor subscriptions; engine builds observations on demand) so the
-upstream-agnostic two-process runtime can route both backends through
-the same shape.
+sensor subscriptions; engine builds observations on demand) so the central
+Policy Runtime can route both Workers through the same Engine contract.
 
 This file holds the ``LeRobotEngine`` core — ``__init__``, the
 ``InferenceEngine`` API surface (``is_ready``, ``load_policy``,

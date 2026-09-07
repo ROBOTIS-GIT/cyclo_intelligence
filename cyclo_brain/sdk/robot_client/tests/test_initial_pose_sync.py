@@ -97,6 +97,97 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
                     client = RobotClient("omy_f3m")
                     self.assertEqual(client._initial_pose_sync_state_max_age_s, 1.0)
 
+    def test_subscription_options_select_observation_groups(self) -> None:
+        subscribers = []
+
+        def make_subscriber(**kwargs):
+            subscribers.append(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+        with mock.patch.object(robot_client_impl, "ROS2Subscriber", make_subscriber):
+            client = RobotClient(
+                "ffw_sg2_rev1",
+                subscribe_images=False,
+                subscribe_state=True,
+                subscribe_sensors=False,
+            )
+
+        self.assertEqual([sub["topic"] for sub in subscribers], ["/joint_states"])
+        self.assertTrue(client._all_ready() is False)
+        self.assertEqual(
+            set(client._get_missing()),
+            {
+                "joint:follower_upper_body",
+                "joint:follower_arm_left",
+                "joint:follower_arm_right",
+                "joint:follower_head",
+                "joint:follower_lift",
+            },
+        )
+
+    def test_disabling_all_observations_creates_no_subscribers(self) -> None:
+        subscribers = []
+
+        def make_subscriber(**kwargs):
+            subscribers.append(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+        with mock.patch.object(robot_client_impl, "ROS2Subscriber", make_subscriber):
+            client = RobotClient(
+                "ffw_sg2_rev1",
+                subscribe_images=False,
+                subscribe_state=False,
+                subscribe_sensors=False,
+            )
+
+        self.assertEqual(subscribers, [])
+        self.assertTrue(client._all_ready())
+        self.assertEqual(client._get_missing(), [])
+
+    def test_state_subscription_can_follow_robot_publish_mode(self) -> None:
+        subscribers = []
+
+        def make_subscriber(**kwargs):
+            subscriber = SimpleNamespace(kwargs=kwargs, closed=False)
+
+            def close():
+                subscriber.closed = True
+
+            subscriber.close = close
+            subscribers.append(subscriber)
+            return subscriber
+
+        with mock.patch.object(robot_client_impl, "ROS2Subscriber", make_subscriber):
+            client = RobotClient(
+                "ffw_sg2_rev1",
+                subscribe_images=False,
+                subscribe_state=False,
+                subscribe_sensors=False,
+            )
+            client.set_state_subscription(True)
+            self.assertEqual(len(subscribers), 1)
+            self.assertEqual(subscribers[0].kwargs["topic"], "/joint_states")
+            self.assertEqual(client._state_subscribers, subscribers)
+
+            client.set_state_subscription(False)
+
+        self.assertTrue(subscribers[0].closed)
+        self.assertEqual(client._state_subscribers, [])
+        self.assertEqual(client._subscribers, [])
+
+    def test_optional_sensors_do_not_block_observation_readiness(self) -> None:
+        with mock.patch.object(RobotClient, "_init_subscriptions"):
+            client = RobotClient(
+                "ffw_sh5_rev1",
+                subscribe_images=False,
+                subscribe_state=False,
+                subscribe_sensors=True,
+            )
+
+        self.assertTrue(client._config["sensors"])
+        self.assertTrue(client._all_ready())
+        self.assertEqual(client._get_missing(), [])
+
     @staticmethod
     def _action_dimension(client: RobotClient, action_keys: list[str]) -> int:
         total = 0
