@@ -185,4 +185,3 @@ class IoMappingMixin:
             self._robot.close()
         finally:
             self._robot = None
-

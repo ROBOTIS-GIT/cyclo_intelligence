@@ -115,4 +115,3 @@ class PreprocessingMixin:
                 np.ascontiguousarray(tactile)
             ).unsqueeze(0).to(self._device),
         }
-

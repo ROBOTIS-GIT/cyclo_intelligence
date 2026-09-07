@@ -19,4 +19,3 @@ JOINT_NAMES = (
     *(f"finger_l_joint{i}" for i in range(1, 21)),
     *(f"finger_r_joint{i}" for i in range(1, 21)),
 )
-

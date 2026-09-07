@@ -20,4 +20,3 @@ class LoadingMixin:
     ) -> ViTacFormerPolicy:
         logger.info("Loading ViTacFormer policy from %s", model_path)
         return load_vitacformer_policy(model_path, device)
-
