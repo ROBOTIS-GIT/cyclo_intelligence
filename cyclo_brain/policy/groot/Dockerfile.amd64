@@ -216,7 +216,9 @@ COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /o
 
 # Copy the shared Engine worker service definition.
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
+RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
+    && rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/main-runtime \
+    && chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
     && chmod +x /app/scripts/smoke_groot_n17.py
 
 # Setup EGL/Vulkan configuration (from official GR00T Dockerfile)

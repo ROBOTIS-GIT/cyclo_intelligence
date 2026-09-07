@@ -314,14 +314,14 @@ def test_policy_build_contexts_use_runtime_specific_ignore_files():
             policy_root / "groot" / f"Dockerfile.{arch}.dockerignore"
         ).read_text()
 
-        assert "!cyclo_brain/policy/common/runtime/engine_process/**" in lerobot_ignore
-        assert "!cyclo_brain/policy/common/s6-services/**" in lerobot_ignore
-        assert "!cyclo_brain/policy/lerobot/lerobot/**" in lerobot_ignore
-        assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" not in lerobot_ignore
-        assert "!cyclo_brain/policy/common/runtime/engine_process/**" in groot_ignore
-        assert "!cyclo_brain/policy/common/s6-services/**" in groot_ignore
-        assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" in groot_ignore
-        assert "!cyclo_brain/policy/lerobot/lerobot/**" not in groot_ignore
+        assert not any(line.startswith("!") for line in lerobot_ignore.splitlines())
+        assert "docker/" in lerobot_ignore
+        assert "cyclo_brain/policy/groot/" in lerobot_ignore
+        assert "cyclo_brain/policy/lerobot/" not in lerobot_ignore
+        assert not any(line.startswith("!") for line in groot_ignore.splitlines())
+        assert "docker/" in groot_ignore
+        assert "cyclo_brain/policy/lerobot/" in groot_ignore
+        assert "cyclo_brain/policy/groot/" not in groot_ignore
 
         main_ignores.append(main_ignore)
         for required in (
@@ -356,7 +356,8 @@ def test_policy_workers_install_only_the_shared_engine_service():
                 "COPY cyclo_brain/policy/common/s6-services/ "
                 "/etc/s6-overlay/s6-rc.d/"
             ) in contents
-            assert "main-runtime" not in contents
+            assert "rm -rf /etc/s6-overlay/s6-rc.d/main-runtime" in contents
+            assert "rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/main-runtime" in contents
 
 
 def test_groot_amd64_keeps_numpy_compatible_with_opencv():

@@ -148,7 +148,9 @@ COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
+RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
+    && rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/main-runtime \
+    && chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run \
     && chmod +x /app/scripts/smoke_groot_n17.py
 
 # EGL configuration for headless rendering / TensorRT paths used by GR00T.

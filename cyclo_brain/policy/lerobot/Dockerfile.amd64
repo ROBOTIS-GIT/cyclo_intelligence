@@ -112,7 +112,9 @@ COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
-RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
+RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
+    && rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/main-runtime \
+    && chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
 
 # HuggingFace cache (bind-mounted from compose so weights survive rebuild).
 ENV HF_HOME=/root/.cache/huggingface
