@@ -1,0 +1,4 @@
+# Leave aspect ratio intact for SmolVLA's internal resize/padding.
+backend: torch
+operations:
+  - type: identity

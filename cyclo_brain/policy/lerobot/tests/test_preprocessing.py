@@ -64,7 +64,7 @@ class Preprocessor(PreprocessingMixin):
         self._robot = FakeRobot(positions)
         self._cameras = {}
         self._state_modalities = ["arm"]
-        self._image_resize = {}
+        self._image_preprocessing = None
         self._device = torch.device("cpu")
         feature = SimpleNamespace(shape=(expected,))
         config = SimpleNamespace(input_features={STATE_KEY: feature})
@@ -75,6 +75,57 @@ class Preprocessor(PreprocessingMixin):
 
 
 class PreprocessingTest(unittest.TestCase):
+    def camera_preprocessor(self, operations):
+        preprocessor = Preprocessor([1.0, 2.0], expected=2)
+        key = "observation.images.head"
+        preprocessor._cameras = {"head": key}
+        preprocessor._robot._config = {"cameras": {"head": {"rotation_deg": 270}}}
+        image = np.arange(8 * 12 * 3, dtype=np.uint8).reshape(8, 12, 3)
+        preprocessor._robot.get_images = lambda format: {"head": image}
+        preprocessor._image_preprocessing = image_preprocessing.ImagePreprocessing(
+            {"backend": "torch", "operations": operations},
+            {key: {"shape": [3, 4, 4]}},
+        )
+        return preprocessor, key, image
+
+    def test_real_observation_path_preserves_native_rotated_size(self):
+        preprocessor, key, image = self.camera_preprocessor([{"type": "identity"}])
+        batch = preprocessor._build_observation("pick")
+        expected = torch.from_numpy(np.rot90(image).copy()).float().div(255).permute(2, 0, 1).unsqueeze(0)
+        torch.testing.assert_close(batch[key], expected, rtol=0, atol=0)
+        self.assertEqual(batch["task"], ["pick"])
+
+    def test_camera_transform_error_returns_failure_not_partial_batch(self):
+        preprocessor, key, _ = self.camera_preprocessor([{"type": "center_crop", "size": [100, 100]}])
+        result = preprocessor._build_observation("pick")
+        self.assertIn("Camera preprocessing failed for head", result["error"])
+        self.assertNotIn(key, result)
+
+    def test_diffusion_stack_validation_runs_on_processed_sizes(self):
+        preprocessor, key, _ = self.camera_preprocessor([{"type": "identity"}])
+        preprocessor._policy.config.type = "diffusion"
+        preprocessor._cameras["wrist"] = "observation.images.wrist"
+        with self.assertRaisesRegex(ValueError, "equal sizes"):
+            preprocessor._validate_camera_shapes({key: torch.zeros(1, 3, 8, 12),
+                "observation.images.wrist": torch.zeros(1, 3, 12, 8)})
+        preprocessor._validate_camera_shapes({key: torch.zeros(1, 3, 4, 4),
+            "observation.images.wrist": torch.zeros(1, 3, 4, 4)})
+
+    def test_xvla_stack_requires_equal_sizes_only_without_internal_resize(self):
+        preprocessor, key, _ = self.camera_preprocessor([{"type": "identity"}])
+        preprocessor._policy.config.type = "xvla"
+        preprocessor._policy.config.resize_imgs_with_padding = None
+        wrist = "observation.images.wrist"
+        preprocessor._cameras["wrist"] = wrist
+        batch = {key: torch.zeros(1, 3, 8, 12), wrist: torch.zeros(1, 3, 12, 8)}
+        with self.assertRaisesRegex(ValueError, "xvla cameras must have equal sizes"):
+            preprocessor._validate_camera_shapes(batch)
+        preprocessor._policy.config.resize_imgs_with_padding = (224, 224)
+        preprocessor._validate_camera_shapes(batch)
+        preprocessor._policy.config.resize_imgs_with_padding = None
+        batch[wrist] = torch.zeros(1, 3, 8, 12)
+        preprocessor._validate_camera_shapes(batch)
+
     def test_pads_short_state_to_policy_shape(self):
         preprocessor = Preprocessor([1.0, 2.0], expected=4)
 

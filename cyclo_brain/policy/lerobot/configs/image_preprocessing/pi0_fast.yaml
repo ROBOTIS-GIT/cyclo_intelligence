@@ -1,0 +1,4 @@
+# Pi0-FAST owns resize/padding; keep native camera aspect ratio.
+backend: torch
+operations:
+  - type: identity

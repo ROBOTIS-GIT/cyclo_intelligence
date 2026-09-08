@@ -80,11 +80,15 @@ with mock.patch.dict(sys.modules, {
 
 
 class EngineModelLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(engine_module, "load_image_preprocessing", return_value=object())
+        self.image_loader = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_engine(self):
         engine = engine_module.LeRobotEngine()
         engine._resolve_model_dir = lambda path: path
         engine._apply_policy_optimization = mock.Mock()
-        engine._infer_image_resize = mock.Mock(return_value={})
         engine._init_robot = mock.Mock()
         return engine
 
@@ -117,6 +121,30 @@ class EngineModelLifecycleTest(unittest.TestCase):
         engine._load_policy_assets = mock.Mock(side_effect=AssertionError("unexpected reload"))
         self.assertTrue(engine.load_policy(self.request("/same"))["success"])
         engine._load_policy_assets.assert_not_called()
+        self.image_loader.assert_called_once_with("/same")
+        self.assertIs(engine._image_preprocessing, self.image_loader.return_value)
+
+    def test_invalid_yaml_blocks_load_before_weights(self):
+        engine = self.make_engine()
+        engine._load_policy_assets = mock.Mock()
+        self.image_loader.side_effect = ValueError("Invalid image preprocessing config")
+        result = engine.load_policy(self.request("/new"))
+        self.assertFalse(result["success"])
+        engine._load_policy_assets.assert_not_called()
+        self.assertIsNone(engine._image_preprocessing)
+
+    def test_cached_load_reads_new_snapshot_and_cleanup_clears_it(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._loaded_model_path = "/same"
+        first, second = object(), object()
+        self.image_loader.side_effect = [first, second]
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        self.assertIs(engine._image_preprocessing, first)
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        self.assertIs(engine._image_preprocessing, second)
+        engine.cleanup()
+        self.assertIsNone(engine._image_preprocessing)
 
     def test_missing_observations_cannot_report_successful_load(self):
         engine = self.make_engine()
@@ -129,6 +157,32 @@ class EngineModelLifecycleTest(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("joint:arm", result["message"])
         self.assertIsNone(engine._policy)
+
+    def test_saved_processor_precedes_shape_validation_and_prediction(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._robot = object()
+        engine._image_preprocessing = object()
+        raw, processed = {"raw": True}, {"processed": True}
+        action = torch.zeros(1, 2, 3)
+        engine._build_observation = mock.Mock(return_value=raw)
+        engine._preprocessor = mock.Mock(return_value=processed)
+        engine._validate_camera_shapes = mock.Mock()
+        engine._predict_chunk = mock.Mock(return_value=action)
+        engine._postprocessor = mock.Mock(side_effect=lambda value: value)
+        result = engine.get_action_chunk(types.SimpleNamespace(task_instruction="pick"))
+        self.assertTrue(result["success"])
+        engine._preprocessor.assert_called_once_with(raw)
+        engine._validate_camera_shapes.assert_called_once_with(processed)
+        engine._predict_chunk.assert_called_once_with(processed)
+        engine._postprocessor.assert_called_once_with(action)
+
+        engine._validate_camera_shapes.side_effect = ValueError("bad camera sizes")
+        engine._predict_chunk.reset_mock()
+        result = engine.get_action_chunk(types.SimpleNamespace(task_instruction="pick"))
+        self.assertFalse(result["success"])
+        engine._predict_chunk.assert_not_called()
+        self.assertNotIn("action_chunk", result)
 
 
 class FakePolicy:

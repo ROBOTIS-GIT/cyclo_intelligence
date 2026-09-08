@@ -6,6 +6,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 APP_PATH = Path(__file__).resolve().with_name("app.py")
 REPO_ROOT = APP_PATH.parents[2]
 
@@ -362,6 +364,70 @@ def test_backend_container_stale_reason_accepts_repo_symlink_workspace_mount(
     ) is None
 
 
+@pytest.mark.parametrize("source_kind", ["relative", "absolute"])
+@pytest.mark.parametrize("wrong_checkout", [False, True])
+def test_backend_config_mount_source_validation(
+    monkeypatch, tmp_path, source_kind, wrong_checkout,
+):
+    project_dir = tmp_path / "repo" / "docker"
+    expected = tmp_path / "repo" / "configs"
+    expected.mkdir(parents=True)
+    source = "../configs" if source_kind == "relative" else str(expected)
+    destination = "/app/configs/image_preprocessing"
+    actual = tmp_path / "other_repo" / "configs" if wrong_checkout else expected
+    monkeypatch.setattr(app, "_host_project_dir", lambda: str(project_dir))
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path / "repo"))
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    for mount in container.attrs["Mounts"]:
+        if mount["Destination"] == destination:
+            mount["Source"] = str(actual)
+    spec = {"config_mounts": {destination: source}}
+    reason = (
+        "config_mount_source_mismatch=" + destination if wrong_checkout else None
+    )
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == reason
+    # Editing the same mounted file must not require recreating the Worker.
+    (expected / "act.yaml").write_text(
+        "backend: torch\noperations: [{type: identity}]\n"
+    )
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == reason
+
+
+def test_backend_config_mount_accepts_symlink(monkeypatch, tmp_path):
+    host_repo = tmp_path / "host_repo"
+    container_repo = tmp_path / "container_repo"
+    real_configs = tmp_path / "ssd" / "configs"
+    container_repo.mkdir()
+    real_configs.mkdir(parents=True)
+    (container_repo / "configs").symlink_to(real_configs)
+    monkeypatch.setattr(app, "_host_project_dir", lambda: str(host_repo / "docker"))
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(container_repo))
+    destination = "/app/configs/image_preprocessing"
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    for mount in container.attrs["Mounts"]:
+        if mount["Destination"] == destination:
+            mount["Source"] = str(real_configs)
+    spec = {"config_mounts": {destination: "../configs"}}
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) is None
+
+
+def test_backend_config_mount_requires_known_host_project(monkeypatch):
+    monkeypatch.setattr(app, "_host_project_dir", lambda: None)
+    destination = "/app/configs/image_preprocessing"
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    spec = {"config_mounts": {destination: "../configs"}}
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == (
+        "config_mount_source_unverified=" + destination
+    )
+
+
+def test_backend_config_mount_is_read_from_compose():
+    assert _BACKENDS["lerobot"]["config_mounts"] == {
+        "/app/configs/image_preprocessing": "../cyclo_brain/policy/lerobot/configs/image_preprocessing"
+    }
+    assert _BACKENDS["groot"]["config_mounts"] == {}
+
+
 def test_mount_source_for_destination_resolves_workspace_host_path():
     mounts = [
         {"Destination": "/root/ros2_ws/src/cyclo_intelligence", "Source": "/repo"},
@@ -616,6 +682,7 @@ def test_compose_configuration_uses_override_and_arch(monkeypatch, tmp_path):
         "config",
         "--format",
         "json",
+        "--no-path-resolution",
     ]
     assert captured["env"]["ARCH"] == app._BACKEND_ARCH
 

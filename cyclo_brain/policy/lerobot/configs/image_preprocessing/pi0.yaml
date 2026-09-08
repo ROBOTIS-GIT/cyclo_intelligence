@@ -1,0 +1,4 @@
+# Pi0 owns resize/padding; do not stretch the image before it.
+backend: torch
+operations:
+  - type: identity

@@ -1,0 +1,9 @@
+# Diffusion stacks cameras BEFORE its backbone resize/crop.
+# Preserve Cyclo's previous OpenCV uint8 linear resize as a compatibility
+# default, NOT a verified training recipe. Match your dataset creation code.
+# Checkpoint size specifies dimensions only, not how training resized images.
+backend: opencv
+operations:
+  - type: resize
+    size: checkpoint
+    interpolation: bilinear

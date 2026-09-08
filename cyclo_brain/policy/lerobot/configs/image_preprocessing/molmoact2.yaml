@@ -1,0 +1,4 @@
+# The checkpoint's Molmo image processor owns image preparation.
+backend: torch
+operations:
+  - type: identity

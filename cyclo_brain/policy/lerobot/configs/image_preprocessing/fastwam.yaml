@@ -1,0 +1,5 @@
+# FastWAM owns per-view resize and concatenation. Its input_features may
+# describe post-resize dimensions, not the raw dataset images.
+backend: torch
+operations:
+  - type: identity

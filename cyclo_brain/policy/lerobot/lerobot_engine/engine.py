@@ -83,6 +83,7 @@ from .optimization import OptimizationMixin  # noqa: E402
 from .io_mapping import IoMappingMixin  # noqa: E402
 from .preprocessing import PreprocessingMixin  # noqa: E402
 from .prediction import PredictionMixin  # noqa: E402
+from .image_preprocessing import load_image_preprocessing  # noqa: E402
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -119,12 +120,7 @@ class LeRobotEngine(
         # UNLOAD. cleanup() must clear this together with the policy cache.
         self._loaded_robot_type: Optional[str] = None
 
-        # Resize targets for input cameras. The preprocessor's stored
-        # ImageProcessorStep handles normalization and CHW reorder; we
-        # only need to pre-resize each camera to the policy feature's
-        # expected size. If config doesn't expose a target shape for a
-        # camera, we leave that image at native resolution.
-        self._image_resize: Dict[str, tuple[int, int]] = {}
+        self._image_preprocessing = None
 
     # ------------------------------------------------------------------ #
     # InferenceEngine API
@@ -137,6 +133,7 @@ class LeRobotEngine(
             and self._preprocessor is not None
             and self._postprocessor is not None
             and self._robot is not None
+            and self._image_preprocessing is not None
         )
 
     def load_policy(self, request: Any) -> Dict[str, Any]:
@@ -148,6 +145,8 @@ class LeRobotEngine(
             # a training-output root containing ``training_state/``
             # alongside (lerobot-train layout).
             model_path = self._resolve_model_dir(model_path)
+            # Validate before allocating weights, including on cached LOAD.
+            image_preprocessing = load_image_preprocessing(model_path)
 
             # Skip weights load when a second LOAD arrives before UNLOAD and
             # we're just reattaching the robot client for the same model.
@@ -174,9 +173,9 @@ class LeRobotEngine(
                 self._loaded_model_path = model_path
                 self._apply_policy_optimization(model_path, request)
 
+            self._image_preprocessing = image_preprocessing
             self._init_robot(robot_type)
             self._loaded_robot_type = robot_type
-            self._image_resize = self._infer_image_resize(self._policy)
 
             return {
                 "success": True,
@@ -202,6 +201,7 @@ class LeRobotEngine(
 
             with torch.inference_mode():
                 preprocessed = self._preprocessor(obs)
+                self._validate_camera_shapes(preprocessed)
                 action = self._predict_chunk(preprocessed)
                 action = self._postprocessor(action)
 
@@ -239,7 +239,7 @@ class LeRobotEngine(
         self._device = None
         self._loaded_model_path = None
         self._loaded_robot_type = None
-        self._image_resize = {}
+        self._image_preprocessing = None
 
         self._cameras = {}
         self._state_modalities = []

@@ -1,0 +1,5 @@
+# ACT handles each camera separately. No additional spatial transform.
+# Match dataset-side transforms explicitly if training used any.
+backend: torch
+operations:
+  - type: identity

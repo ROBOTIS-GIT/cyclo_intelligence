@@ -341,7 +341,9 @@ def _load_compose_configuration() -> dict:
     command = ["docker", "compose"]
     for compose_path in _compose_paths():
         command.extend(["-f", str(compose_path)])
-    command.extend(["config", "--format", "json"])
+    # Keep relative bind sources so they can later be resolved against the
+    # HOST project directory, not this container's baked /opt/cyclo tree.
+    command.extend(["config", "--format", "json", "--no-path-resolution"])
 
     env = os.environ.copy()
     env.setdefault("ARCH", _BACKEND_ARCH)
@@ -422,6 +424,14 @@ def _load_backend_configuration():
             "services": list(runtime["services"]),
             "checkpoint_root": runtime["checkpoint_root"],
             "capabilities": dict(runtime["capabilities"]),
+            "config_mounts": {
+                volume["target"]: volume["source"]
+                for volume in service.get("volumes", []) or []
+                if isinstance(volume, dict)
+                and volume.get("type") == "bind"
+                and str(volume.get("target", "")).startswith("/app/configs/")
+                and volume.get("source")
+            },
         }
         required_mounts[runtime["id"]] = _compose_mount_targets(service)
     return catalog, backends, required_mounts
@@ -1142,6 +1152,18 @@ def _backend_container_stale_reason(
         expected_workspace_dir,
     ):
         return "workspace_mount_mismatch"
+    config_mounts = spec.get("config_mounts", {})
+    project_dir = _host_project_dir() if config_mounts else None
+    for destination, source in config_mounts.items():
+        if not os.path.isabs(source):
+            if not project_dir:
+                return "config_mount_source_unverified=" + destination
+            source = os.path.normpath(os.path.join(project_dir, source))
+        actual_source = _mount_source_for_destination(
+            container.attrs.get("Mounts", []), destination,
+        )
+        if _normalized_host_path(actual_source) != _normalized_host_path(source):
+            return "config_mount_source_mismatch=" + destination
     if _backend_container_image_mismatch(client, container, spec):
         return "image_mismatch"
     return None

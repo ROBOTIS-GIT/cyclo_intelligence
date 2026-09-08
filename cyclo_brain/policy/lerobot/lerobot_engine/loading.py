@@ -11,25 +11,21 @@
 """LeRobot engine loading helpers (LoadingMixin).
 
 Extracted from ``engine.py`` to keep the core ``LeRobotEngine`` class
-focused on the ``InferenceEngine`` API. Mixed into the engine via
-multiple inheritance; bind-mounted into the policy container as part
+focused on the ``InferenceEngine`` API. Installed in the Worker as part
 of the ``/app/lerobot_engine/`` package.
 
 Owns:
 - ``_resolve_model_dir``: auto-descend lerobot training-output roots.
 - ``_load_policy_assets``: load weights + stored pre/post processors.
-- ``_infer_image_resize``: read per-input-image shape hints off the policy.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import torch
-
-from .image_preprocessing import infer_image_resize_targets
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import get_policy_class, make_pre_post_processors
@@ -40,7 +36,7 @@ logger = logging.getLogger("lerobot_engine")
 
 
 class LoadingMixin:
-    """Policy load helpers — weights, processors, resize hint."""
+    """Policy load helpers — weights and saved processors."""
 
     @staticmethod
     def _resolve_model_dir(model_path: str) -> str:
@@ -100,10 +96,8 @@ class LoadingMixin:
             policy = policy.to(device).eval()
             logger.info("Policy weights loaded on %s", device)
 
-        # Stored processor pipelines include the dataset-time normalizer
-        # stats and image transforms so we don't re-derive (and de-sync)
-        # them. Falling through to the default factory here would wipe
-        # those stats and produce garbage actions.
+        # Restore serialized steps and statistics. Dataset-side transforms
+        # outside this pipeline are not necessarily recorded in the checkpoint.
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=policy.config,
             pretrained_path=model_path,
@@ -113,18 +107,3 @@ class LoadingMixin:
         )
         logger.info("Pre/post processors loaded")
         return policy, preprocessor, postprocessor
-
-    def _infer_image_resize(self, policy: PreTrainedPolicy) -> Dict[str, Tuple[int, int]]:
-        """Best-effort per-policy-key target ``(W, H)`` from config.
-
-        Many lerobot policies advertise the expected image shape under
-        ``input_features['observation.images.<cam>'].shape = (C, H, W)``.
-        Pre-resizing on the host keeps mixed camera shapes aligned with the
-        dataset metadata. Missing keys mean: leave that camera at native size.
-        """
-        try:
-            features = getattr(policy.config, "input_features", {}) or {}
-            return infer_image_resize_targets(features)
-        except Exception:
-            pass
-        return {}

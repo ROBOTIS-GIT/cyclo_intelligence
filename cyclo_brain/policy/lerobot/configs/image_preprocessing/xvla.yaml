@@ -1,0 +1,9 @@
+# Training and inference both use XVLA's _prepare_images before camera STACK.
+# If training set resize_imgs_with_padding=[H, W], the checkpoint retains it:
+# XVLA performs aspect-ratio-preserving resize + padding in inference too.
+# Keep identity here; do not duplicate that internal operation in Cyclo.
+# With resize_imgs_with_padding=None, images must already have equal H/W in
+# BOTH training and inference. Reproduce any external training transform here.
+backend: torch
+operations:
+  - type: identity

@@ -1,0 +1,8 @@
+# Standard LeRobot training has no external area resize; keep native images
+# for the saved processor and model. Model resize_images_to remains active
+# if explicitly set in the checkpoint (its upstream default is None).
+# For checkpoints trained with an EXTRA Torch area resize to 224x224,
+# replace identity with: {type: resize, size: [224, 224], interpolation: area}
+backend: torch
+operations:
+  - type: identity

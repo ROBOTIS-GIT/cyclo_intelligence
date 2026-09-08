@@ -161,6 +161,8 @@ services:
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
       # User-visible LeRobot models live under /workspace/model/lerobot.
+      # Editable spatial transforms only; Worker Python code stays image-owned.
+      - ../cyclo_brain/policy/lerobot/configs/image_preprocessing:/app/configs/image_preprocessing:ro
       - ./huggingface:/root/.cache/huggingface
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
       # docker/scripts/init_zenoh_cache.sh) so the in-container SDK

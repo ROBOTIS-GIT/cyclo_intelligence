@@ -9,6 +9,18 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_lerobot_image_preprocessing_defaults_and_editable_mount():
+    source = "cyclo_brain/policy/lerobot/configs/"
+    for arch in ("amd64", "arm64"):
+        contents = (REPO_ROOT / f"cyclo_brain/policy/lerobot/Dockerfile.{arch}").read_text()
+        assert f"COPY {source} /app/configs/" in contents
+    compose = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())
+    mount = f"../{source}image_preprocessing:/app/configs/image_preprocessing:ro"
+    assert mount in compose["services"]["lerobot"]["volumes"]
+    assert mount not in compose["services"]["groot"]["volumes"]
+    assert (REPO_ROOT / source / "image_preprocessing").is_dir()
+
+
 def test_policy_workers_retain_zenoh_shm_memlock_limit():
     compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text())
     services = compose["services"]

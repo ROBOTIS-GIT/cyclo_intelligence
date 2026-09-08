@@ -18,7 +18,6 @@ import numpy as np
 import torch
 
 from .constants import STATE_KEY as _STATE_KEY
-from .image_preprocessing import prepare_policy_image
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -47,15 +46,13 @@ class PreprocessingMixin:
                 return self._fail(f"Missing camera frame: {cam_name}")
             cam_cfg = self._robot._config.get("cameras", {}).get(cam_name, {})
             try:
-                img = prepare_policy_image(
+                tensor = self._image_preprocessing.apply(
                     img,
+                    policy_key,
                     rotation_deg=cam_cfg.get("rotation_deg", 0),
-                    target_size=self._image_resize.get(policy_key),
                 )
             except Exception as exc:
                 return self._fail(f"Camera preprocessing failed for {cam_name}: {exc}")
-            tensor = torch.from_numpy(img.copy()).to(torch.float32) / 255.0
-            tensor = tensor.permute(2, 0, 1).contiguous().unsqueeze(0)
             batch[policy_key] = tensor.to(self._device)
 
         state_parts: List[np.ndarray] = []
@@ -114,3 +111,18 @@ class PreprocessingMixin:
 
         batch["task"] = [task_instruction or ""]
         return batch
+
+    def _validate_camera_shapes(self, batch):
+        # Allow the saved processor to resize before checking the stack contract.
+        policy_type = getattr(self._policy.config, "type", None)
+        needs_equal_sizes = policy_type == "diffusion" or (
+            policy_type == "xvla"
+            and getattr(self._policy.config, "resize_imgs_with_padding", None) is None
+        )
+        if needs_equal_sizes:
+            shapes = {key: tuple(batch[key].shape[-2:]) for key in self._cameras.values()}
+            if len(set(shapes.values())) > 1:
+                raise ValueError(
+                    f"{policy_type} cameras must have equal sizes before stacking: {shapes}. "
+                    f"Check {policy_type}.yaml against the training preprocessing."
+                )
