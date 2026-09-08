@@ -121,7 +121,7 @@ export function getPolicyBackendReadiness(status) {
   if (status.worker_compatible === false) {
     return {
       ready: false,
-      state: 'warming',
+      state: status.worker_readiness === 'error' ? 'error' : 'warming',
       message: status.worker_message || 'Waiting for a compatible model worker...',
     };
   }

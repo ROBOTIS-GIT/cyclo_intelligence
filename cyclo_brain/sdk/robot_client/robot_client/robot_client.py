@@ -1048,18 +1048,25 @@ class RobotClient:
     # Readiness / waiting
     # ------------------------------------------------------------------ #
 
-    def wait_for_ready(self, timeout: float = 10.0) -> bool:
-        """Wait until at least one frame from all sensors is received."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._all_ready():
-                logger.info("All sensors ready")
+    def wait_for_ready(
+        self, timeout: float = 10.0, *, camera_names=None, joint_groups=None,
+        sensor_names=(),
+    ) -> bool:
+        """Wait for selected inputs; omitted camera/joint lists keep legacy defaults."""
+        deadline = time.monotonic() + timeout
+        while True:
+            missing = self.get_missing_observations(
+                camera_names=camera_names, joint_groups=joint_groups,
+                sensor_names=sensor_names,
+            )
+            if not missing:
+                logger.info("Required observations ready")
                 return True
-            time.sleep(0.1)
-        # Log what's missing
-        missing = self._get_missing()
-        logger.warning(f"Timeout waiting for sensors. Missing: {missing}")
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(f"Timeout waiting for sensors. Missing: {missing}")
+                return False
+            time.sleep(min(0.1, remaining))
 
     def wait_for_image(self, camera_name: str, timeout: float = 5.0) -> bool:
         deadline = time.time() + timeout
@@ -1078,24 +1085,30 @@ class RobotClient:
         return False
 
     def _all_ready(self) -> bool:
-        with self._lock:
-            for cam in self._config.get("cameras", {}) if self._subscribe_images else ():
-                if cam not in self._images:
-                    return False
-            for group in self._config.get("joint_groups", {}) if self._subscribe_state else ():
-                if group not in self._joint_positions:
-                    return False
-            return True
+        return not self.get_missing_observations()
 
     def _get_missing(self) -> list[str]:
+        return self.get_missing_observations()
+
+    def get_missing_observations(
+        self, *, camera_names=None, joint_groups=None, sensor_names=(),
+    ) -> list[str]:
+        """Report absent inputs without requiring unused robot capabilities."""
+        if camera_names is None:
+            camera_names = self._config.get("cameras", {}) if self._subscribe_images else ()
+        if joint_groups is None:
+            joint_groups = self._config.get("joint_groups", {}) if self._subscribe_state else ()
         missing = []
         with self._lock:
-            for cam in self._config.get("cameras", {}) if self._subscribe_images else ():
+            for cam in camera_names:
                 if cam not in self._images:
                     missing.append(f"camera:{cam}")
-            for group in self._config.get("joint_groups", {}) if self._subscribe_state else ():
+            for group in joint_groups:
                 if group not in self._joint_positions:
                     missing.append(f"joint:{group}")
+            for sensor in sensor_names:
+                if sensor not in self._sensors:
+                    missing.append(f"sensor:{sensor}")
         return missing
 
     # ------------------------------------------------------------------ #

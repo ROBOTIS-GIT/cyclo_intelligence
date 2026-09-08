@@ -31,6 +31,14 @@ class FakeEngineClient:
 
 
 class InferenceRequesterTests(unittest.TestCase):
+    def test_only_describe_propagates_transport_timeout(self):
+        requester = InferenceRequester(FakeEngineClient([TimeoutError()] * 3))
+        with self.assertRaises(TimeoutError):
+            requester.describe()
+        for response in (requester.get_action("task"), requester.load_policy(object())):
+            self.assertFalse(response.success)
+            self.assertIn("timed out", response.message)
+
     def test_get_action_default_timeout_is_five_seconds(self) -> None:
         client = FakeEngineClient(
             [EngineCommandResponse(success=True, seq_id=1)]

@@ -118,6 +118,7 @@ class PolicyRuntime:
                 "POLICY_RUNTIME_CONTROL_SOCKET",
                 "/run/cyclo/policy-runtime.sock",
             ),
+            on_response_failure=self._handler.release_undelivered_worker_mutation,
         )
         self._shutdown = threading.Event()
         self._monitor_thread: threading.Thread | None = None
@@ -282,7 +283,7 @@ class PolicyRuntime:
     def _handle_control_request(self, request: dict) -> dict:
         operation = str(request.get("operation", "status"))
         if operation == "status":
-            return {"ok": True, **self._handler.runtime_snapshot()}
+            return {"ok": True, **self._handler.runtime_snapshot(blocking=False)}
         if operation == "can_mutate_worker":
             runtime_id = str(request.get("runtime_id", ""))
             self._require_runtime_id(runtime_id)

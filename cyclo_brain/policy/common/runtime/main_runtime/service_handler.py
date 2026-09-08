@@ -372,8 +372,13 @@ class ServiceHandler:
             if self._session.loaded:
                 self._session.mark_error(reason)
 
-    def runtime_snapshot(self) -> dict:
-        with self._lock:
+    def runtime_snapshot(self, *, blocking: bool = True) -> dict:
+        if not self._lock.acquire(blocking=blocking):
+            raise RuntimeError(
+                "Policy Runtime is busy handling a lifecycle request; "
+                "retry after it finishes"
+            )
+        try:
             return {
                 "runtime_state": self._runtime_state(),
                 "runtime_id": self._session.runtime_id,
@@ -385,9 +390,14 @@ class ServiceHandler:
                 "mutating_runtime_ids": sorted(self._worker_mutations),
                 "error": self._session.error,
             }
+        finally:
+            self._lock.release()
 
     def can_mutate_worker(self, runtime_id: str) -> tuple[bool, str]:
-        snapshot = self.runtime_snapshot()
+        try:
+            snapshot = self.runtime_snapshot(blocking=False)
+        except RuntimeError as exc:
+            return False, str(exc)
         if snapshot["loading_runtime_id"] == runtime_id:
             return False, "worker is loading a policy"
         if snapshot["runtime_id"] != runtime_id:
@@ -399,7 +409,14 @@ class ServiceHandler:
         return True, "worker is idle"
 
     def begin_worker_mutation(self, runtime_id: str) -> tuple[bool, str, str]:
-        with self._lock:
+        # Never queue a container operation behind a potentially minutes-long LOAD.
+        if not self._lock.acquire(blocking=False):
+            return (
+                False,
+                "Policy Runtime is busy handling a lifecycle request; retry after it finishes",
+                "",
+            )
+        try:
             if runtime_id in self._worker_mutations:
                 return False, "another worker operation is already in progress", ""
             allowed, reason = self.can_mutate_worker(runtime_id)
@@ -408,6 +425,20 @@ class ServiceHandler:
             token = uuid.uuid4().hex
             self._worker_mutations[runtime_id] = token
             return True, "worker mutation reserved", token
+        finally:
+            self._lock.release()
+
+    def release_undelivered_worker_mutation(self, request: dict, response: dict) -> None:
+        if (
+            isinstance(request, dict)
+            and request.get("operation") == "begin_worker_mutation"
+            and response.get("ok")
+            and response.get("allowed")
+            and response.get("token")
+        ):
+            self.end_worker_mutation(
+                str(request.get("runtime_id", "")), str(response["token"])
+            )
 
     def end_worker_mutation(self, runtime_id: str, token: str) -> bool:
         with self._lock:

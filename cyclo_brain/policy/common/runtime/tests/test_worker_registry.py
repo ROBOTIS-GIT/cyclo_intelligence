@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -126,6 +127,11 @@ class WorkerRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkerCompatibilityError, "invalid capabilities"):
             registry.describe("lerobot")
 
+    def test_explicit_describe_failure_is_not_a_waiting_status(self):
+        registry, _ = self._registry(self._descriptor(success=False, message="Worker failed"))
+        with self.assertRaisesRegex(WorkerCompatibilityError, "Worker failed"):
+            registry.describe("lerobot")
+
     def test_describe_uses_a_dedicated_client_separate_from_inference(self):
         descriptor = self._descriptor()
         registry, clients = self._registry(descriptor)
@@ -139,6 +145,44 @@ class WorkerRegistryTests(unittest.TestCase):
         registry.close()
         self.assertTrue(clients[0].closed)
         self.assertTrue(clients[1].closed)
+
+    def test_readiness_timeout_is_bounded_and_recovers(self):
+        registry, _ = self._registry(self._descriptor())
+        requester = registry._get_or_create_status_requester("lerobot")
+        with patch.object(requester, "describe", side_effect=TimeoutError("seq=425")):
+            with patch.dict("os.environ", {"WORKER_READY_TIMEOUT_S": "120"}):
+                with patch("main_runtime.worker_registry.time.monotonic", return_value=10):
+                    waiting = registry.describe("lerobot")
+                self.assertEqual(waiting["readiness"], "waiting")
+                self.assertNotIn("seq=", waiting["message"])
+                with patch("main_runtime.worker_registry.time.monotonic", return_value=130):
+                    self.assertEqual(registry.describe("lerobot")["readiness"], "error")
+        self.assertEqual(registry.describe("lerobot")["runtime_id"], "lerobot")
+        self.assertNotIn("lerobot", registry._describe_wait_since)
+
+    def test_loading_requires_fresh_heartbeat_and_has_a_deadline(self):
+        registry, _ = self._registry(self._descriptor())
+        requester = registry._get_or_create_status_requester("lerobot")
+        with patch.object(requester, "describe", side_effect=TimeoutError()):
+            with patch.dict("os.environ", {"LOAD_POLICY_TIMEOUT_S": "300", "WORKER_READY_TIMEOUT_S": "120"}):
+                for now, heartbeat_at, expected in (
+                    (10, 10, "waiting"), (200, 200, "waiting"),
+                    (200, 10, "error"), (310, 310, "error"),
+                ):
+                    registry._heartbeat_payload["lerobot"] = {"engine_state": "loading"}
+                    registry._heartbeat_at["lerobot"] = heartbeat_at
+                    with patch("main_runtime.worker_registry.time.monotonic", return_value=now):
+                        result = registry.describe("lerobot")
+                    self.assertEqual(result["readiness"], expected)
+                    if expected == "waiting":
+                        self.assertEqual(result["message"], "Model is loading...")
+
+    def test_running_worker_timeout_is_not_reported_as_loading(self):
+        registry, _ = self._registry(self._descriptor())
+        registry._heartbeat_payload["lerobot"] = {"engine_state": "running"}
+        requester = registry._get_or_create_status_requester("lerobot")
+        with patch.object(requester, "describe", side_effect=TimeoutError()):
+            self.assertEqual(registry.describe("lerobot")["readiness"], "error")
 
     def test_heartbeat_detects_validated_worker_restart(self):
         descriptor = self._descriptor()

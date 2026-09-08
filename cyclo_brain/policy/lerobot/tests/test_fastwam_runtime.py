@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+import weakref
 from unittest import mock
 
 import torch
@@ -61,6 +62,73 @@ with mock.patch.dict(
     loading = load_module("loading")
 
 optimization = load_module("optimization")
+
+engine_base = types.ModuleType("engine")
+engine_base.InferenceEngine = type("InferenceEngine", (), {})
+robot_stub = types.ModuleType("robot_client")
+robot_stub.RobotClient = object
+camera_stub = types.ModuleType("robot_client.camera_mapping")
+camera_stub.resolve_camera_mappings = mock.Mock()
+with mock.patch.dict(sys.modules, {
+    "engine": engine_base,
+    "robot_client": robot_stub,
+    "robot_client.camera_mapping": camera_stub,
+    "lerobot.policies.pretrained": lerobot_pretrained,
+    f"{PACKAGE_NAME}.loading": loading,
+}):
+    engine_module = load_module("engine")
+
+
+class EngineModelLifecycleTest(unittest.TestCase):
+    def make_engine(self):
+        engine = engine_module.LeRobotEngine()
+        engine._resolve_model_dir = lambda path: path
+        engine._apply_policy_optimization = mock.Mock()
+        engine._infer_image_resize = mock.Mock(return_value={})
+        engine._init_robot = mock.Mock()
+        return engine
+
+    @staticmethod
+    def request(path):
+        return types.SimpleNamespace(model_path=path, robot_type="robot")
+
+    def test_previous_policy_is_collected_before_replacement_is_constructed(self):
+        engine = self.make_engine()
+        old = FakePolicy(types.SimpleNamespace(type="act"))
+        old.cycle = old
+        reference = weakref.ref(old)
+        engine._policy = old
+        engine._loaded_model_path = "/old"
+        del old
+
+        def load(path, device):
+            self.assertIsNone(reference(), "old policy still lives during replacement LOAD")
+            return FakePolicy(types.SimpleNamespace(type="act")), object(), object()
+
+        engine._load_policy_assets = mock.Mock(side_effect=load)
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            self.assertTrue(engine.load_policy(self.request("/new"))["success"])
+            engine.cleanup()
+
+    def test_same_checkpoint_reuses_weights_without_loading_again(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._loaded_model_path = "/same"
+        engine._load_policy_assets = mock.Mock(side_effect=AssertionError("unexpected reload"))
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        engine._load_policy_assets.assert_not_called()
+
+    def test_missing_observations_cannot_report_successful_load(self):
+        engine = self.make_engine()
+        engine._load_policy_assets = mock.Mock(return_value=(
+            FakePolicy(types.SimpleNamespace(type="act")), object(), object(),
+        ))
+        engine._init_robot.side_effect = RuntimeError("Required observations: joint:arm")
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            result = engine.load_policy(self.request("/new"))
+        self.assertFalse(result["success"])
+        self.assertIn("joint:arm", result["message"])
+        self.assertIsNone(engine._policy)
 
 
 class FakePolicy:

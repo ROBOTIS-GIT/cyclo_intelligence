@@ -144,6 +144,11 @@ services:
     network_mode: host
     ipc: host
 
+    # Zenoh locks mapped SHM pools (48 MiB each). Docker's default memlock
+    # limit can reject them even with free RAM. Keep the Runtime's limit.
+    ulimits:
+      memlock: 8428281856
+
     # The Worker owns model observation and inference only. Robot commands are
     # published by the Policy Runtime in cyclo_intelligence.
     environment:
@@ -210,6 +215,10 @@ services:
     # robot topics on the same host. /dev/shm enables Zenoh shared memory.
     network_mode: host
     ipc: host
+
+    # Engine-only workers still receive robot observations through Zenoh SHM.
+    ulimits:
+      memlock: 8428281856
 
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

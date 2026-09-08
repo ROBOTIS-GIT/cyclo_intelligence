@@ -3,8 +3,23 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_policy_workers_retain_zenoh_shm_memlock_limit():
+    compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text())
+    services = compose["services"]
+    runtime_limit = services["cyclo_intelligence"]["ulimits"]["memlock"]
+    assert runtime_limit >= 48 * 1024 * 1024
+    for name in ("lerobot", "groot"):
+        worker = services[name]
+        assert worker["ipc"] == "host"
+        assert worker["ulimits"]["memlock"] == runtime_limit, (
+            f"{name} must retain memlock for Zenoh SHM after removing control-loop privileges"
+        )
 
 
 def test_main_dockerfiles_install_compose_v2():

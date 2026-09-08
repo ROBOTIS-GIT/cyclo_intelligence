@@ -159,6 +159,8 @@ class LeRobotEngine(
                 logger.info("Reusing cached policy: %s", model_path)
                 self._teardown_robot()
             else:
+                # Release the old policy before constructing another large model.
+                self.cleanup()
                 logger.info("Loading LeRobot policy from: %s", model_path)
                 self._device = torch.device(
                     "cuda" if torch.cuda.is_available() else "cpu"

@@ -246,6 +246,7 @@ class BackendStatus(BaseModel):
     services: List[ServiceStatus] = Field(default_factory=list)
     worker_compatible: Optional[bool] = None
     worker_message: str = ""
+    worker_readiness: Optional[Literal["waiting", "error", "ready"]] = None
 
 
 class TrtBuildRequest(BaseModel):
@@ -495,15 +496,23 @@ def _runtime_control_request(payload: dict, timeout_s: float = 2.5) -> dict:
         response = json.loads(b"".join(chunks).decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise RuntimeError("Policy Runtime returned invalid control data") from exc
-    if not isinstance(response, dict) or not response.get("ok"):
+    if not isinstance(response, dict):
+        raise RuntimeError("Policy Runtime returned invalid control data")
+    if not response.get("ok"):
         raise RuntimeError(str(response.get("error", "Policy Runtime request failed")))
     return response
 
 
 def _begin_worker_mutation(runtime_id: str) -> str:
-    response = _runtime_control_request(
-        {"operation": "begin_worker_mutation", "runtime_id": runtime_id}
-    )
+    try:
+        response = _runtime_control_request(
+            {"operation": "begin_worker_mutation", "runtime_id": runtime_id}
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            503,
+            f"Cannot change {runtime_id} worker: safety check unavailable. {exc}",
+        ) from exc
     if not response.get("allowed"):
         raise HTTPException(
             409,
@@ -1683,6 +1692,7 @@ async def backend_status(name: str) -> BackendStatus:
     pulled, image_status, container_state, container_id, raw, services = await asyncio.to_thread(_inspect)
     worker_compatible: Optional[bool] = None
     worker_message = ""
+    worker_readiness = None
     if container_state == "running" and all(
         service.state == "up" for service in services
     ):
@@ -1693,7 +1703,11 @@ async def backend_status(name: str) -> BackendStatus:
             )
             heartbeat_age = worker.get("heartbeat_age_s")
             timeout_s = float(os.environ.get("WORKER_HEARTBEAT_TIMEOUT_S", "2.0"))
-            if heartbeat_age is None:
+            if worker.get("readiness") in ("waiting", "error"):
+                worker_compatible = False
+                worker_readiness = worker["readiness"]
+                worker_message = worker["message"]
+            elif heartbeat_age is None:
                 worker_compatible = False
                 worker_message = "Worker heartbeat has not been received"
             elif float(heartbeat_age) > timeout_s:
@@ -1707,6 +1721,7 @@ async def backend_status(name: str) -> BackendStatus:
                 )
         except Exception as exc:
             worker_compatible = False
+            worker_readiness = "error"
             worker_message = str(exc)
     return BackendStatus(
         name=name,
@@ -1719,4 +1734,5 @@ async def backend_status(name: str) -> BackendStatus:
         services=services,
         worker_compatible=worker_compatible,
         worker_message=worker_message,
+        worker_readiness=worker_readiness,
     )

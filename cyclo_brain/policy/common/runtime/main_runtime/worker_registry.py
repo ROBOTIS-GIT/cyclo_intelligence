@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,8 @@ from engine_process.protocol import ENGINE_PROTOCOL_VERSION
 
 from .inference_requester import DEFAULT_LOAD_POLICY_TIMEOUT_S, InferenceRequester
 from .zenoh_client import ZenohEngineCommandClient
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerCompatibilityError(RuntimeError):
@@ -77,6 +80,7 @@ class WorkerRegistry:
         self._heartbeat_at: dict[str, float] = {}
         self._heartbeat_payload: dict[str, dict[str, Any]] = {}
         self._validated_instance: dict[str, str] = {}
+        self._describe_wait_since: dict[str, float] = {}
         self._lock = threading.RLock()
 
     @property
@@ -96,11 +100,15 @@ class WorkerRegistry:
     def describe(self, runtime_id: str) -> dict[str, Any]:
         resolve_runtime(self._catalog, runtime_id)
         requester = self._get_or_create_status_requester(runtime_id)
-        response = requester.describe(
-            timeout_s=float(
-                os.environ.get("WORKER_DESCRIBE_TIMEOUT_S", "2.0")
+        try:
+            response = requester.describe(
+                timeout_s=float(os.environ.get("WORKER_DESCRIBE_TIMEOUT_S", "2.0"))
             )
-        )
+        except TimeoutError as exc:
+            logger.debug("Worker %s readiness probe: %s", runtime_id, exc)
+            return self._describe_timeout_status(runtime_id)
+        with self._lock:
+            self._describe_wait_since.pop(runtime_id, None)
         self._validate_descriptor(runtime_id, response)
         return {
             "protocol_version": response.protocol_version,
@@ -110,6 +118,34 @@ class WorkerRegistry:
             "capabilities_json": response.capabilities_json,
             "engine_state": response.engine_state,
             "heartbeat_age_s": self.heartbeat_age(runtime_id),
+        }
+
+    def _describe_timeout_status(self, runtime_id: str) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._lock:
+            started = self._describe_wait_since.setdefault(runtime_id, now)
+            payload = self._heartbeat_payload.get(runtime_id, {})
+            heartbeat_at = self._heartbeat_at.get(runtime_id)
+        fresh = heartbeat_at is not None and now - heartbeat_at <= float(
+            os.environ.get("WORKER_HEARTBEAT_TIMEOUT_S", "2.0")
+        )
+        state = payload.get("engine_state")
+        loading = fresh and state == "loading"
+        limit = float(os.environ.get(
+            "LOAD_POLICY_TIMEOUT_S" if loading else "WORKER_READY_TIMEOUT_S",
+            str(DEFAULT_LOAD_POLICY_TIMEOUT_S) if loading else "120.0",
+        ))
+        # Only readiness probes get a bounded grace period; action failures
+        # and LOAD responses remain on their existing error/safety paths.
+        failed = now - started >= limit or (state in ("loaded", "running", "error"))
+        return {
+            "readiness": "error" if failed else "waiting",
+            "message": (
+                "Model worker is not responding. Check worker logs and the Zenoh connection."
+                if failed else (
+                    "Model is loading..." if loading else "Waiting for model worker response..."
+                )
+            ),
         }
 
     def record_heartbeat(self, runtime_id: str, raw: str) -> None:

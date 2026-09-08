@@ -633,6 +633,41 @@ def test_backend_status_model_exposes_stale_image_status():
     assert status.image_status == "stale"
 
 
+def test_backend_status_preserves_readiness_and_real_errors(monkeypatch):
+    container = SimpleNamespace(id="worker-container")
+    client = SimpleNamespace(containers=SimpleNamespace(get=lambda _: container))
+    monkeypatch.setattr(app, "_docker_client", lambda: client)
+    monkeypatch.setattr(app, "_local_backend_image", lambda *_: "local-image")
+    monkeypatch.setattr(app, "_host_workspace_dir", lambda: "/workspace")
+    monkeypatch.setattr(app, "_backend_container_stale_reason", lambda *_: "")
+    monkeypatch.setattr(app, "_container_raw_state", lambda _: "running")
+    monkeypatch.setattr(app, "_backend_service_statuses", lambda *_: [
+        app.ServiceStatus(name="engine-process", state="up", raw="up")
+    ])
+    for state in ("waiting", "error"):
+        monkeypatch.setattr(app, "_runtime_control_request", lambda _, state=state: {
+            "ok": True, "readiness": state, "message": "Worker response pending",
+        })
+        status = asyncio.run(app.backend_status("lerobot"))
+        assert status.worker_readiness == state
+        assert status.worker_compatible is False
+        assert status.worker_message == "Worker response pending"
+
+    def incompatible(_):
+        raise RuntimeError("Worker protocol incompatible")
+
+    monkeypatch.setattr(app, "_runtime_control_request", incompatible)
+    status = asyncio.run(app.backend_status("lerobot"))
+    assert status.worker_readiness == "error"
+    assert status.worker_compatible is False
+    assert status.worker_message == "Worker protocol incompatible"
+
+    monkeypatch.setattr(app, "_runtime_control_request", lambda _: {
+        "ok": True, "heartbeat_age_s": 0.1, "engine_state": "unloaded",
+    })
+    assert asyncio.run(app.backend_status("lerobot")).worker_compatible is True
+
+
 def test_backend_start_keeps_running_container(monkeypatch):
     class FakeContainer:
         def __init__(self):
@@ -807,6 +842,64 @@ def test_begin_worker_mutation_rejects_active_worker(monkeypatch):
         assert "UNLOAD" in exc.detail
     else:
         raise AssertionError("active worker mutation should be rejected")
+
+
+def test_worker_lifecycle_fails_closed_when_control_socket_is_unavailable(monkeypatch):
+    import pytest
+
+    def unavailable(_payload):
+        raise RuntimeError("Policy Runtime control socket unavailable: timed out")
+
+    def forbidden_docker():
+        raise AssertionError("Docker must not be called without safety approval")
+
+    monkeypatch.setattr(app, "_runtime_control_request", unavailable)
+    monkeypatch.setattr(app, "_docker_client", forbidden_docker)
+    for endpoint in (app.backend_start, app.backend_restart, app.backend_stop,
+                     app.backend_recreate):
+        with pytest.raises(app.HTTPException) as failure:
+            asyncio.run(endpoint("lerobot"))
+        assert failure.value.status_code == 503
+        assert "safety check unavailable" in failure.value.detail
+        assert "timed out" in failure.value.detail
+
+
+def test_runtime_control_rejects_invalid_responses_and_closes_socket(monkeypatch):
+    import pytest
+
+    class FakeSocket:
+        def __init__(self, response):
+            self.response = response
+            self.closed = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, _data):
+            pass
+
+        def shutdown(self, _how):
+            pass
+
+        def recv(self, _size):
+            response, self.response = self.response, b""
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def close(self):
+            self.closed = True
+
+    for response in (b"[]", b"null", b"broken", b'{"ok":false,"error":"busy"}',
+                     TimeoutError("timed out")):
+        client = FakeSocket(response)
+        monkeypatch.setattr(app.socket, "socket", lambda *_args: client)
+        with pytest.raises(RuntimeError):
+            app._runtime_control_request({"operation": "status"})
+        assert client.closed
 
 
 def test_host_project_dir_falls_back_to_compose_container_name(monkeypatch):

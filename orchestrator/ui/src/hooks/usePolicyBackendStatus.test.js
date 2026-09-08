@@ -1,6 +1,21 @@
 import { getPolicyBackendReadiness } from './usePolicyBackendStatus';
 
 describe('getPolicyBackendReadiness', () => {
+  it.each(['waiting', 'error'])('keeps %s distinct and blocks start', (state) => {
+    const readiness = getPolicyBackendReadiness({
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'running',
+      services: [{ name: 'engine-process', state: 'up' }],
+      worker_compatible: false,
+      worker_readiness: state,
+      worker_message: state === 'waiting' ? 'Model is loading...' : 'Worker unavailable',
+    });
+    expect(readiness.ready).toBe(false);
+    expect(readiness.state).toBe(state === 'waiting' ? 'warming' : 'error');
+    expect(readiness.message).toBe(state === 'waiting' ? 'Model is loading...' : 'Worker unavailable');
+  });
+
   it('blocks inference start when the backend container image is stale', () => {
     const readiness = getPolicyBackendReadiness({
       image_pulled: true,

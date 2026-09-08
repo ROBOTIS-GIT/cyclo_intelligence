@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -156,6 +157,58 @@ def make_response(
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_worker_mutation_does_not_wait_for_load(self):
+        handler, _, _ = self._handler(backend="lerobot")
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        result = []
+        original = handler._requester.load_policy
+
+        def slow_load(request):
+            entered.set()
+            release.wait(3)
+            return original(request)
+
+        handler._requester.load_policy = slow_load
+        loader = threading.Thread(target=handler.handle, args=(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="pick",
+        ),))
+
+        def mutate():
+            result.append(handler.begin_worker_mutation("lerobot"))
+            self.assertFalse(handler.can_mutate_worker("lerobot")[0])
+            with self.assertRaisesRegex(RuntimeError, "busy"):
+                handler.runtime_snapshot(blocking=False)
+            finished.set()
+
+        manager = threading.Thread(target=mutate)
+        loader.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            manager.start()
+            self.assertTrue(finished.wait(0.5), "management blocked behind LOAD")
+            self.assertFalse(result[0][0])
+            self.assertEqual(result[0][2], "")
+        finally:
+            release.set()
+            loader.join(3)
+            if manager.ident is not None:
+                manager.join(3)
+        self.assertEqual(handler._worker_mutations, {})
+
+    def test_undelivered_response_does_not_release_another_token(self):
+        handler, _, _ = self._handler()
+        allowed, _, token = handler.begin_worker_mutation("lerobot")
+        self.assertTrue(allowed)
+        handler.release_undelivered_worker_mutation(
+            {"operation": "begin_worker_mutation", "runtime_id": "lerobot"},
+            {"ok": True, "allowed": True, "token": "old-token"},
+        )
+        self.assertFalse(handler.begin_worker_mutation("lerobot")[0])
+        self.assertTrue(handler.end_worker_mutation("lerobot", token))
+
     def _handler(self, *, catalog=None, backend=""):
         session = SessionState()
         loop = FakeControlLoop()

@@ -107,7 +107,7 @@ class InferenceRequester:
             command=CMD_DESCRIBE,
             seq_id=self._next_seq_id(),
         )
-        return self._call(request, timeout_s)
+        return self._call(request, timeout_s, raise_timeout=True)
 
     def status(self, timeout_s: float = 1.0) -> EngineCommandResponse:
         request = EngineCommandRequest(
@@ -130,11 +130,15 @@ class InferenceRequester:
         self._seq_id += 1
         return self._seq_id
 
-    def _call(self, request: EngineCommandRequest, timeout_s: float) -> EngineCommandResponse:
+    def _call(
+        self, request: EngineCommandRequest, timeout_s: float, *, raise_timeout: bool = False
+    ) -> EngineCommandResponse:
         try:
             with self._call_lock:
                 response = self._client.call(request, timeout_s=timeout_s)
         except TimeoutError:
+            if raise_timeout:
+                raise
             return EngineCommandResponse(
                 success=False,
                 seq_id=request.seq_id,

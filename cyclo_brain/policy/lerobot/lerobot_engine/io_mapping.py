@@ -92,9 +92,17 @@ class IoMappingMixin:
         self._state_modalities = modalities
         self._action_keys = list(modalities)
 
-        # Block until at least one frame from each sensor lands. 10 s is
-        # generous — typical hardware comes up in <2 s.
-        self._robot.wait_for_ready(timeout=10.0)
+        # Match the inputs consumed by _build_observation, not every robot camera.
+        required = {
+            "camera_names": list(self._cameras),
+            "joint_groups": [f"follower_{name}" for name in modalities if name != "mobile"],
+            "sensor_names": ["odom"] if self._has_mobile_state else [],
+        }
+        if not self._robot.wait_for_ready(timeout=10.0, **required):
+            missing = self._robot.get_missing_observations(**required)
+            raise RuntimeError(
+                "Required observations are not ready: " + ", ".join(missing)
+            )
         logger.info(
             "Robot ready: cameras=%s state_modalities=%s",
             list(self._cameras.keys()),

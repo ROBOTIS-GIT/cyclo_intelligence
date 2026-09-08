@@ -561,7 +561,7 @@ export default function PolicyBackendControl({ serviceType, runtime = null }) {
             })}
           </div>
           {!readiness.ready && (
-            <div className="mt-1 text-xs font-medium text-yellow-700">
+            <div className={`mt-1 text-xs font-medium ${readiness.state === 'error' ? 'text-red-600' : 'text-yellow-700'}`}>
               {readiness.message}
             </div>
           )}

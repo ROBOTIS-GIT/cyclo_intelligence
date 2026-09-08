@@ -95,6 +95,7 @@ Runtime fallbacks include:
 | `CHUNK_ALIGN_WINDOW_S` | `0.3` | chunk alignment |
 | `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` | `1.0` | joint-state freshness |
 | `WORKER_HEARTBEAT_TIMEOUT_S` | `2.0` | active Worker watchdog |
+| `WORKER_READY_TIMEOUT_S` | `120.0` | Continuous unanswered readiness probes before showing an error; not a startup delay. A fresh `loading` heartbeat uses `LOAD_POLICY_TIMEOUT_S` instead. |
 | `ORCHESTRATOR_HEARTBEAT_TIMEOUT_S` | `3.0` | active owner watchdog |
 
 ## Adding A Runtime

@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 import importlib.util
+from unittest import mock
 from pathlib import Path
 
 
@@ -43,6 +44,30 @@ IoMappingMixin = io_mapping.IoMappingMixin
 
 
 class IoMappingCameraTest(unittest.TestCase):
+    def test_load_checks_only_policy_cameras_and_consumed_state(self):
+        for ready in (False, True):
+            with self.subTest(ready=ready):
+                robot = mock.Mock()
+                robot.camera_names = ["required_eye", "unused_eye"]
+                robot._config = {
+                    "joint_groups": {"follower_arm": {"role": "follower"}},
+                    "sensors": {"odom": {}},
+                }
+                robot.wait_for_ready.return_value = ready
+                robot.get_missing_observations.return_value = ["joint:follower_arm"]
+                engine = IoMappingMixin()
+                engine._policy_image_keys = lambda: {"observation.images.required_eye"}
+                with mock.patch.object(io_mapping, "RobotClient", return_value=robot):
+                    if ready:
+                        engine._init_robot("some_robot")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "joint:follower_arm"):
+                            engine._init_robot("some_robot")
+                robot.wait_for_ready.assert_called_once_with(
+                    timeout=10.0, camera_names=["required_eye"],
+                    joint_groups=["follower_arm"], sensor_names=["odom"],
+                )
+
     def test_missing_checkpoint_image_metadata_keeps_legacy_default_keys(self):
         self.assertEqual(
             IoMappingMixin._resolve_camera_mappings(

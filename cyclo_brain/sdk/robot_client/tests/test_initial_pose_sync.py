@@ -51,6 +51,27 @@ RobotClient = robot_client_impl.RobotClient
 
 
 class InitialPoseSyncCommandTest(unittest.TestCase):
+    def test_readiness_can_select_required_inputs_without_model_specific_names(self):
+        with mock.patch.object(RobotClient, "_init_subscriptions"):
+            client = RobotClient("ffw_sg2_rev1")
+        client._config = {
+            "cameras": {"required_eye": {}, "unused_eye": {}},
+            "joint_groups": {"follower_arm": {}, "unused_joint": {}},
+            "sensors": {"odom": {}},
+        }
+        required = dict(camera_names=["required_eye"],
+                        joint_groups=["follower_arm"], sensor_names=["odom"])
+        client._images["required_eye"] = np.zeros((2, 2, 3))
+        self.assertEqual(client.get_missing_observations(**required),
+                         ["joint:follower_arm", "sensor:odom"])
+        self.assertFalse(client.wait_for_ready(timeout=0, **required))
+        client._joint_positions["follower_arm"] = np.ones(2)
+        client._sensors["odom"] = {"linear_velocity": [0, 0, 0]}
+        self.assertTrue(client.wait_for_ready(timeout=0, **required))
+        self.assertFalse(client._all_ready())
+        self.assertEqual(client._get_missing(), ["camera:unused_eye", "joint:unused_joint"])
+        client.close()
+
     def _make_client(self, robot_type: str) -> RobotClient:
         section = robot_client_impl.robot_schema.load_robot_section(robot_type)
         action_groups = robot_client_impl.robot_schema.get_action_groups(section)
