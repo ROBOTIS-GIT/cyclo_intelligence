@@ -105,6 +105,20 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(loop.configures[0]["publish_to_robot"], False)
         self.assertEqual(loop.configures[0]["action_request_mode"], "async")
 
+    def test_load_passes_model_action_shape_to_control_loop(self):
+        handler, _session, loop = self._handler()
+        handler._requester.load_policy = lambda _request: SimpleNamespace(
+            success=True, message="loaded", action_keys=["arm_left", "arm_right"],
+            chunk_size=32, action_dim=16,
+        )
+        result = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/model",
+            robot_type="f2", task_instruction="drill", action_request_mode="tt_rtc",
+            control_hz=200.0))
+        self.assertTrue(result.success)
+        self.assertEqual(loop.configures[-1]["tt_rtc_horizon"], 32)
+        self.assertEqual(loop.configures[-1]["tt_rtc_action_dim"], 16)
+        self.assertEqual(loop.configures[-1]["control_hz"], 200.0)
+
     def test_load_configures_robot_publish_when_requested(self) -> None:
         handler, _session, loop = self._handler()
 

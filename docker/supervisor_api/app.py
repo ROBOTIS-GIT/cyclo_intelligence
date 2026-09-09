@@ -275,6 +275,7 @@ class TrtBuildRequest(BaseModel):
     task_instruction: str = ""
     workspace_mb: Optional[int] = None
     force: bool = False
+    action_request_mode: Literal["sync", "async", "tt_rtc"] = "async"
 
 
 class TrtEngineStatus(BaseModel):
@@ -5059,6 +5060,7 @@ def _container_raw_state(container) -> str:
 def _resolve_groot_trt_paths(
     model_path: str,
     engine_path: str = "",
+    action_request_mode: str = "async",
 ) -> tuple[str, str]:
     model = os.path.normpath((model_path or "").strip())
     if not model or not os.path.isabs(model):
@@ -5076,7 +5078,10 @@ def _resolve_groot_trt_paths(
             engine = os.path.join(model, engine)
         engine = os.path.normpath(engine)
     else:
-        engine = os.path.join(model, "dit_model_bf16.trt")
+        engine = os.path.join(model, "dit_model_tt_rtc_bf16.trt"
+                              if action_request_mode == "tt_rtc" else "dit_model_bf16.trt")
+    if action_request_mode == "tt_rtc" and engine == os.path.join(model, "dit_model_bf16.trt"):
+        raise HTTPException(400, "TT-RTC must use a separate TensorRT engine path")
 
     if engine != model and not engine.startswith(model + os.sep):
         raise HTTPException(400, "engine_path must be inside model_path")
@@ -5320,6 +5325,7 @@ def _start_trt_build_job(
     task_instruction: str,
     workspace_mb: Optional[int],
     force: bool,
+    action_request_mode: str = "async",
 ) -> _TrtBuildJob:
     log_path = _trt_log_path(engine_path)
     cmd = [
@@ -5337,6 +5343,8 @@ def _start_trt_build_job(
         robot_type,
         "--task-instruction",
         task_instruction,
+        "--action-request-mode",
+        action_request_mode,
     ]
     if workspace_mb:
         cmd.extend(["--workspace-mb", str(workspace_mb)])
@@ -6518,8 +6526,9 @@ async def service_stop(name: str) -> ActionResult:
 async def groot_trt_status(
     model_path: str,
     engine_path: str = "",
+    action_request_mode: Literal["sync", "async", "tt_rtc"] = "async",
 ) -> TrtEngineStatus:
-    model, engine = _resolve_groot_trt_paths(model_path, engine_path)
+    model, engine = _resolve_groot_trt_paths(model_path, engine_path, action_request_mode)
     return _trt_status(model, engine)
 
 
@@ -6528,6 +6537,7 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
     model, engine = _resolve_groot_trt_paths(
         request.model_path,
         request.engine_path,
+        request.action_request_mode,
     )
     robot_type = request.robot_type.strip()
     if not robot_type:
@@ -6552,6 +6562,7 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
         request.task_instruction,
         request.workspace_mb,
         request.force,
+        request.action_request_mode,
     )
     return _trt_status(model, engine)
 

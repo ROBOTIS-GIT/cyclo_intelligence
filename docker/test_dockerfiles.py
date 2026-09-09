@@ -36,6 +36,13 @@ def test_groot_compose_exposes_shared_hf_hub_read_only_for_one_shot_jobs():
     assert "./huggingface/hub:/huggingface_hub:ro" in groot_section
 
 
+def test_groot_compose_preserves_pythonpath_for_direct_module_commands():
+    contents = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
+    groot_section = contents.split("\n  groot:\n", maxsplit=1)[1]
+    # docker exec python -m runtime.prepare_trt_engine does not use s6's exports.
+    assert "- PYTHONPATH=/app:/gr00t:/cyclo_brain_src" in groot_section
+
+
 def test_interactive_bashrc_includes_simple_ros_zenoh_block():
     dockerfiles = (
         REPO_ROOT / "docker" / "Dockerfile.arm64",

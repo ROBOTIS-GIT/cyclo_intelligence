@@ -56,10 +56,6 @@ def _write_tt_rtc_manifest(root: Path) -> None:
                         "velocity_target": "action_minus_noise",
                     },
                 },
-                "qualification": {
-                    "status": "unqualified",
-                    "deployment": "simulation_only",
-                },
             }
         ),
         encoding="utf-8",
@@ -138,6 +134,31 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.create_engine()
 
         self.assertIsInstance(engine, module.GR00TInference)
+
+    def test_fresh_and_cached_load_do_not_require_live_sensors(self):
+        spec = importlib.util.spec_from_file_location("groot_load_sensor_test", INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class _OfflineRobot:
+            def wait_for_ready(self, **_kwargs):
+                raise AssertionError("LOAD must not wait for live sensors")
+
+            def close(self):
+                pass
+
+        module.Gr00tPolicy = lambda **_kwargs: object()
+        engine = module.create_engine()
+        engine.init_policy_info = lambda: engine.policy_info.update(action=["arm_left"])
+        engine.init_robot_info = lambda _robot_type: setattr(engine, "robot", _OfflineRobot())
+        engine._sync_hf_token_for_gated_backbones = lambda: None
+        request = types.SimpleNamespace(model_path="/model", robot_type="ffw_sg2_rev1",
+                                        publish_to_robot=True, acceleration_mode="pytorch")
+        for cached in (False, True):
+            result = engine.load_policy(request)
+            self.assertTrue(result["success"], result)
+            self.assertEqual("cached" in result["message"], cached)
+            self.assertTrue(engine._loaded_publish_to_robot)
 
     def test_acceleration_request_resolves_model_local_engine_path(self):
         spec = importlib.util.spec_from_file_location(
@@ -277,7 +298,7 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertIn("get_action_tt_rtc", result["message"])
         self.assertIsNone(engine.policy)
 
-    def test_tt_rtc_real_robot_load_rejects_unqualified_checkpoint_first(self):
+    def test_tt_rtc_real_robot_load_without_qualification_still_checks_model_api(self):
         spec = importlib.util.spec_from_file_location(
             "groot_runtime_inference_engine_under_test",
             INFERENCE_ENGINE,
@@ -305,10 +326,10 @@ class GR00TEngineFactoryTests(unittest.TestCase):
             )
 
         self.assertFalse(result["success"])
-        self.assertIn("simulation-only", result["message"])
+        self.assertIn("get_action_tt_rtc", result["message"])
         self.assertIsNone(engine.policy)
 
-    def test_tt_rtc_rejects_tensorrt_before_model_execution(self):
+    def test_tt_rtc_rejects_an_unvalidated_tensorrt_engine(self):
         spec = importlib.util.spec_from_file_location(
             "groot_runtime_inference_engine_under_test",
             INFERENCE_ENGINE,
@@ -329,7 +350,7 @@ class GR00TEngineFactoryTests(unittest.TestCase):
             result = engine.get_action_chunk(_tt_request())
 
         self.assertFalse(result["success"])
-        self.assertIn("unavailable with TensorRT", result["message"])
+        self.assertIn("per-token TensorRT engine", result["message"])
 
     def test_tt_rtc_routes_vla_to_an_explicit_policy_api(self):
         spec = importlib.util.spec_from_file_location(
@@ -362,7 +383,12 @@ class GR00TEngineFactoryTests(unittest.TestCase):
 
             result = engine.get_action_chunk(_tt_request())
 
+            engine._loaded_acceleration_mode = "tensorrt_dit"
+            engine._tt_rtc_trt_ready = True
+            trt_result = engine.get_action_chunk(_tt_request())
+
         self.assertTrue(result["success"])
+        self.assertTrue(trt_result["success"])
         self.assertEqual(result["chunk_size"], 16)
         self.assertEqual(engine.policy.prefix.shape, (1, 6, 19))
 
@@ -376,8 +402,9 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         spec.loader.exec_module(module)
 
         class _StaleRobot(_Robot):
-            def validate_observation_freshness(self, max_age_s):
+            def validate_observation_freshness(self, max_age_s, *, camera_names=None):
                 self.max_age_s = max_age_s
+                self.camera_names = camera_names
                 raise RuntimeError("stale camera:cam_left_head")
 
         class _Policy:
@@ -387,6 +414,7 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.create_engine()
         engine.policy = _Policy()
         engine.robot = _StaleRobot()
+        engine.robot_info["camera_sources"] = {"cam_left_head": "cam_left_head"}
         engine._loaded_publish_to_robot = True
 
         result = engine.get_action_chunk(
@@ -400,6 +428,47 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("stale camera", result["message"])
         self.assertEqual(engine.robot.max_age_s, 0.5)
+        self.assertEqual(engine.robot.camera_names, ["cam_left_head"])
+
+    def test_tt_rtc_32x16_vla_preserves_prefix_and_output_dimensions(self):
+        spec = importlib.util.spec_from_file_location(
+            "groot_runtime_inference_engine_under_test", INFERENCE_ENGINE,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class _Policy:
+            def get_action_tt_rtc(self, _observation, **kwargs):
+                self.kwargs = kwargs
+                return {"action": np.zeros((1, 32, 16), dtype=np.float32)}, {}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_tt_rtc_manifest(root)
+            path = root / "tt_rtc_manifest.json"
+            payload = json.loads(path.read_text())
+            payload["training_time_rtc"].update(action_horizon=32, action_dimension=16)
+            path.write_text(json.dumps(payload))
+            engine = module.create_engine()
+            engine.policy = _Policy()
+            engine.robot = _Robot()
+            engine.policy_info["action"] = ["action"]
+            engine._loaded_model_path = str(root)
+            engine.preprocess = lambda *_args: {"observation": True}
+            request = _tt_request()
+            request.rtc_action_dim = 16
+            request.rtc_prefix_action_list = [0.25] * 96
+            result = engine.get_action_chunk(request)
+            self.assertTrue(result["success"], result)
+            self.assertEqual((result["chunk_size"], result["action_dim"]), (32, 16))
+            self.assertEqual(engine.policy.kwargs["action_horizon"], 32)
+            np.testing.assert_array_equal(
+                engine.policy.kwargs["committed_action_prefix"], np.full((1, 6, 16), 0.25),
+            )
+            bad = engine._validate_tt_rtc_output(
+                {"success": True, "chunk_size": 16, "action_dim": 19}, "base",
+            )
+            self.assertFalse(bad["success"])
 
     def test_tt_rtc_routes_mlp_to_the_rlt_adapter_not_the_vla_policy(self):
         spec = importlib.util.spec_from_file_location(

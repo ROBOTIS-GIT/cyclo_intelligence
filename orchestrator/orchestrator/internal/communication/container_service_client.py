@@ -365,6 +365,7 @@ class ContainerServiceClient:
         action_policy_mode: str = "base",
         rlt_robot_override: bool = False,
         timeout_sec: Optional[float] = None,
+        control_hz: float = 0.0,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
 
@@ -388,6 +389,8 @@ class ContainerServiceClient:
         request.embodiment_tag = embodiment_tag
         request.robot_type = robot_type
         request.task_instruction = task_instruction
+        if command == self.CMD_LOAD and action_request_mode == 'tt_rtc':
+            request.control_hz = float(control_hz)
         if hasattr(request, "publish_to_robot"):
             request.publish_to_robot = bool(publish_to_robot)
         if hasattr(request, "action_request_mode"):

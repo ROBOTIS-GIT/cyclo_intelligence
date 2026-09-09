@@ -303,7 +303,7 @@ services:
       - PYTHONUNBUFFERED=1
       # RLT bundle loader reuses Cyclo's frozen encoder and Action MLP without
       # copying either implementation into the GR00T runtime image.
-      - PYTHONPATH=/cyclo_brain_src
+      - PYTHONPATH=/app:/gr00t:/cyclo_brain_src
 
     volumes:
       - /dev:/dev

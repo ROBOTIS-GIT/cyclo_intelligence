@@ -40,6 +40,11 @@ class InferenceRequester:
         self._lock = threading.Lock()
         self._get_action_in_flight = False
 
+    @property
+    def get_action_timeout_s(self) -> float:
+        """Normal inference timeout, also used for TT-RTC requests."""
+        return self._get_action_timeout_s
+
     def has_pending_get_action(self) -> bool:
         with self._lock:
             return self._get_action_in_flight

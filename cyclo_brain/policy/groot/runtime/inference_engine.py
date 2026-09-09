@@ -168,6 +168,7 @@ def build_trt_engine(
     observation: dict,
     engine_path: str,
     workspace_mb: Optional[int] = None,
+    tt_rtc_capability=None,
 ):
     """Export DiT to ONNX and build TensorRT engine automatically.
 
@@ -191,9 +192,18 @@ def build_trt_engine(
     hook = policy.model.action_head.model.register_forward_pre_hook(
         capture.hook_fn, with_kwargs=True
     )
-    with torch.inference_mode():
-        policy.get_action(observation)
-    hook.remove()
+    try:
+        with torch.inference_mode():
+            if tt_rtc_capability is None:
+                policy.get_action(observation)
+            else:
+                rtc = tt_rtc_capability.payload["training_time_rtc"]
+                policy.get_action_tt_rtc(
+                    observation, delay_steps=6, action_horizon=rtc["action_horizon"],
+                    committed_action_prefix=np.zeros((1, 6, rtc["action_dimension"]), dtype=np.float32),
+                )
+    finally:
+        hook.remove()
 
     if not capture.captured:
         raise RuntimeError("Failed to capture DiT inputs")
@@ -215,7 +225,11 @@ def build_trt_engine(
             return _orig_export(*args, **kwargs)
         torch.onnx.export = _patched_export
         try:
-            export_dit_to_onnx(
+            exporter = export_dit_to_onnx
+            if tt_rtc_capability is not None:
+                from runtime.tt_rtc_trt import export_tt_rtc_dit
+                exporter = export_tt_rtc_dit
+            exporter(
                 policy=policy,
                 captured_inputs=capture,
                 output_path=onnx_path,
@@ -283,6 +297,7 @@ class GR00TInference:
         self._loaded_rlt_enabled: bool = False
         self._loaded_rlt_bundle_path: str = ""
         self._loaded_publish_to_robot: bool = False
+        self._tt_rtc_trt_ready = False
         self._real_robot_sensor_max_age_s = _env_float(
             "GROOT_REAL_ROBOT_SENSOR_MAX_AGE_S",
             0.5,
@@ -337,14 +352,13 @@ class GR00TInference:
                 )
             tt_rtc_capability = None
             if action_request_mode == TT_RTC_REQUEST_MODE:
-                if acceleration_mode != ACCELERATION_PYTORCH:
+                if acceleration_mode not in {ACCELERATION_PYTORCH, ACCELERATION_TENSORRT_DIT}:
                     raise RuntimeError(
-                        "TT-RTC is unavailable with TensorRT: restart GR00T with "
-                        "PyTorch acceleration"
+                        "TT-RTC supports PyTorch or DiT TensorRT only"
                     )
                 tt_rtc_capability = load_tt_rtc_capability(
                     model_path,
-                    require_deployment_qualified=publish_to_robot,
+                    require_rlt=rlt_enabled,
                 )
                 if not callable(getattr(Gr00tPolicy, "get_action_tt_rtc", None)):
                     raise RuntimeError(
@@ -374,6 +388,7 @@ class GR00TInference:
                 and self._loaded_acceleration_engine_path == acceleration_engine_path
                 and self._loaded_rlt_enabled == rlt_enabled
                 and self._loaded_rlt_bundle_path == rlt_bundle_path
+                and (self._tt_rtc_capability is not None) == (tt_rtc_capability is not None)
             ):
                 if tt_rtc_capability is not None:
                     self._validate_loaded_tt_rtc_policy(tt_rtc_capability)
@@ -387,12 +402,6 @@ class GR00TInference:
                     self.robot = None
                 self.init_policy_info()
                 self.init_robot_info(robot_type)
-                sensors_ready = self.robot.wait_for_ready(timeout=10.0)
-                if publish_to_robot and not sensors_ready:
-                    raise RuntimeError(
-                        "Real-robot inference refused: configured sensors did not "
-                        "become ready within 10 seconds"
-                    )
                 self._tt_rtc_capability = tt_rtc_capability
                 self._loaded_publish_to_robot = publish_to_robot
                 if rlt_enabled:
@@ -401,6 +410,7 @@ class GR00TInference:
                     "success": True,
                     "message": self._load_success_message(cached=True),
                     "action_keys": list(self.policy_info["action"]),
+                    **self._tt_rtc_load_shape(),
                 }
 
             if self.policy is not None:
@@ -430,6 +440,7 @@ class GR00TInference:
             )
             self._sync_hf_token_for_gated_backbones()
 
+            self._tt_rtc_trt_ready = False
             self.policy = Gr00tPolicy(
                 embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
                 model_path=model_path,
@@ -440,12 +451,8 @@ class GR00TInference:
 
             self.init_policy_info()
             self.init_robot_info(robot_type)
-            sensors_ready = self.robot.wait_for_ready(timeout=10.0)
-            if publish_to_robot and not sensors_ready:
-                raise RuntimeError(
-                    "Real-robot inference refused: configured sensors did not "
-                    "become ready within 10 seconds"
-                )
+            # Loading a policy does not require live sensors. Real-robot action
+            # requests validate their observations immediately before inference.
 
             if acceleration_mode == ACCELERATION_TENSORRT_DIT:
                 trt_applied = self._enable_dit_tensorrt(
@@ -501,6 +508,7 @@ class GR00TInference:
                 "success": True,
                 "message": self._load_success_message(cached=False),
                 "action_keys": list(self.policy_info["action"]),
+                **self._tt_rtc_load_shape(),
             }
         except Exception as e:
             self._loaded_model_path = None
@@ -566,7 +574,10 @@ class GR00TInference:
             if not os.path.isabs(engine_path):
                 engine_path = os.path.join(model_path, engine_path)
         else:
-            engine_path = os.path.join(model_path, "dit_model_bf16.trt")
+            engine_name = ("dit_model_tt_rtc_bf16.trt"
+                           if getattr(request, "action_request_mode", "") == TT_RTC_REQUEST_MODE
+                           else "dit_model_bf16.trt")
+            engine_path = os.path.join(model_path, engine_name)
         return mode, os.path.normpath(engine_path), strict
 
     def _enable_dit_tensorrt(
@@ -586,7 +597,13 @@ class GR00TInference:
             if os.path.getsize(engine_path) <= 0:
                 raise RuntimeError(f"TRT engine is empty: {engine_path}")
 
-            replace_dit_with_tensorrt(self.policy, engine_path)
+            self._tt_rtc_trt_ready = False
+            if getattr(request, "action_request_mode", "") == TT_RTC_REQUEST_MODE:
+                from runtime.tt_rtc_trt import install_tt_rtc_dit
+                install_tt_rtc_dit(self.policy, engine_path)
+                self._tt_rtc_trt_ready = True
+            else:
+                replace_dit_with_tensorrt(self.policy, engine_path)
             self.logger.info("DiT accelerated with TensorRT: %s", engine_path)
             return True
         except Exception as e:
@@ -875,12 +892,19 @@ class GR00TInference:
 
         self.logger.info("Robot info: %s", self.robot_info)
 
+    def _tt_rtc_load_shape(self) -> dict:
+        if self._tt_rtc_capability is None:
+            return {}
+        rtc = self._tt_rtc_capability.payload["training_time_rtc"]
+        return {"chunk_size": rtc["action_horizon"], "action_dim": rtc["action_dimension"]}
+
     def _require_tt_rtc_capability(self, action_policy_mode: str) -> None:
-        if self._loaded_acceleration_mode != ACCELERATION_PYTORCH:
+        if self._loaded_acceleration_mode != ACCELERATION_PYTORCH and not (
+            self._loaded_acceleration_mode == ACCELERATION_TENSORRT_DIT
+            and self._tt_rtc_trt_ready
+        ):
             raise RuntimeError(
-                "TT-RTC is unavailable with TensorRT: the current GR00T engine "
-                "does not carry per-action timestep and clean-prefix inputs. "
-                "Restart GR00T with PyTorch acceleration."
+                "TT-RTC requires its per-token TensorRT engine or PyTorch; reload the policy"
             )
         if not self._loaded_model_path:
             raise RuntimeError("TT-RTC cannot validate an unknown GR00T checkpoint")
@@ -909,6 +933,18 @@ class GR00TInference:
     def _validate_loaded_tt_rtc_policy(self, capability) -> None:
         """Bind a manifest to the model/processor configuration in GPU memory."""
 
+        if capability.source.name == "tt_rtc_training_manifest.json":
+            # External training uses different field names. Alias only after
+            # its manifest/config/processor have passed validation.
+            config = self.policy.model.config
+            if getattr(config, "training_time_rtc", None) is not True:
+                raise RuntimeError("Loaded model disagrees with TT-RTC training metadata")
+            rtc = capability.payload["training_time_rtc"]
+            if getattr(config, "tt_rtc_max_delay_steps", None) != rtc["max_delay_steps"]:
+                raise RuntimeError("Loaded model TT-RTC delay differs from training metadata")
+            config.training_time_rtc_enabled = True
+            config.training_time_rtc_max_delay_steps = rtc["max_delay_steps"]
+            config.training_time_rtc_action_hz = rtc["action_hz"]
         getter = getattr(self.policy, "get_tt_rtc_model_contract", None)
         if not callable(getter):
             raise RuntimeError(
@@ -961,7 +997,7 @@ class GR00TInference:
             observation,
             committed_action_prefix=committed_prefix,
             delay_steps=tt_request.delay_steps,
-            action_horizon=TT_RTC_ACTION_HORIZON,
+            action_horizon=self._tt_rtc_capability.payload["training_time_rtc"]["action_horizon"],
             **({'capture_context': True} if capture_rlt_context else {}),
         )
         # Match Gr00tPolicy.get_action's public convention while allowing a
@@ -971,24 +1007,24 @@ class GR00TInference:
             raise RuntimeError("TT-RTC policy returned an invalid action mapping")
         return action
 
-    @staticmethod
-    def _validate_tt_rtc_output(result: dict, action_policy_mode: str) -> dict:
+    def _validate_tt_rtc_output(self, result: dict, action_policy_mode: str) -> dict:
         if not result.get("success"):
             return result
         expected_horizon = (
             TT_RTC_RLT_CHUNK_LENGTH
             if action_policy_mode == "rlt"
-            else TT_RTC_ACTION_HORIZON
+            else self._tt_rtc_capability.payload["training_time_rtc"]["action_horizon"]
         )
         if int(result.get("chunk_size", -1)) != expected_horizon:
             return GR00TInference.fail(
                 "TT-RTC output horizon mismatch: expected "
                 f"{expected_horizon}, got {result.get('chunk_size')}"
             )
-        if int(result.get("action_dim", -1)) != TT_RTC_ACTION_DIM:
+        expected_dim = self._tt_rtc_capability.payload["training_time_rtc"]["action_dimension"]
+        if int(result.get("action_dim", -1)) != expected_dim:
             return GR00TInference.fail(
                 "TT-RTC output action dimension mismatch: expected "
-                f"{TT_RTC_ACTION_DIM}, got "
+                f"{expected_dim}, got "
                 f"{result.get('action_dim')}"
             )
         return result
@@ -1010,7 +1046,10 @@ class GR00TInference:
                         "Real-robot inference refused: RobotClient does not "
                         "provide an observation freshness watchdog"
                     )
-                freshness_validator(self._real_robot_sensor_max_age_s)
+                freshness_validator(
+                    self._real_robot_sensor_max_age_s,
+                    camera_names=list(self.robot_info.get("camera_sources", {}).values()) or None,
+                )
 
             action_policy_mode = str(
                 getattr(request, "action_policy_mode", "base") or "base"
@@ -1024,9 +1063,13 @@ class GR00TInference:
                     "RLT action requested without a preloaded RLT bundle"
                 )
 
-            tt_request = parse_tt_rtc_request(request)
-            if tt_request is not None:
+            if str(getattr(request, "action_request_mode", "") or "").strip().lower() == TT_RTC_REQUEST_MODE:
                 self._require_tt_rtc_capability(action_policy_mode)
+            expected_dim = (
+                self._tt_rtc_capability.payload["training_time_rtc"]["action_dimension"]
+                if self._tt_rtc_capability else TT_RTC_ACTION_DIM
+            )
+            tt_request = parse_tt_rtc_request(request, action_dim=expected_dim)
 
             if action_policy_mode == 'rlt':
                 self._ensure_rlt_recording()

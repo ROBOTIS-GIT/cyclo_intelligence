@@ -70,6 +70,18 @@ class TTActionTimelineTests(unittest.TestCase):
 
         np.testing.assert_allclose(timeline.pop_action(), np.asarray([10.0]))
 
+    def test_late_refill_holds_then_resumes_without_skipping_actions(self) -> None:
+        timeline = TTActionTimeline(source_hz=15.0, control_hz=100.0)
+        timeline.push_actions(np.asarray([[0.0], [1.0]]))
+        for _ in range(20):
+            timeline.pop_action()
+        for _ in range(100):
+            self.assertIsNone(timeline.pop_action())
+        np.testing.assert_allclose(timeline.last_action, [1.0])
+        timeline.push_actions(np.asarray([[2.0], [3.0], [4.0]]))
+        outputs = [timeline.pop_action() for _ in range(21)]
+        np.testing.assert_allclose(np.asarray(outputs)[:, 0], 1.0 + np.arange(21) * 0.15)
+
     def test_rejects_a_control_rate_below_the_source_rate(self) -> None:
         with self.assertRaisesRegex(ValueError, "greater than or equal"):
             TTActionTimeline(source_hz=100.0, control_hz=15.0)

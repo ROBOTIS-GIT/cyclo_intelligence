@@ -61,7 +61,6 @@ ACTION_POLICY_RLT = "rlt"
 ACTION_POLICY_MODES = {ACTION_POLICY_BASE, ACTION_POLICY_RLT}
 
 TT_RTC_SOURCE_HZ = 15.0
-TT_RTC_CONTROL_HZ = 100.0
 TT_RTC_HORIZON = 16
 TT_RTC_DELAY_STEPS = 6
 TT_RTC_ACTION_DIM = 19
@@ -141,6 +140,9 @@ class ControlLoop:
         self._active_rlt_robot_override = False
         self._pending_rlt_robot_override: Optional[bool] = None
         self._tt_rtc_failure_reason: Optional[str] = None
+        self._tt_rtc_horizon = TT_RTC_HORIZON
+        self._tt_rtc_action_dim = TT_RTC_ACTION_DIM
+        self._tt_rtc_bootstrap_pending = True
 
     def configure(
         self,
@@ -150,6 +152,9 @@ class ControlLoop:
         publish_to_robot: bool = False,
         action_request_mode: Optional[str] = None,
         rlt_enabled: bool = False,
+        tt_rtc_horizon: int = TT_RTC_HORIZON,
+        tt_rtc_action_dim: int = TT_RTC_ACTION_DIM,
+        control_hz: float = 0.0,
     ) -> None:
         with self._lock:
             self.deconfigure()
@@ -158,6 +163,16 @@ class ControlLoop:
                 if action_request_mode is not None
                 else self._default_action_request_mode
             )
+            if self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+                control_hz = float(control_hz or self._control_hz)
+                if not math.isfinite(control_hz) or control_hz < TT_RTC_SOURCE_HZ:
+                    raise ValueError("TT-RTC Control Hz must be finite and at least 15")
+                if (tt_rtc_horizon, tt_rtc_action_dim) not in {(16, 19), (32, 16)}:
+                    raise ValueError("Unsupported TT-RTC model action shape")
+                if rlt_enabled and (tt_rtc_horizon, tt_rtc_action_dim) != (16, 19):
+                    raise ValueError("Current RLT requires the 16x19 reference contract")
+            self._tt_rtc_horizon = tt_rtc_horizon
+            self._tt_rtc_action_dim = tt_rtc_action_dim
             self._robot = RobotClient(
                 robot_type,
                 enable_command_publishers=True,
@@ -169,7 +184,7 @@ class ControlLoop:
             if tt_rtc_enabled:
                 self._processor = TTActionTimeline(
                     source_hz=TT_RTC_SOURCE_HZ,
-                    control_hz=TT_RTC_CONTROL_HZ,
+                    control_hz=control_hz,
                 )
             else:
                 self._processor = ActionChunkProcessor(
@@ -204,6 +219,7 @@ class ControlLoop:
 
     def deconfigure(self) -> None:
         with self._lock:
+            self._tt_rtc_bootstrap_pending = True
             if self._rlt_trace is not None:
                 self._record_rlt_event('buffer_cleared', reason='deconfigure')
                 self._rlt_trace.close()
@@ -236,6 +252,8 @@ class ControlLoop:
             # lifecycle command is the operator acknowledgement that permits a
             # fresh, bounded bootstrap request.
             self._tt_rtc_failure_reason = None
+            if not self._running:
+                self._tt_rtc_bootstrap_pending = True
             self._running = True
 
     def pause(self) -> None:
@@ -501,12 +519,12 @@ class ControlLoop:
     ) -> None:
         action_request_mode = normalize_action_request_mode(action_request_mode)
         action_policy_mode = normalize_action_policy_mode(action_policy_mode)
-        rtc_prefix = np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+        rtc_prefix = np.empty((0, self._tt_rtc_action_dim), dtype=np.float64)
         rtc_delay_steps = 0
         if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
             try:
                 rtc_prefix = self._validate_tt_rtc_request_prefix(
-                    rtc_prefix_actions
+                    rtc_prefix_actions, action_dim=self._tt_rtc_action_dim,
                 )
             except ValueError as error:
                 self._handle_tt_rtc_failure(
@@ -523,9 +541,21 @@ class ControlLoop:
         ):
             rtc_prefix_captured_at = started_at
         tt_rtc_timeout_s = None
+        tt_rtc_bootstrap = False
         if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            with self._lock:
+                tt_rtc_bootstrap = (
+                    self._tt_rtc_bootstrap_pending
+                    and rtc_delay_steps == 0
+                    and self._processor is not None
+                    and self._processor.buffer_size == 0
+                )
+            if rtc_delay_steps == 0 and not tt_rtc_bootstrap:
+                self._handle_tt_rtc_failure(
+                    generation, "TT-RTC execution buffer exhausted; explicit START/RESUME required",
+                )
+                return
             tt_rtc_timeout_s = self._tt_rtc_remaining_timeout_s(
-                delay_steps=rtc_delay_steps,
                 prefix_captured_at=float(rtc_prefix_captured_at),
             )
             if tt_rtc_timeout_s <= 0.0:
@@ -541,7 +571,7 @@ class ControlLoop:
                     action_policy_mode=action_policy_mode,
                     action_request_mode=action_request_mode,
                     rtc_delay_steps=rtc_delay_steps,
-                    rtc_action_dim=TT_RTC_ACTION_DIM,
+                    rtc_action_dim=self._tt_rtc_action_dim,
                     rtc_prefix_action_list=rtc_prefix.reshape(-1).tolist(),
                     timeout_s=tt_rtc_timeout_s,
                 )
@@ -646,6 +676,7 @@ class ControlLoop:
                         )
                     )
                     if committed:
+                        self._tt_rtc_bootstrap_pending = False
                         self._record_rlt_event(
                             'buffer_accepted', recording_id=recording_id,
                             request_seq=getattr(response, 'seq_id', 0),
@@ -710,19 +741,20 @@ class ControlLoop:
     @staticmethod
     def _validate_tt_rtc_request_prefix(
         prefix_actions: Optional[np.ndarray],
+        *, action_dim: int = TT_RTC_ACTION_DIM,
     ) -> np.ndarray:
         if prefix_actions is None:
-            return np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+            return np.empty((0, action_dim), dtype=np.float64)
         prefix = np.asarray(prefix_actions, dtype=np.float64)
         if prefix.size == 0:
-            return np.empty((0, TT_RTC_ACTION_DIM), dtype=np.float64)
+            return np.empty((0, action_dim), dtype=np.float64)
         if prefix.ndim != 2:
             raise ValueError(
                 f"prefix must be 2D (T, D); got shape {prefix.shape}"
             )
-        if prefix.shape[1] != TT_RTC_ACTION_DIM:
+        if prefix.shape[1] != action_dim:
             raise ValueError(
-                f"prefix action_dim must be {TT_RTC_ACTION_DIM}; "
+                f"prefix action_dim must be {action_dim}; "
                 f"got {prefix.shape[1]}"
             )
         if prefix.shape[0] > TT_RTC_DELAY_STEPS:
@@ -752,14 +784,14 @@ class ControlLoop:
         processor = self._processor
         if processor is None:
             return False, "TT-RTC action processor is unavailable"
-        if chunk.ndim != 2 or chunk.shape[1] != TT_RTC_ACTION_DIM:
+        if chunk.ndim != 2 or chunk.shape[1] != self._tt_rtc_action_dim:
             reason = (
-                f"TT-RTC response expected action_dim={TT_RTC_ACTION_DIM}, "
+                f"TT-RTC response expected action_dim={self._tt_rtc_action_dim}, "
                 f"got shape={tuple(chunk.shape)}"
             )
             logger.warning(
                 "TT-RTC response discarded: expected action_dim=%d, got %s",
-                TT_RTC_ACTION_DIM,
+                self._tt_rtc_action_dim,
                 tuple(chunk.shape),
             )
             return False, reason
@@ -779,14 +811,14 @@ class ControlLoop:
             return False, reason
 
         if action_policy_mode == ACTION_POLICY_BASE:
-            if chunk.shape[0] != TT_RTC_HORIZON:
+            if chunk.shape[0] != self._tt_rtc_horizon:
                 reason = (
-                    f"TT-RTC VLA response expected horizon={TT_RTC_HORIZON}, "
+                    f"TT-RTC VLA response expected horizon={self._tt_rtc_horizon}, "
                     f"got {chunk.shape[0]}"
                 )
                 logger.warning(
                     "TT-RTC base response discarded: expected H=%d, got %d",
-                    TT_RTC_HORIZON,
+                    self._tt_rtc_horizon,
                     chunk.shape[0],
                 )
                 return False, reason
@@ -825,7 +857,7 @@ class ControlLoop:
             0.0,
             time.monotonic() - prefix_captured_at,
         )
-        deadline_s = self._tt_rtc_deadline_budget_s(delay_steps)
+        deadline_s = self._tt_rtc_deadline_budget_s()
         if elapsed_since_capture_s > deadline_s + 1e-9:
             reason = (
                 "TT-RTC capture-to-enqueue deadline exceeded: "
@@ -834,10 +866,10 @@ class ControlLoop:
             )
             logger.warning(
                 "TT-RTC response discarded: capture-to-enqueue latency "
-                "%.3fs exceeded %d-step deadline %.3fs",
+                "%.3fs exceeded normal request timeout %.3fs (prefix=%d)",
                 elapsed_since_capture_s,
-                delay_steps,
                 deadline_s,
+                delay_steps,
             )
             return False, reason
 
@@ -902,28 +934,18 @@ class ControlLoop:
             f"TT-RTC {route} response rejected; inference paused: {reason}"
         )
 
-    @staticmethod
-    def _tt_rtc_deadline_budget_s(delay_steps: int) -> float:
-        """Return the bounded capture-to-enqueue budget for one TT request.
+    def _tt_rtc_deadline_budget_s(self) -> float:
+        """Bound unresponsive requests independently of the trained prefix length."""
+        return float(getattr(self._requester, "get_action_timeout_s", 5.0))
 
-        A normal continuation owns exactly the execution time represented by
-        its committed ``d``-step prefix.  Startup has no committed prefix, so
-        it receives one bounded maximum-delay window rather than falling back
-        to the generic multi-second RPC timeout.
-        """
-        budget_steps = delay_steps if delay_steps > 0 else TT_RTC_DELAY_STEPS
-        return budget_steps / TT_RTC_SOURCE_HZ
-
-    @classmethod
     def _tt_rtc_remaining_timeout_s(
-        cls,
+        self,
         *,
-        delay_steps: int,
         prefix_captured_at: float,
     ) -> float:
         deadline = (
             float(prefix_captured_at)
-            + cls._tt_rtc_deadline_budget_s(delay_steps)
+            + self._tt_rtc_deadline_budget_s()
         )
         return max(0.0, deadline - time.monotonic())
 
@@ -1081,7 +1103,14 @@ class ControlLoop:
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
             return processor.buffer_size <= 0
         if self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
-            return processor.buffer_size <= TT_RTC_DELAY_STEPS
+            if self._request_latency_ema_s is None:
+                prefix_steps = TT_RTC_DELAY_STEPS
+            else:
+                prefix_steps = min(TT_RTC_DELAY_STEPS, max(1, math.ceil(
+                    (self._request_latency_ema_s + max(0.0, self._refill_margin_s))
+                    * TT_RTC_SOURCE_HZ,
+                )))
+            return processor.buffer_size <= prefix_steps
         return processor.buffer_size < self._refill_threshold(processor)
 
     def _refill_threshold(self, processor: ActionChunkProcessor) -> int:
@@ -1097,7 +1126,8 @@ class ControlLoop:
                 self._latency_warmup_remaining -= 1
                 return
             if (
-                self._max_refill_latency_s is not None
+                self._action_request_mode != ACTION_REQUEST_MODE_TT_RTC
+                and self._max_refill_latency_s is not None
                 and latency_s > self._max_refill_latency_s
             ):
                 logger.debug(

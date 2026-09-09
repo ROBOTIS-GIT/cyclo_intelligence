@@ -69,6 +69,7 @@ class InferenceRequesterTests(unittest.TestCase):
             ]
         )
         requester = InferenceRequester(client, get_action_timeout_s=2.5)
+        self.assertEqual(requester.get_action_timeout_s, 2.5)
 
         response = requester.get_action("open drawer", action_policy_mode="rlt")
 

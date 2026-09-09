@@ -151,19 +151,16 @@ const InferencePanel = ({
     (mode) => {
       if (!isEditable) return;
       const next = { actionRequestMode: mode };
-      // The current TensorRT export accepts one batch-wide flow timestep.
-      // TT-RTC needs a clean-prefix timestep per action token, so keep this
-      // path on PyTorch until a separately qualified TT engine is available.
-      if (mode === 'tt_rtc') {
-        next.accelerationMode = 'pytorch';
+      if ((mode === 'tt_rtc') !== (actionRequestMode === 'tt_rtc')) {
         next.accelerationEnginePath = '';
+      }
+      if (mode === 'tt_rtc') {
         next.inferenceHz = 15;
-        next.controlHz = 100;
       }
       dispatch(setInferenceTaskInfo(next));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
-    [isEditable, dispatch]
+    [isEditable, dispatch, actionRequestMode]
   );
 
   const taskSyncKey = useMemo(
@@ -586,15 +583,15 @@ const InferencePanel = ({
           <input
             type="checkbox"
             className={clsx('w-4 h-4', {
-              'cursor-not-allowed opacity-50': !isEditable || actionRequestMode === 'tt_rtc',
-              'cursor-pointer': isEditable && actionRequestMode !== 'tt_rtc',
+              'cursor-not-allowed opacity-50': !isEditable,
+              'cursor-pointer': isEditable,
             })}
             checked={isTensorRtEnabled}
             onChange={(e) => handleChange(
               'accelerationMode',
               e.target.checked ? 'tensorrt_dit' : 'pytorch'
             )}
-            disabled={!isEditable || actionRequestMode === 'tt_rtc'}
+            disabled={!isEditable}
             aria-label="Enable TensorRT"
           />
           <span className={isOfflineRL ? 'text-[10px] text-[#756e63]' : 'text-gray-500'}>
@@ -606,6 +603,7 @@ const InferencePanel = ({
         <TrtEngineControl
           modelPath={info.policyPath}
           enginePath={info.accelerationEnginePath}
+          actionRequestMode={actionRequestMode}
           robotType={robotType}
           taskInstruction={trtTaskInstruction}
           disabled={!isEditable}
@@ -726,7 +724,7 @@ const InferencePanel = ({
           : 'border-amber-200 bg-amber-50 text-amber-700'
       )}>
         {actionRequestMode === 'tt_rtc'
-          ? 'The bundle is preloaded at Start. Switch between the TT-RTC VLA and MLP continuations while inference is running. TensorRT is disabled for this mode.'
+          ? 'The bundle is preloaded at Start. Switch between the TT-RTC VLA and MLP continuations while inference is running. TensorRT requires the TT-RTC engine.'
           : 'The bundle is preloaded at Start. Switch between GR00T and RLT actions while inference is running. DiT TensorRT can remain enabled.'}
       </div>
     </div>
@@ -988,7 +986,7 @@ const InferencePanel = ({
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
             <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-              <Tooltip content="Rate of commands sent to the robot. TT-RTC keeps 15 Hz source actions and interpolates them to 100 Hz." position="bottom">
+              <Tooltip content="Rate of commands sent to the robot. TT-RTC interpolates 15 Hz source actions to this rate without changing their duration." position="bottom">
                 <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
               </Tooltip>
               <span>Control Hz</span>
@@ -997,13 +995,13 @@ const InferencePanel = ({
               className={classTextInput}
               type="number"
               step="5"
-              min="1"
+              min={actionRequestMode === 'tt_rtc' ? 15 : 1}
               value={info.controlHz || ''}
               onChange={(e) => {
                 const v = e.target.value;
                 handleChange('controlHz', v === '' ? '' : Number(v));
               }}
-              disabled={!isEditable || actionRequestMode === 'tt_rtc'}
+              disabled={!isEditable}
               aria-label="Control Hz"
             />
           </div>

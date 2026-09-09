@@ -80,26 +80,58 @@ def _loaded_contract(**overrides) -> dict:
     return payload
 
 
-def _qualify(payload: dict, *, maximum_ms: float = 350.0) -> dict:
-    payload.update(
-        {
-            "base_groot_checkpoint": {"sha256": "a" * 64},
-            "processor_fingerprint": "b" * 64,
-            "action_schema_fingerprint": "c" * 64,
-            "code_revision": "deadbeef",
-            "qualification": {
-                "status": "deployment_qualified",
-                "deployment": "real_robot",
-                "hardware": "cyclo-real-robot-host",
-                "software_image": "sha256:image",
-                "latency_scope": "preprocess+groot+decode+ipc+enqueue",
-                "latency_ms": {"p99": 320.0, "maximum": maximum_ms},
-                "selected_delay_steps": 6,
-                "measured_at": "2026-09-03T00:00:00Z",
-            },
-        }
-    )
-    return payload
+def _write_training_checkpoint(root: Path) -> None:
+    payload = _manifest(include_rlt=False)
+    rtc = payload["training_time_rtc"]
+    rtc.update(action_horizon=32, action_dimension=16, state_timestep="sampled_flow_time")
+    for key in ("action_hz", "num_inference_timesteps", "num_timestep_buckets",
+                "processor_action_horizon", "processor_action_dimension"):
+        rtc.pop(key)
+    (root / "experiment_cfg").mkdir()
+    (root / "experiment_cfg/tt_rtc_training_manifest.json").write_text(json.dumps(payload))
+    (root / "config.json").write_text(json.dumps({
+        "training_time_rtc": True, "tt_rtc_max_delay_steps": 6,
+        "tt_rtc_logical_action_horizon": 32, "tt_rtc_logical_action_dim": 16,
+        "action_horizon": 40, "max_action_dim": 132,
+        "num_inference_timesteps": 4, "num_timestep_buckets": 1000,
+    }))
+    (root / "processor_config.json").write_text(json.dumps({"processor_kwargs": {
+        "max_action_horizon": 40, "max_action_dim": 132,
+        "modality_configs": {"new_embodiment": {"action": {"delta_indices": list(range(32))}}},
+    }}))
+
+
+class ExternalTrainingMetadataTests(unittest.TestCase):
+    def test_training_manifest_32x16_is_adapted_without_rewriting_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_training_checkpoint(root)
+            before = {p: p.read_bytes() for p in root.rglob("*.json")}
+            capability = load_tt_rtc_capability(root)
+            self.assertEqual(capability.source.name, "tt_rtc_training_manifest.json")
+            validate_tt_rtc_model_contract(capability, _loaded_contract(action_horizon=32, action_dimension=16))
+            self.assertEqual(before, {p: p.read_bytes() for p in root.rglob("*.json")})
+            with self.assertRaisesRegex(TTRTCContractError, "VLA-only"):
+                load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_disagreeing_training_config_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_training_checkpoint(root)
+            p = root / "config.json"
+            config = json.loads(p.read_text())
+            config["tt_rtc_logical_action_dim"] = 19
+            p.write_text(json.dumps(config))
+            with self.assertRaisesRegex(TTRTCContractError, "training_config"):
+                load_tt_rtc_capability(root)
+
+    def test_16d_request_requires_matching_model_dimension(self):
+        request = SimpleNamespace(action_request_mode="tt_rtc", rtc_delay_steps=6,
+                                  rtc_action_dim=16, rtc_prefix_action_list=[0.] * 96)
+        parsed = parse_tt_rtc_request(request, action_dim=16)
+        self.assertEqual(len(parsed.prefix_actions), 6)
+        with self.assertRaisesRegex(TTRTCContractError, "must be 19"):
+            parse_tt_rtc_request(request)
 
 
 class TTRTCRequestTests(unittest.TestCase):
@@ -213,56 +245,15 @@ class TTRTCManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(TTRTCContractError, "manifest rlt"):
                 load_tt_rtc_capability(root, require_rlt=True)
 
-    def test_real_robot_requires_measured_deployment_qualification(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            payload = _manifest()
-            payload["qualification"] = {
-                "status": "unqualified",
-                "deployment": "simulation_only",
-            }
-            (root / "tt_rtc_manifest.json").write_text(
-                json.dumps(payload),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(TTRTCContractError, "simulation-only"):
-                load_tt_rtc_capability(
-                    root,
-                    require_deployment_qualified=True,
-                )
-
-    def test_real_robot_accepts_complete_in_window_qualification(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "tt_rtc_manifest.json").write_text(
-                json.dumps(_qualify(_manifest())),
-                encoding="utf-8",
-            )
-
-            capability = load_tt_rtc_capability(
-                root,
-                require_deployment_qualified=True,
-            )
-
-            self.assertEqual(
-                capability.payload["qualification"]["status"],
-                "deployment_qualified",
-            )
-
-    def test_real_robot_rejects_qualification_beyond_trained_window(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "tt_rtc_manifest.json").write_text(
-                json.dumps(_qualify(_manifest(), maximum_ms=400.01)),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(TTRTCContractError, "400 ms"):
-                load_tt_rtc_capability(
-                    root,
-                    require_deployment_qualified=True,
-                )
+    def test_qualification_metadata_is_optional_and_not_an_admission_gate(self):
+        for metadata in ({}, {"qualification": None},
+                         {"qualification": {"status": "unqualified"}}):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = {**_manifest(), **metadata}
+                (root / "tt_rtc_manifest.json").write_text(json.dumps(payload))
+                capability = load_tt_rtc_capability(root)
+                validate_tt_rtc_model_contract(capability, _loaded_contract())
 
     def test_loaded_model_contract_is_cross_checked(self) -> None:
         payload = _manifest()

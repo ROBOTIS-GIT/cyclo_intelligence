@@ -63,6 +63,7 @@ string robot_type
 string task_instruction
 bool publish_to_robot
 string action_request_mode
+float64 control_hz
 string acceleration_mode
 string acceleration_engine_path
 bool rlt_enabled

@@ -575,6 +575,7 @@ class RobotClient:
         max_age_s: float,
         *,
         now_s: Optional[float] = None,
+        camera_names: Optional[list[str]] = None,
     ) -> None:
         """Fail unless every configured policy observation is present and fresh.
 
@@ -587,6 +588,7 @@ class RobotClient:
         Args:
             max_age_s: Maximum permitted age, in seconds, for each observation.
             now_s: Optional wall-clock timestamp used for deterministic checks.
+            camera_names: Model input cameras; None checks all configured cameras.
 
         Raises:
             ValueError: If the freshness threshold or current time is invalid.
@@ -633,7 +635,9 @@ class RobotClient:
                 failures.append(f"stale {kind}:{name} ({age:.3f}s old)")
 
         with self._lock:
-            for camera_name in self._config.get("cameras", {}):
+            for camera_name in (
+                self._config.get("cameras", {}) if camera_names is None else camera_names
+            ):
                 if camera_name not in self._images:
                     failures.append(f"missing camera:{camera_name}")
                     continue

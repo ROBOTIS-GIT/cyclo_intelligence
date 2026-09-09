@@ -63,6 +63,7 @@ const renderPanel = ({
   policyType = 'act',
   accelerationMode = 'pytorch',
   actionRequestMode = 'async',
+  controlHz = 100,
   rltEnabled = false,
   rltBundlePath = '',
   rltRobotOverride = false,
@@ -92,6 +93,7 @@ const renderPanel = ({
           policyType,
           accelerationMode,
           actionRequestMode,
+          controlHz,
           rltEnabled,
           rltBundlePath,
           rltRobotOverride,
@@ -289,6 +291,7 @@ describe('InferencePanel RL Recording', () => {
       serviceType: 'groot',
       policyType: 'n17',
       accelerationMode: 'tensorrt_dit',
+      controlHz: 200,
     });
 
     const ttRtc = screen.getByRole('button', {
@@ -299,19 +302,23 @@ describe('InferencePanel RL Recording', () => {
     expect(store.getState().tasks.inferenceTaskInfo.actionRequestMode)
       .toBe('tt_rtc');
     expect(store.getState().tasks.inferenceTaskInfo.accelerationMode)
-      .toBe('pytorch');
+      .toBe('tensorrt_dit');
     expect(store.getState().tasks.inferenceTaskInfo.accelerationEnginePath)
       .toBe('');
     expect(store.getState().tasks.inferenceTaskInfo.inferenceHz).toBe(15);
-    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(100);
+    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(200);
     expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
-      .toBeDisabled();
+      .toBeEnabled();
     expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
-      .not.toBeChecked();
+      .toBeChecked();
     expect(screen.getByRole('spinbutton', { name: 'Inference Hz' }))
       .toBeDisabled();
     expect(screen.getByRole('spinbutton', { name: 'Control Hz' }))
-      .toBeDisabled();
+      .toBeEnabled();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Control Hz' }), {
+      target: { value: '100' },
+    });
+    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(100);
   });
 
   test.each([

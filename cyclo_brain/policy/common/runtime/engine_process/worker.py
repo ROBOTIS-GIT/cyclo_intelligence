@@ -96,6 +96,8 @@ class EngineWorker:
             seq_id=request.seq_id,
             message=str(result.get("message", "")),
             action_keys=list(result.get("action_keys", []) or []),
+            chunk_size=int(result.get("chunk_size", 0)),
+            action_dim=int(result.get("action_dim", 0)),
         )
 
     def _get_action(self, request: EngineCommandRequest) -> EngineCommandResponse:

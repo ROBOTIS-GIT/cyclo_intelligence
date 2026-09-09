@@ -40,6 +40,9 @@ bool publish_to_robot
 # "tt_rtc" is the GR00T-only clean-prefix continuation contract; the backend
 # rejects checkpoints that do not declare and implement Training-Time RTC.
 string action_request_mode
+# TT-RTC LOAD: interpolated command rate; 0 uses the runtime default.
+# Model source actions remain at 15 Hz.
+float64 control_hz
 # Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
 # PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
 # supported by the backend.

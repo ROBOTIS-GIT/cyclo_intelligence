@@ -21,10 +21,11 @@ async function readJsonResponse(response) {
   }
 }
 
-function buildStatusUrl(modelPath, enginePath) {
+function buildStatusUrl(modelPath, enginePath, actionRequestMode) {
   const params = new URLSearchParams();
   params.set('model_path', modelPath);
   if (enginePath) params.set('engine_path', enginePath);
+  params.set('action_request_mode', actionRequestMode);
   return `${API_BASE}/backends/groot/trt/status?${params.toString()}`;
 }
 
@@ -68,6 +69,7 @@ function statusClass(status, isOfflineRL = false) {
 export default function TrtEngineControl({
   modelPath,
   enginePath = '',
+  actionRequestMode = 'async',
   robotType = '',
   taskInstruction = '',
   disabled = false,
@@ -91,7 +93,7 @@ export default function TrtEngineControl({
     }
     if (!quiet) setIsRefreshing(true);
     try {
-      const response = await fetch(buildStatusUrl(trimmedModelPath, trimmedEnginePath));
+      const response = await fetch(buildStatusUrl(trimmedModelPath, trimmedEnginePath, actionRequestMode));
       const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.detail || data.message || `status failed (${response.status})`);
@@ -109,7 +111,7 @@ export default function TrtEngineControl({
     } finally {
       if (!quiet) setIsRefreshing(false);
     }
-  }, [canQuery, trimmedModelPath, trimmedEnginePath]);
+  }, [canQuery, trimmedModelPath, trimmedEnginePath, actionRequestMode]);
 
   useEffect(() => {
     refreshStatus({ quiet: true });
@@ -139,6 +141,7 @@ export default function TrtEngineControl({
         body: JSON.stringify({
           model_path: trimmedModelPath,
           engine_path: trimmedEnginePath,
+          action_request_mode: actionRequestMode,
           robot_type: robotType,
           task_instruction: taskInstruction || 'dummy task',
           force: status?.status === 'ready',
@@ -159,6 +162,7 @@ export default function TrtEngineControl({
   }, [
     trimmedModelPath,
     trimmedEnginePath,
+    actionRequestMode,
     robotType,
     taskInstruction,
     status?.status,

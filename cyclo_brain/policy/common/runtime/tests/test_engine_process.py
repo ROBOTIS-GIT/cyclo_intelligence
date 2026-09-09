@@ -59,6 +59,13 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_load_response_carries_model_shape_without_new_message_fields(self):
+        engine = FakeEngine()
+        engine.load_policy = lambda _request: {"success": True, "chunk_size": 32, "action_dim": 16}
+        response = EngineWorker(engine).handle(EngineCommandRequest(command=CMD_LOAD_POLICY))
+        self.assertTrue(response.success)
+        self.assertEqual((response.chunk_size, response.action_dim), (32, 16))
+
     def test_tt_rtc_protocol_round_trip_preserves_prefix(self) -> None:
         request = EngineCommandRequest(
             command=CMD_GET_ACTION,

@@ -238,15 +238,15 @@ def test_orchestrator_rejects_tt_rtc_for_non_groot_backend():
     assert OrchestratorNode._action_request_mode_error('async', '/lerobot') == ''
 
 
-def test_orchestrator_rejects_tensorrt_for_tt_rtc():
+def test_orchestrator_accepts_dit_tensorrt_for_tt_rtc():
     assert OrchestratorNode._action_request_mode_error(
         'tt_rtc',
         '/groot',
         'tensorrt_dit',
-    ) == (
-        'TT-RTC currently requires PyTorch; disable TensorRT before starting '
-        'inference'
-    )
+    ) == ''
+    assert OrchestratorNode._action_request_mode_error(
+        'tt_rtc', '/groot', 'tensorrt_full_pipeline',
+    ) == 'TT-RTC supports PyTorch or DiT TensorRT only'
 
 
 def test_action_policy_switch_is_forwarded_for_active_rlt_session():

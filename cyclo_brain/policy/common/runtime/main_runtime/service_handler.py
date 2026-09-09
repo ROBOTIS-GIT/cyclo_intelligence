@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional
 
 
@@ -54,6 +55,11 @@ class ServiceHandler:
         if not request.robot_type:
             return self._make_response(False, "robot_type is required")
 
+        control_hz = float(getattr(request, "control_hz", 0.0) or 0.0)
+        if getattr(request, "action_request_mode", "") == "tt_rtc":
+            if not math.isfinite(control_hz) or (control_hz != 0 and control_hz < 15):
+                return self._make_response(False, "TT-RTC Control Hz must be at least 15")
+
         response = self._requester.load_policy(request)
         if not response.success:
             return self._make_response(False, response.message)
@@ -72,6 +78,9 @@ class ServiceHandler:
             publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             action_request_mode=getattr(request, "action_request_mode", "async"),
             rlt_enabled=bool(getattr(request, "rlt_enabled", False)),
+            tt_rtc_horizon=int(getattr(response, "chunk_size", 0) or 16),
+            tt_rtc_action_dim=int(getattr(response, "action_dim", 0) or 19),
+            control_hz=control_hz,
         )
         return self._make_response(True, response.message or "loaded", action_keys)
 

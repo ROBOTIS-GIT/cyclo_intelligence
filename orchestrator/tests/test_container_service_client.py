@@ -40,3 +40,17 @@ def test_set_action_policy_defaults_rlt_robot_override_to_false():
 
     request = client._call_service.call_args.args[1]
     assert request.rlt_robot_override is False
+
+
+def test_tt_rtc_load_serializes_control_rate():
+    client = ContainerServiceClient(node=None, service_prefix='/groot')
+    client._inference_command_client = object()
+    client._call_service = Mock(return_value=SimpleNamespace(success=True))
+    client.inference_command(
+        ContainerServiceClient.CMD_LOAD,
+        action_request_mode='tt_rtc',
+        control_hz=200.0,
+    )
+    request = client._call_service.call_args.args[1]
+    assert request.control_hz == 200.0
+    assert request.action_request_mode == 'tt_rtc'

@@ -7,7 +7,7 @@
 """Source-clock action timeline for TT-RTC robot control.
 
 TT-RTC reasons about the model's discrete action tokens (15 Hz for the
-current GR00T contract), while the robot command transport runs at 100 Hz.
+current GR00T contract), while the robot command transport uses Control Hz.
 This timeline deliberately keeps the queue in the source domain so
 ``peek_actions()`` exposes the exact clean prefix.  Only ``pop_action()``
 resamples that trajectory for the robot clock.
@@ -102,6 +102,10 @@ class TTActionTimeline:
                 raise ValueError(
                     f"action dimension changed from {self._action_dim} to {action_dim}"
                 )
+            if len(chunk) and not self._buffer and self._phase >= self._phase_denominator:
+                # Resume from the held target, without catching up wall-clock
+                # time by skipping newly arrived source actions.
+                self._phase = 0
             for action in chunk:
                 self._buffer.append(action.copy())
             return len(chunk)
@@ -125,8 +129,10 @@ class TTActionTimeline:
                 alpha = self._phase / self._phase_denominator
                 output = (1.0 - alpha) * self._anchor + alpha * self._buffer[0]
             else:
-                # The last committed waypoint may be held for the remainder
-                # of its source period while a bounded TT request completes.
+                if self._phase >= self._phase_denominator:
+                    # Position controllers retain their last target; the
+                    # caller sends idle (zero velocity) for Twist commands.
+                    return None
                 output = self._anchor.copy()
 
             self._phase += self._phase_step
@@ -140,4 +146,3 @@ class TTActionTimeline:
             self._last_output_action = None
             self._action_dim = None
             self._phase = 0
-

@@ -508,6 +508,16 @@ def test_trt_status_reports_ready_engine(tmp_path):
     assert status.engine_size_bytes == len(b"engine")
 
 
+def test_tt_rtc_uses_separate_engine_path():
+    from fastapi import HTTPException
+    model = "/workspace/model/groot/example"
+    assert _resolve_groot_trt_paths(model, action_request_mode="tt_rtc")[1] == (
+        model + "/dit_model_tt_rtc_bf16.trt"
+    )
+    with pytest.raises(HTTPException):
+        _resolve_groot_trt_paths(model, "dit_model_bf16.trt", "tt_rtc")
+
+
 def test_trt_status_reports_missing_engine(tmp_path):
     model = tmp_path / "workspace" / "model" / "groot" / "example"
     model.mkdir(parents=True)

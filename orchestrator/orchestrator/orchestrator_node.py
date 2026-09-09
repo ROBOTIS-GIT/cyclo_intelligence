@@ -1683,6 +1683,7 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     ),
                                     action_request_mode=requested_action_request_mode,
+                                    control_hz=float(task_info.control_hz or 100.0),
                                     rlt_enabled=requested_rlt_enabled,
                                     rlt_bundle_path=requested_rlt_bundle_path,
                                     action_policy_mode='base',
@@ -2867,10 +2868,9 @@ class OrchestratorNode(Node):
     ) -> str:
         if mode == 'tt_rtc' and str(service_prefix or '').rstrip('/') != '/groot':
             return 'TT-RTC action requests are supported only by GR00T N1.7'
-        if mode == 'tt_rtc' and acceleration_mode != 'pytorch':
+        if mode == 'tt_rtc' and acceleration_mode not in {'pytorch', 'tensorrt_dit'}:
             return (
-                'TT-RTC currently requires PyTorch; disable TensorRT before '
-                'starting inference'
+                'TT-RTC supports PyTorch or DiT TensorRT only'
             )
         return ''
 

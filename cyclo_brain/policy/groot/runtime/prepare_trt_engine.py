@@ -76,6 +76,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--task-instruction", default="")
     parser.add_argument("--workspace-mb", type=int, default=_default_workspace_mb())
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--action-request-mode", choices=("sync", "async", "tt_rtc"), default="async")
     return parser.parse_args()
 
 
@@ -86,7 +87,12 @@ def main() -> int:
     )
     args = _parse_args()
     args.model_path = os.path.normpath(args.model_path)
-    engine_path = os.path.normpath(args.engine_path or _default_engine_path(args.model_path))
+    engine_path = os.path.normpath(args.engine_path or (
+        os.path.join(args.model_path, "dit_model_tt_rtc_bf16.trt")
+        if args.action_request_mode == "tt_rtc" else _default_engine_path(args.model_path)
+    ))
+    if args.action_request_mode == "tt_rtc" and engine_path == _default_engine_path(args.model_path):
+        raise ValueError("TT-RTC must not overwrite the standard TensorRT engine")
     started_at = time.time()
 
     if os.path.exists(engine_path) and os.path.getsize(engine_path) > 0 and not args.force:
@@ -112,6 +118,11 @@ def main() -> int:
             model_path=args.model_path,
             device="cuda",
         )
+        capability = None
+        if args.action_request_mode == "tt_rtc":
+            from runtime.tt_rtc import load_tt_rtc_capability
+            capability = load_tt_rtc_capability(args.model_path)
+            inference._validate_loaded_tt_rtc_policy(capability)
         inference.init_policy_info()
 
         LOGGER.info("Building model-schema synthetic observation")
@@ -124,6 +135,7 @@ def main() -> int:
             observation,
             engine_path,
             workspace_mb=args.workspace_mb,
+            tt_rtc_capability=capability,
         )
         if not os.path.exists(engine_path) or os.path.getsize(engine_path) <= 0:
             raise RuntimeError(

@@ -169,6 +169,21 @@ class PublishActionSafetyTest(unittest.TestCase):
 
 
 class ObservationFreshnessSafetyTest(unittest.TestCase):
+    def test_unused_camera_does_not_block_but_required_camera_is_checked(self):
+        client = _observation_client()
+        client._images = {"head": object()}
+        client._image_timestamps = {"head": 99.9}
+        client._joint_positions = {"arm": np.zeros(2)}
+        client._joint_timestamps = {"arm": 99.9}
+        client._sensors = {"odom": {}}
+        client._sensor_timestamps = {"odom": 99.9}
+        client.validate_observation_freshness(0.5, now_s=100, camera_names=["head"])
+        with self.assertRaisesRegex(RuntimeError, "missing camera:left_wrist"):
+            client.validate_observation_freshness(0.5, now_s=100)
+        client._image_timestamps["head"] = 98
+        with self.assertRaisesRegex(RuntimeError, "stale camera:head"):
+            client.validate_observation_freshness(0.5, now_s=100, camera_names=["head"])
+
     def test_all_configured_policy_observations_are_fresh(self):
         client = _observation_client()
         client._images = {"head": object(), "left_wrist": object()}
