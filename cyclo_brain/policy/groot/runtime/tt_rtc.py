@@ -23,16 +23,29 @@ import os
 from pathlib import Path
 from typing import Any
 
+from cyclo_brain.model.common import (
+    GROOT_REFERENCE_ACTION_HORIZON,
+    RLT_ACTION_DIM,
+    RLT_ACTION_HORIZON,
+)
+
 
 TT_RTC_REQUEST_MODE = "tt_rtc"
 TT_RTC_SCHEMA = "cyclo.training-time-rtc/v1"
 TT_RTC_RLT_CONTEXT_SCHEMA = "cyclo.groot.tt-rtc-rlt-context/v1"
-TT_RTC_ACTION_HORIZON = 16
-TT_RTC_ACTION_DIM = 19
-TT_RTC_MAX_DELAY_STEPS = 6
+TT_RTC_ACTION_HORIZON = GROOT_REFERENCE_ACTION_HORIZON
+TT_RTC_ACTION_DIM = RLT_ACTION_DIM
+TT_RTC_MAX_DELAY_STEPS = GROOT_REFERENCE_ACTION_HORIZON - RLT_ACTION_HORIZON
 TT_RTC_ACTION_HZ = 15.0
-TT_RTC_RLT_CHUNK_LENGTH = 10
+TT_RTC_RLT_CHUNK_LENGTH = RLT_ACTION_HORIZON
 TT_RTC_MANIFEST_NAME = "tt_rtc_manifest.json"
+TT_RTC_MODEL_ACTION_HORIZON = 40
+TT_RTC_MODEL_ACTION_DIM = 132
+TT_RTC_PROCESSOR_ACTION_HORIZON = 40
+TT_RTC_PROCESSOR_ACTION_DIM = 132
+TT_RTC_NUM_INFERENCE_TIMESTEPS = 4
+TT_RTC_NUM_TIMESTEP_BUCKETS = 1000
+TT_RTC_DEPLOYMENT_QUALIFICATION = "deployment_qualified"
 
 
 class TTRTCContractError(ValueError):
@@ -79,6 +92,94 @@ def _exact_integer(value: object, expected: int, name: str) -> None:
         raise TTRTCContractError(
             f"TT-RTC manifest {name} must be {expected}, got {value!r}"
         )
+
+
+def _finite_number(value: object, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise TTRTCContractError(
+            f"TT-RTC manifest {name} must be a finite number, got {value!r}"
+        )
+    return float(value)
+
+
+def _nonempty_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TTRTCContractError(
+            f"TT-RTC manifest {name} must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _validate_deployment_qualification(payload: Mapping[str, Any]) -> None:
+    """Require measured, hardware-specific qualification for robot output.
+
+    Training writes an explicit ``unqualified`` record.  A deployment process
+    may promote that record only after the complete preprocess -> inference ->
+    decode -> IPC -> enqueue path has been measured on the target machine.
+    Merely editing ``status`` is insufficient because the remaining evidence is
+    checked here as well.
+    """
+
+    qualification = _as_plain_mapping(payload.get("qualification"), "qualification")
+    if qualification.get("status") != TT_RTC_DEPLOYMENT_QUALIFICATION:
+        raise TTRTCContractError(
+            "TT-RTC real-robot mode requires qualification.status="
+            "'deployment_qualified'; this checkpoint remains simulation-only"
+        )
+    if qualification.get("deployment") != "real_robot":
+        raise TTRTCContractError(
+            "TT-RTC deployment-qualified manifest must declare "
+            "qualification.deployment='real_robot'"
+        )
+    _nonempty_string(qualification.get("hardware"), "qualification.hardware")
+    _nonempty_string(
+        qualification.get("software_image"),
+        "qualification.software_image",
+    )
+    _nonempty_string(
+        qualification.get("latency_scope"),
+        "qualification.latency_scope",
+    )
+    _nonempty_string(qualification.get("measured_at"), "qualification.measured_at")
+    _exact_integer(
+        qualification.get("selected_delay_steps"),
+        TT_RTC_MAX_DELAY_STEPS,
+        "qualification.selected_delay_steps",
+    )
+
+    latency = _as_plain_mapping(
+        qualification.get("latency_ms"),
+        "qualification.latency_ms",
+    )
+    p99_ms = _finite_number(latency.get("p99"), "qualification.latency_ms.p99")
+    maximum_ms = _finite_number(
+        latency.get("maximum"),
+        "qualification.latency_ms.maximum",
+    )
+    deadline_ms = 1000.0 * TT_RTC_MAX_DELAY_STEPS / TT_RTC_ACTION_HZ
+    if p99_ms < 0.0 or maximum_ms < 0.0:
+        raise TTRTCContractError("TT-RTC qualification latency must be non-negative")
+    if p99_ms > deadline_ms or maximum_ms > deadline_ms:
+        raise TTRTCContractError(
+            "TT-RTC qualification exceeds the 400 ms trained handoff window: "
+            f"p99={p99_ms:.3f} ms maximum={maximum_ms:.3f} ms"
+        )
+
+    base_checkpoint = _as_plain_mapping(
+        payload.get("base_groot_checkpoint"),
+        "base_groot_checkpoint",
+    )
+    for name, value in (
+        ("base_groot_checkpoint.sha256", base_checkpoint.get("sha256")),
+        ("processor_fingerprint", payload.get("processor_fingerprint")),
+        ("action_schema_fingerprint", payload.get("action_schema_fingerprint")),
+        ("code_revision", payload.get("code_revision")),
+    ):
+        _nonempty_string(value, name)
 
 
 def parse_tt_rtc_request(request: object) -> TTRTCRequest | None:
@@ -202,6 +303,7 @@ def load_tt_rtc_capability(
     model_path: str | os.PathLike[str],
     *,
     require_rlt: bool = False,
+    require_deployment_qualified: bool = False,
 ) -> TTRTCCapability:
     """Load and validate the machine-readable TT-RTC checkpoint contract."""
 
@@ -219,6 +321,36 @@ def load_tt_rtc_capability(
     _exact_integer(rtc.get("action_dimension"), TT_RTC_ACTION_DIM, "action_dimension")
     _exact_number(rtc.get("action_hz"), TT_RTC_ACTION_HZ, "action_hz")
     _exact_integer(rtc.get("max_delay_steps"), TT_RTC_MAX_DELAY_STEPS, "max_delay_steps")
+    _exact_integer(
+        rtc.get("model_action_horizon"),
+        TT_RTC_MODEL_ACTION_HORIZON,
+        "model_action_horizon",
+    )
+    _exact_integer(
+        rtc.get("model_action_dimension"),
+        TT_RTC_MODEL_ACTION_DIM,
+        "model_action_dimension",
+    )
+    _exact_integer(
+        rtc.get("num_inference_timesteps"),
+        TT_RTC_NUM_INFERENCE_TIMESTEPS,
+        "num_inference_timesteps",
+    )
+    _exact_integer(
+        rtc.get("num_timestep_buckets"),
+        TT_RTC_NUM_TIMESTEP_BUCKETS,
+        "num_timestep_buckets",
+    )
+    _exact_integer(
+        rtc.get("processor_action_horizon"),
+        TT_RTC_PROCESSOR_ACTION_HORIZON,
+        "processor_action_horizon",
+    )
+    _exact_integer(
+        rtc.get("processor_action_dimension"),
+        TT_RTC_PROCESSOR_ACTION_DIM,
+        "processor_action_dimension",
+    )
     if rtc.get("prefix_input") != "ground_truth_clean_action":
         raise TTRTCContractError(
             "TT-RTC manifest prefix_input must be 'ground_truth_clean_action'"
@@ -259,12 +391,56 @@ def load_tt_rtc_capability(
             TT_RTC_ACTION_HORIZON,
             "rlt.reference_horizon",
         )
-        if rlt.get("reference_slice") != "[d:d+10]":
+        expected_reference_slice = f"[d:d+{TT_RTC_RLT_CHUNK_LENGTH}]"
+        if rlt.get("reference_slice") != expected_reference_slice:
             raise TTRTCContractError(
-                "TT-RTC RLT manifest reference_slice must be '[d:d+10]'"
+                "TT-RTC RLT manifest reference_slice must be "
+                f"'{expected_reference_slice}'"
             )
 
+    if require_deployment_qualified:
+        _validate_deployment_qualification(payload)
+
     return TTRTCCapability(source=source, payload=payload)
+
+
+def validate_tt_rtc_model_contract(
+    capability: TTRTCCapability,
+    model_contract: Mapping[str, Any],
+) -> None:
+    """Cross-check the manifest against the model and processor actually loaded."""
+
+    if model_contract.get("enabled") is not True:
+        raise TTRTCContractError(
+            "Loaded GR00T config does not enable training_time_rtc_enabled"
+        )
+    rtc = _as_plain_mapping(
+        capability.payload.get("training_time_rtc"),
+        "training_time_rtc",
+    )
+    comparisons = (
+        ("max_delay_steps", TT_RTC_MAX_DELAY_STEPS),
+        ("action_horizon", TT_RTC_ACTION_HORIZON),
+        ("action_dimension", TT_RTC_ACTION_DIM),
+        ("model_action_horizon", TT_RTC_MODEL_ACTION_HORIZON),
+        ("model_action_dimension", TT_RTC_MODEL_ACTION_DIM),
+        ("processor_action_horizon", TT_RTC_PROCESSOR_ACTION_HORIZON),
+        ("processor_action_dimension", TT_RTC_PROCESSOR_ACTION_DIM),
+        ("num_inference_timesteps", TT_RTC_NUM_INFERENCE_TIMESTEPS),
+        ("num_timestep_buckets", TT_RTC_NUM_TIMESTEP_BUCKETS),
+    )
+    for name, expected in comparisons:
+        value = model_contract.get(name)
+        _exact_integer(value, expected, f"loaded_model.{name}")
+        _exact_integer(rtc.get(name), value, f"manifest_vs_loaded_model.{name}")
+
+    action_hz = model_contract.get("action_hz")
+    _exact_number(action_hz, TT_RTC_ACTION_HZ, "loaded_model.action_hz")
+    _exact_number(
+        rtc.get("action_hz"),
+        float(action_hz),
+        "manifest_vs_loaded_model.action_hz",
+    )
 
 
 __all__ = [
@@ -272,7 +448,13 @@ __all__ = [
     "TT_RTC_ACTION_HORIZON",
     "TT_RTC_ACTION_HZ",
     "TT_RTC_MANIFEST_NAME",
+    "TT_RTC_MODEL_ACTION_DIM",
+    "TT_RTC_MODEL_ACTION_HORIZON",
     "TT_RTC_MAX_DELAY_STEPS",
+    "TT_RTC_NUM_INFERENCE_TIMESTEPS",
+    "TT_RTC_NUM_TIMESTEP_BUCKETS",
+    "TT_RTC_PROCESSOR_ACTION_DIM",
+    "TT_RTC_PROCESSOR_ACTION_HORIZON",
     "TT_RTC_REQUEST_MODE",
     "TT_RTC_RLT_CONTEXT_SCHEMA",
     "TT_RTC_RLT_CHUNK_LENGTH",
@@ -282,4 +464,5 @@ __all__ = [
     "TTRTCRequest",
     "load_tt_rtc_capability",
     "parse_tt_rtc_request",
+    "validate_tt_rtc_model_contract",
 ]

@@ -281,20 +281,20 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
         data-testid="conversion-setup-surface"
       >
         <div
-          className="grid grid-cols-2 gap-2"
+          className="pg-conversion-top gap-2"
           data-testid="conversion-path-row"
         >
           <div className="min-w-0">
-            <div className="mb-1 text-[10px] font-semibold text-[#5e584f]">
+            <div className="mb-1 text-[12px] font-semibold text-[#5e584f]">
               Conversion setup
             </div>
             <div className="rounded-lg border border-[#e2dbcf] bg-white px-2.5 py-1.5">
-              <div className="mb-0.5 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#8a8276]">
+              <div className="mb-0.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8a8276]">
                 <MdStorage size={12} aria-hidden="true" />
                 MCAP source
               </div>
               <div
-                className="truncate text-[10px] font-medium text-[#5f594f]"
+                className="truncate text-[12px] font-medium text-[#5f594f]"
                 title={sourcePath || undefined}
               >
                 {sourcePath || 'No MCAP selected'}
@@ -302,7 +302,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
             </div>
           </div>
 
-          <label className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]">
+          <label className="flex min-w-0 flex-col gap-1 text-[12px] font-medium text-[#756e63]">
             LeRobot collection root
             <div className="flex min-w-0 gap-1.5">
               <input
@@ -313,7 +313,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
                 )}
                 disabled={isRunning || !isActive}
                 placeholder="/workspace/lerobot"
-                className="h-9 min-w-0 flex-1 rounded-lg border border-[#d9d2c5] bg-white px-2.5 text-[10px] text-[#4c473f] outline-none transition-colors focus:border-[#879b89] focus:ring-2 focus:ring-[#879b89]/15 disabled:bg-[#efebe3]"
+                className="h-9 min-w-0 flex-1 rounded-lg border border-[#d9d2c5] bg-white px-2.5 text-[12px] text-[#4c473f] outline-none transition-colors focus:border-[#879b89] focus:ring-2 focus:ring-[#879b89]/15 disabled:bg-[#efebe3]"
               />
               <button
                 type="button"
@@ -329,10 +329,10 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
         </div>
 
         <div
-          className="mt-2 grid grid-cols-[64px_minmax(112px,0.7fr)_minmax(190px,1.2fr)_minmax(104px,0.7fr)_minmax(116px,0.65fr)] items-start gap-2"
+          className="pg-conversion-controls mt-2 items-start gap-2"
           data-testid="conversion-options-row"
         >
-          <label className="flex flex-col gap-1 text-[10px] font-medium text-[#756e63]">
+          <label className="flex flex-col gap-1 text-[12px] font-medium text-[#756e63]">
             FPS
             <input
               aria-label="Conversion FPS"
@@ -343,11 +343,11 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
               value={fps}
               onChange={(event) => dispatch(setOfflineRLConversionFps(event.target.value))}
               disabled={isRunning || !isActive}
-              className="h-9 rounded-lg border border-[#d9d2c5] bg-white px-2 text-[10px] font-semibold text-[#4c473f] outline-none focus:border-[#879b89] disabled:bg-[#efebe3]"
+              className="h-9 rounded-lg border border-[#d9d2c5] bg-white px-2 text-[12px] font-semibold text-[#4c473f] outline-none focus:border-[#879b89] disabled:bg-[#efebe3]"
             />
           </label>
           <div
-            className="flex flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            className="flex flex-col gap-1 text-[12px] font-medium text-[#756e63]"
             data-testid="conversion-output-format"
           >
             Output format
@@ -365,7 +365,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
                   }))}
                   disabled={isRunning || !isActive}
                   className={clsx(
-                    'rounded-lg border text-[10px] font-semibold transition-colors disabled:opacity-45',
+                    'rounded-lg border text-[12px] font-semibold transition-colors disabled:opacity-45',
                     formats[key]
                       ? 'border-[#7f9a84] bg-[#e3ece3] text-[#58705d]'
                       : 'border-[#ddd6ca] bg-white text-[#938b7f]'
@@ -377,7 +377,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
             </div>
           </div>
           <div
-            className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            className="flex min-w-0 flex-col gap-1 text-[12px] font-medium text-[#756e63]"
             aria-label="Conversion validation"
           >
             Validation
@@ -389,7 +389,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
                 <span
                   key={label}
                   className={clsx(
-                    'inline-flex items-center gap-1 text-[9px] font-medium',
+                    'inline-flex items-center gap-1 text-[11px] font-medium',
                     valid ? 'text-[#5e7a64]' : 'text-[#9a7250]'
                   )}
                 >
@@ -399,19 +399,19 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
               ))}
             </div>
             {!destinationValid && (
-              <div className="text-[9px] text-[#a06b61]">
+              <div className="text-[11px] text-[#a06b61]">
                 Destination must be inside {LEROBOT_ROOT}
               </div>
             )}
           </div>
           <div
-            className="flex min-w-0 flex-col gap-1 text-[10px] font-medium text-[#756e63]"
+            className="flex min-w-0 flex-col gap-1 text-[12px] font-medium text-[#756e63]"
             data-testid="offline-rl-data-epoch-output"
             title={reservedEpoch?.output_root || undefined}
           >
             Data Epoch
             <div className="flex h-9 min-w-0 items-center rounded-lg border border-[#ded7ca] bg-white px-2.5">
-              <span className="truncate text-[10px] font-semibold text-[#58705d]">
+              <span className="truncate text-[12px] font-semibold text-[#58705d]">
                 {reservedEpoch?.epoch_name || 'Next available'}
               </span>
             </div>
@@ -420,7 +420,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
             type="button"
             onClick={handleConvert}
             disabled={!canConvert}
-            className="flex h-9 self-end items-center justify-center gap-1.5 rounded-lg border border-[#66836c] bg-[#69866f] px-2 text-[10px] font-semibold text-white shadow-[0_4px_10px_rgba(74,101,80,0.15)] transition-colors hover:bg-[#5e7b64] disabled:cursor-not-allowed disabled:border-[#d7d0c4] disabled:bg-[#e8e3da] disabled:text-[#9d9589] disabled:shadow-none"
+            className="flex h-9 self-end items-center justify-center gap-1.5 rounded-lg border border-[#66836c] bg-[#69866f] px-2 text-[12px] font-semibold text-white shadow-[0_4px_10px_rgba(74,101,80,0.15)] transition-colors hover:bg-[#5e7b64] disabled:cursor-not-allowed disabled:border-[#d7d0c4] disabled:bg-[#e8e3da] disabled:text-[#9d9589] disabled:shadow-none"
           >
             <MdPlayArrow size={14} />
             {isRunning ? 'Converting…' : 'Convert Dataset'}
@@ -428,7 +428,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
         </div>
         {reservedEpoch?.output_root && (
           <div
-            className="mt-1 truncate text-[9px] text-[#948c80]"
+            className="mt-1 truncate text-[11px] text-[#948c80]"
             title={reservedEpoch.output_root}
           >
             {reservedEpoch.output_root}
@@ -439,7 +439,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
       {(feedback || isRunning) && (
         <div className="rounded-xl border border-[#e2dbcf] bg-[#f8f5ef] px-2.5 py-2">
           <div className={clsx(
-            'flex items-center justify-between gap-3 text-[10px]',
+            'flex items-center justify-between gap-3 text-[12px]',
             isRunning && 'mb-1.5'
           )}>
             <span
@@ -474,7 +474,7 @@ export default function OfflineRLDatasetConversion({ isActive = true }) {
                   style={{ width: `${progress}%` }}
                 />
               </div>
-              <div className="mt-1 truncate text-[9px] text-[#91897d]">
+              <div className="mt-1 truncate text-[11px] text-[#91897d]">
                 {conversionStatus.stage || 'queued'}
               </div>
             </>

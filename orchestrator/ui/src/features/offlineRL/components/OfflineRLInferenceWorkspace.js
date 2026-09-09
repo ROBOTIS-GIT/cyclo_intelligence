@@ -407,9 +407,9 @@ export default function OfflineRLInferenceWorkspace({
             persistAssignment={false}
             readOnly
             fillHeight
-            columnWeights={[4, 5, 4]}
+            columnWeights={[9, 16, 9]}
             edgeToEdge
-            coverCell
+            imageFit="contain"
           />
         </div>
       </div>

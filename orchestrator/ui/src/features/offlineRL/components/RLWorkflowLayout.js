@@ -24,6 +24,8 @@ import OfflineRLDataConversionGuideModal from './OfflineRLDataConversionGuideMod
 import OfflineRLTrainingGuideModal from './OfflineRLTrainingGuideModal';
 import RLFrameworkRail from './RLFrameworkRail';
 import PanelToggleGlyph from './PanelToggleGlyph';
+import ResizableWorkspacePanel from './ResizableWorkspacePanel';
+import './playground.css';
 import RobotLabIcon from './RobotLabIcon';
 import { InferencePhase, RecordPhase } from '../../../constants/taskPhases';
 import PageType from '../../../constants/pageType';
@@ -94,7 +96,7 @@ function SectionHeader({
           </span>
         )}
         <div className="min-w-0">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
+          <p className="text-[12px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
             {eyebrow}
           </p>
           <h2 className="truncate text-sm font-semibold text-[#292720]">{title}</h2>
@@ -102,7 +104,7 @@ function SectionHeader({
       </div>
       {actions}
       {!actions && badge && (
-        <span className="shrink-0 rounded-full border border-[#d9d2c5] bg-white px-2.5 py-1 text-[10px] font-semibold text-[#6f685d]">
+        <span className="shrink-0 rounded-full border border-[#d9d2c5] bg-white px-2.5 py-1 text-[12px] font-semibold text-[#6f685d]">
           {badge}
         </span>
       )}
@@ -427,9 +429,6 @@ export default function RLWorkflowLayout({ isActive = true }) {
   const frameworkPanelState = isReplayDrawerOpen && isTrainingDrawerOpen
     ? 'both'
     : activeFrameworkSection;
-  const drawerWidthClass = isReplayDrawerOpen && isTrainingDrawerOpen
-    ? 'lg:w-[calc(50%_-_1.5rem)]'
-    : 'lg:w-1/2';
 
   const lineageResetDisabled = (
     workspaceModeSwitchLocked ||
@@ -678,7 +677,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                             title={workspaceModeSwitchLocked
                               ? 'Stop inference or recording before switching workspace'
                               : `Switch to ${label.toLowerCase()} workspace`}
-                            className={`h-7 rounded-md px-2.5 text-[10px] font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1 ${
+                            className={`h-7 rounded-md px-2.5 text-[12px] font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1 ${
                               selected
                                 ? selectedClass
                                 : 'text-[#6f685d] hover:bg-[#e5dfd4]'
@@ -713,11 +712,17 @@ export default function RLWorkflowLayout({ isActive = true }) {
             data-testid="offline-rl-workflow-steps"
             data-panel-state={frameworkPanelState}
           >
-            <aside
+            <ResizableWorkspacePanel
+              side="left"
+              label="Replay Buffer"
+              active={activeFrameworkSection === 'replay'}
+              onActivate={() => setFrameworkPanels((current) => (
+                current.lastActive === 'replay' ? current : { ...current, lastActive: 'replay' }
+              ))}
               id="offline-rl-replay-drawer"
               aria-labelledby="offline-rl-replay-drawer-title"
               aria-hidden={!isReplayDrawerOpen}
-              className={`absolute inset-y-4 left-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${drawerWidthClass} ${
+              className={`absolute inset-y-4 left-4 flex min-h-0 min-w-0 max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
                 isReplayDrawerOpen
                   ? 'visible translate-x-0 opacity-100 pointer-events-auto'
                   : 'invisible -translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
@@ -727,7 +732,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
               inert={!isReplayDrawerOpen}
             >
               <div
-                className="flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
+                className="pg-panel-header flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
                 data-testid="offline-rl-replay-drawer-header"
               >
                 <button
@@ -748,7 +753,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                     <MdDns size={17} aria-hidden="true" />
                   </span>
                   <div className="min-w-0">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
+                    <p className="text-[12px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
                       Data Workflow
                     </p>
                     <h2
@@ -782,13 +787,19 @@ export default function RLWorkflowLayout({ isActive = true }) {
                   <OfflineRLLeRobotDataset isActive={isActive} />
                 </PipelineCard>
               </div>
-            </aside>
+            </ResizableWorkspacePanel>
 
-            <aside
+            <ResizableWorkspacePanel
+              side="right"
+              label="Training"
+              active={activeFrameworkSection === 'training'}
+              onActivate={() => setFrameworkPanels((current) => (
+                current.lastActive === 'training' ? current : { ...current, lastActive: 'training' }
+              ))}
               id="offline-rl-training-drawer"
               aria-labelledby="offline-rl-training-drawer-title"
               aria-hidden={!isTrainingDrawerOpen}
-              className={`absolute inset-y-4 right-4 flex min-h-0 min-w-0 w-[calc(100%_-_2rem)] max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${drawerWidthClass} ${
+              className={`absolute inset-y-4 right-4 flex min-h-0 min-w-0 max-w-[calc(100%_-_2rem)] flex-col overflow-hidden rounded-2xl border border-[#d8d1c5] bg-[#f3f0e8] shadow-[0_18px_45px_rgba(55,49,39,0.2)] transition-[transform,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
                 isTrainingDrawerOpen
                   ? 'visible translate-x-0 opacity-100 pointer-events-auto'
                   : 'invisible translate-x-[calc(100%_+_2rem)] opacity-0 pointer-events-none'
@@ -798,7 +809,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
               inert={!isTrainingDrawerOpen}
             >
               <div
-                className="flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
+                className="pg-panel-header flex shrink-0 items-center gap-3 border-b border-[#ded8cc] bg-[#fbfaf6] px-4 py-3"
                 data-testid="offline-rl-training-drawer-header"
               >
                 <button
@@ -820,7 +831,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                     <MdModelTraining size={17} aria-hidden="true" />
                   </span>
                   <div className="min-w-0">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
+                    <p className="text-[12px] font-semibold uppercase tracking-[0.15em] text-[#989083]">
                       Policy Workflow
                     </p>
                     <h2
@@ -838,9 +849,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                 data-testid="offline-rl-training-content"
               >
                 <section
-                  className={`${SURFACE_CLASS} flex w-full min-w-0 shrink-0 flex-col p-4 ${
-                    isTrainingCompact ? 'min-h-0' : 'h-full min-h-[640px]'
-                  }`}
+                  className={`${SURFACE_CLASS} flex min-h-0 w-full min-w-0 shrink-0 flex-col p-4`}
                   data-testid="offline-rl-training-stage"
                   data-compact-layout={isTrainingCompact ? 'true' : 'false'}
                 >
@@ -854,21 +863,21 @@ export default function RLWorkflowLayout({ isActive = true }) {
                     <div className="flex shrink-0 items-center gap-1.5">
                       {trainingMethod === 'imitation' ? (
                         <span
-                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#746c61]"
+                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[11px] font-bold text-[#746c61]"
                           aria-label="Imitation Learning base policy RL Epoch 0"
                         >
                           Base Policy {formatRLEpoch(0)}
                         </span>
                       ) : trainingMethod === 'critic' ? (
                         <span
-                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#746c61]"
+                          className="rounded-full border border-[#d8d0c3] bg-[#f2eee6] px-2.5 py-1 font-mono text-[11px] font-bold text-[#746c61]"
                           aria-label={`Critic Warm-up policy RL Epoch ${rlLineage.policyEpoch} unchanged`}
                         >
                           Critic · {formatRLEpoch(rlLineage.policyEpoch)}
                         </span>
                       ) : (
                         <span
-                          className="rounded-full border border-[#cfd8cd] bg-[#e8eee6] px-2.5 py-1 font-mono text-[9px] font-bold text-[#58705d]"
+                          className="rounded-full border border-[#cfd8cd] bg-[#e8eee6] px-2.5 py-1 font-mono text-[11px] font-bold text-[#58705d]"
                           aria-label={`Training policy RL Epoch ${rlLineage.policyEpoch} to ${rlLineage.policyEpoch + 1}`}
                         >
                           RL Epoch {formatRLEpoch(rlLineage.policyEpoch)} → {formatRLEpoch(rlLineage.policyEpoch + 1)}
@@ -878,7 +887,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
                         type="button"
                         onClick={handleNewRLLineage}
                         disabled={lineageResetDisabled}
-                        className="flex h-7 items-center gap-1 rounded-md border border-[#d4ccbf] bg-[#f5f2eb] px-2 text-[9px] font-semibold text-[#6f685d] transition-colors hover:bg-[#e7e1d6] disabled:cursor-not-allowed disabled:opacity-45"
+                        className="flex h-7 items-center gap-1 rounded-md border border-[#d4ccbf] bg-[#f5f2eb] px-2 text-[11px] font-semibold text-[#6f685d] transition-colors hover:bg-[#e7e1d6] disabled:cursor-not-allowed disabled:opacity-45"
                         title={lineageResetDisabled
                           ? 'Stop inference, recording, or training before starting a new RL lineage'
                           : 'Start a new RL lineage without deleting saved files'}
@@ -892,7 +901,6 @@ export default function RLWorkflowLayout({ isActive = true }) {
                   />
                   <OfflineRLTrainingSection
                   isActive={isActive}
-                  variant="workflow"
                   inferencePhase={inferencePhase}
                   currentPolicyEpoch={rlLineage.policyEpoch}
                   forceFreshLineage={rlLineage.forceFresh}
@@ -918,10 +926,10 @@ export default function RLWorkflowLayout({ isActive = true }) {
                       <MdCloudUpload size={18} />
                     </span>
                     <div className="min-w-0">
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
+                      <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
                         Step 05 · Deployment
                       </div>
-                      <div className="truncate text-[11px] font-semibold text-[#403b34]">
+                      <div className="truncate text-[12px] font-semibold text-[#403b34]">
                         {isRltBundleCandidate ? 'RLT Bundle Deploy' : 'Policy Deploy'}
                       </div>
                     </div>
@@ -932,8 +940,8 @@ export default function RLWorkflowLayout({ isActive = true }) {
                       onClick={handleDiscardPolicy}
                       disabled={discardDisabled}
                       className={discardDisabled
-                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
-                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#a86b68] bg-[#a86b68] px-4 text-[10px] font-semibold text-white hover:bg-[#965d5a]'}
+                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[12px] font-semibold text-[#9a9286]'
+                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#a86b68] bg-[#a86b68] px-4 text-[12px] font-semibold text-white hover:bg-[#965d5a]'}
                     >
                       <MdUndo size={14} /> {isRltBundleActive ? 'Discard RLT Bundle' : 'Discard Policy'}
                     </button>
@@ -942,15 +950,15 @@ export default function RLWorkflowLayout({ isActive = true }) {
                       onClick={handleDeployPolicy}
                       disabled={deployDisabled}
                       className={deployDisabled
-                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[10px] font-semibold text-[#9a9286]'
-                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#5f7965] bg-[#69866f] px-4 text-[10px] font-semibold text-white hover:bg-[#5f7965]'}
+                        ? 'flex h-9 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg border border-[#d9d2c5] bg-[#f0ede6] px-4 text-[12px] font-semibold text-[#9a9286]'
+                        : 'flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[#5f7965] bg-[#69866f] px-4 text-[12px] font-semibold text-white hover:bg-[#5f7965]'}
                     >
                       <MdCloudUpload size={14} /> {isRltBundleCandidate ? 'Deploy RLT Bundle' : 'Deploy Policy'}
                     </button>
                   </div>
                 </section>
               </div>
-            </aside>
+            </ResizableWorkspacePanel>
           </div>
         </div>
       </main>

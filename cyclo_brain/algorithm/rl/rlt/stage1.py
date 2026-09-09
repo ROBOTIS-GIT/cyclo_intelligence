@@ -9,16 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from hashlib import sha256
-import json
 import math
 import os
 from pathlib import Path
-import tempfile
 from typing import Any
 
 import torch
 from torch import Tensor
+
+from cyclo_brain.algorithm.common import atomic_torch_save, canonical_json_sha256
 
 from .rl_token import (
     RLTokenAutoencoder,
@@ -29,16 +28,6 @@ from .rl_token import (
 
 
 _STAGE1_CHECKPOINT_FORMAT = "cyclo_brain.rlt.stage1/v1"
-
-
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
 
 
 def _finite_positive(value: float, name: str) -> None:
@@ -103,25 +92,6 @@ class RLTokenStage1Metrics:
         return asdict(self)
 
 
-def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            torch.save(dict(payload), stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        if os.path.lexists(temporary_path):
-            os.unlink(temporary_path)
-
-
 def _cpu_clone(value: Any) -> Any:
     if isinstance(value, Tensor):
         return value.detach().cpu().clone()
@@ -158,7 +128,7 @@ class RLTokenStage1Trainer:
             raise ValueError("RLT Stage 1 representation width disagrees")
         self.model = model.to(device=torch.device(device))
         self.representation_contract = representation
-        self.representation_contract_fingerprint = _canonical_fingerprint(
+        self.representation_contract_fingerprint = canonical_json_sha256(
             representation
         )
         self.config = config or RLTokenStage1Config()
@@ -244,7 +214,7 @@ class RLTokenStage1Trainer:
             "model": _cpu_clone(self.model.state_dict()),
             "optimizer": _cpu_clone(self.optimizer.state_dict()),
         }
-        _atomic_torch_save(checkpoint_path, payload)
+        atomic_torch_save(checkpoint_path, payload)
         return checkpoint_path
 
     def load_checkpoint(self, path: str | os.PathLike[str]) -> int:
@@ -303,7 +273,7 @@ class RLTokenStage1Trainer:
             self.model,
             self.representation_contract,
         )
-        _atomic_torch_save(artifact_path, payload)
+        atomic_torch_save(artifact_path, payload)
         loaded = load_frozen_rl_token_encoder(artifact_path, device="cpu")
         if loaded.artifact_fingerprint != payload["artifact_fingerprint"]:
             raise RuntimeError("RLT Stage 1 encoder export verification failed")

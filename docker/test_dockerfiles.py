@@ -29,6 +29,13 @@ def test_main_compose_mounts_shared_s6_runner():
     ) in contents
 
 
+def test_groot_compose_exposes_shared_hf_hub_read_only_for_one_shot_jobs():
+    contents = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
+    groot_section = contents.split("\n  groot:\n", maxsplit=1)[1]
+
+    assert "./huggingface/hub:/huggingface_hub:ro" in groot_section
+
+
 def test_interactive_bashrc_includes_simple_ros_zenoh_block():
     dockerfiles = (
         REPO_ROOT / "docker" / "Dockerfile.arm64",

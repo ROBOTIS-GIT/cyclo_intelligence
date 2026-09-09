@@ -88,6 +88,18 @@ WORKDIR /gr00t
 
 # Copy the pinned N1.7 Isaac-GR00T checkout from the submodule.
 COPY Isaac-GR00T/ ./
+COPY patches/isaac_gr00t_training_time_rtc*.patch /tmp/tt_rtc_patches/
+RUN for patch in /tmp/tt_rtc_patches/*.patch; do \
+        if git apply --check "$patch"; then \
+            git apply "$patch"; \
+        elif git apply --reverse --check "$patch"; then \
+            echo "Isaac-GR00T TT-RTC patch already present: $patch"; \
+        else \
+            echo "Isaac-GR00T TT-RTC patch does not match the pinned source: $patch" >&2; \
+            exit 1; \
+        fi; \
+    done \
+    && rm -rf /tmp/tt_rtc_patches
 
 # Use the official Orin-specific N1.7 dependency manifest instead of manually
 # listing torch / triton / flash-attn versions in this Dockerfile.

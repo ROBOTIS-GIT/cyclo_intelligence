@@ -6,6 +6,10 @@
 
 workspace/
 .git/
+# Isaac-GR00T is a git submodule. Its `.git` entry is a host-relative
+# gitdir pointer file rather than a directory; copying it into the image
+# leaves a broken repository pointer and makes `git apply` fail.
+Isaac-GR00T/.git
 __pycache__/
 *.pyc
 *.pyo

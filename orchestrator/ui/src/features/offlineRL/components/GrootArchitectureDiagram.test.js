@@ -21,7 +21,7 @@ describe('GrootArchitectureDiagram', () => {
     );
     expect(actionModule).toBeDisabled();
 
-    expect(screen.getByText(/Official fine-tuning defaults/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Official fine-tuning defaults/i)).not.toBeInTheDocument();
     expect(screen.getByText('Locked policy')).toBeInTheDocument();
   });
 
@@ -58,7 +58,7 @@ describe('GrootArchitectureDiagram', () => {
 
     expect(screen.getByTestId('groot-architecture-diagram'))
       .toHaveAttribute('data-architecture-mode', 'all-frozen');
-    expect(screen.getByText(/RLT base policy · all modules frozen/i)).toBeInTheDocument();
+    expect(screen.queryByText(/RLT base policy · all modules frozen/i)).not.toBeInTheDocument();
     expect(screen.getAllByRole('button')).toHaveLength(3);
     for (const node of screen.getAllByRole('button')) {
       expect(node).toHaveAttribute('aria-pressed', 'false');

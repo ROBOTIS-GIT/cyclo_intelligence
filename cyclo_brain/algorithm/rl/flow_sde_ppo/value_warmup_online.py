@@ -18,6 +18,8 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from cyclo_brain.algorithm.common.artifact_io import file_sha256
+
 from .value_warmup import VALUE_WARMUP_FORMAT, module_sha256
 from .value_warmup_cli import BUNDLE_FORMAT, REQUIRED_POLICY_ARTIFACTS
 from .value_warmup_eval import validate_current_value_head_state_dict
@@ -50,14 +52,11 @@ def _mapping(value: Any, *, name: str) -> Mapping[str, Any]:
 
 
 def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
+        digest = file_sha256(path)
     except FileNotFoundError:
         raise FileNotFoundError(f"required policy artifact is missing: {path}") from None
-    return f"sha256:{digest.hexdigest()}"
+    return f"sha256:{digest}"
 
 
 def _state_dict_sha256(state_dict: Mapping[str, Tensor]) -> str:

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
-import os
-import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
@@ -14,6 +11,8 @@ from typing import Any
 
 import torch
 from torch import Tensor, nn
+
+from cyclo_brain.algorithm.common import atomic_torch_save, module_state_sha256
 
 from .learner import ACTTD3Learner, ACTTD3UpdateResult
 from .lerobot_offline import (
@@ -47,48 +46,6 @@ def _positive_integer(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"ACT-TD3 warm-up {name} must be a positive integer")
     return value
-
-
-def _module_sha256(module: nn.Module) -> str:
-    """Hash exact parameter and buffer values without serializing locations."""
-
-    digest = hashlib.sha256()
-    for name, tensor in module.state_dict().items():
-        value = tensor.detach().cpu().contiguous()
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(value.dtype).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(tuple(value.shape)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"))
-    return digest.hexdigest()
-
-
-def _atomic_torch_save(path: Path, state: Mapping[str, Any]) -> None:
-    """Durably replace one checkpoint after its temporary file is complete."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            torch.save(dict(state), stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
 
 
 class ACTTD3CriticWarmupRunner:
@@ -198,8 +155,8 @@ class ACTTD3CriticWarmupRunner:
         # addition to the update gate and exact tensor hash checks below.
         learner.actor.requires_grad_(False)
         learner.actor_target.requires_grad_(False)
-        self._baseline_actor_sha256 = _module_sha256(learner.actor)
-        self._baseline_target_actor_sha256 = _module_sha256(learner.actor_target)
+        self._baseline_actor_sha256 = module_state_sha256(learner.actor)
+        self._baseline_target_actor_sha256 = module_state_sha256(learner.actor_target)
         if self._baseline_actor_sha256 != self._baseline_target_actor_sha256:
             raise ValueError("ACT-TD3 warm-up actor and target actor must start equal")
         self._elapsed_seconds = 0.0
@@ -261,8 +218,8 @@ class ACTTD3CriticWarmupRunner:
         if self.learner.actor.training or self.learner.actor_target.training:
             raise RuntimeError("ACT-TD3 warm-up actors must remain in evaluation mode")
         if exact and (
-            _module_sha256(self.learner.actor) != self._baseline_actor_sha256
-            or _module_sha256(self.learner.actor_target)
+            module_state_sha256(self.learner.actor) != self._baseline_actor_sha256
+            or module_state_sha256(self.learner.actor_target)
             != self._baseline_target_actor_sha256
         ):
             raise RuntimeError("ACT-TD3 actor tensors changed during critic warm-up")
@@ -339,9 +296,10 @@ class ACTTD3CriticWarmupRunner:
 
     def _save_checkpoint(self, elapsed_seconds: float) -> None:
         self._assert_actor_invariant(exact=True)
-        _atomic_torch_save(
+        atomic_torch_save(
             self.checkpoint_path,
             self._checkpoint_state(elapsed_seconds),
+            sync_directory=True,
         )
         self._durable_checkpoint_updates = self.learner.completed_critic_updates
 

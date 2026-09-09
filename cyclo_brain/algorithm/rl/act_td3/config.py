@@ -5,27 +5,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from cyclo_brain.model.act import (
+from cyclo_brain.contracts.act import (
     ACT_TRAINABLE_GROUPS,
-    canonicalize_act_trainable_groups,
+    ACT_TD3_ACTOR_OBJECTIVES,
+    canonicalize_act_td3_actor_objective,
+    effective_act_td3_trainable_groups,
 )
-
-
-ACT_TD3_ACTOR_OBJECTIVES = ("td3", "td3_bc")
-"""Canonical actor objectives exposed by the ACT-TD3 training contract."""
-
-
-def canonicalize_act_td3_actor_objective(value: str) -> str:
-    """Validate one exact, checkpoint-stable ACT-TD3 actor objective ID."""
-
-    if not isinstance(value, str):
-        raise TypeError("ACT-TD3 actor_objective must be a string")
-    if value not in ACT_TD3_ACTOR_OBJECTIVES:
-        raise ValueError(
-            "ACT-TD3 actor_objective must be one of: "
-            + ", ".join(ACT_TD3_ACTOR_OBJECTIVES)
-        )
-    return value
 
 
 def _finite_real(value: float, name: str, *, minimum: float, inclusive: bool) -> None:
@@ -43,7 +28,7 @@ def _finite_real(value: float, name: str, *, minimum: float, inclusive: bool) ->
 class ACTTD3Config:
     """Algorithm settings for an ACT executed-prefix macro policy.
 
-    This is not the scalar-action :class:`TD3Config`. ``td3`` uses only the
+    This is not a scalar-action TD3 configuration. ``td3`` uses only the
     delayed ``-Q1`` chunk objective. ``td3_bc`` adds the official ACT CVAE loss
     and a deterministic deployed-path BC anchor on successful episodes only;
     its Q coefficient is linearly ramped for conservative offline training.
@@ -74,19 +59,9 @@ class ACTTD3Config:
             "actor_objective",
             canonicalize_act_td3_actor_objective(self.actor_objective),
         )
-        actor_trainable_groups = canonicalize_act_trainable_groups(
-            self.actor_trainable_groups
+        actor_trainable_groups = effective_act_td3_trainable_groups(
+            self.actor_objective, self.actor_trainable_groups
         )
-        # The deployed zero-latent action path used by pure TD3 never traverses
-        # the target-action-only CVAE encoder. Keep default/all-group configs
-        # usable while ensuring checkpoints do not falsely advertise it as a
-        # trainable pure-TD3 parameter group.
-        if self.actor_objective == "td3":
-            actor_trainable_groups = tuple(
-                group
-                for group in actor_trainable_groups
-                if group != "cvae_encoder"
-            )
         object.__setattr__(
             self,
             "actor_trainable_groups",

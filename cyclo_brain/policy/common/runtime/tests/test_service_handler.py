@@ -147,7 +147,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertTrue(response.success)
         self.assertTrue(loop.configures[0]["rlt_enabled"])
 
-    def test_start_applies_publish_mode(self) -> None:
+    def test_start_rejects_publish_mode_elevation_after_simulation_load(self) -> None:
         handler, _session, loop = self._handler()
         handler.handle(SimpleNamespace(
             command=CMD_LOAD,
@@ -162,16 +162,18 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
             publish_to_robot=True,
         ))
 
-        self.assertTrue(response.success)
-        self.assertEqual(loop.starts[-1], True)
+        self.assertFalse(response.success)
+        self.assertIn("Deploy Target differs", response.message)
+        self.assertEqual(loop.starts, [])
 
-    def test_resume_applies_publish_mode(self) -> None:
+    def test_resume_rejects_publish_mode_elevation_after_simulation_load(self) -> None:
         handler, _session, loop = self._handler()
         handler.handle(SimpleNamespace(
             command=CMD_LOAD,
             model_path="/models/policy",
             robot_type="ffw",
             task_instruction="pick",
+            publish_to_robot=False,
         ))
         handler.handle(SimpleNamespace(command=CMD_START, publish_to_robot=False))
 
@@ -181,9 +183,29 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
             publish_to_robot=True,
         ))
 
+        self.assertFalse(response.success)
+        self.assertIn("Deploy Target differs", response.message)
+        self.assertEqual(loop.starts, [False])
+        self.assertEqual(loop.task_instructions, [])
+
+    def test_start_uses_robot_mode_when_policy_was_loaded_for_robot(self) -> None:
+        handler, session, loop = self._handler()
+        handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+            publish_to_robot=True,
+        ))
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_START,
+            publish_to_robot=True,
+        ))
+
         self.assertTrue(response.success)
+        self.assertTrue(session.publish_to_robot)
         self.assertEqual(loop.starts[-1], True)
-        self.assertEqual(loop.task_instructions[-1], "place")
 
     def test_running_session_forwards_action_policy_switch(self) -> None:
         handler, _session, loop = self._handler()
@@ -211,6 +233,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
             model_path="/models/policy",
             robot_type="ffw",
             task_instruction="pick",
+            publish_to_robot=True,
         ))
         handler.handle(SimpleNamespace(command=CMD_START, publish_to_robot=True))
 

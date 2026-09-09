@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +11,7 @@ from typing import Any
 
 import torch
 
+from cyclo_brain.algorithm.common.artifact_io import atomic_json_save
 from cyclo_brain.model.multi_task_dit.checkpoint_validation import (
     assert_deployment_artifacts,
     validate_policy_contract,
@@ -88,27 +87,7 @@ def _read_json(path: Path, *, name: str) -> dict[str, Any]:
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(
-                payload,
-                stream,
-                allow_nan=False,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_json_save(path, payload, ensure_ascii=False, indent=2, newline=True)
 
 
 def _require_mapping(value: Any, *, name: str) -> Mapping[str, Any]:

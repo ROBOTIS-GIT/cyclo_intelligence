@@ -8,9 +8,7 @@ progress reporting, and the cooperative stop boundary.
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import random
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +19,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from cyclo_brain.algorithm.common import atomic_json_save
 from cyclo_brain.model.act.trainability import (
     ACT_TRAINABLE_GROUPS,
     apply_act_trainable_groups,
@@ -209,19 +208,6 @@ class ACTBCTrainingResult:
         return {"event": "result", **self.__dict__}
 
 
-def _atomic_json_save(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    payload = json.dumps(
-        dict(value),
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    )
-    temporary.write_text(payload + "\n", encoding="utf-8")
-    os.replace(temporary, path)
-
-
 def write_failed_result(output_dir: Path, error: BaseException) -> dict[str, Any]:
     """Persist a machine-readable terminal failure when CLI setup had started."""
 
@@ -235,7 +221,7 @@ def write_failed_result(output_dir: Path, error: BaseException) -> dict[str, Any
     }
     output_dir = Path(output_dir).expanduser().resolve()
     if output_dir.exists() and output_dir.is_dir():
-        _atomic_json_save(output_dir / "result.json", value)
+        atomic_json_save(output_dir / "result.json", value, ensure_ascii=True)
     return value
 
 
@@ -278,7 +264,9 @@ def _prepare_output(config: ACTBCTrainingConfig) -> None:
             )
     else:
         config.output_dir.mkdir(parents=True)
-    _atomic_json_save(config.output_dir / "manifest.json", _manifest(config))
+    atomic_json_save(
+        config.output_dir / "manifest.json", _manifest(config), ensure_ascii=True
+    )
 
 
 def _finite_metric(value: Any, *, name: str) -> float:
@@ -324,7 +312,9 @@ def _emit_progress(
     progress: ACTBCTrainingProgress,
     callback: Callable[[ACTBCTrainingProgress], None] | None,
 ) -> None:
-    _atomic_json_save(config.output_dir / "progress.json", progress.to_dict())
+    atomic_json_save(
+        config.output_dir / "progress.json", progress.to_dict(), ensure_ascii=True
+    )
     if callback is not None:
         callback(progress)
 
@@ -601,7 +591,9 @@ def run_training(
         model_path=str(last_model_path) if status == "complete" else None,
         checkpoint_path=str(last_training_state) if last_training_state is not None else None,
     )
-    _atomic_json_save(config.output_dir / "result.json", result.to_dict())
+    atomic_json_save(
+        config.output_dir / "result.json", result.to_dict(), ensure_ascii=True
+    )
     return result
 
 

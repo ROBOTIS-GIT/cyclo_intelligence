@@ -8,19 +8,17 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from cyclo_brain.model.common.sg2 import MULTI_TASK_DIT_CAMERA_KEYS
+
 
 OBSERVATION_STATE = "observation.state"
 LANGUAGE_TOKENS = "observation.language.tokens"
 LANGUAGE_ATTENTION_MASK = "observation.language.attention_mask"
 DEFAULT_TASK_INSTRUCTION = "ACT_dataset"
 
-# This is the canonical Cyclo SG2 order. The checkpoint config must preserve
-# the same order because MultiTaskDiT concatenates camera features.
-CYCLO_SG2_CAMERA_KEYS = (
-    "observation.images.rgb.cam_left_wrist",
-    "observation.images.rgb.cam_left_head",
-    "observation.images.rgb.cam_right_wrist",
-)
+# Backwards-compatible public name. This order is explicitly MultiTaskDiT's;
+# GR00T/RLT uses a different processor order for the same three cameras.
+CYCLO_SG2_CAMERA_KEYS = MULTI_TASK_DIT_CAMERA_KEYS
 
 
 def with_default_task_instruction(

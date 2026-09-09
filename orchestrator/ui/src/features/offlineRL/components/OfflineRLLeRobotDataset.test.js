@@ -13,10 +13,9 @@ import {
 } from '../../../utils/offlineRlApi';
 import offlineRLReducer, {
   setOfflineRLConversionDestinationPath,
-  selectOfflineRLDatasetPaths,
   setOfflineRLConvertedDatasetPaths,
-  setOfflineRLDatasetPath,
   setOfflineRLDatasetSelection,
+  selectOfflineRLDatasetSelections,
 } from '../offlineRLSlice';
 import OfflineRLLeRobotDataset, {
   buildSelectedTrainingComposition,
@@ -49,7 +48,7 @@ const renderDataset = () => {
       offlineRL: offlineRLReducer,
     },
   });
-  store.dispatch(setOfflineRLDatasetPath(datasetPath));
+  store.dispatch(setOfflineRLDatasetSelection({ path: datasetPath, version: 'v3.0' }));
   render(
     <Provider store={store}>
       <OfflineRLLeRobotDataset />
@@ -277,7 +276,7 @@ test('renders converted episodes with an episode-weighted success percentage', a
   expect(screen.getByTestId('offline-rl-lerobot-episode-region'))
     .toHaveClass('min-h-[232px]', 'shrink-0');
   expect(screen.getByTestId('replay-buffer-composition-layout'))
-    .toHaveClass('md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]');
+    .toHaveClass('pg-replay-layout');
   expect(screen.getByText('Training composition')).toBeInTheDocument();
   expect(screen.getByRole('group', { name: 'Training Data Epochs' }))
     .toHaveClass('max-h-[108px]', 'overflow-y-auto');
@@ -651,10 +650,13 @@ test('keeps checked v3 roots when a new conversion is added to dataset_paths', a
   const epoch1V30Checkbox = epoch1Checkboxes.find((checkbox) => !checkbox.disabled);
   const epoch1V21Checkbox = epoch1Checkboxes.find((checkbox) => checkbox.disabled);
   expect(epoch1V30Checkbox).toBeChecked();
+  expect(epoch1V30Checkbox.parentElement.parentElement)
+    .toHaveClass('h-11', 'text-[14px]', 'bg-[#e6eee5]');
   expect(epoch1V21Checkbox).not.toBeChecked();
   expect(screen.getByLabelText('Include data_epoch_0000 v3.0 in training')).toBeChecked();
   await waitFor(() => {
-    expect(selectOfflineRLDatasetPaths(store.getState())).toEqual([epoch0, epoch1]);
+    expect(selectOfflineRLDatasetSelections(store.getState()).map(({ path }) => path))
+      .toEqual([epoch0, epoch1]);
   });
   expect(screen.getByText('2 included')).toBeInTheDocument();
 });

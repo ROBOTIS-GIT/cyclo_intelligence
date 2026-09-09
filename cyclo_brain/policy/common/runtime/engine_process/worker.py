@@ -101,6 +101,7 @@ class EngineWorker:
     def _get_action(self, request: EngineCommandRequest) -> EngineCommandResponse:
         result = self._engine.get_action_chunk(
             SimpleNamespace(
+                seq_id=request.seq_id,
                 task_instruction=request.task_instruction,
                 action_policy_mode=request.action_policy_mode,
                 action_request_mode=request.action_request_mode,

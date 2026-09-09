@@ -72,11 +72,18 @@ describe('OfflineRLTrainingGuideModal', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'GR00T' }));
     const grootGuide = screen.getByTestId('training-guide-groot');
     expect(grootGuide).toHaveTextContent('10 × 19 @ 15 Hz');
-    expect(grootGuide).toHaveTextContent('not connected to Start Training');
-    expect(screen.getByRole('link', { name: /RLinf: RL on GR00T Models/i }))
+    expect(grootGuide).toHaveTextContent(
+      'Train Stage 1 once for a frozen GR00T checkpoint'
+    );
+    expect(grootGuide).toHaveTextContent(
+      'Stage 2 freezes GR00T and the retained encoder'
+    );
+    expect(screen.getByRole('link', {
+      name: /Physical Intelligence: Precise Manipulation with Efficient Online RL/i,
+    }))
       .toHaveAttribute(
         'href',
-        'https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/gr00t.html'
+        'https://www.pi.website/research/rlt'
       );
 
     fireEvent.click(screen.getByRole('tab', { name: 'Pi0.5' }));
@@ -104,6 +111,29 @@ describe('OfflineRLTrainingGuideModal', () => {
     fireEvent.keyDown(piTab, { key: 'Home' });
     expect(quickStartTab).toHaveFocus();
     expect(quickStartTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('keeps shared setting explanations in Quick Start', () => {
+    renderGuide();
+    const guide = screen.getByTestId('training-guide-quick-start');
+    expect(guide).toHaveTextContent('Training controls');
+    expect(guide).toHaveTextContent('One step is one minibatch optimizer update');
+    expect(guide).toHaveTextContent('Save an intermediate checkpoint every N optimizer steps');
+    expect(guide).toHaveTextContent('click outside or press Escape to close');
+  });
+
+  test.each([
+    ['ACT', 'Twin chunk Q-functions', '1:1 is allowed'],
+    ['Diffusion Policy', 'State value V(s)', 'Value LR'],
+    ['GR00T', 'Frozen Token Feature MSE', 'RLT Source'],
+    ['Pi0.5', 'SigLIP + PaliGemma', 'does not submit a Pi0.5 training configuration'],
+  ])('preserves the moved network and setting explanations for %s', (tab, network, setting) => {
+    renderGuide();
+    fireEvent.click(screen.getByRole('tab', { name: tab }));
+    expect(screen.getByText('Network & settings reference')).toBeInTheDocument();
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveTextContent(network);
+    expect(panel).toHaveTextContent(setting);
   });
 
   test('closes with Back, Escape, and the backdrop while restoring focus', () => {

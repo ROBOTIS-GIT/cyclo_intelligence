@@ -24,7 +24,12 @@ from .stage2 import (
     RLTStage2Update,
     stage2_spec_fingerprint,
 )
-from .stage2_bundle import InitializationMode, RLTStage2Run
+from .stage2_bundle import (
+    InitializationMode,
+    RLTStage2Run,
+    build_stage2_training_round,
+    validate_stage2_replay_lineage,
+)
 from .shadow import (
     GR00TRLTShadowPolicy,
     RLTShadowOutput,
@@ -57,4 +62,6 @@ __all__ = [
     "load_groot_rlt_shadow_policy",
     "rl_token_reconstruction_loss",
     "stage2_spec_fingerprint",
+    "build_stage2_training_round",
+    "validate_stage2_replay_lineage",
 ]

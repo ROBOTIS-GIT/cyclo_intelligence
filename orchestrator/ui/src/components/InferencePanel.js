@@ -158,7 +158,7 @@ const InferencePanel = ({
         next.accelerationMode = 'pytorch';
         next.accelerationEnginePath = '';
         next.inferenceHz = 15;
-        next.controlHz = 15;
+        next.controlHz = 100;
       }
       dispatch(setInferenceTaskInfo(next));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
@@ -988,7 +988,7 @@ const InferencePanel = ({
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
             <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-              <Tooltip content="Rate of commands sent to the robot." position="bottom">
+              <Tooltip content="Rate of commands sent to the robot. TT-RTC keeps 15 Hz source actions and interpolates them to 100 Hz." position="bottom">
                 <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
               </Tooltip>
               <span>Control Hz</span>

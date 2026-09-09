@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import torch
 
@@ -14,6 +18,7 @@ GROOT_ROOT = Path(__file__).resolve().parents[1]
 if str(GROOT_ROOT) not in sys.path:
     sys.path.insert(0, str(GROOT_ROOT))
 
+from runtime import rlt_stage1_training_cli as cli  # noqa: E402
 from runtime.rlt_stage1_training_cli import (  # noqa: E402
     _FeatureCache,
     _FeatureCacheWriter,
@@ -78,6 +83,36 @@ class RLTStage1TrainingCLITests(unittest.TestCase):
 
         self.assertEqual(len(args.dataset_root), 2)
         self.assertEqual(args.steps, 100)
+
+    def test_main_reports_machine_readable_error_event(self) -> None:
+        argv = [
+            "--groot-checkpoint",
+            "/workspace/model/groot/showroom_groot",
+            "--dataset-root",
+            "/workspace/lerobot/a-v21",
+            "--output-dir",
+            "/workspace/checkpoint/rlt/stage1/run",
+            "--job-id",
+            "run",
+            "--steps",
+            "100",
+            "--batch-size",
+            "1",
+            "--save-freq",
+            "25",
+        ]
+        stderr = io.StringIO()
+        with mock.patch.object(cli, "run", side_effect=PermissionError("denied")):
+            with redirect_stderr(stderr):
+                with self.assertRaises(PermissionError):
+                    cli.main(argv)
+
+        payload = json.loads(stderr.getvalue().splitlines()[0])
+        self.assertEqual(payload["event"], "error")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["job_id"], "run")
+        self.assertEqual(payload["error"], "PermissionError: denied")
+        self.assertIn("PermissionError: denied", payload["message"])
 
 
 if __name__ == "__main__":

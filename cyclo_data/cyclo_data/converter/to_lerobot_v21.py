@@ -1981,6 +1981,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         # Optional subtask metadata mirrors the per-frame subtask_index.
         self._write_subtasks_parquet(output_dir, episodes_data)
         self._write_subtask_annotations(output_dir, episodes_data)
+        self._write_rlt_sidecars(output_dir, episodes_data)
 
         # Write metadata files
         self._write_info_json()

@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import argparse
-import json
-import math
-import signal
 import sys
-import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
-from cyclo_brain.algorithm.il.act_bc.dataset import (
-    RootSelection,
-    parse_success_episode_csv,
+from cyclo_brain.algorithm.il.common.cli import (
+    episode_csv as _episode_csv,
+    json_line as _json_line,
+    non_negative_integer as _non_negative,
+    positive_float as _positive_float,
+    positive_integer as _positive,
+    run_with_stop_signals,
 )
+from cyclo_brain.algorithm.il.common.dataset import RootSelection
 
 from .training import (
     DEFAULT_TASK_INSTRUCTION,
@@ -26,43 +26,6 @@ from .training import (
     training_manifest,
     write_failed_result,
 )
-
-
-def _positive(value: str) -> int:
-    try:
-        parsed = int(value, 10)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected a base-10 integer") from error
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
-
-
-def _non_negative(value: str) -> int:
-    try:
-        parsed = int(value, 10)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected a base-10 integer") from error
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("expected a non-negative integer")
-    return parsed
-
-
-def _positive_float(value: str) -> float:
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected a number") from error
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError("expected a finite positive number")
-    return parsed
-
-
-def _episode_csv(value: str) -> tuple[int, ...]:
-    try:
-        return parse_success_episode_csv(value)
-    except (TypeError, ValueError) as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -158,19 +121,6 @@ def config_from_args(args: argparse.Namespace) -> MultiTaskDiTILConfig:
     )
 
 
-def _json_line(value: Mapping[str, Any], *, stream: Any = sys.stdout) -> None:
-    print(
-        json.dumps(
-            dict(value),
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        file=stream,
-        flush=True,
-    )
-
-
 def _progress_line(progress: MultiTaskDiTILProgress) -> None:
     _json_line(progress.to_dict())
 
@@ -181,20 +131,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = build_parser().parse_args(argv)
         config = config_from_args(args)
         _json_line(training_manifest(config))
-        stop_requested = threading.Event()
-        previous_sigint = signal.getsignal(signal.SIGINT)
-        previous_sigterm = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, lambda _signum, _frame: stop_requested.set())
-        signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_requested.set())
-        try:
-            result = run_training(
+        result = run_with_stop_signals(
+            lambda should_stop: run_training(
                 config,
-                should_stop=stop_requested.is_set,
+                should_stop=should_stop,
                 progress_callback=_progress_line,
             )
-        finally:
-            signal.signal(signal.SIGINT, previous_sigint)
-            signal.signal(signal.SIGTERM, previous_sigterm)
+        )
         _json_line(result.to_dict())
         return 0
     except KeyboardInterrupt:

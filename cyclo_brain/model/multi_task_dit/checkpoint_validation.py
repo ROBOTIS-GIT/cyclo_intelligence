@@ -21,6 +21,12 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from cyclo_brain.model.common.sg2 import (
+    MULTI_TASK_DIT_ACTION_DIM,
+    MULTI_TASK_DIT_ACTION_HORIZON,
+    MULTI_TASK_DIT_STATE_DIM,
+)
+
 from .flow_sde_adapter import CYCLO_SG2_CAMERA_KEYS, MultiTaskDiTFlowAdapter
 
 
@@ -29,11 +35,11 @@ class MultiTaskDiTDeploymentContract:
     """The initial Cyclo SG2 policy contract used by training and deployment."""
 
     camera_keys: tuple[str, ...] = CYCLO_SG2_CAMERA_KEYS
-    state_dim: int = 22
-    action_dim: int = 22
-    horizon: int = 16
+    state_dim: int = MULTI_TASK_DIT_STATE_DIM
+    action_dim: int = MULTI_TASK_DIT_ACTION_DIM
+    horizon: int = MULTI_TASK_DIT_ACTION_HORIZON
     n_obs_steps: int = 1
-    n_action_steps: int = 16
+    n_action_steps: int = MULTI_TASK_DIT_ACTION_HORIZON
     objective: str = "flow_matching"
     sigma_min: float = 0.0
 

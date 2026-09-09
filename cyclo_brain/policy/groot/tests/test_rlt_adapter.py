@@ -11,12 +11,14 @@ import unittest
 
 import numpy as np
 import torch
+from unittest import mock
 
 
 GROOT_ROOT = Path(__file__).resolve().parents[1]
 if str(GROOT_ROOT) not in sys.path:
     sys.path.insert(0, str(GROOT_ROOT))
 
+from runtime import rlt_adapter as rlt_adapter_module  # noqa: E402
 from runtime.rlt_adapter import (  # noqa: E402
     GR00TRLTInferenceAdapter,
     GR00TRLTTokenExtractor,
@@ -192,6 +194,7 @@ class _Shadow:
         chunk_length=10,
         action_dim=19,
         proprio_dim=19,
+        rl_token_artifact_fingerprint='e' * 64,
     )
 
     def __init__(self):
@@ -215,10 +218,63 @@ class _Shadow:
             :, reference_offset_steps : reference_offset_steps + 10
         ].clone()
         batch = tokens.shape[0]
-        return SimpleNamespace(action_mean=torch.full((batch, 10, 19), 0.25))
+        return SimpleNamespace(
+            action_mean=torch.full((batch, 10, 19), 0.25),
+            z_rl=tokens.mean(dim=1), reference_prefix=self.reference_slice,
+        )
 
 
 class RLTInferenceAdapterTests(unittest.TestCase):
+    def test_load_validates_stage1_and_stage2_runtime_provenance(self) -> None:
+        policy = _Policy()
+        policy.model.device = torch.device("cpu")
+        shadow = _Shadow()
+        shadow.encoder = SimpleNamespace(representation_contract={"contract": True})
+        bundle = SimpleNamespace(
+            root=Path("/bundle"),
+            encoder=Path("/bundle/artifacts/rl_token_encoder.pt"),
+            actor=Path("/bundle/artifacts/rlt_actor.pt"),
+        )
+        provenance = SimpleNamespace(weight_fingerprint="a" * 64)
+
+        with mock.patch(
+            "cyclo_brain.algorithm.rl.rlt.load_groot_rlt_shadow_policy",
+            return_value=shadow,
+        ), mock.patch.object(
+            rlt_adapter_module,
+            "resolve_rlt_bundle",
+            return_value=bundle,
+        ), mock.patch.object(
+            rlt_adapter_module,
+            "build_groot_rlt_provenance",
+            return_value=provenance,
+        ), mock.patch.object(
+            rlt_adapter_module,
+            "validate_stage1_encoder_provenance",
+        ) as validate_stage1, mock.patch.object(
+            rlt_adapter_module,
+            "validate_stage2_bundle_provenance",
+        ) as validate_stage2, mock.patch.object(
+            rlt_adapter_module, 'file_sha256', return_value='b' * 64,
+        ):
+            adapter = GR00TRLTInferenceAdapter.load(
+                policy,
+                "/bundle",
+                "/model",
+            )
+
+        self.assertIs(adapter.shadow_policy, shadow)
+        self.assertEqual(adapter.recording_identity['actor_sha256'], 'b' * 64)
+        validate_stage1.assert_called_once_with(
+            shadow.encoder.representation_contract,
+            provenance,
+        )
+        validate_stage2.assert_called_once_with(
+            Path("/bundle"),
+            spec=shadow.spec,
+            provenance=provenance,
+        )
+
     def test_deployment_qualification_fails_closed(self) -> None:
         self.assertTrue(is_deployment_qualified("deployment_qualified"))
         self.assertFalse(
@@ -329,6 +385,41 @@ class RLTInferenceAdapterTests(unittest.TestCase):
                 delay_steps=6,
                 action_horizon=16,
             )
+
+    def test_recording_captures_actual_token_and_shifted_reference_only_on_request(self):
+        policy, shadow = _TTRTCPolicy(), _Shadow()
+        adapter = GR00TRLTInferenceAdapter(
+            policy, shadow,
+            SimpleNamespace(root=Path('.'), encoder=Path('e'), actor=Path('a')),
+        )
+        adapter.require_tt_rtc_capability = lambda: None
+        kwargs = dict(
+            committed_action_prefix=np.zeros((1, 6, 19), dtype=np.float32),
+            delay_steps=6, action_horizon=16,
+        )
+        action = adapter.get_action_tt_rtc({}, capture_context=True, **kwargs)
+        recorded = adapter.recording_context
+        np.testing.assert_array_equal(recorded['z_rl'], shadow.tokens.mean(dim=1))
+        np.testing.assert_array_equal(recorded['mlp_reference'], shadow.reference[:, 6:16])
+        np.testing.assert_array_equal(recorded['action_mean'], action['action'])
+        self.assertEqual(recorded['reference_actions'].shape, (1, 16, 19))
+        self.assertTrue(all(isinstance(value, np.ndarray) for value in recorded.values()))
+        adapter.get_action_tt_rtc({}, **kwargs)
+        self.assertIsNone(adapter.recording_context)
+
+    def test_standard_rlt_recording_retains_unshifted_reference(self):
+        policy, shadow = _Policy(), _Shadow()
+        adapter = GR00TRLTInferenceAdapter(
+            policy, shadow,
+            SimpleNamespace(root=Path('.'), encoder=Path('e'), actor=Path('a')),
+        )
+        adapter.get_action(
+            {'state': {'state': np.zeros((1, 1, 19), dtype=np.float32)}},
+            capture_context=True,
+        )
+        np.testing.assert_array_equal(
+            adapter.recording_context['mlp_reference'], shadow.reference[:, :10],
+        )
 
     def test_stage1_extractor_freezes_model_and_skips_action_head(self) -> None:
         policy = _Policy()

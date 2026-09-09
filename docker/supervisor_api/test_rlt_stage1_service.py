@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -59,11 +60,13 @@ def _write_v21(path: Path) -> Path:
 
 def _write_v30(path: Path) -> Path:
     meta = path / "meta"
-    meta.mkdir(parents=True)
+    (meta / "episodes/chunk-000").mkdir(parents=True)
     (meta / "info.json").write_text(
         json.dumps({"codebase_version": "v3.0", "total_episodes": 1}),
         encoding="utf-8",
     )
+    (meta / "tasks.parquet").write_bytes(b"tasks")
+    (meta / "episodes/chunk-000/file-000.parquet").write_bytes(b"episodes")
     return path
 
 
@@ -75,6 +78,48 @@ def _write_groot(path: Path) -> Path:
     )
     (path / "model-00001-of-00001.safetensors").write_bytes(b"weights")
     return path
+
+
+def _write_completed_stage1_run(
+    output_root: Path,
+    *,
+    dataset: Path,
+    groot: Path,
+    steps: int,
+    job_id: str,
+) -> Path:
+    output = output_root / f"steps_{steps:06d}_{job_id[:12]}"
+    encoder = output / "artifacts" / "rl_token_encoder.pt"
+    checkpoint = output / "training_state" / "rlt_stage1.pt"
+    encoder.parent.mkdir(parents=True)
+    checkpoint.parent.mkdir(parents=True)
+    encoder.write_bytes(b"encoder")
+    checkpoint.write_bytes(b"checkpoint")
+    (checkpoint.parent / "rlt_stage1.pt.run.json").write_text(
+        json.dumps(
+            {
+                "format": service._STAGE1_RUN_FORMAT,
+                "status": "completed",
+                "job_id": job_id,
+                "dataset_roots": [str(dataset)],
+                "groot_checkpoint": str(groot),
+                "policy_weight_fingerprint": "a" * 64,
+                "policy_checkpoint_fingerprint": "b" * 64,
+                "policy_processor_fingerprint": "c" * 64,
+                "action_normalization_id": "showroom-normalized-19d",
+                "action_codec_id": "normalized-chunk-10x19",
+                "completed_steps": steps,
+                "batch_size": 2,
+                "artifact": {
+                    "path": str(encoder),
+                    "artifact_fingerprint": "d" * 64,
+                },
+                "checkpoint": {"path": str(checkpoint)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return output
 
 
 @pytest.fixture
@@ -136,13 +181,95 @@ def test_routes_are_dedicated_to_stage1():
     assert supervisor.status().status == "idle"
 
 
+def test_restart_recovers_newest_verified_completed_stage1(roots):
+    dataset_root, model_root, _, output_root, _ = roots
+    dataset = _write_v30(dataset_root / "selected")
+    groot = _write_groot(model_root / "showroom_groot")
+    older = _write_completed_stage1_run(
+        output_root,
+        dataset=dataset,
+        groot=groot,
+        steps=100,
+        job_id="a" * 32,
+    )
+    newer = _write_completed_stage1_run(
+        output_root,
+        dataset=dataset,
+        groot=groot,
+        steps=200,
+        job_id="b" * 32,
+    )
+    os.utime(older / "training_state/rlt_stage1.pt.run.json", ns=(1, 1))
+    os.utime(newer / "training_state/rlt_stage1.pt.run.json", ns=(2, 2))
+
+    status = _supervisor().status()
+
+    assert status.status == "completed"
+    assert status.job_id == "b" * 32
+    assert status.output_dir == str(newer.resolve())
+    assert status.encoder_artifact_path == str(
+        newer.resolve() / "artifacts/rl_token_encoder.pt"
+    )
+    assert status.checkpoint_path == str(
+        newer.resolve() / "training_state/rlt_stage1.pt"
+    )
+    assert status.total_steps == 200
+    assert status.batch_size == 2
+    assert status.save_freq == 0
+    assert "Recovered" in status.message
+
+
+def test_restart_skips_newer_partial_stage1_publication(roots):
+    dataset_root, model_root, _, output_root, _ = roots
+    dataset = _write_v30(dataset_root / "selected")
+    groot = _write_groot(model_root / "showroom_groot")
+    valid = _write_completed_stage1_run(
+        output_root,
+        dataset=dataset,
+        groot=groot,
+        steps=100,
+        job_id="a" * 32,
+    )
+    partial = output_root / f"steps_{200:06d}_{'b' * 12}"
+    (partial / "training_state").mkdir(parents=True)
+    partial_manifest = partial / "training_state/rlt_stage1.pt.run.json"
+    partial_manifest.write_text("{}", encoding="utf-8")
+    os.utime(valid / "training_state/rlt_stage1.pt.run.json", ns=(1, 1))
+    os.utime(partial_manifest, ns=(2, 2))
+
+    status = _supervisor().status()
+
+    assert status.status == "completed"
+    assert status.output_dir == str(valid.resolve())
+
+
+def test_restart_ignores_stage1_run_with_symlink_artifact(roots, tmp_path):
+    dataset_root, model_root, _, output_root, _ = roots
+    dataset = _write_v30(dataset_root / "selected")
+    groot = _write_groot(model_root / "showroom_groot")
+    output = _write_completed_stage1_run(
+        output_root,
+        dataset=dataset,
+        groot=groot,
+        steps=100,
+        job_id="a" * 32,
+    )
+    encoder = output / "artifacts/rl_token_encoder.pt"
+    encoder.unlink()
+    outside = tmp_path / "outside.pt"
+    outside.write_bytes(b"encoder")
+    encoder.symlink_to(outside)
+
+    assert _supervisor().status().status == "idle"
+
+
 def test_direct_v21_dataset_is_accepted(roots):
     dataset_root, *_ = roots
     dataset = _write_v21(dataset_root / "direct-v21")
     assert service._resolve_datasets([str(dataset)]) == [dataset.resolve()]
 
 
-def test_v30_resolves_only_through_data_epoch_manifest(roots):
+def test_v30_is_accepted_directly_even_when_a_v21_pair_exists(roots):
     dataset_root, *_ = roots
     epoch = dataset_root / "data_epoch_0007"
     v30 = _write_v30(epoch / "task_lerobot_v30")
@@ -157,10 +284,10 @@ def test_v30_resolves_only_through_data_epoch_manifest(roots):
         encoding="utf-8",
     )
 
-    assert service._resolve_datasets([str(v30)]) == [v21.resolve()]
+    assert service._resolve_datasets([str(v30)]) == [v30.resolve()]
 
 
-def test_v30_without_explicit_v21_pair_has_clear_error(roots):
+def test_v30_without_explicit_v21_pair_is_accepted_directly(roots):
     dataset_root, *_ = roots
     epoch = dataset_root / "data_epoch_0008"
     v30 = _write_v30(epoch / "task_lerobot_v30")
@@ -169,21 +296,19 @@ def test_v30_without_explicit_v21_pair_has_clear_error(roots):
         encoding="utf-8",
     )
 
-    with pytest.raises(HTTPException, match="reconvert this epoch with v2.1 enabled"):
-        service._resolve_datasets([str(v30)])
+    assert service._resolve_datasets([str(v30)]) == [v30.resolve()]
 
 
-def test_v30_does_not_infer_an_unrecorded_sibling(roots):
+def test_v30_does_not_require_or_infer_an_unrecorded_sibling(roots):
     dataset_root, *_ = roots
     epoch = dataset_root / "data_epoch_0009"
     v30 = _write_v30(epoch / "task_lerobot_v30")
     _write_v21(epoch / "task_lerobot_v21")
 
-    with pytest.raises(HTTPException, match="no cyclo_data_epoch.json"):
-        service._resolve_datasets([str(v30)])
+    assert service._resolve_datasets([str(v30)]) == [v30.resolve()]
 
 
-def test_duplicate_v30_and_v21_pair_is_rejected(roots):
+def test_v30_and_v21_are_both_supported_sources(roots):
     dataset_root, *_ = roots
     epoch = dataset_root / "data_epoch_0010"
     v30 = _write_v30(epoch / "task_lerobot_v30")
@@ -193,8 +318,10 @@ def test_duplicate_v30_and_v21_pair_is_rejected(roots):
         encoding="utf-8",
     )
 
-    with pytest.raises(HTTPException, match="duplicate LeRobot v2.1"):
-        service._resolve_datasets([str(v30), str(v21)])
+    assert service._resolve_datasets([str(v30), str(v21)]) == [
+        v30.resolve(),
+        v21.resolve(),
+    ]
 
 
 def test_groot_checkpoint_requires_groot_config_and_weights(roots):
@@ -246,6 +373,21 @@ def test_command_uses_one_shot_groot_stage1_cli(tmp_path):
     assert command[command.index("--steps") + 1] == "100"
     assert command[command.index("--batch-size") + 1] == "1"
     assert command[command.index("--save-freq") + 1] == "25"
+    runtime_environment = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--env"
+    ]
+    assert f"HF_HOME={service.RLT_STAGE1_CACHE_ROOT}/huggingface" in runtime_environment
+    assert f"HF_HUB_CACHE={service.RLT_STAGE1_HF_HUB_CACHE}" in runtime_environment
+    assert f"HUGGINGFACE_HUB_CACHE={service.RLT_STAGE1_HF_HUB_CACHE}" in runtime_environment
+    assert f"TRANSFORMERS_CACHE={service.RLT_STAGE1_HF_HUB_CACHE}" in runtime_environment
+    assert "HF_HUB_OFFLINE=1" in runtime_environment
+    assert "TRANSFORMERS_OFFLINE=1" in runtime_environment
+    assert "GROOT_HF_LOCAL_FIRST=1" in runtime_environment
+    assert "GROOT_PATCH_MISTRAL=1" in runtime_environment
+    assert "NO_ALBUMENTATIONS_UPDATE=1" in runtime_environment
+    assert all("/root/.cache" not in value for value in runtime_environment)
 
 
 def test_monitor_requires_reported_existing_encoder_and_checkpoint(tmp_path):
@@ -305,6 +447,39 @@ def test_monitor_rejects_success_without_terminal_artifact_report(tmp_path):
     supervisor._job = job
     supervisor._monitor(job)
     assert supervisor.status().status == "failed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "event": "error",
+            "status": "failed",
+            "message": "RLT Stage 1 failed: PermissionError: denied",
+            "error": "PermissionError: denied",
+        },
+        {
+            "event": "result",
+            "status": "failed",
+            "error": "PermissionError: denied",
+        },
+    ],
+    ids=("standard-error", "legacy-result"),
+)
+def test_monitor_preserves_cli_failure_detail(tmp_path, payload):
+    job = _job(
+        tmp_path,
+        process=FakeProcess(stdout=[json.dumps(payload) + "\n"], returncode=1),
+    )
+    supervisor = _supervisor()
+    supervisor._job = job
+
+    supervisor._monitor(job)
+
+    status = supervisor.status()
+    assert status.status == "failed"
+    assert status.phase == "error"
+    assert "PermissionError: denied" in status.message
 
 
 def test_start_validates_then_launches_exact_job(roots, monkeypatch):

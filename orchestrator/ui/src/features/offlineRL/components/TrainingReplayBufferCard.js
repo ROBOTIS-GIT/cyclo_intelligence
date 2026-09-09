@@ -5,6 +5,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
+import ReplayBufferVessel from './ReplayBufferVessel';
 
 export const DEFAULT_TRAINING_REPLAY_CAPACITY = 200;
 
@@ -107,21 +108,18 @@ const formatEpisodes = (count) => (
 const OUTCOME_PRESENTATION = {
   success: {
     label: 'Success',
-    color: '#6f9277',
-    softColor: '#e6eee5',
+    color: '#75957a',
     textColor: '#45634d',
   },
   failure: {
     label: 'Failure',
-    color: '#d87969',
-    softColor: '#f8e5e0',
+    color: '#c98278',
     textColor: '#9b4f43',
   },
   unlabeled: {
     label: 'Unlabeled',
-    color: '#c4ad87',
-    softColor: '#eee5d5',
-    textColor: '#7a684e',
+    color: '#b7b1a8',
+    textColor: '#756e63',
   },
 };
 
@@ -136,11 +134,11 @@ function OutcomeDetail({ outcome, datasets, onInspectDataset, detailRef }) {
       ref={detailRef}
       role="status"
       aria-live="polite"
-      className="absolute left-1/2 top-1/2 z-20 w-52 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-[#d7d0c4] bg-white p-3 text-left shadow-[0_12px_30px_rgba(76,66,52,0.16)]"
+      className="absolute left-1/2 top-1/2 z-20 w-52 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-[#d7d0c4] bg-white p-3 text-left"
       data-testid="training-replay-outcome-detail"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[11px] font-semibold text-[#3e3932]">
+        <span className="flex items-center gap-1.5 text-[14px] font-semibold text-[#3e3932]">
           <span
             className="h-2.5 w-2.5 rounded-full"
             style={{ backgroundColor: presentation.color }}
@@ -148,7 +146,7 @@ function OutcomeDetail({ outcome, datasets, onInspectDataset, detailRef }) {
           />
           {presentation.label} data
         </span>
-        <span className="text-[10px] font-semibold" style={{ color: presentation.textColor }}>
+        <span className="text-[14px] font-semibold" style={{ color: presentation.textColor }}>
           {formatEpisodes(total)}
         </span>
       </div>
@@ -169,14 +167,14 @@ function OutcomeDetail({ outcome, datasets, onInspectDataset, detailRef }) {
               key={dataset.path}
               type="button"
               onClick={() => onInspectDataset(dataset, outcome)}
-              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-[9px] text-[#71695e] hover:bg-[#f4f0e8] focus:outline-none focus:ring-1 focus:ring-[#8da391]"
+              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-[#71695e] hover:bg-[#f4f0e8] focus:outline-none focus:ring-1 focus:ring-[#8da391]"
             >
               {content}
             </button>
           ) : (
             <div
               key={dataset.path}
-              className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[9px] text-[#71695e]"
+              className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-[#71695e]"
             >
               {content}
             </div>
@@ -214,20 +212,6 @@ export function TrainingReplayBufferCylinder({
   const displayedOutcome = pinnedOutcome || activeOutcome;
   const unknownDatasetCount = normalizedDatasets.length - knownDatasets.length;
 
-  const visiblePercent = (count) => (
-    totals.episodes > 0 ? (count / totals.episodes) * fillPercent : 0
-  );
-  const percentages = {
-    success: visiblePercent(totals.success),
-    failure: visiblePercent(totals.failure),
-    unlabeled: visiblePercent(totals.unlabeled),
-  };
-  const offsets = {
-    success: 0,
-    failure: percentages.success,
-    unlabeled: percentages.success + percentages.failure,
-  };
-
   const showOutcome = (outcome) => {
     if (!pinnedOutcome) setActiveOutcome(outcome);
   };
@@ -261,7 +245,7 @@ export function TrainingReplayBufferCylinder({
   return (
     <div
       ref={rootRef}
-      className="relative flex min-w-0 items-center justify-center gap-5"
+      className="pg-training-buffer relative flex min-w-0 items-center justify-center"
       data-testid="training-replay-buffer-cylinder"
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
@@ -274,53 +258,35 @@ export function TrainingReplayBufferCylinder({
         <div className="text-[28px] font-semibold tracking-[-0.04em] text-[#38342e]">
           {Math.round(fillPercent)}%
         </div>
-        <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#999083]">
+        <div className="text-[12px] font-medium uppercase tracking-[0.08em] text-[#696256]">
           buffer filled
         </div>
-        <div className="mt-2 text-[11px] font-medium text-[#6f675c]">
+        <div className="mt-2 text-[14px] font-medium text-[#6f675c]">
           {totals.episodes} / {capacity} episodes
         </div>
         {unknownDatasetCount > 0 && (
-          <div className="mt-1 max-w-[128px] text-[9px] leading-3 text-[#a06c4e]">
+          <div className="mt-1 max-w-[128px] text-[12px] leading-5 text-[#a06c4e]">
             {unknownDatasetCount} dataset{unknownDatasetCount === 1 ? '' : 's'} awaiting episode metadata
           </div>
         )}
       </div>
 
-      <div className="relative h-48 w-40 shrink-0" aria-label="Training replay buffer fill">
-        <div
-          className="absolute inset-x-1 bottom-4 top-4 overflow-hidden rounded-b-[42%] border-x border-b border-[#bfb6a8] bg-[#f6f1e7]/80 shadow-[inset_8px_0_14px_rgba(75,66,51,0.05),inset_-8px_0_14px_rgba(75,66,51,0.06)]"
-          data-testid="training-replay-buffer-body"
-        >
-          {['success', 'failure', 'unlabeled'].map((outcome) => {
-            const count = totals[outcome];
-            if (!count) return null;
-            const presentation = OUTCOME_PRESENTATION[outcome];
-            return (
-              <button
-                key={outcome}
-                type="button"
-                aria-label={`Inspect ${outcome} datasets: ${formatEpisodes(count)}`}
-                aria-pressed={pinnedOutcome === outcome}
-                data-training-replay-outcome={outcome}
-                onMouseEnter={() => showOutcome(outcome)}
-                onMouseLeave={() => hideOutcome(outcome)}
-                onFocus={() => showOutcome(outcome)}
-                onBlur={() => hideOutcome(outcome)}
-                onClick={() => toggleOutcome(outcome)}
-                className="absolute inset-x-0 cursor-pointer border-0 p-0 outline-none transition-[filter] hover:brightness-105 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/80"
-                style={{
-                  bottom: `${offsets[outcome]}%`,
-                  height: `${percentages[outcome]}%`,
-                  background: `linear-gradient(90deg, ${presentation.color} 0%, ${presentation.softColor} 52%, ${presentation.color} 100%)`,
-                }}
-              />
-            );
+      <div className="relative w-40 max-w-full shrink-0" data-testid="training-replay-buffer-body">
+        <ReplayBufferVessel
+          counts={totals}
+          capacity={capacity}
+          label="Training replay buffer fill"
+          outcomeProps={(outcome, count) => ({
+            'aria-label': `Inspect ${outcome} datasets: ${formatEpisodes(count)}`,
+            'aria-pressed': pinnedOutcome === outcome,
+            'data-training-replay-outcome': outcome,
+            onMouseEnter: () => showOutcome(outcome),
+            onMouseLeave: () => hideOutcome(outcome),
+            onFocus: () => showOutcome(outcome),
+            onBlur: () => hideOutcome(outcome),
+            onClick: () => toggleOutcome(outcome),
           })}
-          <div className="pointer-events-none absolute inset-y-0 left-[15%] w-[12%] bg-white/10 blur-sm" />
-        </div>
-        <div className="pointer-events-none absolute inset-x-1 top-0 h-8 rounded-[50%] border border-[#bfb6a8] bg-[#fbf8f1]/90 shadow-[inset_0_-4px_9px_rgba(75,66,51,0.08)]" />
-        <div className="pointer-events-none absolute inset-x-1 bottom-0 h-8 rounded-[50%] border border-[#bfb6a8] bg-transparent shadow-[0_8px_14px_rgba(75,66,51,0.10)]" />
+        />
         {displayedOutcome && totals[displayedOutcome] > 0 && (
           <OutcomeDetail
             outcome={displayedOutcome}
@@ -353,7 +319,7 @@ export default function TrainingReplayBufferCard({
   return (
     <section
       className={clsx(
-        'min-w-0 rounded-2xl border border-[#d8d1c5] bg-white p-4 shadow-[0_8px_24px_rgba(75,66,51,0.07)]',
+        'min-w-0 rounded-2xl border border-[#d8d1c5] bg-white p-4',
         className
       )}
       aria-labelledby="training-replay-buffer-title"
@@ -361,22 +327,19 @@ export default function TrainingReplayBufferCard({
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9a9286]">
+          <div className="text-[12px] font-semibold uppercase tracking-[0.1em] text-[#696256]">
             Dataset
           </div>
-          <h3 id="training-replay-buffer-title" className="mt-0.5 text-[14px] font-semibold text-[#38342e]">
+          <h3 id="training-replay-buffer-title" className="mt-0.5 text-[14px] font-semibold text-[#38342e]" title="Hover or click a color to inspect the deployed datasets.">
             Replay Buffer
           </h3>
-          <p className="mt-1 text-[10px] text-[#8b8378]">
-            Deployed LeRobot data · hover or click a color
-          </p>
         </div>
-        <span className="rounded-full bg-[#eeeae2] px-2.5 py-1 text-[9px] font-semibold text-[#71695f]">
+        <span className="rounded-full bg-[#eeeae2] px-2.5 py-1 text-[12px] font-semibold text-[#71695f]">
           {normalizedDatasets.length} dataset{normalizedDatasets.length === 1 ? '' : 's'}
         </span>
       </div>
 
-      <div className="mt-2 flex h-[190px] min-h-0 items-center justify-center pr-20">
+      <div className="mt-2 flex min-h-0 items-center justify-center">
         <TrainingReplayBufferCylinder
           datasets={datasets}
           capacityEpisodes={capacityEpisodes}
@@ -386,7 +349,7 @@ export default function TrainingReplayBufferCard({
 
       <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-t border-[#eee9df] pt-3">
         {Object.entries(OUTCOME_PRESENTATION).map(([outcome, presentation]) => (
-          <span key={outcome} className="flex items-center gap-2 text-[11px] font-medium leading-3 text-[#756d62]">
+          <span key={outcome} className="flex items-center gap-2 text-[14px] font-medium leading-5 text-[#756d62]">
             <span
               className="h-2.5 w-2.5 rounded-full"
               style={{ backgroundColor: presentation.color }}
@@ -395,7 +358,7 @@ export default function TrainingReplayBufferCard({
             {presentation.label} {totals[outcome]}
           </span>
         ))}
-        <span className="flex items-center gap-2 text-[11px] font-medium leading-3 text-[#756d62]">
+        <span className="flex items-center gap-2 text-[14px] font-medium leading-5 text-[#756d62]">
           <span className="h-2.5 w-2.5 rounded-full border border-[#d8d1c5] bg-[#f6f1e7]" aria-hidden="true" />
           Empty
         </span>

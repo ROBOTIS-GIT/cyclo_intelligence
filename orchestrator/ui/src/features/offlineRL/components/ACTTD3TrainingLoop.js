@@ -15,8 +15,8 @@ import TrainingReplayBufferCard, {
 } from './TrainingReplayBufferCard';
 
 const inputClass = (
-  'mt-1 h-8 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 '
-  + 'text-[10px] font-semibold text-[#4a4038] outline-none transition '
+  'mt-1 h-9 w-full rounded-lg border border-[#ddc9b9] bg-white px-2.5 '
+  + 'text-[14px] font-semibold text-[#4a4038] outline-none transition '
   + 'focus:border-[#bd8564] focus:ring-2 focus:ring-[#ead7ca] '
   + 'disabled:cursor-not-allowed disabled:bg-[#eeeae4] disabled:text-[#999187]'
 );
@@ -71,8 +71,11 @@ function NumberSetting({
   title,
 }) {
   return (
-    <label className="min-w-0 text-[9px] font-semibold text-[#776b62]">
-      {label}
+    <label className="min-w-0 text-[12px] font-semibold text-[#776b62]">
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {title && <span title={title} aria-label={title} tabIndex={0}>ⓘ</span>}
+      </span>
       <input
         aria-label={ariaLabel}
         type="number"
@@ -102,23 +105,20 @@ function TrainingCardShell({
 }) {
   return (
     <section
-      className="h-full min-w-0 rounded-2xl border border-[#decfc3] bg-white p-4 shadow-[0_8px_24px_rgba(75,66,51,0.07)]"
+      className="h-full min-w-0 rounded-2xl border border-[#decfc3] bg-white p-4"
       aria-labelledby={titleId}
       data-testid={testId}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#aa795f]">
+          <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-[#aa795f]">
             {eyebrow}
           </div>
-          <h3 id={titleId} className="mt-0.5 text-[14px] font-semibold text-[#38342e]">
+          <h3 id={titleId} title={description} className="mt-0.5 text-[14px] font-semibold text-[#38342e]">
             {title}
           </h3>
-          <p className="mt-1 text-[10px] text-[#8b8378]">
-            {description}
-          </p>
         </div>
-        <span className="shrink-0 rounded-full bg-[#f5e9df] px-2.5 py-1 text-[9px] font-bold text-[#9b6245]">
+        <span className="shrink-0 rounded-full bg-[#f5e9df] px-2.5 py-1 text-[12px] font-bold text-[#9b6245]">
           {badge}
         </span>
       </div>
@@ -159,21 +159,18 @@ function AlgorithmCard({
     >
       <div className="mt-3 rounded-xl border border-[#e1bca4] bg-[#fbede3] p-3 text-[#754832]">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#ad7251]">
+          <span className="text-[12px] font-bold uppercase tracking-[0.12em] text-[#ad7251]">
             Value function
           </span>
-          <span className="rounded-full bg-[#d9895f] px-2 py-0.5 text-[8px] font-semibold text-white">
+          <span className="rounded-full bg-[#d9895f] px-2 py-0.5 text-[12px] font-semibold text-white">
             Trainable
           </span>
         </div>
-        <div className="mt-1 text-[13px] font-semibold">Critic Network</div>
-        <div className="mt-0.5 text-[9px] text-[#9a674d]">
-          Twin chunk Q-functions · clipped Bellman target
-        </div>
+        <div className="mt-1 text-[14px] font-semibold">Critic Network</div>
       </div>
 
       <fieldset className="mt-3" disabled={disabled}>
-        <legend className="text-[9px] font-semibold text-[#776b62]">Loss option</legend>
+        <legend className="text-[12px] font-semibold text-[#776b62]">Loss option</legend>
         <div className="mt-1 grid grid-cols-2 gap-1 rounded-xl bg-[#f1ede7] p-1">
           {objectiveOptions.map((option) => {
             const selected = actorObjective === option.value;
@@ -183,6 +180,7 @@ function AlgorithmCard({
                 type="button"
                 aria-pressed={selected}
                 aria-label={`${option.label} loss`}
+                title={option.detail}
                 disabled={disabled}
                 onClick={() => onActorObjectiveChange?.(option.value)}
                 className={clsx(
@@ -193,8 +191,7 @@ function AlgorithmCard({
                   disabled && 'cursor-not-allowed opacity-60'
                 )}
               >
-                <span className="block text-[10px] font-semibold">{option.label}</span>
-                <span className="mt-0.5 block truncate text-[8px] opacity-75">{option.detail}</span>
+                <span className="block text-[14px] font-semibold">{option.label}</span>
               </button>
             );
           })}
@@ -204,6 +201,7 @@ function AlgorithmCard({
       <div className="mt-3 grid grid-cols-3 gap-2">
         <NumberSetting
           label="Critic epochs"
+          title="Replay passes for critic updates; not a single optimizer step. See Training Guide → ACT."
           value={criticEpochs}
           onChange={onCriticEpochsChange}
           disabled={disabled}
@@ -212,6 +210,7 @@ function AlgorithmCard({
         />
         <NumberSetting
           label="Actor epochs"
+          title="Sets the actor update frequency relative to critic epochs; 1:1 is allowed."
           value={actorEpochs}
           onChange={onActorEpochsChange}
           disabled={disabled}
@@ -219,6 +218,7 @@ function AlgorithmCard({
         />
         <NumberSetting
           label="Batch size"
+          title="Number of sampled action chunks per optimizer update."
           value={batchSize}
           onChange={onBatchSizeChange}
           disabled={disabled}
@@ -227,9 +227,9 @@ function AlgorithmCard({
         />
       </div>
 
-      <p className="mt-2 text-[8px] leading-relaxed text-[#8d8579]" data-testid="td3-schedule-help">
+      <p className="mt-2 text-[12px] leading-relaxed text-[#696256]" data-testid="td3-schedule-help">
         {actorUpdatePeriod
-          ? `Actor update period: every ${actorUpdatePeriod} critic ${actorUpdatePeriod === 1 ? 'update' : 'updates'}. 1:1 is allowed, including with a warmed critic.`
+          ? `Actor update period: every ${actorUpdatePeriod} critic ${actorUpdatePeriod === 1 ? 'update' : 'updates'}.`
           : 'Use positive whole epochs with Critic ≥ Actor and Critic divisible by Actor. The ratio determines the actor update period; 1:1 is allowed.'}
       </p>
 
@@ -274,22 +274,20 @@ export function ImitationLearningCard({
     >
       <div className="mt-3 rounded-xl border border-[#cfd5e7] bg-[#f2f4fa] p-3 text-[#4b587b]">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#7180a4]">
+          <span className="text-[12px] font-bold uppercase tracking-[0.12em] text-[#7180a4]">
             {resolvedObjectiveEyebrow}
           </span>
-          <span className="rounded-full bg-[#66759b] px-2 py-0.5 text-[8px] font-semibold text-white">
+          <span className="rounded-full bg-[#66759b] px-2 py-0.5 text-[12px] font-semibold text-white">
             Trainable
           </span>
         </div>
-        <div className="mt-1 text-[13px] font-semibold">{objectiveTitle}</div>
-        <div className="mt-0.5 text-[9px] text-[#6f7890]">
-          {objectiveDetail}
-        </div>
+        <div className="mt-1 text-[14px] font-semibold" title={objectiveDetail}>{objectiveTitle}</div>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         <NumberSetting
           label="Training steps"
+          title="One step is one minibatch optimizer update, not a full pass over the dataset."
           ariaLabel="Imitation steps"
           value={steps}
           onChange={onStepsChange}
@@ -307,6 +305,7 @@ export function ImitationLearningCard({
         />
         <NumberSetting
           label="Save frequency"
+          title="Save an intermediate checkpoint every N optimizer steps."
           ariaLabel="Imitation save frequency"
           value={saveFreq}
           onChange={onSaveFreqChange}
@@ -354,11 +353,11 @@ function CriticWarmupCard({
           className="rounded-xl border border-[#ded9d1] bg-[#f4f2ee] p-3 text-[#777068]"
           aria-label="ACT actor: Frozen; no gradients"
         >
-          <div className="text-[8px] font-bold uppercase tracking-[0.12em]">Actor</div>
-          <div className="mt-1 text-[12px] font-semibold">ACT Policy</div>
+          <div className="text-[12px] font-bold uppercase tracking-[0.12em]">Actor</div>
+          <div className="mt-1 text-[14px] font-semibold">ACT Policy</div>
           <output
             aria-label="Critic warm-up ACT actor mode"
-            className="mt-1 inline-flex rounded-full bg-[#dedbd5] px-2 py-0.5 text-[8px] font-bold text-[#756e66]"
+            className="mt-1 inline-flex rounded-full bg-[#dedbd5] px-2 py-0.5 text-[12px] font-bold text-[#756e66]"
           >
             Frozen
           </output>
@@ -367,11 +366,11 @@ function CriticWarmupCard({
           →
         </div>
         <div className="rounded-xl border border-[#e1bca4] bg-[#fbede3] p-3 text-[#754832]">
-          <div className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#ad7251]">
+          <div className="text-[12px] font-bold uppercase tracking-[0.12em] text-[#ad7251]">
             Value function
           </div>
-          <div className="mt-1 text-[12px] font-semibold">Critic Network</div>
-          <span className="mt-1 inline-flex rounded-full bg-[#d9895f] px-2 py-0.5 text-[8px] font-bold text-white">
+          <div className="mt-1 text-[14px] font-semibold">Critic Network</div>
+          <span className="mt-1 inline-flex rounded-full bg-[#d9895f] px-2 py-0.5 text-[12px] font-bold text-white">
             Trainable
           </span>
         </div>
@@ -398,19 +397,19 @@ function CriticWarmupCard({
       </div>
 
       <div
-        className="mt-3 rounded-xl border border-[#ebe3da] bg-[#faf8f4] px-3 py-2 text-[9px]"
+        className="mt-3 rounded-xl border border-[#ebe3da] bg-[#faf8f4] px-3 py-2 text-[12px]"
         aria-label="ACT critic warm-up checkpoint"
       >
         <div className="font-semibold text-[#645b52]">Critic checkpoint</div>
         <div
-          className="mt-1 truncate font-mono text-[8px] text-[#998f85]"
+          className="mt-1 truncate font-mono text-[12px] text-[#6e665a]"
           title={checkpointDisplay}
           aria-label="Critic checkpoint path"
         >
           {checkpointDisplay}
         </div>
         {checkpoint && guidance && (
-          <div className="mt-1.5 text-[8px] leading-3 text-[#8b8278]">
+          <div className="mt-1.5 text-[12px] leading-3 text-[#8b8278]">
             {guidance}
           </div>
         )}
@@ -656,7 +655,7 @@ function DesktopLoopConnector({
     <svg
       viewBox={`0 0 ${geometry.width} ${geometry.height}`}
       preserveAspectRatio="none"
-      className="pointer-events-none absolute inset-0 z-20 hidden h-full w-full overflow-visible 2xl:block"
+      className="pg-loop-connector pointer-events-none absolute inset-0 z-20 h-full w-full overflow-visible"
       aria-hidden="true"
       data-testid={testId}
     >
@@ -695,9 +694,9 @@ function DesktopLoopConnector({
 
 function MobileStep({ children }) {
   return (
-    <div className="flex items-center justify-center py-1.5 text-[#8f897f] 2xl:hidden">
+    <div className="pg-loop-mobile-step flex items-center justify-center py-1.5 text-[#8f897f]">
       <MdArrowDownward size={14} className="mr-1" aria-hidden="true" />
-      <span className="text-[8px] font-bold uppercase tracking-[0.12em]">{children}</span>
+      <span className="text-[12px] font-bold uppercase tracking-[0.12em]">{children}</span>
     </div>
   );
 }
@@ -755,7 +754,7 @@ export function PolicyTrainingLoopLayout({
         testId={connectorTestId}
       />
 
-      <div className="relative z-10 grid min-w-0 gap-3 2xl:grid-cols-2 2xl:gap-x-12 2xl:gap-y-12">
+      <div className="pg-loop-grid relative z-10 min-w-0 gap-3">
         <div
           ref={policyRef}
           className={clsx(
@@ -767,7 +766,7 @@ export function PolicyTrainingLoopLayout({
         >
           <span className="sr-only">Policy</span>
           {updated && (
-            <span className="absolute -right-1 -top-2 z-20 flex items-center gap-1 rounded-full bg-[#53658f] px-2.5 py-1 text-[8px] font-bold uppercase tracking-[0.08em] text-white shadow-md">
+            <span className="absolute -right-1 -top-2 z-20 flex items-center gap-1 rounded-full bg-[#53658f] px-2.5 py-1 text-[12px] font-bold uppercase tracking-[0.08em] text-white shadow-md">
               <MdCheck size={11} aria-hidden="true" /> Updated policy
             </span>
           )}
@@ -794,10 +793,10 @@ export function PolicyTrainingLoopLayout({
         <div
           ref={algorithmRef}
           className={clsx(
-            'min-w-0 2xl:col-span-2 2xl:justify-self-center',
+            'pg-training-algorithm min-w-0',
             wideTrainingStage
-              ? '2xl:w-3/4'
-              : '2xl:w-[calc(50%-1.5rem)]'
+              ? 'pg-training-algorithm-wide'
+              : ''
           )}
           data-testid="training-algorithm-stage"
           data-training-stage-width={wideTrainingStage ? 'wide' : 'standard'}

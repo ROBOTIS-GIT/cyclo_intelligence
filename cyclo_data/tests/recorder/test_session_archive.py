@@ -199,6 +199,9 @@ def test_archive_moves_segmented_files_and_marks_pending(tmp_path):
     manager = _make_manager(root, subtask_total=2)
     first = _write_segment(root, full_idx=0, subtask_idx=0, subtask_total=2)
     second = _write_segment(root, full_idx=0, subtask_idx=1, subtask_total=2)
+    for segment in (first, second):
+        (segment / 'rlt').mkdir()
+        (segment / 'rlt' / 'token.npz').write_bytes(b'preserved-rlt-token')
 
     out = manager._archive_full_episode(0)
 
@@ -208,6 +211,10 @@ def test_archive_moves_segmented_files_and_marks_pending(tmp_path):
     assert not (first / "segment_0.mcap").exists()
     assert not (second / "segment_1.mcap").exists()
     assert not (out / "segments").exists()
+    for index in (0, 1):
+        trace = out / 'rlt' / f'segment_{index:03d}'
+        assert (trace / 'token.npz').read_bytes() == b'preserved-rlt-token'
+        assert (trace / 'source_episode_info.json').is_file()
     assert (out / "videos" / "0_0" / "cam0.mp4").read_bytes() == b"raw-mjpeg"
     assert (out / "videos" / "0_0" / "cam0_timestamps.parquet").read_bytes() == (
         b"timestamps"

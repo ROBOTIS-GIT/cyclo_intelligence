@@ -191,7 +191,7 @@ export default function InferencePage({ isActive = true }) {
             <div className={classHeartbeatStatus}>
               <HeartbeatStatus />
             </div>
-            <ImageGrid isActive={isActive} />
+            <ImageGrid isActive={isActive} imageFit="contain" />
           </div>
           <div className="flex-[4] min-h-[120px] flex flex-row items-center justify-center mx-1 gap-2 h-full relative">
             {show3DViewer && (

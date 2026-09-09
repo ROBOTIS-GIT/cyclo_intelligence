@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import shutil
@@ -17,6 +16,7 @@ from typing import Any, Callable, Mapping, Sequence
 import torch
 from torch import Tensor
 
+from cyclo_brain.algorithm.common.artifact_io import atomic_json_save
 from cyclo_brain.model.act import (
     ACT_TRAINABLE_GROUPS,
     ACTTwinChunkCritic,
@@ -37,16 +37,18 @@ from .offline_training import (
     load_policy_local_warmup_critic,
     policy_update_period_for_epoch_schedule,
 )
-from .offline_warmup_cli import (
-    _MAX_SEED,
-    _VIDEO_BACKENDS,
-    _device,
-    _input_directory,
-    _input_file,
-    _positive,
-    _require_local_dataset_layout,
-    _require_referenced_dataset_files,
-    _seed,
+from .cli_common import (
+    MAX_SEED as _MAX_SEED,
+    VIDEO_BACKENDS as _VIDEO_BACKENDS,
+    dataset_root_arguments as _dataset_root_arguments,
+    emit_json_line as _json_line,
+    input_directory as _input_directory,
+    input_file as _input_file,
+    positive_argument as _positive,
+    require_local_dataset_layout as _require_local_dataset_layout,
+    require_referenced_dataset_files as _require_referenced_dataset_files,
+    resolve_device as _device,
+    seed_argument as _seed,
 )
 from .training_identity import (
     build_act_td3_multi_root_training_data_identity,
@@ -155,19 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _json_line(value: Mapping[str, Any], *, stream: Any = sys.stdout) -> None:
-    print(
-        json.dumps(
-            dict(value),
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        file=stream,
-        flush=True,
-    )
-
-
 def _progress_line(progress: ACTTD3OfflineTrainingProgress) -> None:
     _json_line({"event": "progress", **asdict(progress)})
 
@@ -262,18 +251,6 @@ def _initialize_critic_source(
     return "random", None
 
 
-def _dataset_root_arguments(value: Any) -> tuple[Path, ...]:
-    """Normalize argparse and legacy programmatic one-root namespaces."""
-
-    if isinstance(value, Path):
-        return (value,)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        roots = tuple(value)
-        if roots and all(isinstance(root, Path) for root in roots):
-            return roots
-    raise TypeError("dataset_root must contain one or more paths")
-
-
 def _training_identity_summary(identity: Any) -> dict[str, Any]:
     roots = identity.virtual_contract.get("data_roots", [])
     return {
@@ -313,31 +290,6 @@ def _output_directory(
                 "and robot-config inputs"
             )
     return resolved
-
-
-def _atomic_json_save(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(
-                dict(value),
-                stream,
-                allow_nan=False,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
 
 
 def _assert_actor_state_equal(expected: Mapping[str, Tensor], actual: Any) -> None:
@@ -711,7 +663,7 @@ def _run_from_args_unlocked(
         critic_checkpoint=critic_checkpoint,
         actor_objective=config.actor_objective,
     )
-    _atomic_json_save(output_dir / "training_manifest.json", final)
+    atomic_json_save(output_dir / "training_manifest.json", final)
     _json_line(final)
     return result
 

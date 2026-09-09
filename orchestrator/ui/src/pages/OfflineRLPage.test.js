@@ -76,7 +76,6 @@ jest.mock('../features/offlineRL/components/OfflineRLLeRobotDataset', () => {
 jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
   return function MockOfflineRLTrainingSection({
     isActive,
-    variant,
     inferencePhase,
     onDeploymentStateChange,
     onTrainingMethodStateChange,
@@ -90,7 +89,6 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
       <div
         data-testid="workflow-training-controller"
         data-active={String(isActive)}
-        data-variant={variant}
         data-inference-phase={String(inferencePhase)}
         data-policy-epoch={String(currentPolicyEpoch)}
         data-force-fresh-lineage={String(forceFreshLineage)}
@@ -111,7 +109,7 @@ jest.mock('../features/offlineRL/components/OfflineRLTrainingSection', () => {
         >
           <span>Training progress</span>
           <span>Training action</span>
-          <button type="button" disabled>Start Training</button>
+          <button type="button" disabled>Start</button>
           <button type="button" onClick={() => onRunningChange?.(false)}>
             Mark training status ready
           </button>
@@ -340,7 +338,7 @@ test('slides the Replay Buffer data workflow over the mounted environment', () =
   expect(conversion).toHaveAttribute('data-active', 'true');
   expect(lerobotDataset).toHaveAttribute('data-active', 'true');
   expect(drawer).toHaveClass(
-    'absolute', 'w-[calc(100%_-_2rem)]', 'lg:w-1/2'
+    'absolute', 'pg-panel'
   );
   expect(screen.getByTestId('offline-rl-workflow-steps'))
     .not.toHaveClass('xl:contents');
@@ -352,7 +350,7 @@ test('slides the Replay Buffer data workflow over the mounted environment', () =
   expect(drawer).toHaveAttribute('data-panel-state', 'open');
   expect(drawer).toHaveAttribute('aria-hidden', 'false');
   expect(drawer).not.toHaveAttribute('inert');
-  expect(drawer).toHaveClass('absolute', 'lg:w-1/2');
+  expect(drawer).toHaveClass('absolute', 'pg-panel');
   expect(drawer).not.toHaveClass('xl:static', 'xl:mr-4');
   expect(screen.getByTestId('offline-rl-dataset-pipeline'))
     .toHaveClass('min-h-0', 'w-full', 'flex-1', 'overflow-y-auto');
@@ -427,7 +425,7 @@ test('keeps Replay Buffer and Training open together and closes them independent
   expect(trainingButton).toHaveAttribute('aria-expanded', 'false');
   expect(trainingController).toHaveAttribute('data-active', 'true');
   expect(trainingDrawer).toHaveClass(
-    'absolute', 'min-h-0', 'w-[calc(100%_-_2rem)]', 'lg:w-1/2'
+    'absolute', 'min-h-0', 'pg-panel'
   );
   expect(trainingDrawer.style.width).toBe('');
 
@@ -444,9 +442,9 @@ test('keeps Replay Buffer and Training open together and closes them independent
   expect(trainingDrawer).toHaveAttribute('data-panel-state', 'open');
   expect(trainingDrawer).toHaveAttribute('aria-hidden', 'false');
   expect(trainingDrawer).not.toHaveAttribute('inert');
-  expect(replayDrawer).toHaveClass('lg:w-[calc(50%_-_1.5rem)]');
+  expect(replayDrawer).toHaveClass('pg-panel');
   expect(trainingDrawer).toHaveClass(
-    'absolute', 'lg:w-[calc(50%_-_1.5rem)]'
+    'absolute', 'pg-panel'
   );
   expect(trainingDrawer).not.toHaveClass('xl:static', 'xl:ml-4');
   expect(within(trainingDrawer).getByRole('heading', { name: 'Training Pipeline' }))
@@ -470,7 +468,7 @@ test('keeps Replay Buffer and Training open together and closes them independent
   expect(screen.getByTestId('offline-rl-training-content'))
     .toHaveClass('min-h-0', 'w-full', 'flex-1', 'overflow-y-auto');
   expect(screen.getByTestId('offline-rl-training-stage'))
-    .toHaveClass('h-full', 'min-h-[640px]', 'w-full', 'shrink-0');
+    .toHaveClass('min-h-0', 'w-full', 'shrink-0');
   expect(deployment).toHaveClass('w-full', 'shrink-0');
   expect(workspace).toBeInTheDocument();
   expect(screen.getByTestId('offline-rl-environment-canvas'))
@@ -488,7 +486,7 @@ test('keeps Replay Buffer and Training open together and closes them independent
   expect(replayButton).toHaveFocus();
   expect(trainingDrawer).toHaveAttribute('data-panel-state', 'open');
   expect(trainingButton).toHaveAttribute('aria-expanded', 'true');
-  expect(trainingDrawer).toHaveClass('lg:w-1/2');
+  expect(trainingDrawer).toHaveClass('pg-panel');
   expect(screen.getByTestId('offline-rl-workflow-steps'))
     .toHaveAttribute('data-panel-state', 'training');
 
@@ -638,7 +636,7 @@ test('pulls Training progress and Policy Deploy upward for compact workflows', (
   const deployment = screen.getByTestId('offline-rl-deployment');
 
   expect(stage).toHaveAttribute('data-compact-layout', 'false');
-  expect(stage).toHaveClass('h-full', 'min-h-[640px]');
+  expect(stage).toHaveClass('min-h-0');
 
   fireEvent.click(screen.getByRole('button', { name: 'Compact training layout' }));
 
@@ -662,7 +660,7 @@ test('shows three camera slots without enabling unfinished actions', () => {
   const content = container.textContent;
   expect(content.indexOf('Left wrist')).toBeLessThan(content.indexOf('Head'));
   expect(content.indexOf('Head')).toBeLessThan(content.indexOf('Right wrist'));
-  expect(screen.getByRole('button', { name: 'Start Training' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Deploy Policy' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Discard Policy' })).toBeDisabled();
 });

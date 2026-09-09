@@ -3,7 +3,7 @@ import {
   normalizeColumnWeights,
   normalizeRotationDeg,
 } from './ImageGrid';
-import { getQuarterTurnCoverSize } from './ImageGridCell';
+import { getQuarterTurnCoverSize, normalizeImageFit } from './ImageGridCell';
 
 describe('ImageGrid rotation helpers', () => {
   test('normalizes camera rotations to css-friendly degrees', () => {
@@ -43,5 +43,11 @@ describe('ImageGrid rotation helpers', () => {
   test('sizes a quarter-turn wrapper from the real camera cell dimensions', () => {
     expect(getQuarterTurnCoverSize(480, 320)).toEqual({ width: 320, height: 480 });
     expect(getQuarterTurnCoverSize(0, 320)).toBeNull();
+  });
+
+  test('uses contain only when a caller explicitly requests uncropped video', () => {
+    expect(normalizeImageFit('contain')).toBe('contain');
+    expect(normalizeImageFit('cover')).toBe('cover');
+    expect(normalizeImageFit(undefined)).toBe('cover');
   });
 });

@@ -22,7 +22,16 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from cyclo_brain.model.multi_task_dit.flow_sde_adapter import CYCLO_SG2_CAMERA_KEYS
+from cyclo_brain.model.common.sg2 import (
+    MULTI_TASK_DIT_ACTION_DIM,
+    MULTI_TASK_DIT_ACTION_HORIZON,
+    MULTI_TASK_DIT_CAMERA_KEYS,
+    MULTI_TASK_DIT_CAMERA_NAMES,
+    SG2_CAMERA_FEATURE_KEYS,
+    SG2_LIVE_STATE_GROUPS,
+    SG2_TRANSPORT_ACTION_GROUPS,
+    SG2_TRANSPORT_ACTION_WIDTHS,
+)
 
 from .on_policy import FlowSDEEpisode
 
@@ -62,23 +71,17 @@ float64 timestamp
 float64 duration
 """
 
-ACTION_KEYS = ("arm_left", "arm_right", "head", "lift", "mobile")
-ACTION_WIDTHS = (8, 8, 2, 1, 3)
-ACTION_DIM = 22
-EXECUTION_HORIZON = 16
+ACTION_KEYS = SG2_TRANSPORT_ACTION_GROUPS
+ACTION_WIDTHS = SG2_TRANSPORT_ACTION_WIDTHS
+ACTION_DIM = MULTI_TASK_DIT_ACTION_DIM
+EXECUTION_HORIZON = MULTI_TASK_DIT_ACTION_HORIZON
 if sum(ACTION_WIDTHS) != ACTION_DIM:
     raise RuntimeError("Cyclo ActionStep modality widths do not form the 22D contract")
 CAMERA_TO_POLICY_KEY = {
-    "cam_left_wrist": "observation.images.rgb.cam_left_wrist",
-    "cam_left_head": "observation.images.rgb.cam_left_head",
-    "cam_right_wrist": "observation.images.rgb.cam_right_wrist",
+    name: SG2_CAMERA_FEATURE_KEYS[name]
+    for name in MULTI_TASK_DIT_CAMERA_NAMES
 }
-STATE_GROUPS = (
-    ("follower_arm_left", 8),
-    ("follower_arm_right", 8),
-    ("follower_head", 2),
-    ("follower_lift", 1),
-)
+STATE_GROUPS = SG2_LIVE_STATE_GROUPS
 
 
 class FlowSDELiveError(RuntimeError):
@@ -339,7 +342,8 @@ class ZenohAtomicActionStepTransport:
                 executed = tuple(float(item) for item in message.executed_action)
                 if len(executed) != ACTION_DIM or not all(np.isfinite(executed)):
                     value = FlowSDELiveError(
-                        "ActionStep ACK must contain exactly 22 finite executed-action values"
+                        "ActionStep ACK must contain exactly "
+                        f"{ACTION_DIM} finite executed-action values"
                     )
                 else:
                     value = ActionStepReceipt(
@@ -487,7 +491,7 @@ class CycloLeRobotObservationSource:
         self._last_marker: SensorMarker | None = None
 
         image_features = getattr(policy.config, "image_features", None)
-        if tuple(image_features or ()) != CYCLO_SG2_CAMERA_KEYS:
+        if tuple(image_features or ()) != MULTI_TASK_DIT_CAMERA_KEYS:
             raise ValueError("Live Flow-SDE checkpoint camera order is not the Cyclo 3-camera contract")
         self._target_sizes: dict[str, tuple[int, int]] = {}
         for key, feature in image_features.items():

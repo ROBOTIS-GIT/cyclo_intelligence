@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
-from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -16,9 +15,23 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
+from cyclo_brain.algorithm.common import (
+    atomic_json_save,
+    atomic_torch_save,
+    canonical_json_sha256,
+    file_sha256,
+)
+from cyclo_brain.model.common import RLT_ACTION_DIM, RLT_ACTION_HORIZON
+
+from cyclo_brain.contracts.rlt import (
+    validate_training_round,
+    _positive_integer,
+    _finite_float,
+    _digest,
+)
+
 from .rl_token import load_frozen_rl_token_encoder
 from .shadow import RLTStage2InferenceSpec, load_groot_rlt_shadow_policy
-from .stage1 import _atomic_torch_save
 from .stage2 import (
     RLTStage2Config,
     RLTStage2FrozenSource,
@@ -29,9 +42,12 @@ from .stage2 import (
 
 
 InitializationMode = Literal["new", "resume"]
-_BUNDLE_FORMAT = "cyclo_brain.rlt.stage2_bundle/v1"
-_TRAINING_STATE_FORMAT = "cyclo_brain.rlt.stage2_training/v1"
+_BUNDLE_FORMAT = "cyclo_brain.rlt.stage2_bundle/v2"
+_TRAINING_STATE_FORMAT = "cyclo_brain.rlt.stage2_training/v2"
 _ACTOR_ARTIFACT_FORMAT = "cyclo_brain.rlt.stage2_actor/v2"
+_TRAINING_ROUND_FORMAT = "cyclo_brain.rlt.stage2_training_round/v1"
+_REPLAY_MANIFEST_FORMAT = "cyclo.groot.rlt.stage2_feature_replay_manifest/v1"
+_DATASET_SNAPSHOT_FORMAT = "cyclo.groot.rlt.dataset_snapshot/v1"
 _QUALIFICATION = "training_only_not_deployment_validated"
 _ENCODER_RELATIVE = Path("artifacts/rl_token_encoder.pt")
 _ACTOR_RELATIVE = Path("artifacts/rlt_actor.pt")
@@ -39,27 +55,7 @@ _TRAINING_RELATIVE = Path("training_state/rlt_stage2.pt")
 _MANIFEST_RELATIVE = Path("manifest.json")
 _MAX_MANIFEST_BYTES = 4 * 1024**2
 _MAX_TRAINING_STATE_BYTES = 4 * 1024**3
-
-
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
-def _digest(value: Any, name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"RLT Stage 2 bundle {name} is invalid")
-    return value
+_MAX_REPLAY_MANIFEST_BYTES = 64 * 1024**2
 
 
 def _lexical(path: str | os.PathLike[str]) -> Path:
@@ -75,45 +71,13 @@ def _regular_file(path: Path, name: str, *, maximum_bytes: int) -> os.stat_resul
     return metadata
 
 
-def _file_sha256(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _file_record(path: Path, relative_path: Path) -> dict[str, Any]:
     metadata = _regular_file(path, str(relative_path), maximum_bytes=8 * 1024**3)
     return {
         "relative_path": relative_path.as_posix(),
         "byte_count": metadata.st_size,
-        "sha256": _file_sha256(path),
+        "sha256": file_sha256(path),
     }
-
-
-def _atomic_json_save(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(
-                dict(payload),
-                stream,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            os.unlink(temporary)
 
 
 def _atomic_copy(source: Path, destination: Path) -> None:
@@ -181,8 +145,12 @@ def _secure_torch_load(path: Path) -> Mapping[str, Any]:
     return payload
 
 
-def _load_manifest(path: Path) -> Mapping[str, Any]:
-    _regular_file(path, "bundle manifest", maximum_bytes=_MAX_MANIFEST_BYTES)
+def _load_manifest(
+    path: Path,
+    *,
+    maximum_bytes: int = _MAX_MANIFEST_BYTES,
+) -> Mapping[str, Any]:
+    _regular_file(path, "bundle manifest", maximum_bytes=maximum_bytes)
     with path.open("r", encoding="utf-8") as stream:
         payload = json.load(stream)
     if not isinstance(payload, Mapping):
@@ -225,6 +193,254 @@ def _dtype_from_name(value: Any) -> torch.dtype:
     raise ValueError("RLT Stage 2 checkpoint dtype is unsupported")
 
 
+def _json_clone(value: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads(
+        json.dumps(
+            dict(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    )
+
+
+def _validate_dataset_snapshots(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    snapshots = metadata.get("dataset_snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        raise ValueError("RLT Stage 2 replay dataset snapshots are missing")
+    summaries = []
+    content_fingerprints = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "format",
+            "file_count",
+            "total_byte_count",
+            "files",
+            "content_fingerprint",
+        }:
+            raise ValueError("RLT Stage 2 dataset snapshot fields are invalid")
+        if snapshot.get("format") != _DATASET_SNAPSHOT_FORMAT:
+            raise ValueError("RLT Stage 2 dataset snapshot format is invalid")
+        files = snapshot.get("files")
+        file_count = _positive_integer(snapshot.get("file_count"), "dataset file_count")
+        total_bytes = _positive_integer(
+            snapshot.get("total_byte_count"),
+            "dataset total_byte_count",
+            allow_zero=True,
+        )
+        if not isinstance(files, list) or len(files) != file_count:
+            raise ValueError("RLT Stage 2 dataset snapshot file count disagrees")
+        seen = set()
+        calculated_bytes = 0
+        for record in files:
+            if not isinstance(record, Mapping) or set(record) != {
+                "relative_path",
+                "byte_count",
+                "sha256",
+            }:
+                raise ValueError("RLT Stage 2 dataset file record is invalid")
+            relative = record.get("relative_path")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or relative.startswith("/")
+                or relative in seen
+                or ".." in Path(relative).parts
+            ):
+                raise ValueError("RLT Stage 2 dataset relative path is invalid")
+            seen.add(relative)
+            calculated_bytes += _positive_integer(
+                record.get("byte_count"),
+                "dataset file byte_count",
+                allow_zero=True,
+            )
+            _digest(record.get("sha256"), "dataset file SHA-256")
+        if calculated_bytes != total_bytes:
+            raise ValueError("RLT Stage 2 dataset snapshot byte count disagrees")
+        core = {
+            key: value for key, value in snapshot.items() if key != "content_fingerprint"
+        }
+        fingerprint = _digest(
+            snapshot.get("content_fingerprint"),
+            "dataset content fingerprint",
+        )
+        if canonical_json_sha256(core, allow_nan=False) != fingerprint:
+            raise ValueError("RLT Stage 2 dataset content fingerprint disagrees")
+        content_fingerprints.append(fingerprint)
+        summaries.append(
+            {
+                "ordinal": len(summaries),
+                "file_count": file_count,
+                "total_byte_count": total_bytes,
+                "content_fingerprint": fingerprint,
+            }
+        )
+    collection = {
+        "format": "cyclo.groot.rlt.dataset_collection/v1",
+        "ordered_content_fingerprints": content_fingerprints,
+    }
+    collection_fingerprint = _digest(
+        metadata.get("dataset_snapshot_fingerprint"),
+        "dataset collection fingerprint",
+    )
+    if (
+        canonical_json_sha256(collection, allow_nan=False)
+        != collection_fingerprint
+    ):
+        raise ValueError("RLT Stage 2 dataset collection fingerprint disagrees")
+    return {
+        "snapshot_fingerprint": collection_fingerprint,
+        "snapshots": summaries,
+    }
+
+
+def _validate_training_round(
+    value: Any,
+    *,
+    replay_root: Path | None,
+) -> dict[str, Any]:
+    validate_training_round(value)
+    replay = value["replay"]
+    if replay_root is not None:
+        root = _lexical(replay_root)
+        metadata = root.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("RLT Stage 2 replay root must be a real directory")
+        for key in ("manifest", "artifact"):
+            record = replay[key]
+            expected = Path(record["relative_path"])
+            _artifact_path(root, record, expected, f"round replay {key}")
+        replay_manifest = _load_manifest(
+            root / "manifest.json",
+            maximum_bytes=_MAX_REPLAY_MANIFEST_BYTES,
+        )
+        if canonical_json_sha256(replay_manifest, allow_nan=False) != replay.get(
+            "manifest_fingerprint"
+        ):
+            raise ValueError("RLT Stage 2 replay manifest fingerprint disagrees")
+    return _json_clone(value)
+
+
+def build_stage2_training_round(
+    replay_root: str | os.PathLike[str],
+    *,
+    expected_spec_fingerprint: str,
+    reference_seed: int,
+    feature_batch_size: int,
+    sampling_seed: int,
+    batch_size: int,
+    steps: int,
+    starting_critic_updates: int,
+) -> dict[str, Any]:
+    """Build and verify the immutable provenance for one Stage-2 update round."""
+
+    root = _lexical(replay_root)
+    manifest_path = root / "manifest.json"
+    replay_path = root / "replay.pt"
+    manifest = _load_manifest(
+        manifest_path,
+        maximum_bytes=_MAX_REPLAY_MANIFEST_BYTES,
+    )
+    if manifest.get("format") != _REPLAY_MANIFEST_FORMAT:
+        raise ValueError("RLT Stage 2 replay manifest format is invalid")
+    if manifest.get("file") != "replay.pt":
+        raise ValueError("RLT Stage 2 replay artifact name is invalid")
+    replay_record = _file_record(replay_path, Path("replay.pt"))
+    if (
+        manifest.get("byte_count") != replay_record["byte_count"]
+        or manifest.get("sha256") != replay_record["sha256"]
+    ):
+        raise ValueError("RLT Stage 2 replay manifest artifact digest disagrees")
+    expected_spec = _digest(expected_spec_fingerprint, "expected replay spec")
+    if manifest.get("spec_fingerprint") != expected_spec:
+        raise ValueError("RLT Stage 2 replay spec fingerprint disagrees")
+    transition_count = _positive_integer(
+        manifest.get("transition_count"), "replay transition_count"
+    )
+    average_reward = _finite_float(
+        manifest.get("average_reward"), "replay average_reward"
+    )
+    metadata = manifest.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("RLT Stage 2 replay metadata is invalid")
+    if metadata.get("transition_count") != transition_count:
+        raise ValueError("RLT Stage 2 replay transition metadata disagrees")
+    reward_contract = metadata.get("reward_contract")
+    if not isinstance(reward_contract, str) or not reward_contract:
+        raise ValueError("RLT Stage 2 replay reward contract is invalid")
+    datasets = _validate_dataset_snapshots(metadata)
+    expected_reference = {
+        "seed": _positive_integer(reference_seed, "reference seed", allow_zero=True),
+        "feature_batch_size": _positive_integer(
+            feature_batch_size, "feature batch size"
+        ),
+    }
+    if metadata.get("reference_extraction") != expected_reference:
+        raise ValueError("RLT Stage 2 replay reference extraction disagrees")
+    unsigned = {
+        "format": _TRAINING_ROUND_FORMAT,
+        "replay": {
+            "manifest": _file_record(manifest_path, Path("manifest.json")),
+            "artifact": replay_record,
+            "manifest_fingerprint": canonical_json_sha256(
+                manifest,
+                allow_nan=False,
+            ),
+            "spec_fingerprint": expected_spec,
+            "transition_count": transition_count,
+            "average_reward": average_reward,
+            "reward_contract": reward_contract,
+        },
+        "datasets": datasets,
+        "reference_extraction": expected_reference,
+        "optimization": {
+            "sampling_seed": _positive_integer(
+                sampling_seed, "sampling seed", allow_zero=True
+            ),
+            "batch_size": _positive_integer(batch_size, "optimizer batch size"),
+            "steps": _positive_integer(steps, "optimizer steps"),
+            "starting_critic_updates": _positive_integer(
+                starting_critic_updates,
+                "starting critic updates",
+                allow_zero=True,
+            ),
+        },
+    }
+    value = {
+        **unsigned,
+        "round_fingerprint": canonical_json_sha256(unsigned, allow_nan=False),
+    }
+    return _validate_training_round(value, replay_root=root)
+
+
+def validate_stage2_replay_lineage(
+    parent_training_round: Mapping[str, Any],
+    current_training_round: Mapping[str, Any],
+) -> None:
+    """Require resume replay datasets to retain the exact parent prefix.
+
+    A resume round may reuse exactly the same ordered dataset collection to run
+    additional optimizer steps, or append newly collected datasets.  Removing,
+    reordering, or mutating any dataset already represented by the parent bundle
+    is rejected before the learner is updated.
+    """
+
+    parent = _validate_training_round(parent_training_round, replay_root=None)
+    current = _validate_training_round(current_training_round, replay_root=None)
+    parent_snapshots = parent["datasets"]["snapshots"]
+    current_snapshots = current["datasets"]["snapshots"]
+    if len(current_snapshots) < len(parent_snapshots):
+        raise ValueError(
+            "RLT Stage 2 resume replay removed a parent dataset snapshot"
+        )
+    if current_snapshots[: len(parent_snapshots)] != parent_snapshots:
+        raise ValueError(
+            "RLT Stage 2 resume replay is not an exact ordered extension of "
+            "the parent dataset snapshots"
+        )
+
+
 @dataclass
 class RLTStage2Run:
     """One in-memory Stage-2 learner and its immutable encoder source."""
@@ -234,6 +450,26 @@ class RLTStage2Run:
     encoder_artifact_path: Path
     initialization_mode: InitializationMode
     parent_bundle_fingerprint: str | None = None
+    training_round: dict[str, Any] | None = None
+    replay_root: Path | None = None
+
+    def bind_training_round(
+        self,
+        provenance: Mapping[str, Any],
+        *,
+        replay_root: str | os.PathLike[str],
+    ) -> None:
+        """Attach the exact replay/extraction/optimizer contract for this run."""
+
+        root = _lexical(replay_root)
+        validated = _validate_training_round(provenance, replay_root=root)
+        starting = validated["optimization"]["starting_critic_updates"]
+        if starting != self.learner.completed_critic_updates:
+            raise ValueError(
+                "RLT Stage 2 training round starts at a different critic update"
+            )
+        self.training_round = validated
+        self.replay_root = root
 
     @classmethod
     def new(
@@ -294,6 +530,7 @@ class RLTStage2Run:
         *,
         device: str | torch.device = "cpu",
         expected_groot_checkpoint_fingerprint: str | None = None,
+        expected_replay_root: str | os.PathLike[str] | None = None,
     ) -> "RLTStage2Run":
         root = _lexical(bundle_root)
         metadata = root.lstat()
@@ -308,6 +545,7 @@ class RLTStage2Run:
             "spec_fingerprint",
             "completed_critic_updates",
             "completed_actor_updates",
+            "training_round",
             "artifacts",
             "qualification",
             "manifest_fingerprint",
@@ -325,10 +563,22 @@ class RLTStage2Run:
         manifest_fingerprint = _digest(
             manifest.get("manifest_fingerprint"), "manifest fingerprint"
         )
-        if _canonical_fingerprint(unsigned) != manifest_fingerprint:
+        if (
+            canonical_json_sha256(unsigned, allow_nan=False)
+            != manifest_fingerprint
+        ):
             raise ValueError("RLT Stage 2 bundle manifest fingerprint disagrees")
         if manifest.get("qualification") != _QUALIFICATION:
             raise ValueError("RLT Stage 2 bundle qualification is invalid")
+        replay_root = (
+            _lexical(expected_replay_root)
+            if expected_replay_root is not None
+            else root / "replay_cache"
+        )
+        training_round = _validate_training_round(
+            manifest.get("training_round"),
+            replay_root=replay_root,
+        )
         initialization = manifest.get("initialization")
         if not isinstance(initialization, Mapping) or set(initialization) != {
             "mode",
@@ -395,12 +645,17 @@ class RLTStage2Run:
             raise ValueError("RLT Stage 2 bundled encoder contract disagrees")
 
         checkpoint = _secure_torch_load(training_path)
-        if set(checkpoint) != {"format", "source", "learner"} or checkpoint.get(
-            "format"
-        ) != _TRAINING_STATE_FORMAT:
+        if set(checkpoint) != {
+            "format",
+            "source",
+            "learner",
+            "training_round",
+        } or checkpoint.get("format") != _TRAINING_STATE_FORMAT:
             raise ValueError("RLT Stage 2 training checkpoint fields are invalid")
         if checkpoint.get("source") != asdict(source):
             raise ValueError("RLT Stage 2 training checkpoint source disagrees")
+        if checkpoint.get("training_round") != training_round:
+            raise ValueError("RLT Stage 2 training checkpoint round disagrees")
         learner_state = checkpoint.get("learner")
         if not isinstance(learner_state, Mapping):
             raise ValueError("RLT Stage 2 learner checkpoint is invalid")
@@ -440,8 +695,8 @@ class RLTStage2Run:
             actor_path,
             device=device,
             dtype=learner.dtype,
-            expected_chunk_length=10,
-            expected_action_dim=19,
+            expected_chunk_length=RLT_ACTION_HORIZON,
+            expected_action_dim=RLT_ACTION_DIM,
         )
         if shadow.spec != spec or not _tensor_mapping_equal(
             shadow.actor.state_dict(), learner.actor.state_dict()
@@ -453,11 +708,16 @@ class RLTStage2Run:
             encoder_artifact_path=encoder_path,
             initialization_mode="resume",
             parent_bundle_fingerprint=manifest_fingerprint,
+            training_round=training_round,
+            replay_root=replay_root,
         )
 
     def _actor_artifact(self) -> dict[str, Any]:
-        source_fingerprint = _canonical_fingerprint(
-            {"source": asdict(self.source), "spec": asdict(self.learner.spec)}
+        if self.training_round is None:
+            raise ValueError("RLT Stage 2 training round has not been bound")
+        source_fingerprint = canonical_json_sha256(
+            {"source": asdict(self.source), "spec": asdict(self.learner.spec)},
+            allow_nan=False,
         )
         return {
             "format": _ACTOR_ARTIFACT_FORMAT,
@@ -467,7 +727,12 @@ class RLTStage2Run:
             "actor_hidden_dims": tuple(self.learner.actor.hidden_dims),
             "completed_critic_updates": self.learner.completed_critic_updates,
             "completed_actor_updates": self.learner.completed_actor_updates,
-            "replay_artifact": {"contract": "precomputed_frozen_features/v1"},
+            "replay_artifact": {
+                "contract": "precomputed_frozen_features/v1",
+                "training_round_fingerprint": self.training_round[
+                    "round_fingerprint"
+                ],
+            },
             "source_manifest_fingerprint": source_fingerprint,
             "actor": {
                 name: value.detach().cpu().clone()
@@ -482,6 +747,12 @@ class RLTStage2Run:
         """Atomically publish artifacts first and the authoritative manifest last."""
 
         self.source.validate_spec(self.learner.spec)
+        if self.training_round is None or self.replay_root is None:
+            raise ValueError("RLT Stage 2 training round has not been bound")
+        training_round = _validate_training_round(
+            self.training_round,
+            replay_root=self.replay_root,
+        )
         root = _lexical(bundle_root)
         if os.path.lexists(root):
             metadata = root.lstat()
@@ -499,13 +770,14 @@ class RLTStage2Run:
             != self.source.representation_contract_fingerprint
         ):
             raise RuntimeError("RLT Stage 2 copied encoder verification failed")
-        _atomic_torch_save(actor_path, self._actor_artifact())
-        _atomic_torch_save(
+        atomic_torch_save(actor_path, self._actor_artifact())
+        atomic_torch_save(
             training_path,
             {
                 "format": _TRAINING_STATE_FORMAT,
                 "source": asdict(self.source),
                 "learner": self.learner.state_dict(),
+                "training_round": training_round,
             },
         )
         initialization = {
@@ -520,6 +792,7 @@ class RLTStage2Run:
             "spec_fingerprint": stage2_spec_fingerprint(self.learner.spec),
             "completed_critic_updates": self.learner.completed_critic_updates,
             "completed_actor_updates": self.learner.completed_actor_updates,
+            "training_round": training_round,
             "artifacts": {
                 "rl_token_encoder": _file_record(encoder_path, _ENCODER_RELATIVE),
                 "rlt_actor": _file_record(actor_path, _ACTOR_RELATIVE),
@@ -529,9 +802,18 @@ class RLTStage2Run:
         }
         manifest = {
             **unsigned,
-            "manifest_fingerprint": _canonical_fingerprint(unsigned),
+            "manifest_fingerprint": canonical_json_sha256(
+                unsigned,
+                allow_nan=False,
+            ),
         }
-        _atomic_json_save(root / _MANIFEST_RELATIVE, manifest)
+        atomic_json_save(
+            root / _MANIFEST_RELATIVE,
+            manifest,
+            ensure_ascii=True,
+            compact=True,
+            newline=False,
+        )
         # Full round-trip verification is intentionally part of save.
         RLTStage2Run.resume(
             root,
@@ -539,9 +821,15 @@ class RLTStage2Run:
             expected_groot_checkpoint_fingerprint=(
                 self.source.groot_checkpoint_fingerprint
             ),
+            expected_replay_root=self.replay_root,
         )
         self.encoder_artifact_path = encoder_path
         return root
 
 
-__all__ = ["InitializationMode", "RLTStage2Run"]
+__all__ = [
+    "InitializationMode",
+    "RLTStage2Run",
+    "build_stage2_training_round",
+    "validate_stage2_replay_lineage",
+]

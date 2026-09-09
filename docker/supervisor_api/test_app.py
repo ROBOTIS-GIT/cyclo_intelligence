@@ -3541,6 +3541,23 @@ def test_imitation_learning_model_verification_requires_requested_policy_type(
     assert app._imitation_learning_verified_model(job) is False
 
 
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf"), True, "nan", 10**400])
+def test_imitation_learning_progress_preserves_finite_values(invalid):
+    job = app._ImitationLearningJob(
+        job_id="job", dataset_path="dataset", dataset_paths=["dataset"],
+        success_episodes=[[0]], output_dir="output", episode_count=1,
+        excluded_episode_count=0, log_path="unused.log",
+    )
+    metrics = {"loss": 0.3, "l1_loss": 0.2, "kld_loss": 0.01,
+               "eta_seconds": 12.0, "percentage": 25.0}
+    app._imitation_learning_consume_event(job, {"event": "progress", **metrics})
+    app._imitation_learning_consume_event(job, {
+        "event": "progress", **dict.fromkeys(metrics, invalid),
+    })
+    assert {name: getattr(job, name) for name in metrics} == metrics
+    json.dumps(vars(app._imitation_learning_status(job)), allow_nan=False)
+
+
 def test_imitation_learning_progress_and_verified_completion(monkeypatch, tmp_path):
     _dataset, _act, model_root = _offline_rl_test_layout(monkeypatch, tmp_path)
     output = model_root / "imitation_learning" / "run"

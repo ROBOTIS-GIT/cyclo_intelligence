@@ -835,6 +835,7 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         # Phase 7: Write optional subtask metadata/annotations
         self._write_subtasks_parquet(output_dir, episodes_data)
         self._write_subtask_annotations(output_dir, episodes_data)
+        self._write_rlt_sidecars(output_dir, episodes_data)
 
         # Phase 8: Write global stats
         self._write_global_stats()

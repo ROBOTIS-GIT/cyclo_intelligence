@@ -22,6 +22,7 @@ robot_client_stub.RobotClient = object
 sys.modules.setdefault("robot_client", robot_client_stub)
 
 from main_runtime.control_loop import ControlLoop  # noqa: E402
+from main_runtime.tt_rtc_timeline import TTActionTimeline  # noqa: E402
 from action_chunk_processing import ActionChunkProcessor  # noqa: E402
 
 
@@ -276,11 +277,11 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertIsNone(processor.scheduled_delays[-1])
         self.assertEqual(processor.align_flags[-1], False)
 
-    def test_tt_rtc_configures_exact_15_hz_source_queue(self) -> None:
+    def test_tt_rtc_configures_15_hz_source_with_100_hz_output(self) -> None:
         loop = ControlLoop(
             requester=object(),
             inference_hz=30.0,
-            control_hz=100.0,
+            control_hz=50.0,
             postprocess_actions=True,
         )
 
@@ -293,9 +294,21 @@ class ControlLoopSafetyTests(unittest.TestCase):
                 action_request_mode="tt_rtc",
             )
 
-        self.assertEqual(loop._processor.output_hz, 15.0)
-        loop._processor.push_actions(np.zeros((16, 19), dtype=np.float64))
+        self.assertEqual(loop._processor.output_hz, 100.0)
+        source = np.arange(16, dtype=np.float64).reshape(16, 1)
+        loop._processor.push_actions(source)
         self.assertEqual(loop._processor.buffer_size, 16)
+        self.assertAlmostEqual(loop._tick_period(), 0.01)
+
+        outputs = [loop._processor.pop_action() for _ in range(61)]
+        self.assertEqual(loop._processor.buffer_size, 6)
+        np.testing.assert_allclose(loop._processor.peek_actions(), source[10:])
+        np.testing.assert_allclose(outputs[0], source[0])
+        np.testing.assert_allclose(outputs[-1], source[9])
+
+        remaining_outputs = [loop._processor.pop_action() for _ in range(40)]
+        self.assertEqual(loop._processor.buffer_size, 0)
+        np.testing.assert_allclose(remaining_outputs[-1], source[-1])
         loop.deconfigure()
 
     def test_tt_rtc_refill_request_carries_six_action_prefix(self) -> None:
@@ -340,6 +353,50 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertEqual(
             request_fields["rtc_prefix_action_list"],
             prefix.reshape(-1).tolist(),
+        )
+
+    def test_tt_rtc_dual_rate_refill_appends_only_new_postfix(self) -> None:
+        source = np.repeat(
+            np.arange(16, dtype=np.float64).reshape(16, 1),
+            19,
+            axis=1,
+        )
+        postfix = np.repeat(
+            np.arange(16, 26, dtype=np.float64).reshape(10, 1),
+            19,
+            axis=1,
+        )
+        processor = TTActionTimeline(source_hz=15.0, control_hz=100.0)
+        processor.push_actions(source)
+        for _ in range(61):
+            processor.pop_action()
+        prefix = processor.peek_actions()
+        self.assertEqual(prefix.shape, (6, 19))
+
+        response_chunk = np.concatenate((prefix, postfix), axis=0)
+        response = SimpleNamespace(
+            success=True,
+            message="ok",
+            chunk_size=16,
+            action_dim=19,
+            action_list=response_chunk.reshape(-1).tolist(),
+        )
+        loop = ControlLoop(requester=FakeRequester(response))
+        loop._running = True
+        loop._processor = processor
+
+        loop._request_and_buffer(
+            "pick",
+            loop._generation,
+            "tt_rtc",
+            "base",
+            prefix.copy(),
+        )
+
+        self.assertEqual(processor.buffer_size, 16)
+        np.testing.assert_allclose(
+            processor.peek_actions(),
+            np.concatenate((prefix, postfix), axis=0),
         )
 
     def test_tt_rtc_rlt_appends_complete_ten_action_postfix(self) -> None:
@@ -397,11 +454,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
                     action_list=response_chunk.reshape(-1).tolist(),
                 )
                 requester = FakeRequester(response)
-                processor = ActionChunkProcessor(
-                    inference_hz=15.0,
-                    control_hz=100.0,
-                    postprocess=False,
-                )
+                processor = TTActionTimeline(source_hz=15.0, control_hz=100.0)
                 processor.push_actions(source)
                 robot = FakeRobot()
                 loop = self._make_loop(processor, robot)
@@ -439,6 +492,86 @@ class ControlLoopSafetyTests(unittest.TestCase):
                 )
                 self.assertEqual(len(robot.previews), 1)
                 self.assertEqual(robot.idles, [])
+
+    def test_tt_rtc_repeated_dual_rate_refills_preserve_each_action(self) -> None:
+        # Exercise both wire formats, startup, and route changes against the
+        # actual interpolating timeline. Model/transport latency uses a fake
+        # clock; no robot, GPU, or wall-clock sleeps are involved.
+        routes = (("base",) * 4, ("rlt",) * 4, ("base", "rlt", "base", "rlt"))
+        for modes in routes:
+            for latency_ticks in (0, 20, 35):
+                with self.subTest(modes=modes, latency_ticks=latency_ticks):
+                    processor = TTActionTimeline(source_hz=15.0, control_hz=100.0)
+                    loop = self._make_loop(processor, FakeRobot())
+                    loop._action_request_mode = "tt_rtc"
+                    loop._rlt_enabled = True
+                    now = [100.0]
+                    outputs = []
+                    next_waypoint = 0
+
+                    def control_tick():
+                        outputs.append(processor.pop_action())
+                        now[0] += 0.01
+
+                    for request_index, mode in enumerate(modes):
+                        if request_index:
+                            for _ in range(120):
+                                if loop._should_request_actions(processor):
+                                    break
+                                control_tick()
+                        prefix = processor.peek_actions()
+                        delay = len(prefix)
+                        self.assertEqual(delay, 0 if request_index == 0 else 6)
+                        fresh_count = 16 - delay if mode == "base" else 10
+                        fresh = np.repeat(
+                            np.arange(
+                                next_waypoint, next_waypoint + fresh_count,
+                                dtype=np.float64,
+                            )[:, None], 19, axis=1,
+                        )
+                        next_waypoint += fresh_count
+                        chunk = (
+                            np.concatenate((prefix, fresh))
+                            if delay and mode == "base" else fresh
+                        )
+                        response = SimpleNamespace(
+                            success=True, message="ok", chunk_size=len(chunk),
+                            action_dim=19, action_list=chunk.reshape(-1).tolist(),
+                        )
+
+                        class DelayedRequester(FakeRequester):
+                            def get_action(self, *args, **kwargs):
+                                if delay:
+                                    for _ in range(latency_ticks):
+                                        control_tick()
+                                return super().get_action(*args, **kwargs)
+
+                        loop._requester = DelayedRequester(response)
+                        loop._pending_action_policy_mode = mode
+                        with patch(
+                            "main_runtime.control_loop.time.monotonic",
+                            side_effect=lambda: now[0],
+                        ):
+                            loop._request_and_buffer(
+                                "pick", loop._generation, "tt_rtc", mode, prefix,
+                            )
+                        self.assertIsNone(loop.tt_rtc_failure_reason)
+                        self.assertEqual(loop._active_action_policy_mode, mode)
+                        self.assertEqual(
+                            loop._requester.keyword_calls[-1]["rtc_delay_steps"], delay,
+                        )
+                        np.testing.assert_array_equal(
+                            processor.peek_actions()[-fresh_count:], fresh,
+                        )
+
+                    # A ramp makes duplicates, skipped waypoints, and phase
+                    # resets visible across every VLA/MLP chunk boundary.
+                    for _ in range(60):
+                        control_tick()
+                    np.testing.assert_allclose(
+                        np.asarray(outputs)[:, 0], np.arange(len(outputs)) * 0.15,
+                        rtol=0.0, atol=1e-12,
+                    )
 
     def test_tt_rtc_switch_during_inflight_request_uses_old_postfix_as_bridge(
         self,
@@ -542,7 +675,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
             np.concatenate((target_prefix, target_postfix), axis=0),
         )
 
-    def test_tt_rtc_rejected_mlp_postfix_falls_back_without_dropping_prefix(
+    def test_tt_rtc_rejected_mlp_postfix_latches_safe_pause(
         self,
     ) -> None:
         prefix = np.arange(6 * 19, dtype=np.float64).reshape(6, 19)
@@ -578,9 +711,11 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertEqual(loop._active_action_policy_mode, "base")
         self.assertIsNone(loop._pending_action_policy_mode)
         self.assertEqual(loop._generation, generation + 1)
-        np.testing.assert_allclose(processor.peek_actions(), prefix)
+        self.assertFalse(loop._running)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertIn("MLP response rejected", loop.tt_rtc_failure_reason)
 
-    def test_tt_rtc_failed_mlp_handoff_reports_failure_and_keeps_prefix(
+    def test_tt_rtc_failed_mlp_handoff_reports_failure_and_latches_pause(
         self,
     ) -> None:
         source = np.arange(7 * 19, dtype=np.float64).reshape(7, 19)
@@ -624,7 +759,8 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0][0])
         self.assertIn("MLP response rejected", result[0][1])
-        np.testing.assert_allclose(processor.peek_actions(), source[1:])
+        self.assertFalse(loop._running)
+        self.assertEqual(processor.buffer_size, 0)
         self.assertEqual(len(robot.previews), 1)
         self.assertEqual(robot.idles, [])
 
@@ -690,7 +826,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
 
         with patch(
             "main_runtime.control_loop.time.monotonic",
-            side_effect=[100.300, 100.310, 100.410],
+            side_effect=[100.300, 100.310, 100.310, 100.410],
         ):
             loop._request_and_buffer(
                 "pick",
@@ -701,7 +837,170 @@ class ControlLoopSafetyTests(unittest.TestCase):
                 100.0,
             )
 
-        self.assertEqual(processor.buffer_size, 6)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertFalse(loop._running)
+        self.assertIn("VLA response rejected", loop.tt_rtc_failure_reason)
+
+    def test_tt_rtc_passes_remaining_prefix_budget_to_requester(self) -> None:
+        prefix = np.zeros((6, 19), dtype=np.float64)
+        response = SimpleNamespace(
+            success=True,
+            message="ok",
+            chunk_size=16,
+            action_dim=19,
+            action_list=np.zeros((16, 19), dtype=np.float64).reshape(-1).tolist(),
+        )
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        processor.push_actions(prefix)
+        requester = FakeRequester(response)
+        loop = ControlLoop(requester=requester)
+        loop._running = True
+        loop._processor = processor
+
+        with patch("main_runtime.control_loop.time.monotonic", return_value=10.1):
+            loop._request_and_buffer(
+                "pick",
+                loop._generation,
+                "tt_rtc",
+                "base",
+                prefix.copy(),
+                10.0,
+            )
+
+        self.assertAlmostEqual(requester.keyword_calls[-1]["timeout_s"], 0.3)
+        self.assertTrue(loop._running)
+        self.assertEqual(processor.buffer_size, 16)
+
+    def test_tt_rtc_bootstrap_uses_bounded_max_delay_timeout(self) -> None:
+        response = SimpleNamespace(
+            success=True,
+            message="ok",
+            chunk_size=16,
+            action_dim=19,
+            action_list=np.zeros((16, 19), dtype=np.float64).reshape(-1).tolist(),
+        )
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        requester = FakeRequester(response)
+        loop = ControlLoop(requester=requester)
+        loop._running = True
+        loop._processor = processor
+
+        with patch("main_runtime.control_loop.time.monotonic", return_value=20.0):
+            loop._request_and_buffer(
+                "pick",
+                loop._generation,
+                "tt_rtc",
+                "base",
+                np.empty((0, 19), dtype=np.float64),
+                20.0,
+            )
+
+        self.assertAlmostEqual(requester.keyword_calls[-1]["timeout_s"], 0.4)
+        self.assertEqual(processor.buffer_size, 16)
+
+    def test_tt_rtc_expired_budget_latches_before_rpc(self) -> None:
+        requester = FakeRequester(SimpleNamespace(success=True))
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        prefix = np.zeros((6, 19), dtype=np.float64)
+        processor.push_actions(prefix)
+        loop = ControlLoop(requester=requester)
+        loop._running = True
+        loop._processor = processor
+
+        with patch("main_runtime.control_loop.time.monotonic", return_value=30.5):
+            loop._request_and_buffer(
+                "pick",
+                loop._generation,
+                "tt_rtc",
+                "base",
+                prefix,
+                30.0,
+            )
+
+        self.assertEqual(requester.calls, [])
+        self.assertFalse(loop._running)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertIn("expired before", loop.tt_rtc_failure_reason)
+
+    def test_tt_rtc_request_failure_latches_pause_and_idles_robot(self) -> None:
+        response = SimpleNamespace(
+            success=False,
+            message="deadline timeout",
+            chunk_size=0,
+            action_dim=0,
+            action_list=[],
+        )
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        processor.push_actions(np.zeros((6, 19), dtype=np.float64))
+        requester = FakeRequester(response)
+        robot = FakeRobot()
+        loop = ControlLoop(requester=requester)
+        loop._running = True
+        loop._processor = processor
+        loop._robot = robot
+        loop._action_keys = ["arm"]
+        loop._publish_to_robot = True
+        generation = loop._generation
+
+        loop._request_and_buffer(
+            "pick",
+            generation,
+            "tt_rtc",
+            "base",
+            processor.peek_actions(),
+        )
+
+        self.assertFalse(loop._running)
+        self.assertEqual(loop._generation, generation + 1)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertEqual(robot.idles, [["arm"]])
+        self.assertIn("deadline timeout", loop.tt_rtc_failure_reason)
+        loop.tick()
+        self.assertEqual(len(requester.calls), 1)
+
+        loop.start(publish_to_robot=True)
+        self.assertTrue(loop._running)
+        self.assertIsNone(loop.tt_rtc_failure_reason)
+
+    def test_tt_rtc_invalid_request_prefix_latches_pause_before_rpc(self) -> None:
+        response = SimpleNamespace(success=True)
+        requester = FakeRequester(response)
+        processor = ActionChunkProcessor(
+            inference_hz=15.0,
+            control_hz=100.0,
+            postprocess=False,
+        )
+        loop = ControlLoop(requester=requester)
+        loop._running = True
+        loop._processor = processor
+
+        loop._request_and_buffer(
+            "pick",
+            loop._generation,
+            "tt_rtc",
+            "base",
+            np.zeros((7, 19), dtype=np.float64),
+        )
+
+        self.assertFalse(loop._running)
+        self.assertEqual(requester.calls, [])
+        self.assertIn("prefix invalid", loop.tt_rtc_failure_reason)
 
     def test_tt_rtc_discards_when_queued_prefix_is_not_captured_suffix(
         self,
@@ -742,7 +1041,9 @@ class ControlLoopSafetyTests(unittest.TestCase):
             prefix.copy(),
         )
 
-        np.testing.assert_allclose(processor.peek_actions(), replacement)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertFalse(loop._running)
+        self.assertIn("VLA response rejected", loop.tt_rtc_failure_reason)
 
     def test_tt_rtc_discards_base_response_with_changed_prefix(self) -> None:
         prefix = np.zeros((6, 19), dtype=np.float64)
@@ -773,7 +1074,9 @@ class ControlLoopSafetyTests(unittest.TestCase):
             prefix.copy(),
         )
 
-        self.assertEqual(processor.buffer_size, 6)
+        self.assertEqual(processor.buffer_size, 0)
+        self.assertFalse(loop._running)
+        self.assertIn("VLA response rejected", loop.tt_rtc_failure_reason)
 
     def test_async_mode_buffers_chunk_with_latency_and_buffer_delay(self) -> None:
         response = SimpleNamespace(

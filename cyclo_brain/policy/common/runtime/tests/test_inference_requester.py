@@ -42,6 +42,7 @@ class InferenceRequesterTests(unittest.TestCase):
             "rlt_enabled": True,
             "rlt_bundle_path": "/models/rlt",
             "action_request_mode": "tt_rtc",
+            "publish_to_robot": True,
         })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
@@ -53,6 +54,7 @@ class InferenceRequesterTests(unittest.TestCase):
         self.assertTrue(client.calls[0][0].rlt_enabled)
         self.assertEqual(client.calls[0][0].rlt_bundle_path, "/models/rlt")
         self.assertEqual(client.calls[0][0].action_request_mode, "tt_rtc")
+        self.assertTrue(client.calls[0][0].publish_to_robot)
 
     def test_get_action_uses_monotonic_seq_id(self) -> None:
         client = FakeEngineClient(
@@ -100,6 +102,20 @@ class InferenceRequesterTests(unittest.TestCase):
         self.assertEqual(request.rtc_delay_steps, 6)
         self.assertEqual(request.rtc_action_dim, 19)
         self.assertEqual(request.rtc_prefix_action_list, prefix)
+
+    def test_get_action_explicit_timeout_overrides_default(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client, get_action_timeout_s=5.0)
+
+        requester.get_action(
+            "pick",
+            action_request_mode="tt_rtc",
+            timeout_s=0.275,
+        )
+
+        self.assertEqual(client.calls[0][1], 0.275)
 
     def test_timeout_clears_in_flight_and_next_request_advances_seq(self) -> None:
         client = FakeEngineClient(

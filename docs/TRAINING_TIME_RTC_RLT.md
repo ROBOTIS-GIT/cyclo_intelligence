@@ -1,10 +1,12 @@
-# Training-Time RTC Loss Contract for GR00T N1.7 + RLT
+# External Training-Time RTC Contract for GR00T N1.7 + RLT
 
-Status: partially implemented; runtime transport, scheduling, the logical
-`16x19` capability gate, and RLT reference-offset plumbing exist. Internal
-`40x132`/four-step manifest checks, model-side per-action-token flow
-conditioning, the postfix-only TT-RTC loss, and TT-RTC sampling are not yet
-implemented. No current checkpoint is deployment-qualified for TT-RTC.
+Status: Cyclo implements TT-RTC inference, runtime transport, 400 ms
+scheduling, external-checkpoint validation, and RLT same-forward reference
+plumbing. TT-RTC fine-tuning is intentionally external to this repository;
+the objective below is the contract that the external training environment
+must satisfy. A trained checkpoint, TensorRT TT export, end-to-end validation,
+and hardware-in-the-loop (HIL) qualification remain outstanding. No current
+checkpoint is deployment-qualified for TT-RTC.
 
 This document defines the training and runtime contract for adding
 Training-Time Real-Time Chunking (TT-RTC) to the CYCLO GR00T N1.7 action head
@@ -16,12 +18,16 @@ CYCLO embodiment's logical action tensor:
 |---|---|---:|
 | `H_model` | GR00T internal padded action horizon | 40 steps |
 | `A_model` | GR00T internal padded action dimension | 132 |
+| `H_processor` | Processor padded action horizon | 40 steps |
+| `A_processor` | Processor padded action dimension | 132 |
 | `H_valid` | CYCLO logical/reference horizon | 16 steps |
 | `A_valid` | CYCLO logical action dimension | 19 |
 | `D_max` | Maximum supported handoff delay | 6 steps |
 | `C` | RLT action chunk length | 10 steps |
-| `f` | Action clock | 15 Hz |
+| `f` | Model/source action clock | 15 Hz |
+| `f_control` | SG2 robot command clock | 100 Hz |
 | `N_flow` | Current checkpoint denoising steps | 4 |
+| `N_bucket` | Flow timestep quantization buckets | 1000 |
 
 The values `H_model=40`, `A_model=132`, and `N_flow=4` come from the current
 `showroom_groot/config.json`; the CYCLO processor pads the logical `16x19`
@@ -63,27 +69,57 @@ qualification checks in this document say so.
 The current implementation boundary is:
 
 - The [GR00T N1.7 action head](../cyclo_brain/policy/groot/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py)
-  uses one scalar flow time per batch item, corrupts all action tokens, and
-  applies loss over the full valid action mask. It has no
-  `get_action_tt_rtc` model entry point.
+  retains the legacy scalar-time path and adds TT-RTC inference with per-token
+  time and a sampler that clamps the committed prefix before and after every
+  Euler update. It deliberately does not implement the fine-tuning loss.
 - Its existing inference option called `RTC` seeds an overlap from the previous
   chunk and applies frozen/ramped velocity updates. It was not trained with
   clean prefix conditioning and is not PI's Training-Time RTC. It also is not
   PI's inference-time pseudoinverse/VJP RTC algorithm.
-- Request fields, engine transport, the common-runtime scheduler, the strict
-  logical-contract capability gate, and deadline/stale-result rejection are
-  implemented. They intentionally fail closed while the model entry point is
-  absent. The gate must still be extended to verify the internal `40x132`
-  tensor and four denoising steps. The current TensorRT path is also rejected
-  for TT-RTC.
+- Request fields, engine transport, the common-runtime scheduler, strict
+  logical/internal model-contract gates, sensor freshness checks, and
+  deadline/stale-result rejection are implemented. The runtime cross-checks
+  manifest values against the loaded model/processor. The current TensorRT
+  path remains rejected for TT-RTC.
+- The TT-RTC queue remains in the 15 Hz source-action domain for prefix
+  conditioning and deadline accounting. A separate source-clock timeline
+  interpolates that committed trajectory at 100 Hz for SG2 command publish;
+  interpolated commands are never fed back as model prefix tokens.
+- The model conditions on the normalized prefix in its native compute dtype,
+  but the decoded VLA result replaces its prefix rows with the exact float32
+  physical commands owned by the control queue. This prevents BF16 decode
+  round-off from rejecting a valid RLT-to-VLA handoff.
+- The simulation/robot Deploy Target is fixed when the policy is loaded.
+  `START` or `RESUME` cannot elevate a simulation-loaded policy to robot
+  output and bypass Engine qualification; changing targets requires
+  `STOP -> UNLOAD -> LOAD`.
 - The [RLT inference adapter](../cyclo_brain/policy/groot/runtime/rlt_adapter.py)
-  and shadow policy accept `reference_offset_steps` and can select
-  `reference[:, d:d+10]`. Ordinary inference defaults the offset to zero; a
-  TT-RTC caller must pass the validated request delay. This slicing support
-  alone does not make the GR00T reference prefix-conditioned.
+  receives frozen tokens, state, and the prefix-conditioned reference from the
+  exact same GR00T forward, then selects `reference[:, d:d+10]`. Ordinary RLT
+  inference continues to default the offset to zero.
 - The current [RLT Stage 2](../cyclo_brain/algorithm/rl/rlt/stage2.py) critic
   does not carry the delayed-handoff context or variable execution duration
   defined below.
+
+### Runtime build and external-training boundary
+
+The outer Cyclo repository owns
+`cyclo_brain/policy/groot/patches/isaac_gr00t_training_time_rtc.patch`, so the
+TT-RTC inference support is reproducible even though Isaac-GR00T is a pinned
+submodule. Rebuild the GR00T image after pulling this change; restarting an old
+image is not sufficient.
+
+```bash
+cd /home/robotis-ai/cyclo_intelligence
+./docker/container.sh start-groot --build
+```
+
+Run fine-tuning in the separate training environment using the objective and
+shape contract below. Import the resulting model together with its processor,
+config metadata, and `tt_rtc_manifest.json`. Cyclo only reads and validates
+that bundle; it does not create or modify the manifest. The existing
+`showroom_groot` checkpoint was not trained with this objective and must not be
+made compatible by copying or editing a manifest.
 
 ## Time and indexing contract
 
@@ -200,14 +236,15 @@ must not be counted as extra supported continuation steps.
 
 TT-RTC flow fine-tuning, RL-token representation learning, and RLT online RL
 have different targets and masks. Do not call all of them "the TT-RTC loss."
-The sequential, frozen boundaries below describe the current CYCLO training
-implementation. They are not a universal requirement of the RLT paper: RLT
+The sequential, frozen boundaries below define the integration contract across
+the external TT-RTC trainer and CYCLO's RLT stages. They are not a universal
+requirement of the RLT paper: RLT
 Stage 1 explicitly permits jointly optimizing its reconstruction loss with a
 supervised VLA loss, `L_ro + alpha * L_vla`. CYCLO currently chooses
-`alpha=0`, freezes GR00T during RL-token training, and runs TT-RTC action-head
-fine-tuning as a separate stage.
+`alpha=0` and freezes GR00T during RL-token training. TT-RTC action-head
+fine-tuning remains a separate, external stage.
 
-### 1. CYCLO GR00T TT-RTC fine-tuning
+### 1. External GR00T TT-RTC fine-tuning
 
 Use the postfix-only flow loss defined above. The VLM may remain frozen, but
 the GR00T action expert that consumes token-wise flow time must be trainable.
@@ -605,7 +642,10 @@ training_time_rtc:
   action_dimension: 19           # logical A_valid; current gate field
   model_action_horizon: 40       # padded H_model from GR00T config
   model_action_dimension: 132    # padded A_model from GR00T config
+  processor_action_horizon: 40
+  processor_action_dimension: 132
   num_inference_timesteps: 4
+  num_timestep_buckets: 1000
   action_hz: 15.0
   max_delay_steps: 6
   delay_sampling:
@@ -622,13 +662,13 @@ training_time_rtc:
     velocity_target: action_minus_noise
     time_quantizer: <name-and-version>
     clean_endpoint_code: <exact-integer-or-float-code>
-  base_groot_checkpoint:
-    identifier: <checkpoint-id>
-    sha256: <digest>
-  processor_fingerprint: <digest>
-  action_schema_fingerprint: <digest>
-  dataset_fingerprint: <digest>
-  code_revision: <git-revision>
+base_groot_checkpoint:
+  identifier: <checkpoint-id>
+  sha256: <digest>
+processor_fingerprint: <digest>
+action_schema_fingerprint: <digest>
+dataset_fingerprint: <digest>
+code_revision: <git-revision>
 
 rlt:
   chunk_length: 10
@@ -648,6 +688,7 @@ rlt:
 
 qualification:
   status: unqualified
+  deployment: simulation_only
   hardware: <device-and-host-description>
   software_image: <immutable-image-id>
   latency_scope: preprocess+groot+rlt+decode+ipc+enqueue
@@ -655,6 +696,20 @@ qualification:
   selected_delay_steps: null
   measured_at: null
 ```
+
+Real-robot LOAD additionally requires `status: deployment_qualified`,
+`deployment: real_robot`, non-empty hardware/software/fingerprint evidence,
+`selected_delay_steps: 6`, and measured p99 and maximum end-to-end latency no
+greater than 400 ms. Simulation accepts an unqualified training output; real
+robot mode fails closed.
+
+This gate makes the current implementation safe to *prepare* for hardware; it
+does not itself qualify a robot. Robot-specific joint position/velocity/
+acceleration bounds, mobile velocity bounds, low-level command watchdog,
+deadman/e-stop behavior, and HIL timing/jitter results are not inferred from a
+dataset or checkpoint. They must be supplied and validated for the target
+controller before promoting a manifest to `deployment_qualified`. Until then,
+TT-RTC real-robot LOAD is intentionally rejected.
 
 The loader must fail closed when `trained` is absent/false, when any logical or
 model horizon, dimension, denoising-step count, rate, flow convention,

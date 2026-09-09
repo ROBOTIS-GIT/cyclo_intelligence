@@ -7,7 +7,6 @@ import torch
 from torch import nn
 
 from cyclo_brain.algorithm.rl.td3 import (
-    TD3Config,
     bellman_target,
     clipped_target_action,
     critic_loss,
@@ -100,23 +99,6 @@ class TD3FunctionalTest(unittest.TestCase):
         expected_weight = previous_target.weight * 0.75 + online.weight * 0.25
         torch.testing.assert_close(target.weight, expected_weight)
         torch.testing.assert_close(target.running, online.running)
-
-    def test_config_rejects_invalid_algorithm_values(self):
-        defaults = TD3Config()
-        self.assertEqual(defaults.policy_update_period, 2)
-        self.assertEqual(defaults.actor_learning_rate, 3.0e-4)
-        self.assertEqual(defaults.critic_learning_rate, 3.0e-4)
-        with self.assertRaises(ValueError):
-            TD3Config(policy_update_period=0)
-        with self.assertRaises(ValueError):
-            TD3Config(target_update_rate=0.0)
-        with self.assertRaises(ValueError):
-            TD3Config(discount=1.1)
-        with self.assertRaises(ValueError):
-            TD3Config(actor_learning_rate=0.0)
-        with self.assertRaises(ValueError):
-            TD3Config(critic_learning_rate=-1.0)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,6 +79,22 @@ _PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
 if _PACKAGE_PARENT not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT)
 
+# The live source mount supplies dependency-free training contracts.
+_REPO_ROOT = os.environ.get("CYCLO_SUPERVISOR_API_REPO_MOUNT") or (
+    str(Path(__file__).resolve().parents[2])
+    if (Path(__file__).resolve().parents[2] / "cyclo_brain").is_dir()
+    else "/root/ros2_ws/src/cyclo_intelligence"
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from cyclo_brain.contracts.act import (
+    ACT_TRAINABLE_GROUPS as _OFFLINE_RL_ACTOR_TRAINABLE_GROUPS,
+    ACT_TD3_ACTOR_OBJECTIVES as _OFFLINE_RL_ACTOR_OBJECTIVES,
+    canonicalize_act_trainable_groups,
+    effective_act_td3_trainable_groups,
+    policy_update_period_for_epoch_schedule,
+)
+
 _NAVIGATION_PATH = Path(__file__).resolve().with_name("navigation.py")
 _NAVIGATION_SPEC = importlib.util.spec_from_file_location(
     "supervisor_api.navigation",
@@ -274,19 +290,14 @@ class TrtEngineStatus(BaseModel):
     log_tail: List[str] = Field(default_factory=list)
 
 
-_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS: tuple[str, ...] = (
-    "visual_backbone",
-    "cvae_encoder",
-    "transformer_encoder",
-    "action_decoder",
-)
+
 _OFFLINE_RL_CRITIC_SOURCES: tuple[str, ...] = (
     "resume_checkpoint",
     "parent_checkpoint",
     "policy_warmup",
     "random",
 )
-_OFFLINE_RL_ACTOR_OBJECTIVES: tuple[str, ...] = ("td3", "td3_bc")
+
 
 
 class OfflineRLStartRequest(BaseModel):
@@ -3243,21 +3254,10 @@ def _offline_rl_schedule(
     critic_epochs: int,
     actor_equivalent_epochs: int,
 ) -> tuple[int, int]:
-    for label, value in (
-        ("critic_epochs", critic_epochs),
-        ("actor_equivalent_epochs", actor_equivalent_epochs),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise HTTPException(400, f"{label} must be a positive integer")
-    if (
-        critic_epochs < actor_equivalent_epochs
-        or critic_epochs % actor_equivalent_epochs != 0
-    ):
-        raise HTTPException(
-            400,
-            "TD3 requires critic_epochs to be an exact integer multiple of "
-            "actor_equivalent_epochs; 1:1 is supported",
-        )
+    try:
+        policy_update_period_for_epoch_schedule(critic_epochs, actor_equivalent_epochs)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
     return critic_epochs, actor_equivalent_epochs
 
 
@@ -3283,27 +3283,13 @@ def _act_trainable_groups(
             raise HTTPException(400, f"{field_name} must not contain empty names")
         normalized.append(group)
 
-    if len(set(normalized)) != len(normalized):
-        raise HTTPException(400, f"{field_name} must not contain duplicates")
-
-    unknown = sorted(set(normalized) - set(_OFFLINE_RL_ACTOR_TRAINABLE_GROUPS))
-    if unknown:
-        raise HTTPException(
-            400,
-            f"Unknown {field_name}: " + ", ".join(unknown),
-        )
-
-    ordered = [
-        group for group in _OFFLINE_RL_ACTOR_TRAINABLE_GROUPS
-        if group in normalized
-    ]
-    if ordered == ["cvae_encoder"]:
-        raise HTTPException(
-            400,
-            f"CVAE-only {field_name} is not supported because it does not "
-            "update the deployed action path",
-        )
-    return ordered
+    try:
+        return list(canonicalize_act_trainable_groups(normalized))
+    except ValueError as error:
+        detail = str(error)
+        if "inference-path" in detail:
+            detail = f"CVAE-only {field_name} does not update the deployed action path"
+        raise HTTPException(400, detail) from error
 
 
 def _offline_rl_actor_trainable_groups(groups: List[str]) -> List[str]:
@@ -3325,14 +3311,10 @@ def _offline_rl_objective_trainable_groups(
     """
 
     normalized = _offline_rl_actor_trainable_groups(groups)
-    if actor_objective == "td3":
-        normalized = [group for group in normalized if group != "cvae_encoder"]
-        if not normalized:
-            raise HTTPException(
-                400,
-                "Pure TD3 requires at least one trainable deterministic ACT block",
-            )
-    return normalized
+    try:
+        return list(effective_act_td3_trainable_groups(actor_objective, normalized))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 def _offline_rl_algorithm_contract(
@@ -3798,11 +3780,14 @@ def _offline_rl_container_name(job: _OfflineRLJob) -> str:
     return f"cyclo_offline_rl_{job.job_id[:12]}"
 
 
-def _offline_rl_interrupt_job(job: _OfflineRLJob) -> bool:
+def _interrupt_training_job(
+    job: _OfflineRLJob | _ACTTD3CriticWarmupJob | _ImitationLearningJob,
+    container_name: str,
+) -> bool:
     """Send SIGINT only to this job's container or compose subprocess."""
     docker_error: Optional[Exception] = None
     try:
-        container = _docker_client().containers.get(_offline_rl_container_name(job))
+        container = _docker_client().containers.get(container_name)
         container.kill(signal="SIGINT")
         return True
     except NotFound:
@@ -3813,8 +3798,8 @@ def _offline_rl_interrupt_job(job: _OfflineRLJob) -> bool:
     except DockerException as exc:
         docker_error = exc
         logger.warning(
-            "Could not signal Offline RL container %s: %s",
-            _offline_rl_container_name(job),
+            "Could not signal training container %s: %s",
+            container_name,
             exc,
         )
 
@@ -3837,7 +3822,10 @@ def _offline_rl_interrupt_job(job: _OfflineRLJob) -> bool:
     return True
 
 
-def _offline_rl_append_log(job: _OfflineRLJob, line: str) -> None:
+def _append_training_log(
+    job: _OfflineRLJob | _ACTTD3CriticWarmupJob | _ImitationLearningJob,
+    line: str,
+) -> None:
     if not line:
         return
     job.log_tail.append(line)
@@ -4174,7 +4162,7 @@ def _monitor_offline_rl_job(job: _OfflineRLJob) -> None:
                     log.write(line + "\n")
                     log.flush()
                     with _OFFLINE_RL_LOCK:
-                        _offline_rl_append_log(job, line)
+                        _append_training_log(job, line)
                         try:
                             payload = json.loads(line)
                         except (TypeError, json.JSONDecodeError):
@@ -4372,53 +4360,6 @@ def _act_td3_critic_warmup_command(
     return command
 
 
-def _act_td3_critic_warmup_interrupt_job(job: _ACTTD3CriticWarmupJob) -> bool:
-    docker_error: Optional[Exception] = None
-    try:
-        container = _docker_client().containers.get(
-            _act_td3_critic_warmup_container_name(job)
-        )
-        container.kill(signal="SIGINT")
-        return True
-    except NotFound:
-        pass
-    except DockerException as exc:
-        docker_error = exc
-        logger.warning(
-            "Could not signal ACT-TD3 critic warm-up container %s: %s",
-            _act_td3_critic_warmup_container_name(job),
-            exc,
-        )
-
-    process = job.process
-    if process is None:
-        if docker_error is not None:
-            raise RuntimeError(str(docker_error)) from docker_error
-        return False
-    poll = getattr(process, "poll", None)
-    if callable(poll) and poll() is not None:
-        return False
-    try:
-        process.send_signal(signal.SIGINT)
-    except (OSError, ProcessLookupError) as exc:
-        if callable(poll) and poll() is not None:
-            return False
-        if docker_error is not None:
-            raise RuntimeError(f"{docker_error}; {exc}") from exc
-        raise
-    return True
-
-
-def _act_td3_critic_warmup_append_log(
-    job: _ACTTD3CriticWarmupJob,
-    line: str,
-) -> None:
-    if not line:
-        return
-    job.log_tail.append(line)
-    del job.log_tail[:-_OFFLINE_RL_LOG_LINES]
-
-
 def _act_td3_critic_warmup_update_number(
     job: _ACTTD3CriticWarmupJob,
     payload: dict,
@@ -4581,7 +4522,7 @@ def _monitor_act_td3_critic_warmup_job(job: _ACTTD3CriticWarmupJob) -> None:
                     log.write(line + "\n")
                     log.flush()
                     with _ACT_TD3_CRITIC_WARMUP_LOCK:
-                        _act_td3_critic_warmup_append_log(job, line)
+                        _append_training_log(job, line)
                         try:
                             payload = json.loads(line)
                         except (TypeError, json.JSONDecodeError):
@@ -4869,50 +4810,6 @@ def _imitation_learning_command(job: _ImitationLearningJob) -> List[str]:
     return command
 
 
-def _imitation_learning_interrupt_job(job: _ImitationLearningJob) -> bool:
-    docker_error: Optional[Exception] = None
-    try:
-        container = _docker_client().containers.get(
-            _imitation_learning_container_name(job)
-        )
-        container.kill(signal="SIGINT")
-        return True
-    except NotFound:
-        pass
-    except DockerException as exc:
-        docker_error = exc
-        logger.warning(
-            "Could not signal imitation-learning container %s: %s",
-            _imitation_learning_container_name(job),
-            exc,
-        )
-
-    process = job.process
-    if process is None:
-        if docker_error is not None:
-            raise RuntimeError(str(docker_error)) from docker_error
-        return False
-    poll = getattr(process, "poll", None)
-    if callable(poll) and poll() is not None:
-        return False
-    try:
-        process.send_signal(signal.SIGINT)
-    except (OSError, ProcessLookupError) as exc:
-        if callable(poll) and poll() is not None:
-            return False
-        if docker_error is not None:
-            raise RuntimeError(f"{docker_error}; {exc}") from exc
-        raise
-    return True
-
-
-def _imitation_learning_append_log(job: _ImitationLearningJob, line: str) -> None:
-    if not line:
-        return
-    job.log_tail.append(line)
-    del job.log_tail[:-_OFFLINE_RL_LOG_LINES]
-
-
 def _imitation_learning_update_number(
     job: _ImitationLearningJob,
     payload: dict,
@@ -4926,8 +4823,9 @@ def _imitation_learning_update_number(
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             setattr(job, name, value)
         return
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        setattr(job, name, float(value))
+    finite_value = _offline_rl_finite_float(value)
+    if finite_value is not None:
+        setattr(job, name, finite_value)
 
 
 def _imitation_learning_consume_event(
@@ -4954,9 +4852,9 @@ def _imitation_learning_consume_event(
             "eta_seconds",
         ):
             _imitation_learning_update_number(job, payload, name)
-        percentage = payload.get("percentage")
-        if isinstance(percentage, (int, float)) and not isinstance(percentage, bool):
-            job.percentage = max(0.0, min(100.0, float(percentage)))
+        percentage = _offline_rl_finite_float(payload.get("percentage"))
+        if percentage is not None:
+            job.percentage = max(0.0, min(100.0, percentage))
         checkpoint = payload.get("checkpoint_path")
         if isinstance(checkpoint, str):
             job.checkpoint_path = checkpoint
@@ -5043,7 +4941,7 @@ def _monitor_imitation_learning_job(job: _ImitationLearningJob) -> None:
                     log.write(line + "\n")
                     log.flush()
                     with _IMITATION_LEARNING_LOCK:
-                        _imitation_learning_append_log(job, line)
+                        _append_training_log(job, line)
                         try:
                             payload = json.loads(line)
                         except (TypeError, json.JSONDecodeError):
@@ -6101,7 +5999,9 @@ async def offline_rl_stop(request: OfflineRLStopRequest) -> OfflineRLStatus:
         job.message = "Stopping ACT-TD3 training"
 
     try:
-        interrupted = await asyncio.to_thread(_offline_rl_interrupt_job, job)
+        interrupted = await asyncio.to_thread(
+            _interrupt_training_job, job, _offline_rl_container_name(job)
+        )
     except Exception as exc:  # noqa: BLE001 - Docker/subprocess control boundary
         with _OFFLINE_RL_LOCK:
             if _OFFLINE_RL_JOB is job and job.status != "running":
@@ -6303,8 +6203,9 @@ async def act_td3_critic_warmup_stop(
 
     try:
         interrupted = await asyncio.to_thread(
-            _act_td3_critic_warmup_interrupt_job,
+            _interrupt_training_job,
             job,
+            _act_td3_critic_warmup_container_name(job),
         )
     except Exception as exc:  # noqa: BLE001 - Docker/subprocess control boundary
         with _ACT_TD3_CRITIC_WARMUP_LOCK:
@@ -6506,8 +6407,9 @@ async def imitation_learning_stop(
 
     try:
         interrupted = await asyncio.to_thread(
-            _imitation_learning_interrupt_job,
+            _interrupt_training_job,
             job,
+            _imitation_learning_container_name(job),
         )
     except Exception as exc:  # noqa: BLE001 - Docker/subprocess control boundary
         with _IMITATION_LEARNING_LOCK:

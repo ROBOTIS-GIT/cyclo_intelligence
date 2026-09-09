@@ -18,6 +18,9 @@ uint64 seq_id
 string model_path
 string embodiment_tag
 string robot_type
+# LOAD_POLICY safety context. false permits simulation/preview. true requires
+# a deployment-qualified TT-RTC checkpoint before the Engine loads it.
+bool publish_to_robot
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path

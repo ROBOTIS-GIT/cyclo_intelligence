@@ -303,7 +303,7 @@ describe('InferencePanel RL Recording', () => {
     expect(store.getState().tasks.inferenceTaskInfo.accelerationEnginePath)
       .toBe('');
     expect(store.getState().tasks.inferenceTaskInfo.inferenceHz).toBe(15);
-    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(15);
+    expect(store.getState().tasks.inferenceTaskInfo.controlHz).toBe(100);
     expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))
       .toBeDisabled();
     expect(screen.getByRole('checkbox', { name: 'Enable TensorRT' }))

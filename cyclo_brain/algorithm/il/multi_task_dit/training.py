@@ -9,9 +9,7 @@ JSON progress/result contract used by the supervisor's ACT trainer.
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import random
 import time
 from collections.abc import Callable, Mapping
@@ -22,11 +20,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from cyclo_brain.algorithm.il.act_bc.dataset import (
-    LeRobotDatasetDependencies,
+from cyclo_brain.algorithm.common import atomic_json_save
+from cyclo_brain.algorithm.il.common.dataset import (
+    DatasetDependencies,
     RootSelection,
-    VirtualACTBCDataset,
-    load_virtual_act_bc_dataset,
+    VirtualLeRobotDataset,
+    load_virtual_lerobot_dataset,
 )
 from cyclo_brain.model.multi_task_dit.flow_sde_adapter import CYCLO_SG2_CAMERA_KEYS
 from cyclo_brain.model.multi_task_dit.lerobot_batch import (
@@ -56,7 +55,7 @@ _MODEL_FILES = (
 class OfficialTrainingDependencies:
     """Pinned LeRobot APIs isolated behind an injectable test boundary."""
 
-    dataset: LeRobotDatasetDependencies
+    dataset: DatasetDependencies
     policy_config_cls: type
     policy_feature_cls: type
     feature_type: Any
@@ -100,7 +99,7 @@ def load_official_training_dependencies() -> OfficialTrainingDependencies:
     from lerobot.utils.utils import cycle
 
     return OfficialTrainingDependencies(
-        dataset=LeRobotDatasetDependencies(
+        dataset=DatasetDependencies(
             metadata_cls=LeRobotDatasetMetadata,
             dataset_cls=LeRobotDataset,
             resolve_delta_timestamps=resolve_delta_timestamps,
@@ -236,16 +235,6 @@ class MultiTaskDiTILResult:
         return {"event": "result", **self.__dict__}
 
 
-def _atomic_json_save(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(dict(value), allow_nan=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
-
-
 def write_failed_result(output_dir: Path, error: BaseException) -> dict[str, Any]:
     value = {
         "event": "result",
@@ -257,7 +246,7 @@ def write_failed_result(output_dir: Path, error: BaseException) -> dict[str, Any
     }
     output_dir = Path(output_dir).expanduser().resolve()
     if output_dir.exists() and output_dir.is_dir():
-        _atomic_json_save(output_dir / "result.json", value)
+        atomic_json_save(output_dir / "result.json", value, ensure_ascii=True)
     return value
 
 
@@ -302,7 +291,11 @@ def _prepare_output(config: MultiTaskDiTILConfig) -> None:
             )
     else:
         config.output_dir.mkdir(parents=True)
-    _atomic_json_save(config.output_dir / "manifest.json", training_manifest(config))
+    atomic_json_save(
+        config.output_dir / "manifest.json",
+        training_manifest(config),
+        ensure_ascii=True,
+    )
 
 
 def _build_policy_config(
@@ -431,7 +424,7 @@ def _seed_everything(seed: int) -> torch.Generator:
 
 def _build_dataloader(
     config: MultiTaskDiTILConfig,
-    dataset: VirtualACTBCDataset,
+    dataset: VirtualLeRobotDataset,
     generator: torch.Generator,
 ) -> torch.utils.data.DataLoader:
     return torch.utils.data.DataLoader(
@@ -491,7 +484,9 @@ def _emit_progress(
     progress: MultiTaskDiTILProgress,
     callback: Callable[[MultiTaskDiTILProgress], None] | None,
 ) -> None:
-    _atomic_json_save(config.output_dir / "progress.json", progress.to_dict())
+    atomic_json_save(
+        config.output_dir / "progress.json", progress.to_dict(), ensure_ascii=True
+    )
     if callback is not None:
         callback(progress)
 
@@ -520,7 +515,9 @@ def _write_training_contract(
         ],
         "padding_loss_masked": True,
     }
-    _atomic_json_save(model_dir / "cyclo_training_contract.json", contract)
+    atomic_json_save(
+        model_dir / "cyclo_training_contract.json", contract, ensure_ascii=True
+    )
 
 
 def _validate_checkpoint(checkpoint_dir: Path) -> tuple[Path, Path]:
@@ -591,7 +588,7 @@ def run_training(
     started_at = clock()
     generator = _seed_everything(config.seed)
 
-    dataset = load_virtual_act_bc_dataset(
+    dataset = load_virtual_lerobot_dataset(
         config.selections,
         policy_config=policy_config,
         dependencies=dependencies.dataset,
@@ -755,7 +752,9 @@ def run_training(
             str(last_training_state) if last_training_state is not None else None
         ),
     )
-    _atomic_json_save(config.output_dir / "result.json", result.to_dict())
+    atomic_json_save(
+        config.output_dir / "result.json", result.to_dict(), ensure_ascii=True
+    )
     return result
 
 

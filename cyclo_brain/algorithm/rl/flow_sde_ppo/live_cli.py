@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from cyclo_brain.algorithm.common import file_sha256
+
 from cyclo_brain.model.multi_task_dit.checkpoint_validation import (
     assert_deployment_artifacts,
     validate_policy_contract,
@@ -248,11 +250,7 @@ def _file_sha256(path: str | Path) -> str:
     resolved = Path(path)
     if not resolved.is_file():
         raise FileNotFoundError(f"Required Flow-SDE PPO artifact is missing: {resolved}")
-    digest = hashlib.sha256()
-    with resolved.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+    return f"sha256:{file_sha256(resolved)}"
 
 
 def _policy_artifact_hashes(pretrained_dir: str | Path) -> dict[str, str]:

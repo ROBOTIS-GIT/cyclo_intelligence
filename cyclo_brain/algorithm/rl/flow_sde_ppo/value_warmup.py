@@ -8,10 +8,7 @@ encoder and Flow-Matching noise predictor are frozen, while a
 
 from __future__ import annotations
 
-import hashlib
 import math
-import os
-import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -23,6 +20,11 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from cyclo_brain.algorithm.common.artifact_io import (
+    atomic_torch_save as _atomic_torch_save,
+    module_state_sha256,
+)
+
 
 VALUE_WARMUP_FORMAT = "cyclo.flow_sde_ppo.value_warmup.v1"
 SAMPLING_CONTRACT = "alternate_outcome_then_uniform_episode_then_uniform_chunk"
@@ -33,42 +35,13 @@ def module_sha256(module: nn.Module) -> str:
 
     if not isinstance(module, nn.Module):
         raise TypeError("module_sha256 requires a torch module")
-    digest = hashlib.sha256()
-    for name, tensor in module.state_dict().items():
-        value = tensor.detach().cpu().contiguous()
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(value.dtype).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(tuple(value.shape)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"))
-    return f"sha256:{digest.hexdigest()}"
+    return f"sha256:{module_state_sha256(module)}"
 
 
 def atomic_torch_save(path: str | Path, payload: Mapping[str, Any]) -> Path:
     """Durably replace a torch checkpoint at an optimizer-step boundary."""
 
-    resolved = Path(path).expanduser()
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{resolved.name}.", suffix=".tmp", dir=resolved.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            torch.save(dict(payload), stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, resolved)
-        directory = os.open(resolved.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return resolved
+    return _atomic_torch_save(path, payload, sync_directory=True)
 
 
 def _scalar_index(value: Any, *, name: str) -> int:

@@ -36,6 +36,12 @@ def _write_tt_rtc_manifest(root: Path) -> None:
                     "action_dimension": 19,
                     "action_hz": 15.0,
                     "max_delay_steps": 6,
+                    "model_action_horizon": 40,
+                    "model_action_dimension": 132,
+                    "processor_action_horizon": 40,
+                    "processor_action_dimension": 132,
+                    "num_inference_timesteps": 4,
+                    "num_timestep_buckets": 1000,
                     "delay_sampling": {
                         "type": "uniform_integer",
                         "min_inclusive": 0,
@@ -49,6 +55,10 @@ def _write_tt_rtc_manifest(root: Path) -> None:
                         "clean_endpoint": 1.0,
                         "velocity_target": "action_minus_noise",
                     },
+                },
+                "qualification": {
+                    "status": "unqualified",
+                    "deployment": "simulation_only",
                 },
             }
         ),
@@ -267,6 +277,37 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertIn("get_action_tt_rtc", result["message"])
         self.assertIsNone(engine.policy)
 
+    def test_tt_rtc_real_robot_load_rejects_unqualified_checkpoint_first(self):
+        spec = importlib.util.spec_from_file_location(
+            "groot_runtime_inference_engine_under_test",
+            INFERENCE_ENGINE,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            model_root = Path(temporary)
+            _write_tt_rtc_manifest(model_root)
+            engine = module.create_engine()
+
+            result = engine.load_policy(
+                types.SimpleNamespace(
+                    model_path=str(model_root),
+                    robot_type="ffw_sg2_rev1",
+                    publish_to_robot=True,
+                    action_request_mode="tt_rtc",
+                    acceleration_mode="pytorch",
+                    acceleration_engine_path="",
+                    rlt_enabled=False,
+                    rlt_bundle_path="",
+                )
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("simulation-only", result["message"])
+        self.assertIsNone(engine.policy)
+
     def test_tt_rtc_rejects_tensorrt_before_model_execution(self):
         spec = importlib.util.spec_from_file_location(
             "groot_runtime_inference_engine_under_test",
@@ -325,6 +366,41 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertEqual(result["chunk_size"], 16)
         self.assertEqual(engine.policy.prefix.shape, (1, 6, 19))
 
+    def test_real_robot_action_request_fails_on_stale_observation(self):
+        spec = importlib.util.spec_from_file_location(
+            "groot_runtime_inference_engine_under_test",
+            INFERENCE_ENGINE,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        class _StaleRobot(_Robot):
+            def validate_observation_freshness(self, max_age_s):
+                self.max_age_s = max_age_s
+                raise RuntimeError("stale camera:cam_left_head")
+
+        class _Policy:
+            def get_action(self, _observation):
+                raise AssertionError("stale sensor data must not reach the policy")
+
+        engine = module.create_engine()
+        engine.policy = _Policy()
+        engine.robot = _StaleRobot()
+        engine._loaded_publish_to_robot = True
+
+        result = engine.get_action_chunk(
+            types.SimpleNamespace(
+                task_instruction="pick",
+                action_policy_mode="base",
+                action_request_mode="async",
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIn("stale camera", result["message"])
+        self.assertEqual(engine.robot.max_age_s, 0.5)
+
     def test_tt_rtc_routes_mlp_to_the_rlt_adapter_not_the_vla_policy(self):
         spec = importlib.util.spec_from_file_location(
             "groot_runtime_inference_engine_under_test",
@@ -366,6 +442,51 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["chunk_size"], 10)
         self.assertTrue(engine._rlt_adapter.validated)
+
+    def test_rlt_recording_keeps_request_identity_and_numeric_context(self):
+        from dataclasses import make_dataclass
+
+        spec = importlib.util.spec_from_file_location('groot_recording_test', INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        engine = module.create_engine()
+        submitted = []
+        engine._rlt_trace_initialized = True
+        engine._rlt_trace = types.SimpleNamespace(
+            recording_id='episode-a',
+            submit=lambda metadata, arrays, **kw: submitted.append((metadata, arrays, kw)),
+        )
+        adapter = types.SimpleNamespace(
+            recording_identity={'actor_sha256': 'a' * 64},
+            spec=make_dataclass('TraceSpec', [('action_dim', int)])(19),
+            bundle=types.SimpleNamespace(root=Path('/bundle')),
+        )
+
+        def infer(_observation, *, capture_context):
+            self.assertTrue(capture_context)
+            adapter.recording_context = {'z_rl': np.ones((1, 4), dtype=np.float32)}
+            return {'action': np.zeros((1, 10, 19), dtype=np.float32)}
+
+        adapter.get_action = infer
+        engine._rlt_adapter = adapter
+        engine.policy = object()
+        engine.robot = _Robot()
+        engine.policy_info['action'] = ['action']
+        engine._loaded_model_path = '/model'
+        engine.preprocess = lambda *_args: {'observation': True}
+        request = types.SimpleNamespace(
+            seq_id=42, task_instruction='pick', action_policy_mode='rlt',
+            action_request_mode='sync',
+        )
+        result = engine.get_action_chunk(request)
+        self.assertTrue(result['success'], result.get('message'))
+        metadata, arrays, kwargs = submitted[0]
+        self.assertEqual(metadata['request_seq'], 42)
+        self.assertEqual(kwargs['recording_id'], 'episode-a')
+        self.assertEqual(arrays['physical_action_chunk'].shape, (10, 19))
+        self.assertEqual(arrays['physical_prefix'].shape, (0, 19))
+        self.assertFalse(metadata['execution_verified'])
+        self.assertIsNone(adapter.recording_context)
 
 
 if __name__ == "__main__":

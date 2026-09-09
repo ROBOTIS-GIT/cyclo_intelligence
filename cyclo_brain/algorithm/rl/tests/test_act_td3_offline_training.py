@@ -27,7 +27,7 @@ from cyclo_brain.algorithm.rl.act_td3.offline_training import (
     load_policy_local_warmup_critic,
     policy_update_period_for_epoch_schedule,
 )
-from cyclo_brain.algorithm.rl.act_td3.offline_warmup import _module_sha256
+from cyclo_brain.algorithm.common import module_state_sha256
 from cyclo_brain.algorithm.rl.tests.test_act_td3_lerobot_offline import (
     _FakeLeRobotDataset,
     _OffsetPreprocessor,
@@ -203,7 +203,7 @@ def _write_policy_warmup_critic(
     critic_dir = actor_root / "critic"
     critic_dir.mkdir(parents=True, exist_ok=True)
     latest = critic_dir / "latest.pt"
-    actor_sha256 = _module_sha256(learner.actor)
+    actor_sha256 = module_state_sha256(learner.actor)
     warm_config = asdict(replace(
         learner.config,
         critic_warmup_updates=5000,

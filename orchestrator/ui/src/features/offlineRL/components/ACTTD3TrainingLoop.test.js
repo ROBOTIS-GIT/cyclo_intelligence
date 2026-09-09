@@ -269,7 +269,7 @@ describe('ACTTD3TrainingLoop', () => {
     expect(screen.getByLabelText('Critic epochs')).toHaveAttribute('min', '1');
     expect(screen.getByLabelText('Critic epochs')).toHaveAttribute('step', '1');
     expect(screen.getByTestId('td3-schedule-help')).toHaveTextContent(
-      'Actor update period: every 1 critic update. 1:1 is allowed'
+      'Actor update period: every 1 critic update.'
     );
   });
 

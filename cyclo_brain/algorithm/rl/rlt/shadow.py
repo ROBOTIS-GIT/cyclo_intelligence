@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
-from hashlib import sha256
-import json
 import math
 import os
 from pathlib import Path
@@ -20,6 +18,11 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from cyclo_brain.algorithm.common import (
+    canonical_json_sha256,
+    validate_lowercase_sha256,
+)
+from cyclo_brain.model.common import RLT_ACTION_DIM, RLT_ACTION_HORIZON
 from cyclo_brain.model.mlp import RLTGaussianChunkActor
 
 from .rl_token import FrozenRLTokenEncoder, load_frozen_rl_token_encoder
@@ -29,24 +32,11 @@ _ACTOR_ARTIFACT_FORMAT = "cyclo_brain.rlt.stage2_actor/v2"
 _MAX_ACTOR_ARTIFACT_BYTES = 1024**3
 
 
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
 def _digest(value: Any, name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"RLT actor artifact {name} is invalid")
-    return value
+    return validate_lowercase_sha256(
+        value,
+        error_message=f"RLT actor artifact {name} is invalid",
+    )
 
 
 def _secure_load(path: str | os.PathLike[str]) -> Mapping[str, Any]:
@@ -237,8 +227,8 @@ def load_groot_rlt_shadow_policy(
     *,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.float32,
-    expected_chunk_length: int = 10,
-    expected_action_dim: int = 19,
+    expected_chunk_length: int = RLT_ACTION_HORIZON,
+    expected_action_dim: int = RLT_ACTION_DIM,
 ) -> GR00TRLTShadowPolicy:
     """Load the existing showroom bundle without enabling live execution."""
 
@@ -272,7 +262,7 @@ def load_groot_rlt_shadow_policy(
         raise ValueError("RLT actor spec is invalid")
     spec = RLTStage2InferenceSpec(**dict(raw_spec))
     spec_fingerprint = _digest(payload.get("spec_fingerprint"), "spec fingerprint")
-    if _canonical_fingerprint(raw_spec) != spec_fingerprint:
+    if canonical_json_sha256(raw_spec) != spec_fingerprint:
         raise ValueError("RLT actor spec fingerprint disagrees")
     if spec.rl_token_artifact_fingerprint != encoder.artifact_fingerprint:
         raise ValueError("RLT actor and RL-token encoder artifacts disagree")
@@ -283,6 +273,46 @@ def load_groot_rlt_shadow_policy(
             "RLT actor does not satisfy the required "
             f"{expected_chunk_length}x{expected_action_dim} action contract"
         )
+    replay_artifact = payload.get("replay_artifact")
+    if not isinstance(replay_artifact, Mapping):
+        raise ValueError("RLT actor replay provenance is invalid")
+    # A standalone legacy actor may still be loaded for structural diagnostics.
+    # Deployment goes through GR00TRLTInferenceAdapter, which requires the v2
+    # bundle manifest.  Every newly saved v2 actor must carry the round digest.
+    if "training_round_fingerprint" in replay_artifact:
+        if set(replay_artifact) != {"contract", "training_round_fingerprint"} or (
+            replay_artifact.get("contract") != "precomputed_frozen_features/v1"
+        ):
+            raise ValueError("RLT actor replay provenance fields are invalid")
+        _digest(
+            replay_artifact.get("training_round_fingerprint"),
+            "training round fingerprint",
+        )
+    elif set(replay_artifact) == {"contract"}:
+        if replay_artifact.get("contract") != "precomputed_frozen_features/v1":
+            raise ValueError("RLT legacy actor replay provenance is invalid")
+    else:
+        legacy_fields = {
+            "byte_count",
+            "content_fingerprint",
+            "path",
+            "sha256",
+            "size",
+            "spec_fingerprint",
+        }
+        if set(replay_artifact) != legacy_fields:
+            raise ValueError("RLT legacy actor replay provenance fields are invalid")
+        for field_name in ("content_fingerprint", "sha256", "spec_fingerprint"):
+            _digest(replay_artifact.get(field_name), f"legacy replay {field_name}")
+        for field_name in ("byte_count", "size"):
+            _positive_integer(
+                replay_artifact.get(field_name),
+                f"legacy replay {field_name}",
+            )
+        if not isinstance(replay_artifact.get("path"), str) or not replay_artifact.get(
+            "path"
+        ):
+            raise ValueError("RLT legacy actor replay path is invalid")
 
     config = payload.get("config")
     if not isinstance(config, Mapping):

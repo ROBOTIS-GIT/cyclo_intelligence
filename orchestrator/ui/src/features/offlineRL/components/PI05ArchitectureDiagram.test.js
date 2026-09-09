@@ -10,11 +10,11 @@ describe('PI05ArchitectureDiagram', () => {
     expect(within(inputs).getByText('Robot state')).toBeInTheDocument();
 
     expect(screen.getByRole('button', { name: /Vision-language encoder: Frozen/i }))
-      .toHaveTextContent('SigLIP + PaliGemma');
+      .toHaveAttribute('title', 'SigLIP + PaliGemma → multimodal tokens');
     expect(screen.getByRole('button', { name: /Action conditioning: Trainable/i }))
-      .toHaveTextContent('Robot state + noisy action + time');
+      .toHaveAttribute('title', 'Robot state + noisy action + time');
     expect(screen.getByRole('button', { name: /Action Module: Trainable/i }))
-      .toHaveTextContent('Flow-matching velocity prediction');
+      .toHaveAttribute('title', 'Flow-matching velocity prediction');
     expect(screen.getByTestId('pi05-policy-output')).toHaveTextContent('Action chunk');
   });
 
@@ -35,7 +35,7 @@ describe('PI05ArchitectureDiagram', () => {
     expect(trainableConditioning).toBeDisabled();
     expect(trainableAction).toBeDisabled();
     expect(trainableAction).toHaveClass('opacity-100');
-    expect(screen.getByText(/Fine-tuning boundary · view only/i)).toBeInTheDocument();
+    expect(screen.getByText('Locked policy')).toBeInTheDocument();
   });
 
   test.each([
@@ -50,6 +50,6 @@ describe('PI05ArchitectureDiagram', () => {
     }
     expect(screen.getByTestId('pi05-architecture-diagram'))
       .toHaveAttribute('data-architecture-mode', 'all-frozen');
-    expect(screen.getByText(/RLT base policy · all modules frozen/i)).toBeInTheDocument();
+    expect(screen.queryByText(/RLT base policy · all modules frozen/i)).not.toBeInTheDocument();
   });
 });

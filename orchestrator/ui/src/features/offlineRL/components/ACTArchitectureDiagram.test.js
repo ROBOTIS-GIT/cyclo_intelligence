@@ -97,9 +97,10 @@ describe('ACTArchitectureDiagram', () => {
     expect(screen.getByTestId('act-architecture-flow'))
       .toHaveClass('min-h-0', 'flex-1');
     expect(screen.getByText('Visual backbone'))
-      .toHaveClass('text-[12px]');
-    expect(screen.getByText('3 cameras → ResNet features'))
-      .toHaveClass('text-[10px]');
+      .toHaveClass('text-[14px]');
+    expect(screen.queryByText('3 cameras → ResNet features')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Visual backbone/i }))
+      .toHaveAttribute('title', '3 cameras → ResNet features');
   });
 
   test('exposes frozen state and prevents changes while disabled', () => {

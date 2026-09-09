@@ -6,12 +6,15 @@
 import React from 'react';
 import clsx from 'clsx';
 import {
-  MdAcUnit,
-  MdArrowDownward,
   MdCameraAlt,
   MdMemory,
-  MdWhatshot,
 } from 'react-icons/md';
+import {
+  PolicyFlowArrow as FlowArrow,
+  PolicyInputNode as InputNode,
+  PolicyOutputNode,
+  PolicyTrainabilityBadge,
+} from './PolicyArchitecturePrimitives';
 
 export const ACT_TRAINABLE_GROUPS = [
   {
@@ -110,10 +113,10 @@ function ArchitectureNode({
       aria-label={`${group.label}: ${status}; ${nextAction}`}
       disabled={disabled || locked}
       onClick={onToggle}
-      title={locked ? 'Not used by the pure TD3 actor objective' : undefined}
+      title={locked ? 'Not used by the pure TD3 actor objective' : group.detail}
       className={clsx(
-        'group flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left shadow-[0_1px_2px_rgba(56,50,42,0.04)] transition-all',
-        'hover:-translate-y-px hover:shadow-[0_4px_12px_rgba(56,50,42,0.08)] focus:outline-none focus:ring-2 focus:ring-[#9eaa9f] focus:ring-offset-1',
+        'group flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left transition-all',
+        'hover:border-[#9eaa9f] focus:outline-none focus:ring-2 focus:ring-[#9eaa9f] focus:ring-offset-1',
         (trainable || mixed)
           ? [tone.border, tone.background, tone.text]
           : 'border-[#d9d2c5] bg-[#f1eee7] text-[#7d7569]',
@@ -121,68 +124,17 @@ function ArchitectureNode({
       )}
       data-trainable-group={group.id}
     >
-      <span
-        className={clsx(
-          'mb-1 text-[8px] font-bold uppercase tracking-[0.12em]',
-          (trainable || mixed) ? tone.detail : 'text-[#999084]'
-        )}
-      >
-        {tone.eyebrow}
-      </span>
-      <span className="flex items-center justify-between gap-2">
-        <span className="truncate text-[12px] font-semibold">{group.label}</span>
-        <span
-          className={clsx(
-            'flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.06em]',
-            trainable
-              ? 'bg-[#69866f] text-white'
-              : mixed
-                ? 'border border-[#c9b986] bg-[#f8f0d7] text-[#79662f]'
-              : 'border border-[#d3ccc0] bg-white/60 text-[#80776a]'
-          )}
-        >
-          {locked ? (
-            <><MdAcUnit size={10} aria-hidden="true" /> Frozen · TD3</>
-          ) : mixed ? (
-            <><MdWhatshot size={10} aria-hidden="true" /> Mixed</>
-          ) : trainable ? (
-            <><MdWhatshot size={10} aria-hidden="true" /> Fire · Trainable</>
-          ) : (
-            <><MdAcUnit size={10} aria-hidden="true" /> Frozen</>
-          )}
-        </span>
-      </span>
-      <span
-        className={clsx(
-          'mt-1 block truncate text-[10px]',
-          (trainable || mixed) ? tone.detail : 'text-[#958c80]'
-        )}
-      >
-        {group.detail}
+      <span className="flex flex-wrap items-center justify-between gap-2">
+        <span className="truncate text-[14px] font-semibold">{group.label}</span>
+        <PolicyTrainabilityBadge
+          trainable={trainable && !locked}
+          mixed={mixed && !locked}
+          frozenLabel={locked ? 'Frozen · TD3' : 'Frozen'}
+        />
       </span>
     </button>
   );
 }
-
-function InputNode({ icon: Icon, label, detail }) {
-  return (
-    <div className="flex min-w-0 items-center gap-2.5 rounded-xl border border-[#b9d3e2] bg-[#edf6fa] px-3 py-2 text-[#34586b] shadow-[0_1px_2px_rgba(54,91,110,0.04)]">
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#d9ecf4] text-[#517b91]">
-        <Icon size={15} aria-hidden="true" />
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-[10px] font-semibold">{label}</span>
-        <span className="block truncate text-[8px] text-[#6f93a5]">{detail}</span>
-      </span>
-    </div>
-  );
-}
-
-const FlowArrow = () => (
-  <div className="flex items-center justify-center text-[#aaa295]">
-    <MdArrowDownward size={15} aria-hidden="true" />
-  </div>
-);
 
 /**
  * Controlled, presentation-only ACT trainability graph.
@@ -227,15 +179,14 @@ export default function ACTArchitectureDiagram({
 
   return (
     <div
-      className="flex h-full min-h-0 flex-col rounded-2xl border border-[#e0d9ce] bg-white p-3.5 shadow-[0_8px_24px_rgba(61,55,46,0.06)]"
+      className="flex h-full min-h-0 flex-col rounded-2xl border border-[#e0d9ce] bg-white p-3.5"
       data-testid="act-architecture-diagram"
     >
       <div className="mb-2.5 flex shrink-0 items-center justify-between gap-2">
         <div>
-          <div className="text-[13px] font-semibold text-[#39352e]">ACT Policy</div>
-          <div className="text-[9px] text-[#8d8579]">Select a module to switch Frozen / Trainable</div>
+          <div className="text-[14px] font-semibold text-[#39352e]">ACT Policy</div>
         </div>
-        <span className="rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
+        <span className="rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
           Actor policy
         </span>
       </div>
@@ -259,7 +210,7 @@ export default function ACTArchitectureDiagram({
             locked={locked.has(ACT_TRAINABLE_GROUPS[0].id)}
             onToggle={() => toggleGroups([ACT_TRAINABLE_GROUPS[0].id])}
           />
-          <span className="flex items-center justify-center text-[10px] font-semibold uppercase text-[#aaa295]">+</span>
+          <span className="flex items-center justify-center text-[12px] font-semibold uppercase text-[#aaa295]">+</span>
           <ArchitectureNode
             group={ACT_TRAINABLE_GROUPS[1]}
             trainable={selected.has(ACT_TRAINABLE_GROUPS[1].id)}
@@ -282,18 +233,7 @@ export default function ACTArchitectureDiagram({
 
         <FlowArrow />
 
-        <div
-          className="flex items-center justify-between gap-3 rounded-xl border border-[#9faacf] bg-[#e9edfa] px-3 py-2 text-[#36456f] shadow-[0_2px_8px_rgba(54,69,111,0.08)]"
-          data-testid="act-policy-output"
-        >
-          <span className="min-w-0">
-            <span className="block text-[8px] font-bold uppercase tracking-[0.12em] text-[#69769e]">Policy output</span>
-            <span className="block truncate text-[11px] font-semibold">Action chunk</span>
-          </span>
-          <span className="shrink-0 rounded-full bg-[#485984] px-2.5 py-1 text-[9px] font-semibold text-white">
-            30 steps
-          </span>
-        </div>
+        <PolicyOutputNode testId="act-policy-output" badge="30 steps" />
       </div>
     </div>
   );

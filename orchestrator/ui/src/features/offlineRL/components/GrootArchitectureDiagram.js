@@ -6,13 +6,16 @@
 import React from 'react';
 import clsx from 'clsx';
 import {
-  MdAcUnit,
-  MdArrowDownward,
   MdCameraAlt,
   MdLock,
   MdMemory,
-  MdWhatshot,
 } from 'react-icons/md';
+import {
+  PolicyFlowArrow as FlowArrow,
+  PolicyInputNode as InputNode,
+  PolicyOutputNode,
+  PolicyTrainabilityBadge,
+} from './PolicyArchitecturePrimitives';
 
 export const GROOT_N17_DEFAULT_GROUPS = [
   {
@@ -107,8 +110,9 @@ function LockedArchitectureNode({ group, memberGroups = [group.id] }) {
       aria-pressed={group.trainable}
       aria-label={`${group.label}: ${group.trainable ? 'Trainable' : 'Frozen'}; locked`}
       disabled
+      title={group.detail}
       className={clsx(
-        'flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left shadow-[0_1px_2px_rgba(56,50,42,0.04)]',
+        'flex h-full min-h-[58px] w-full min-w-0 flex-col justify-center rounded-xl border px-3 py-2.5 text-left',
         group.trainable
           ? [tone.border, tone.background, tone.text, 'cursor-default opacity-100']
           : 'cursor-not-allowed border-[#d9d2c5] bg-[#f1eee7] text-[#7d7569] opacity-75'
@@ -116,62 +120,13 @@ function LockedArchitectureNode({ group, memberGroups = [group.id] }) {
       data-trainable-group={group.id}
       data-member-groups={memberGroups.join(' ')}
     >
-      <span
-        className={clsx(
-          'mb-1 text-[8px] font-bold uppercase tracking-[0.12em]',
-          group.trainable ? tone.detail : 'text-[#999084]'
-        )}
-      >
-        {tone.eyebrow}
-      </span>
-      <span className="flex items-center justify-between gap-2">
-        <span className="truncate text-[12px] font-semibold">{group.label}</span>
-        <span
-          className={clsx(
-            'flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.06em]',
-            group.trainable
-              ? 'bg-[#69866f] text-white'
-              : 'border border-[#d3ccc0] bg-white/60 text-[#80776a]'
-          )}
-        >
-          {group.trainable ? (
-            <><MdWhatshot size={10} aria-hidden="true" /> Fire · Trainable</>
-          ) : (
-            <><MdAcUnit size={10} aria-hidden="true" /> Frozen</>
-          )}
-        </span>
-      </span>
-      <span
-        className={clsx(
-          'mt-1 block truncate text-[10px]',
-          group.trainable ? tone.detail : 'text-[#958c80]'
-        )}
-      >
-        {group.detail}
+      <span className="flex flex-wrap items-center justify-between gap-2">
+        <span className="truncate text-[14px] font-semibold">{group.label}</span>
+        <PolicyTrainabilityBadge trainable={group.trainable} />
       </span>
     </button>
   );
 }
-
-function InputNode({ icon: Icon, label, detail }) {
-  return (
-    <div className="flex min-w-0 items-center gap-2.5 rounded-xl border border-[#b9d3e2] bg-[#edf6fa] px-3 py-2 text-[#34586b] shadow-[0_1px_2px_rgba(54,91,110,0.04)]">
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#d9ecf4] text-[#517b91]">
-        <Icon size={15} aria-hidden="true" />
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-[10px] font-semibold">{label}</span>
-        <span className="block truncate text-[8px] text-[#6f93a5]">{detail}</span>
-      </span>
-    </div>
-  );
-}
-
-const FlowArrow = () => (
-  <div className="flex items-center justify-center text-[#aaa295]">
-    <MdArrowDownward size={15} aria-hidden="true" />
-  </div>
-);
 
 /**
  * Presentation-only GR00T N1.7 topology.
@@ -202,20 +157,15 @@ export default function GrootArchitectureDiagram({
 
   return (
     <div
-      className="flex h-full min-h-0 flex-col rounded-2xl border border-[#e0d9ce] bg-white p-3.5 shadow-[0_8px_24px_rgba(61,55,46,0.06)]"
+      className="flex h-full min-h-0 flex-col rounded-2xl border border-[#e0d9ce] bg-white p-3.5"
       data-testid="groot-architecture-diagram"
       data-architecture-mode={freezeBasePolicy ? 'all-frozen' : 'finetune'}
     >
       <div className="mb-2.5 flex shrink-0 items-center justify-between gap-2">
         <div>
-          <div className="text-[13px] font-semibold text-[#39352e]">GR00T N1.7 Policy</div>
-          <div className="text-[9px] text-[#8d8579]">
-            {freezeBasePolicy
-              ? 'RLT base policy · all modules frozen'
-              : 'Official fine-tuning defaults · view only'}
-          </div>
+          <div className="text-[14px] font-semibold text-[#39352e]">GR00T N1.7 Policy</div>
         </div>
-        <span className="flex items-center gap-1 rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
+        <span className="flex items-center gap-1 rounded-full border border-[#d7ddea] bg-[#f2f4fa] px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] text-[#5c6684]">
           <MdLock size={10} aria-hidden="true" /> Locked policy
         </span>
       </div>
@@ -241,7 +191,7 @@ export default function GrootArchitectureDiagram({
 
         <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_20px_minmax(0,1fr)] items-stretch gap-1.5">
           <LockedArchitectureNode group={groups[0]} />
-          <span className="flex items-center justify-center text-[10px] font-semibold uppercase text-[#aaa295]">+</span>
+          <span className="flex items-center justify-center text-[12px] font-semibold uppercase text-[#aaa295]">+</span>
           <LockedArchitectureNode group={groups[1]} />
         </div>
 
@@ -254,18 +204,10 @@ export default function GrootArchitectureDiagram({
 
         <FlowArrow />
 
-        <div
-          className="flex items-center justify-between gap-3 rounded-xl border border-[#9faacf] bg-[#e9edfa] px-3 py-2 text-[#36456f] shadow-[0_2px_8px_rgba(54,69,111,0.08)]"
-          data-testid="groot-policy-output"
-        >
-          <span className="min-w-0">
-            <span className="block text-[8px] font-bold uppercase tracking-[0.12em] text-[#69769e]">Policy output</span>
-            <span className="block truncate text-[11px] font-semibold">Action chunk</span>
-          </span>
-          <span className="shrink-0 rounded-full bg-[#485984] px-2.5 py-1 text-[9px] font-semibold text-white">
-            Chunked controls
-          </span>
-        </div>
+        <PolicyOutputNode
+          testId="groot-policy-output"
+          badge="Chunked controls"
+        />
       </div>
     </div>
   );

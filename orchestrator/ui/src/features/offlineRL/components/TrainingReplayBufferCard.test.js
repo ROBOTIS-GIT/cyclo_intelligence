@@ -75,19 +75,17 @@ describe('TrainingReplayBufferCard', () => {
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.getByText('10 / 20 episodes')).toBeInTheDocument();
     const cylinder = screen.getByLabelText('Training replay buffer fill');
-    expect(cylinder).toHaveClass('h-48', 'w-40');
-    const visualArea = cylinder.parentElement.parentElement;
-    expect(visualArea).toHaveClass('h-[190px]', 'min-h-0');
-    expect(visualArea).not.toHaveClass('min-h-[222px]');
-    expect(screen.getByText('Success 6')).toHaveClass('text-[11px]');
-    expect(screen.getByText('Failure 3')).toHaveClass('text-[11px]');
-    expect(screen.getByText('Unlabeled 1')).toHaveClass('text-[11px]');
+    expect(cylinder).toHaveClass('pg-buffer-vessel');
+    expect(cylinder).toHaveAttribute('data-capacity-percent', '50');
+    expect(screen.getByText('Success 6')).toHaveClass('text-[14px]');
+    expect(screen.getByText('Failure 3')).toHaveClass('text-[14px]');
+    expect(screen.getByText('Unlabeled 1')).toHaveClass('text-[14px]');
     expect(screen.getByLabelText('Inspect success datasets: 6 episodes'))
-      .toHaveStyle({ height: '30%', bottom: '0%' });
+      .toHaveAttribute('data-episode-count', '6');
     expect(screen.getByLabelText('Inspect failure datasets: 3 episodes'))
-      .toHaveStyle({ height: '15%', bottom: '30%' });
+      .toHaveAttribute('data-episode-count', '3');
     expect(screen.getByLabelText('Inspect unlabeled datasets: 1 episode'))
-      .toHaveStyle({ height: '5%', bottom: '45%' });
+      .toHaveAttribute('data-episode-count', '1');
     expect(screen.queryByTestId('training-replay-buffer-grid')).not.toBeInTheDocument();
   });
 

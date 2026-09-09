@@ -74,6 +74,14 @@ const MODEL_GUIDES = {
       ['TD3 critic source', 'Automatic priority: resume checkpoint → previous round → policy warm-up → random initialization.'],
       ['Execution', 'The current showroom control path consumes actions at the configured 15 Hz contract.'],
     ],
+    screenReference: [
+      ["Visual backbone", "Three cameras → ResNet features. Select an ACT module to switch Frozen / Fire; the setting controls gradient updates."],
+      ["CVAE encoder", "State + target actions → latent. IL reconstructs action chunks with latent KL regularization. Pure TD3 does not use this encoder in the actor objective."],
+      ["Action Module", "Transformer encoder + action decoder: visual, state, and latent tokens → action chunk. Mixed means only some underlying blocks are trainable."],
+      ["Critic Network", "Twin chunk Q-functions with a clipped Bellman target. Critic warm-up keeps the ACT actor frozen."],
+      ["Loss option", "TD3: −Q1. TD3-BC: −Q1 plus success-only behavior cloning. Failed transitions still train the critics."],
+      ["Critic / Actor epochs", "Epochs are replay passes, not individual optimizer updates. Their integer ratio determines the actor update period. Critic ≥ Actor and Critic divisible by Actor are required; 1:1 is allowed, including with a warmed critic."],
+    ],
     recipes: [
       {
         name: 'Imitation Learning',
@@ -138,6 +146,13 @@ const MODEL_GUIDES = {
       ['Critic data', 'Checked LeRobot v3.0 replay with success/fail outcomes, the selected policy checkpoint, and the same task instruction used by PPO.'],
       ['PPO rollout', 'Live simulator transitions with action-step ACK and a terminal success/fail outcome.'],
     ],
+    screenReference: [
+      ["Visual + task encoder", "Images and task tokens → features. The current conditioning encoders are frozen."],
+      ["Robot-state encoder", "22D state → proprioceptive features. Head, left-wrist and right-wrist images remain aligned with state and actions."],
+      ["Action Module", "Frozen conditioning → trainable Flow-Matching DiT. IL reconstructs recorded actions through the flow-matching objective; Critic mode freezes the whole policy."],
+      ["Value Critic Network", "State value V(s) is trained against offline targets during warm-up. Value LR controls its learning rate; Discount weights future rewards."],
+      ["PPO critic source", "A compatible PPO resume state takes precedence; otherwise use a compatible completed offline critic bundle or fresh value initialization. Inspect the active source and compatibility warnings on the Training screen."],
+    ],
     recipes: [
       {
         name: 'Flow-Matching IL',
@@ -192,10 +207,10 @@ const MODEL_GUIDES = {
     testId: 'training-guide-groot',
     title: 'GR00T N1.7',
     subtitle: 'Frozen VLA policy with an RLT action adapter',
-    status: 'Staged',
-    tone: 'staged',
-    summary: 'Cyclo can inspect the GR00T + RLT architecture and route a qualified RLT bundle during inference. The RLT training request is intentionally not connected to Start Training yet.',
-    methods: ['RLT inference', 'Training staged'],
+    status: 'Ready',
+    tone: 'ready',
+    summary: 'Cyclo trains the RL Token representation separately, then updates a compact Action MLP and twin-Q critics while GR00T and the RL Token Encoder remain frozen.',
+    methods: ['RL Token Stage 1', 'RLT Stage 2', 'RLT inference'],
     flow: ['3 RGB images + state + language', 'Frozen GR00T N1.7', 'RL Token Encoder + Action MLP', '10 × 19 @ 15 Hz'],
     contract: [
       ['Base policy', 'GR00T N1.7 remains frozen in the current RLT design.'],
@@ -203,15 +218,23 @@ const MODEL_GUIDES = {
       ['RLT action', 'RL token features and the reference action produce a 10 × 19 chunk at 15 Hz.'],
       ['Deployment', 'RLT routing requires a compatible, deployment-qualified bundle.'],
     ],
+    screenReference: [
+      ["Visual encoder / Language model", "Cosmos Qwen3-VL vision tower and language layers supply multimodal features. The current diagram is locked; its displayed state is not an editable fine-tuning control."],
+      ["Action Module", "VL norm + self-attention, state/action projectors, and a conditioned Flow-Matching DiT. GR00T is fully frozen in RLT."],
+      ["RL Token Stage 1", "Demonstrations train only the RL Token Encoder and Reconstruction Decoder using Frozen Token Feature MSE. GR00T features are reconstructed autoregressively; Success/Fail labels are not required."],
+      ["RL Token Encoder / Action MLP", "Stage 2 freezes the retained encoder. RL token features and reference actions condition the lightweight Action MLP, which emits a 10 × 19 action chunk."],
+      ["Q critic network", "Independent Q1 and Q2 MLPs evaluate RL token + proprioception + action chunk. Both critics train in Stage 2; min(Q1, Q2) forms the clipped target."],
+      ["RLT Source", "Training uses the linked Seed Bundle for a new Stage 2 run or a compatible existing bundle for resume. The resolved source and candidate output path remain visible beside the optimizer schedule."],
+    ],
     recipes: [
       {
         name: 'Cyclo RLT',
-        status: 'Staged',
-        tone: 'staged',
-        when: 'Use only for architecture inspection and qualified-bundle inference today.',
-        data: 'Future training requires GR00T token features, reference actions, rewards, and transitions.',
-        configure: 'RL Token Encoder / Action MLP trainability is visible, but Start Training is not wired.',
-        output: 'A future bundle must include adapter weights and its base-policy compatibility metadata.',
+        status: 'Ready',
+        tone: 'ready',
+        when: 'Train Stage 1 once for a frozen GR00T checkpoint, then run or resume Stage 2 after each compatible replay collection round.',
+        data: 'Checked LeRobot v3.0 Data Epochs are read directly without rewriting aggregate parquet or video shards. Stage 2 requires 15 Hz, three RGB cameras, 22-D recorder state/action, and both Success and Fail outcomes.',
+        configure: 'Stage 1 trains the RL Token Encoder and reconstruction decoder. Stage 2 freezes GR00T and the retained encoder, then trains the 10 × 19 Action MLP and twin-Q critics.',
+        output: 'An immutable self-contained bundle with the frozen RL Token Encoder, Action MLP, critics, optimizer/RNG state, and a fingerprinted manifest.',
       },
       {
         name: 'RLinf GR00T PPO',
@@ -225,10 +248,10 @@ const MODEL_GUIDES = {
     ],
     steps: [
       'Select GR00T N1.7 and a compatible base policy path in Inference Settings.',
-      'Choose RLT and inspect the frozen GR00T / adapter boundary.',
-      'For inference testing, select a qualified RLT Bundle Path before starting inference.',
-      'Switch between VLA Action and RLT Action only through the runtime action router.',
-      'Do not expect Start Training to launch GR00T RLT until the trainer/checkpoint contract is connected.',
+      'Convert each replay Data Epoch to v3.0, then deploy the checked v3.0 entry to Training. Existing v2.1 datasets remain supported.',
+      'Choose IL → RL Token Training to create the Stage 1 encoder bound to the selected frozen GR00T checkpoint.',
+      'Choose RL → RLT. The first round starts New from the compatible Stage 1 encoder; later rounds Resume automatically from the current Inference bundle.',
+      'After Stage 2 completes, deploy the candidate bundle and switch between VLA Action and RLT Action through the runtime action router.',
     ],
     monitor: [
       'Compare VLA Action and RLT Action rollouts from the same initial condition.',
@@ -237,14 +260,16 @@ const MODEL_GUIDES = {
       'For external RLinf PPO, success rate is primary and actor/value/KL metrics are diagnostic.',
     ],
     limitations: [
-      'Cyclo GR00T RLT training is not connected; the current Training page is a staged architecture view.',
+      'LeRobot v3.0 episode/data/video shard metadata must remain contiguous and immutable while frozen features are extracted.',
+      'New Stage 2 requires a completed Stage 1 run manifest from the exact same GR00T checkpoint; legacy standalone encoder files are rejected.',
+      'Completed Stage 2 bundles remain training-only until simulation and real-robot deployment qualification are recorded.',
       'RLinf GR00T PPO and Cyclo RLT are different algorithms and runtime contracts.',
       'A GR00T-only RLT bundle is not automatically compatible with Pi0.5 or another base checkpoint.',
     ],
     reference: {
-      label: 'RLinf: RL on GR00T Models',
-      href: 'https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/gr00t.html',
-      detail: 'Official external example covering SFT cold start, online PPO, launch configuration, metrics, and evaluation. Use it as a design reference, not as evidence that Cyclo RLT training is connected.',
+      label: 'Physical Intelligence: Precise Manipulation with Efficient Online RL',
+      href: 'https://www.pi.website/research/rlt',
+      detail: 'Primary RLT reference for the frozen RL Token representation, action-chunk actor, VLA reference constraint, reference dropout, and compact actor-critic training.',
     },
   },
   pi05: {
@@ -261,6 +286,12 @@ const MODEL_GUIDES = {
       ['Action', 'Flow-matched continuous action chunk; the Cyclo deployment contract is not finalized.'],
       ['Training', 'No Pi0.5 trainer or Frozen/Fire submission contract is connected.'],
       ['Deployment', 'Requires a Pi0.5-specific runtime and compatible adapter bundle.'],
+    ],
+    screenReference: [
+      ["Vision-language encoder", "SigLIP + PaliGemma → multimodal tokens in the architecture preview."],
+      ["Action conditioning", "Robot state + noisy action + time condition the action module."],
+      ["Action Module", "Flow-matching velocity prediction. Frozen/Trainable indicates the intended boundary only; this preview does not submit a Pi0.5 training configuration."],
+      ["RLT preview", "A Pi0.5-specific token encoder, action adapter and qualified training backend are required. GR00T bundle compatibility must not be assumed."],
     ],
     recipes: [
       {
@@ -304,7 +335,7 @@ const MODEL_GUIDES = {
 
 function StatusPill({ tone = 'ready', children }) {
   return (
-    <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.07em] ${STATUS_STYLES[tone]}`}>
+    <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[12px] font-bold uppercase tracking-[0.07em] ${STATUS_STYLES[tone]}`}>
       {children}
     </span>
   );
@@ -317,7 +348,7 @@ function GuideCard({ title, subtitle, status, tone, children, className = '' }) 
         <div className="min-w-0">
           <h3 className="text-[13px] font-semibold text-[#39352e]">{title}</h3>
           {subtitle && (
-            <p className="mt-0.5 text-[10px] leading-relaxed text-[#8a8276]">
+            <p className="mt-0.5 text-[14px] leading-relaxed text-[#8a8276]">
               {subtitle}
             </p>
           )}
@@ -334,7 +365,7 @@ function NetworkFlow({ nodes }) {
     <div className="flex flex-wrap items-center gap-1.5" aria-label={nodes.join(' to ')}>
       {nodes.map((node, index) => (
         <React.Fragment key={node}>
-          <span className="rounded-lg border border-[#d8d1c5] bg-white px-2.5 py-2 text-[10px] font-semibold text-[#514b42]">
+          <span className="rounded-lg border border-[#d8d1c5] bg-white px-2.5 py-2 text-[14px] font-semibold text-[#514b42]">
             {node}
           </span>
           {index < nodes.length - 1 && (
@@ -348,7 +379,7 @@ function NetworkFlow({ nodes }) {
 
 function BulletList({ items }) {
   return (
-    <ul className="space-y-2 text-[10px] leading-relaxed text-[#625c52]">
+    <ul className="space-y-2 text-[14px] leading-relaxed text-[#625c52]">
       {items.map((item) => (
         <li key={item} className="flex items-start gap-2">
           <MdCheckCircle className="mt-0.5 shrink-0 text-[#69866f]" size={13} aria-hidden="true" />
@@ -364,8 +395,8 @@ function ContractGrid({ items }) {
     <dl className="divide-y divide-[#ece6dc] rounded-xl border border-[#e1dbd0] bg-white">
       {items.map(([label, value]) => (
         <div key={label} className="grid gap-1 px-3 py-2.5 sm:grid-cols-[110px_1fr] sm:gap-3">
-          <dt className="text-[9px] font-bold uppercase tracking-[0.08em] text-[#8c8377]">{label}</dt>
-          <dd className="text-[10px] leading-relaxed text-[#5f584e]">{value}</dd>
+          <dt className="text-[12px] font-bold uppercase tracking-[0.08em] text-[#8c8377]">{label}</dt>
+          <dd className="text-[14px] leading-relaxed text-[#5f584e]">{value}</dd>
         </div>
       ))}
     </dl>
@@ -377,10 +408,10 @@ function TrainingSteps({ items }) {
     <ol className="grid gap-2 lg:grid-cols-5">
       {items.map((item, index) => (
         <li key={item} className="rounded-xl border border-[#ded8cc] bg-white p-3">
-          <div className="font-mono text-[9px] font-bold text-[#69866f]">
+          <div className="font-mono text-[12px] font-bold text-[#69866f]">
             STEP {String(index + 1).padStart(2, '0')}
           </div>
-          <p className="mt-1.5 text-[9px] leading-relaxed text-[#6f685d]">{item}</p>
+          <p className="mt-1.5 text-[12px] leading-relaxed text-[#6f685d]">{item}</p>
         </li>
       ))}
     </ol>
@@ -409,7 +440,7 @@ function QuickStartPanel() {
           <MdInfoOutline className="mt-0.5 shrink-0 text-[#5d7863]" size={17} aria-hidden="true" />
           <div>
             <h3 className="text-xs font-semibold text-[#3d5743]">Start from the current backend contract</h3>
-            <p className="mt-1 text-[10px] leading-relaxed text-[#607064]">
+            <p className="mt-1 text-[14px] leading-relaxed text-[#607064]">
               A disabled combination is a preview, not a runnable trainer. Use the model tabs to check data, action, label, and checkpoint requirements before starting.
             </p>
           </div>
@@ -420,10 +451,23 @@ function QuickStartPanel() {
         <TrainingSteps items={steps} />
       </GuideCard>
 
+      <GuideCard title="Training controls" subtitle="Keep the workspace compact; consult this reference for parameter meanings.">
+        <ContractGrid items={[
+          ['Frozen / Fire', 'Frozen disables gradient updates; Fire marks trainable modules. Locked or preview modules cannot be toggled. Current states and validation warnings stay on the Training screen.'],
+          ['Steps / Updates', 'One step is one minibatch optimizer update, not a complete episode or dataset pass. Critic/Actor epochs in ACT TD3 instead count replay passes; see the ACT tab.'],
+          ['Batch size', 'Number of sampled action chunks or transitions per minibatch update. Larger batches change memory use and the optimization schedule; keep within the selected backend limits.'],
+          ['Save frequency', 'Save an intermediate checkpoint every N optimizer steps. Final artifacts and their paths are reported separately.'],
+          ['Action chunk size', 'Number of actions predicted per chunk, not the minibatch size. ACT IL exposes the horizon; fixed model/runtime contracts may lock it.'],
+          ['Replay Buffer', 'The cylinder represents deployed training datasets. Hover or click Success/Failure to inspect dataset names and episode counts; click outside or press Escape to close.'],
+          ['Training prerequisites', 'Training action shows ✓/× for selected Dataset, Model, Robot, and method-specific inputs. Click a row for its setup location or remedy. A checkmark confirms the UI prerequisite only; the backend still validates file contents, labels, and checkpoint compatibility. ACT/DiT IL can start a new policy without an initial model. PPO requires a labeled Inference rollout instead of offline LeRobot data.'],
+          ['Training progress', 'Loss values, progress, remaining time, current source paths, and errors remain visible. Use the expand icon in Training progress to inspect the recorded metric history.'],
+        ]} />
+      </GuideCard>
+
       <GuideCard title="Compatibility" subtitle="Availability in the current Cyclo Training Pipeline.">
         <div className="overflow-x-auto rounded-xl border border-[#e1dbd0] bg-white">
-          <table className="w-full min-w-[650px] text-left text-[10px] text-[#625c52]">
-            <thead className="bg-[#f1ede5] text-[9px] uppercase tracking-[0.08em] text-[#81796e]">
+          <table className="w-full min-w-[650px] text-left text-[14px] text-[#625c52]">
+            <thead className="bg-[#f1ede5] text-[12px] uppercase tracking-[0.08em] text-[#81796e]">
               <tr>
                 {['Policy', 'IL', 'Critic', 'TD3', 'PPO', 'RLT'].map((label) => (
                   <th key={label} scope="col" className="px-3 py-2.5 font-bold">{label}</th>
@@ -446,17 +490,17 @@ function QuickStartPanel() {
 
       <div className="grid gap-3 lg:grid-cols-3">
         <GuideCard title="IL data" status="Outcome optional" tone="ready">
-          <p className="text-[10px] leading-relaxed text-[#625c52]">
+          <p className="text-[14px] leading-relaxed text-[#625c52]">
             Demonstrations train the policy directly. ACT and Diffusion Policy IL do not require episode outcome labels.
           </p>
         </GuideCard>
         <GuideCard title="Offline value / TD3" status="Outcome required" tone="staged">
-          <p className="text-[10px] leading-relaxed text-[#625c52]">
+          <p className="text-[14px] leading-relaxed text-[#625c52]">
             ACT critic warm-up, Diffusion Policy value-critic training, and TD3 require labeled replay with both successful and failed episodes.
           </p>
         </GuideCard>
         <GuideCard title="Online PPO" status="Live rollout" tone="online">
-          <p className="text-[10px] leading-relaxed text-[#625c52]">
+          <p className="text-[14px] leading-relaxed text-[#625c52]">
             PPO needs current-policy simulator rollouts, action-step acknowledgement, and a terminal outcome for each episode.
           </p>
         </GuideCard>
@@ -471,16 +515,16 @@ function ModelGuidePanel({ guide }) {
       <section className="rounded-2xl border border-[#d9d2c5] bg-[#fbfaf6] p-5 shadow-[0_6px_20px_rgba(69,61,47,0.05)]">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-[#91897d]">Model guide</p>
+            <p className="text-[12px] font-bold uppercase tracking-[0.14em] text-[#91897d]">Model guide</p>
             <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[#302d28]">{guide.title}</h2>
-            <p className="mt-1 text-[11px] text-[#7e766b]">{guide.subtitle}</p>
+            <p className="mt-1 text-[14px] text-[#7e766b]">{guide.subtitle}</p>
           </div>
           <StatusPill tone={guide.tone}>{guide.status}</StatusPill>
         </div>
-        <p className="mt-4 max-w-4xl text-[11px] leading-5 text-[#5f584e]">{guide.summary}</p>
+        <p className="mt-4 max-w-4xl text-[14px] leading-5 text-[#5f584e]">{guide.summary}</p>
         <div className="mt-4 flex flex-wrap gap-2">
           {guide.methods.map((method) => (
-            <span key={method} className="rounded-full border border-[#d4cec2] bg-white px-3 py-1 text-[9px] font-semibold text-[#5f584e]">
+            <span key={method} className="rounded-full border border-[#d4cec2] bg-white px-3 py-1 text-[12px] font-semibold text-[#5f584e]">
               {method}
             </span>
           ))}
@@ -501,10 +545,10 @@ function ModelGuidePanel({ guide }) {
           {guide.recipes.map((recipe) => (
             <article key={recipe.name} className="rounded-xl border border-[#ded8cc] bg-white p-3.5">
               <div className="flex items-center justify-between gap-2">
-                <h4 className="text-[11px] font-semibold text-[#3f3a33]">{recipe.name}</h4>
+                <h4 className="text-[14px] font-semibold text-[#3f3a33]">{recipe.name}</h4>
                 <StatusPill tone={recipe.tone}>{recipe.status}</StatusPill>
               </div>
-              <dl className="mt-3 space-y-2 text-[9px] leading-relaxed text-[#6f685d]">
+              <dl className="mt-3 space-y-2 text-[12px] leading-relaxed text-[#6f685d]">
                 {[
                   ['When', recipe.when],
                   ['Data', recipe.data],
@@ -520,6 +564,10 @@ function ModelGuidePanel({ guide }) {
             </article>
           ))}
         </div>
+      </GuideCard>
+
+      <GuideCard title="Network & settings reference" subtitle="Explanations moved out of the compact Training screen.">
+        <ContractGrid items={guide.screenReference} />
       </GuideCard>
 
       <GuideCard title="Run in PLAYGROUND" subtitle="Follow the controls in this order.">
@@ -541,12 +589,12 @@ function ModelGuidePanel({ guide }) {
             href={guide.reference.href}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#4e6d56] underline decoration-[#9fb2a2] underline-offset-4 hover:text-[#344d3a]"
+            className="inline-flex items-center gap-1.5 text-[14px] font-semibold text-[#4e6d56] underline decoration-[#9fb2a2] underline-offset-4 hover:text-[#344d3a]"
           >
             {guide.reference.label}
             <MdArrowForward size={14} aria-hidden="true" />
           </a>
-          <p className="mt-2 text-[10px] leading-relaxed text-[#6f685d]">{guide.reference.detail}</p>
+          <p className="mt-2 text-[14px] leading-relaxed text-[#6f685d]">{guide.reference.detail}</p>
         </GuideCard>
       )}
     </div>
@@ -662,7 +710,7 @@ export default function OfflineRLTrainingGuideModal({ open, onBack }) {
             <MdModelTraining size={19} aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-[#989083]">Policy Workflow</p>
+            <p className="text-[14px] font-semibold uppercase tracking-[0.15em] text-[#989083]">Policy Workflow</p>
             <h2 id="offline-rl-training-guide-title" className="truncate text-sm font-semibold text-[#292720]">Training Guide</h2>
             <p id="offline-rl-training-guide-description" className="sr-only">
               Model-specific setup, training, validation, and deployment guidance for the current Training Pipeline.
@@ -672,7 +720,7 @@ export default function OfflineRLTrainingGuideModal({ open, onBack }) {
 
         <div className="flex min-h-0 flex-1">
           <aside className="w-[216px] shrink-0 border-r border-[#ded8cc] bg-[#f1ede5] p-3">
-            <div className="px-2 pb-2 text-[9px] font-bold uppercase tracking-[0.13em] text-[#968e82]">
+            <div className="px-2 pb-2 text-[12px] font-bold uppercase tracking-[0.13em] text-[#968e82]">
               Guide sections
             </div>
             <div
@@ -708,7 +756,7 @@ export default function OfflineRLTrainingGuideModal({ open, onBack }) {
                       <Icon size={16} aria-hidden="true" />
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate text-[11px] font-semibold">{tab.label}</span>
+                      <span className="block truncate text-[14px] font-semibold">{tab.label}</span>
                       <span className="mt-0.5 block truncate text-[8px] opacity-70">{tab.detail}</span>
                     </span>
                   </button>
@@ -723,7 +771,7 @@ export default function OfflineRLTrainingGuideModal({ open, onBack }) {
             aria-labelledby={`offline-rl-training-guide-tab-${activeTab}`}
             className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-5"
           >
-            <div className="mb-4 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
+            <div className="mb-4 flex items-center gap-2 text-[14px] font-semibold uppercase tracking-[0.12em] text-[#91897d]">
               <ActiveIcon size={15} aria-hidden="true" />
               {activeTabDefinition.label}
             </div>

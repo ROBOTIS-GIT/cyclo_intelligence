@@ -24,11 +24,9 @@ from collections.abc import Iterator, Mapping, Sequence
 import gc
 import json
 import math
-import os
 from pathlib import Path
 import random
 import sys
-import tempfile
 import time
 from typing import Any
 
@@ -36,105 +34,25 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from cyclo_brain.algorithm.common import atomic_json_save, atomic_torch_save
 from cyclo_brain.algorithm.rl.rlt import (
     RLTokenAutoencoder,
     RLTokenConfig,
     RLTokenStage1Trainer,
 )
 
-from .rlt_adapter import GR00TRLTTokenExtractor, _checkpoint_weight_fingerprint
-from .rlt_stage1_dataset import RLTStage1LeRobotV21Source
+from .rlt_adapter import GR00TRLTTokenExtractor
+from .rlt_cli_common import (
+    json_line,
+    positive_int,
+    prepare_output_directory,
+    resolved_directory,
+)
+from .rlt_provenance import GR00TRLTProvenance, build_groot_rlt_provenance
+from .rlt_stage1_dataset import open_rlt_stage1_source
 
 
 _CACHE_FORMAT = "cyclo.groot.rlt.stage1_feature_cache/v1"
-
-
-def _positive_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("must be an integer") from error
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
-
-
-def _json_line(payload: Mapping[str, Any], *, stream: Any = sys.stdout) -> None:
-    print(
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        file=stream,
-        flush=True,
-    )
-
-
-def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            torch.save(dict(payload), stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            os.unlink(temporary)
-
-
-def _atomic_json_save(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(
-                dict(payload),
-                stream,
-                ensure_ascii=False,
-                allow_nan=False,
-                indent=2,
-                sort_keys=True,
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            os.unlink(temporary)
-
-
-def _resolved_directory(value: str | Path, name: str) -> Path:
-    path = Path(value).expanduser().absolute()
-    if path.is_symlink() or not path.is_dir():
-        raise ValueError(f"{name} must be a real directory: {path}")
-    return path
-
-
-def _prepare_output(value: str | Path, inputs: Sequence[Path]) -> Path:
-    output = Path(value).expanduser().absolute()
-    if output.is_symlink():
-        raise ValueError("RLT Stage 1 output must not be a symbolic link")
-    for source in inputs:
-        if output == source or output in source.parents or source in output.parents:
-            raise ValueError("RLT Stage 1 output overlaps an input directory")
-    if output.exists():
-        if not output.is_dir() or any(output.iterdir()):
-            raise FileExistsError(f"RLT Stage 1 output is not empty: {output}")
-    else:
-        output.mkdir(parents=True)
-    return output
 
 
 def _progress(
@@ -166,7 +84,7 @@ def _progress(
                 "total_steps": total,
             }
         )
-    _json_line(payload)
+    json_line(payload)
 
 
 class _FeatureCacheWriter:
@@ -206,7 +124,7 @@ class _FeatureCacheWriter:
             "token_valid": token_valid.detach().to(device="cpu", dtype=torch.bool),
             "image_token": image_token.detach().to(device="cpu", dtype=torch.bool),
         }
-        _atomic_torch_save(path, payload)
+        atomic_torch_save(path, payload)
         count = int(tokens.shape[0])
         self.shards.append(
             {
@@ -236,7 +154,7 @@ class _FeatureCacheWriter:
             **dict(extra),
         }
         path = self.root / "manifest.json"
-        _atomic_json_save(path, manifest)
+        atomic_json_save(path, manifest)
         return path
 
 
@@ -348,7 +266,7 @@ def _extract_features(
     from gr00t.data.embodiment_tags import EmbodimentTag
     from gr00t.policy.gr00t_policy import Gr00tPolicy
 
-    sources = tuple(RLTStage1LeRobotV21Source(root) for root in dataset_roots)
+    sources = tuple(open_rlt_stage1_source(root) for root in dataset_roots)
     total_samples = sum(len(source) for source in sources)
     writer = _FeatureCacheWriter(cache_root)
     started = time.monotonic()
@@ -399,15 +317,17 @@ def _extract_features(
 
 def _representation_contract(
     cache: _FeatureCache,
-    checkpoint: Path,
-    weight_fingerprint: str,
+    provenance: GR00TRLTProvenance,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "backend": "gr00t-n1.7",
         "embodiment": "new_embodiment",
-        "policy_checkpoint": str(checkpoint),
-        "policy_weight_fingerprint": weight_fingerprint,
+        "policy_weight_fingerprint": provenance.weight_fingerprint,
+        "policy_checkpoint_fingerprint": provenance.checkpoint_fingerprint,
+        "policy_processor_fingerprint": provenance.processor_fingerprint,
+        "action_normalization_id": provenance.action_normalization_id,
+        "action_codec_id": provenance.action_codec_id,
         "embeddings": {
             "source": "Qwen3 final-layer backbone tokens before the action head",
             "width": cache.embedding_dim,
@@ -425,12 +345,18 @@ def run(args: argparse.Namespace) -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    checkpoint = _resolved_directory(args.groot_checkpoint, "GR00T checkpoint")
+    checkpoint = resolved_directory(args.groot_checkpoint, "GR00T checkpoint")
     dataset_roots = tuple(
-        _resolved_directory(path, "LeRobot dataset") for path in args.dataset_root
+        resolved_directory(path, "LeRobot dataset") for path in args.dataset_root
     )
-    output = _prepare_output(args.output_dir, (*dataset_roots, checkpoint))
-    weight_fingerprint = _checkpoint_weight_fingerprint(checkpoint)
+    output = prepare_output_directory(
+        args.output_dir,
+        (*dataset_roots, checkpoint),
+        stage_label="RLT Stage 1",
+        overlap_description="an input directory",
+    )
+    provenance = build_groot_rlt_provenance(checkpoint)
+    weight_fingerprint = provenance.weight_fingerprint
     extraction_batch_size = min(args.batch_size, 4)
     cache = _extract_features(
         checkpoint,
@@ -452,7 +378,7 @@ def run(args: argparse.Namespace) -> int:
         token_selection="image",
         loss_reduction="paper_per_sample_sum",
     )
-    contract = _representation_contract(cache, checkpoint, weight_fingerprint)
+    contract = _representation_contract(cache, provenance)
     trainer = RLTokenStage1Trainer(
         RLTokenAutoencoder(model_config),
         contract,
@@ -497,7 +423,7 @@ def run(args: argparse.Namespace) -> int:
     if len(artifact_fingerprint) != 64:
         raise RuntimeError("RLT Stage 1 encoder artifact fingerprint is invalid")
     run_manifest_path = checkpoint_path.with_name(f"{checkpoint_path.name}.run.json")
-    _atomic_json_save(
+    atomic_json_save(
         run_manifest_path,
         {
             "format": "cyclo.groot.rlt.stage1_run/v1",
@@ -506,6 +432,10 @@ def run(args: argparse.Namespace) -> int:
             "dataset_roots": [str(path) for path in dataset_roots],
             "groot_checkpoint": str(checkpoint),
             "policy_weight_fingerprint": weight_fingerprint,
+            "policy_checkpoint_fingerprint": provenance.checkpoint_fingerprint,
+            "policy_processor_fingerprint": provenance.processor_fingerprint,
+            "action_normalization_id": provenance.action_normalization_id,
+            "action_codec_id": provenance.action_codec_id,
             "completed_steps": trainer.completed_steps,
             "batch_size": args.batch_size,
             "artifact": {
@@ -515,7 +445,7 @@ def run(args: argparse.Namespace) -> int:
             "checkpoint": {"path": str(checkpoint_path)},
         },
     )
-    _json_line(
+    json_line(
         {
             "event": "result",
             "status": "completed",
@@ -540,10 +470,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", action="append", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--job-id", required=True)
-    parser.add_argument("--steps", type=_positive_int, required=True)
-    parser.add_argument("--batch-size", type=_positive_int, required=True)
-    parser.add_argument("--save-freq", type=_positive_int, required=True)
-    parser.add_argument("--progress-interval", type=_positive_int, default=10)
+    parser.add_argument("--steps", type=positive_int, required=True)
+    parser.add_argument("--batch-size", type=positive_int, required=True)
+    parser.add_argument("--save-freq", type=positive_int, required=True)
+    parser.add_argument("--progress-interval", type=positive_int, default=10)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     return parser
@@ -554,17 +484,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return run(args)
     except KeyboardInterrupt:
-        _json_line(
+        json_line(
             {"event": "result", "status": "stopped", "job_id": args.job_id}
         )
         return 130
     except Exception as error:
-        _json_line(
+        detail = f"{type(error).__name__}: {error}"
+        json_line(
             {
-                "event": "result",
+                "event": "error",
                 "status": "failed",
                 "job_id": args.job_id,
-                "error": f"{type(error).__name__}: {error}",
+                "message": f"RLT Stage 1 failed: {detail}",
+                "error": detail,
             },
             stream=sys.stderr,
         )

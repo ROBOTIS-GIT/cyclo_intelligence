@@ -570,6 +570,104 @@ class RobotClient:
         with self._lock:
             return sensor_name in self._sensors
 
+    def validate_observation_freshness(
+        self,
+        max_age_s: float,
+        *,
+        now_s: Optional[float] = None,
+    ) -> None:
+        """Fail unless every configured policy observation is present and fresh.
+
+        The callback timestamps in this client use ``time.time()``, so callers
+        that supply ``now_s`` must use the same wall-clock domain.  This method
+        deliberately validates freshness only; physical joint/action limits
+        remain the responsibility of the robot controller and its safety
+        configuration.
+
+        Args:
+            max_age_s: Maximum permitted age, in seconds, for each observation.
+            now_s: Optional wall-clock timestamp used for deterministic checks.
+
+        Raises:
+            ValueError: If the freshness threshold or current time is invalid.
+            RuntimeError: If a configured camera, joint group, or odometry
+                observation is missing, has an invalid timestamp, or is stale.
+        """
+        try:
+            max_age = float(max_age_s)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_age_s must be a finite non-negative number") from exc
+        if not np.isfinite(max_age) or max_age < 0.0:
+            raise ValueError("max_age_s must be a finite non-negative number")
+
+        if now_s is None:
+            now = time.time()
+        else:
+            try:
+                now = float(now_s)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("now_s must be a finite wall-clock timestamp") from exc
+            if not np.isfinite(now):
+                raise ValueError("now_s must be a finite wall-clock timestamp")
+
+        failures: list[str] = []
+
+        def check_timestamp(kind: str, name: str, timestamp) -> None:
+            if timestamp is None:
+                failures.append(f"missing timestamp for {kind}:{name}")
+                return
+            try:
+                sample_time = float(timestamp)
+            except (TypeError, ValueError):
+                failures.append(f"invalid timestamp for {kind}:{name}")
+                return
+            if not np.isfinite(sample_time):
+                failures.append(f"invalid timestamp for {kind}:{name}")
+                return
+            age = now - sample_time
+            if age < 0.0:
+                failures.append(
+                    f"future timestamp for {kind}:{name} ({-age:.3f}s ahead)"
+                )
+            elif age > max_age:
+                failures.append(f"stale {kind}:{name} ({age:.3f}s old)")
+
+        with self._lock:
+            for camera_name in self._config.get("cameras", {}):
+                if camera_name not in self._images:
+                    failures.append(f"missing camera:{camera_name}")
+                    continue
+                check_timestamp(
+                    "camera",
+                    camera_name,
+                    self._image_timestamps.get(camera_name),
+                )
+
+            for group_name in self._config.get("joint_groups", {}):
+                if group_name not in self._joint_positions:
+                    failures.append(f"missing joint:{group_name}")
+                    continue
+                check_timestamp(
+                    "joint",
+                    group_name,
+                    self._joint_timestamps.get(group_name),
+                )
+
+            # Odometry is the state sensor used by the mobile action contract.
+            # Do not make unrelated optional sensors a real-robot gate here.
+            if "odom" in self._config.get("sensors", {}):
+                if "odom" not in self._sensors:
+                    failures.append("missing odom")
+                else:
+                    check_timestamp("sensor", "odom", self._sensor_timestamps.get("odom"))
+
+        if failures:
+            detail = "; ".join(failures)
+            raise RuntimeError(
+                "Observation freshness validation failed "
+                f"(max_age_s={max_age:.3f}): {detail}"
+            )
+
     # ------------------------------------------------------------------ #
     # Command API
     # ------------------------------------------------------------------ #
@@ -583,33 +681,91 @@ class RobotClient:
 
         Main process control loops use this method. Engine process instances keep
         ``enable_command_publishers=False`` and remain read-only.
+
+        The complete action contract is validated before the first ROS message
+        is published.  This prevents a malformed vector or unavailable modality
+        from partially commanding the robot.
         """
         if not self._command_publishers:
             raise RuntimeError("RobotClient command publishers are not enabled")
 
-        keys = list(action_keys) if action_keys else self._action_keys
-        values = np.asarray(action, dtype=np.float64).reshape(-1)
-        offset = 0
+        keys = list(self._action_keys if action_keys is None else action_keys)
+        if not keys:
+            raise ValueError("action_keys must select at least one configured action")
+        try:
+            values = np.asarray(action, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("action must be a numeric vector") from exc
+        if not np.all(np.isfinite(values)):
+            raise ValueError("action contains non-finite values")
+
+        # Preflight every modality and publisher before publishing anything.
+        plan: list[tuple[str, ROS2Publisher, list[str], int]] = []
+        resolved_keys: set[str] = set()
+        expected_width = 0
         for action_key in keys:
+            if not isinstance(action_key, str) or not action_key:
+                raise ValueError(f"invalid action key: {action_key!r}")
             publish_key = self._resolve_action_key(action_key)
             cfg = self._action_groups.get(publish_key)
             if cfg is None:
-                continue
-            publisher_key = f"leader_{publish_key}"
-            msg_type = cfg["msg_type"]
-            width = 3 if msg_type == "geometry_msgs/msg/Twist" else len(cfg["joint_names"])
-            segment = values[offset:offset + width]
-            offset += width
+                raise ValueError(f"unknown action key: {action_key!r}")
+            if publish_key in resolved_keys:
+                raise ValueError(
+                    f"duplicate action key after alias resolution: {action_key!r} "
+                    f"resolves to {publish_key!r}"
+                )
+            resolved_keys.add(publish_key)
 
+            publisher_key = f"leader_{publish_key}"
             publisher = self._command_publishers.get(publisher_key)
             if publisher is None:
-                continue
+                raise RuntimeError(
+                    f"command publisher unavailable for action key {publish_key!r}"
+                )
+
+            msg_type = cfg.get("msg_type")
+            if msg_type == "geometry_msgs/msg/Twist":
+                width = 3
+                joint_names: list[str] = []
+            elif msg_type == "trajectory_msgs/msg/JointTrajectory":
+                configured_names = list(cfg.get("joint_names", []))
+                joint_names = list(self._command_joint_names.get(publisher_key, []))
+                if not configured_names:
+                    raise RuntimeError(
+                        f"action key {publish_key!r} has no configured joint names"
+                    )
+                if joint_names != configured_names:
+                    raise RuntimeError(
+                        f"command joint contract mismatch for action key {publish_key!r}: "
+                        f"configured={configured_names!r}, publisher={joint_names!r}"
+                    )
+                width = len(joint_names)
+            else:
+                raise RuntimeError(
+                    f"unsupported command message type for action key "
+                    f"{publish_key!r}: {msg_type!r}"
+                )
+
+            plan.append((msg_type, publisher, joint_names, width))
+            expected_width += width
+
+        if values.size != expected_width:
+            raise ValueError(
+                "action width mismatch: "
+                f"received {values.size}, expected {expected_width} for keys {keys!r}"
+            )
+
+        offset = 0
+        for msg_type, publisher, joint_names, width in plan:
+            segment = values[offset:offset + width]
+            offset += width
             if msg_type == "geometry_msgs/msg/Twist":
                 self._publish_twist(publisher, segment)
             else:
                 self._publish_joint_trajectory(
                     publisher,
-                    self._command_joint_names.get(publisher_key, []),
+                    joint_names,
                     segment,
                 )
 

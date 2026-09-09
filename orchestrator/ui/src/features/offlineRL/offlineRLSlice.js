@@ -9,7 +9,6 @@ const initialState = {
   datasetPath: '',
   datasetVersion: '',
   datasetSelections: [],
-  checkpointPath: '',
   replayBufferPath: '',
   conversionDestinationPath: '/workspace/lerobot',
   conversionFps: 15,
@@ -23,31 +22,27 @@ const initialState = {
   },
 };
 
+function normalizeDatasetSelection(item) {
+  const rawEpoch = item?.dataEpoch == null ? Number.NaN : Number(item.dataEpoch);
+  return {
+    path: String(item?.path || ''),
+    version: String(item?.version || ''),
+    dataEpoch: Number.isInteger(rawEpoch) && rawEpoch >= 0 ? rawEpoch : null,
+    dataEpochProvenance: item?.dataEpochProvenance || null,
+  };
+}
+
 const offlineRLSlice = createSlice({
   name: 'offlineRL',
   initialState,
   reducers: {
-    setOfflineRLDatasetPath: (state, action) => {
-      const path = String(action.payload || '');
-      state.datasetPath = path;
-      state.datasetVersion = '';
-      state.datasetSelections = path ? [{
-        path, version: '', dataEpoch: null, dataEpochProvenance: null,
-      }] : [];
-    },
     setOfflineRLDatasetSelection: (state, action) => {
-      const path = String(action.payload?.path || '');
-      const version = String(action.payload?.version || '');
-      const rawEpoch = action.payload?.dataEpoch == null
-        ? Number.NaN
-        : Number(action.payload.dataEpoch);
-      const dataEpoch = Number.isInteger(rawEpoch) && rawEpoch >= 0 ? rawEpoch : null;
-      const dataEpochProvenance = action.payload?.dataEpochProvenance || null;
+      const next = normalizeDatasetSelection(action.payload);
+      const { path, version } = next;
       state.datasetPath = path;
       state.datasetVersion = version;
       if (path) {
         const existing = state.datasetSelections.findIndex((item) => item.path === path);
-        const next = { path, version, dataEpoch, dataEpochProvenance };
         if (existing >= 0) state.datasetSelections[existing] = next;
         else state.datasetSelections.push(next);
       }
@@ -59,25 +54,12 @@ const offlineRLSlice = createSlice({
     setOfflineRLDatasetSelections: (state, action) => {
       const seen = new Set();
       state.datasetSelections = (Array.isArray(action.payload) ? action.payload : [])
-        .map((item) => {
-          const path = String(item?.path || '');
-          const version = String(item?.version || '');
-          const rawEpoch = item?.dataEpoch == null ? Number.NaN : Number(item.dataEpoch);
-          return {
-            path,
-            version,
-            dataEpoch: Number.isInteger(rawEpoch) && rawEpoch >= 0 ? rawEpoch : null,
-            dataEpochProvenance: item?.dataEpochProvenance || null,
-          };
-        })
+        .map(normalizeDatasetSelection)
         .filter((item) => {
           if (!item.path || seen.has(item.path)) return false;
           seen.add(item.path);
           return true;
         });
-    },
-    setOfflineRLCheckpointPath: (state, action) => {
-      state.checkpointPath = String(action.payload || '');
     },
     setOfflineRLReplayBufferPath: (state, action) => {
       state.replayBufferPath = String(action.payload || '');
@@ -108,10 +90,6 @@ export const selectOfflineRLDatasetPath = (state) => (
   state.offlineRL?.datasetPath || ''
 );
 
-export const selectOfflineRLDatasetVersion = (state) => (
-  state.offlineRL?.datasetVersion || ''
-);
-
 export const selectOfflineRLDatasetSelections = (state) => {
   const selections = state.offlineRL?.datasetSelections;
   if (Array.isArray(selections)) return selections;
@@ -123,14 +101,6 @@ export const selectOfflineRLDatasetSelections = (state) => {
     dataEpochProvenance: null,
   }] : [];
 };
-
-export const selectOfflineRLDatasetPaths = (state) => (
-  selectOfflineRLDatasetSelections(state).map((item) => item.path)
-);
-
-export const selectOfflineRLCheckpointPath = (state) => (
-  state.offlineRL?.checkpointPath || ''
-);
 
 export const selectOfflineRLReplayBufferPath = (state) => (
   state.offlineRL?.replayBufferPath || ''
@@ -153,11 +123,9 @@ export const selectOfflineRLConvertedDatasetPaths = (state) => (
 );
 
 export const {
-  setOfflineRLDatasetPath,
   setOfflineRLDatasetSelection,
   setOfflineRLDatasetPreview,
   setOfflineRLDatasetSelections,
-  setOfflineRLCheckpointPath,
   setOfflineRLReplayBufferPath,
   setOfflineRLConversionDestinationPath,
   setOfflineRLConversionFps,

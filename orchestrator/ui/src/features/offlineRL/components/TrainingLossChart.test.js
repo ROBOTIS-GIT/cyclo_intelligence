@@ -10,6 +10,15 @@ jest.mock('./TrainingMetricsModal', () => ({ open, onBack }) => (
 ));
 
 describe('TrainingLossChart', () => {
+  test('uses one compact heading and wrapping metric rows without hiding values', () => {
+    render(<TrainingLossChart title="Training progress" actorLossHistory={[{ step: 1, loss: 0.5 }]} />);
+    expect(screen.getByRole('heading', { name: 'Training progress' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Training loss' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Latest actor loss')).toHaveTextContent('0.50');
+    expect(screen.getByLabelText('Latest actor loss').parentElement)
+      .toHaveClass('flex', 'flex-wrap', 'items-baseline');
+  });
+
   test('renders only the latest actor and critic losses with progress metadata', () => {
     render(
       <TrainingLossChart
@@ -29,6 +38,9 @@ describe('TrainingLossChart', () => {
 
     expect(screen.getByLabelText('Latest critic loss')).toHaveTextContent('0.80');
     expect(screen.getByLabelText('Latest actor loss')).toHaveTextContent('-0.40');
+    expect(screen.getByText('Training loss')).toHaveClass('text-[14px]');
+    expect(screen.getByLabelText('Latest actor loss')).toHaveClass('text-[20px]', 'tabular-nums');
+    expect(screen.getByLabelText('Latest actor loss').parentElement).not.toHaveClass('border');
     expect(screen.getByLabelText('Training percentage')).toHaveTextContent('42.3%');
     expect(screen.getByLabelText('Training ETA')).toHaveTextContent('ETA 2m 05s');
     expect(screen.getByRole('progressbar', { name: 'Training loss progress' }))

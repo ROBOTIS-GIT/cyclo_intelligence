@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import signal
-import tempfile
 import threading
 import time
 import uuid
@@ -19,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from cyclo_brain.algorithm.common.artifact_io import atomic_json_save, file_sha256
 from cyclo_brain.model.multi_task_dit.checkpoint_validation import (
     assert_deployment_artifacts,
     validate_policy_contract,
@@ -78,11 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+    return f"sha256:{file_sha256(path)}"
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -92,19 +88,13 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    atomic_json_save(
+        path,
+        payload,
+        ensure_ascii=False,
+        compact=True,
+        newline=True,
     )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(_canonical_json(payload) + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 class JsonlProgress:

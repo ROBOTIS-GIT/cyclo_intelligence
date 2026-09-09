@@ -9,57 +9,11 @@ if TYPE_CHECKING:
     from lerobot.policies.act.modeling_act import ACTPolicy
 
 
-ACT_TRAINABLE_GROUPS = (
-    "visual_backbone",
-    "cvae_encoder",
-    "transformer_encoder",
-    "action_decoder",
+from cyclo_brain.contracts.act import (
+    ACT_TRAINABLE_GROUPS,
+    ACT_DETERMINISTIC_INFERENCE_GROUPS,
+    canonicalize_act_trainable_groups,
 )
-"""Canonical UI, CLI, and checkpoint order for ACT parameter groups."""
-
-ACT_DETERMINISTIC_INFERENCE_GROUPS = (
-    "visual_backbone",
-    "transformer_encoder",
-    "action_decoder",
-)
-"""Groups that contribute to the deployed zero-latent inference path."""
-
-
-def canonicalize_act_trainable_groups(groups: Iterable[str]) -> tuple[str, ...]:
-    """Validate and return selected ACT groups in the canonical order.
-
-    The CVAE encoder consumes target actions only while training. Allowing it
-    to be the sole trainable group would produce a checkpoint whose deployed
-    deterministic actor is unchanged, so that selection is rejected here.
-    """
-
-    if isinstance(groups, (str, bytes)):
-        raise TypeError("ACT trainable groups must be an iterable of group names")
-    try:
-        requested = tuple(groups)
-    except TypeError as error:
-        raise TypeError(
-            "ACT trainable groups must be an iterable of group names"
-        ) from error
-    if not requested:
-        raise ValueError("ACT trainable groups cannot be empty")
-    if any(not isinstance(group, str) for group in requested):
-        raise TypeError("ACT trainable group names must be strings")
-    if len(set(requested)) != len(requested):
-        raise ValueError("ACT trainable groups cannot contain duplicates")
-    unknown = sorted(set(requested).difference(ACT_TRAINABLE_GROUPS))
-    if unknown:
-        raise ValueError(f"Unknown ACT trainable group(s): {', '.join(unknown)}")
-
-    canonical = tuple(
-        group for group in ACT_TRAINABLE_GROUPS if group in requested
-    )
-    if not set(canonical).intersection(ACT_DETERMINISTIC_INFERENCE_GROUPS):
-        raise ValueError(
-            "ACT trainable groups must include at least one deterministic "
-            "inference-path group"
-        )
-    return canonical
 
 
 def act_parameter_group(parameter_name: str) -> str:

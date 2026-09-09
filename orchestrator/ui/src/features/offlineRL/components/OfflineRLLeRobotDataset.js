@@ -530,13 +530,13 @@ export default function OfflineRLLeRobotDataset({ isActive = true }) {
 
         <section className="rounded-xl border border-[#e2dbcf] bg-[#f8f5ef] p-2.5">
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-[#756e63]">
+              <span className="text-[14px] font-semibold text-[#39352e]">
                 Training Data Epochs
               </span>
               <div className="flex min-w-0 items-center gap-1.5">
                 <span
                   className={clsx(
-                    'truncate text-[9px] font-semibold',
+                    'truncate text-[12px] font-semibold',
                     inventoryError ? 'text-[#b56255]' : 'text-[#58705d]'
                   )}
                   title={inventoryError || undefined}
@@ -561,7 +561,7 @@ export default function OfflineRLLeRobotDataset({ isActive = true }) {
               className="grid max-h-[108px] shrink-0 grid-cols-2 gap-1.5 overflow-y-auto pr-0.5"
             >
               {!inventory.length && (
-                <div className="col-span-2 grid h-8 place-items-center rounded-md border border-dashed border-[#d9d2c5] text-[10px] text-[#8c857a]">
+                <div className="col-span-2 grid h-8 place-items-center rounded-md border border-dashed border-[#d9d2c5] text-[12px] text-[#8c857a]">
                   No converted datasets
                 </div>
               )}
@@ -585,13 +585,14 @@ export default function OfflineRLLeRobotDataset({ isActive = true }) {
                       key={selection.path}
                       title={selection.path}
                       className={clsx(
-                        'flex h-8 min-w-0 items-center rounded-md border text-[10px] transition-colors',
+                        'flex h-11 min-w-0 items-center rounded-md border text-[14px] transition-colors',
                         previewing
                           ? 'border-[#708c76] ring-1 ring-[#adc0b0]'
                           : included
-                            ? 'border-[#aebdad]'
+                            ? 'border-[#8fa58f]'
                             : 'border-[#ded7cb]',
-                        included ? 'bg-[#e6eee5]' : 'bg-white'
+                        included ? 'bg-[#e6eee5]' : 'bg-white',
+                        'focus-within:ring-2 focus-within:ring-[#879b83]'
                       )}
                     >
                       <span
@@ -604,7 +605,7 @@ export default function OfflineRLLeRobotDataset({ isActive = true }) {
                           checked={included}
                           disabled={!isActive || conversionStatus === 'running' || !isV30}
                           onChange={() => toggleTrainingDataset(dataset)}
-                          className="h-4 w-4 shrink-0 accent-[#69866f] disabled:opacity-40"
+                          className="h-4 w-4 shrink-0 accent-[#4c7055] disabled:opacity-40"
                         />
                       </span>
                       <button
@@ -615,14 +616,14 @@ export default function OfflineRLLeRobotDataset({ isActive = true }) {
                         disabled={!isActive || inventoryLoading || conversionStatus === 'running'}
                         className={clsx(
                           'flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left',
-                          previewing ? 'text-[#4f6955]' : 'text-[#756e63]',
+                          previewing ? 'text-[#3e6046]' : 'text-[#39352e]',
                           'hover:bg-[#eef2ea] disabled:opacity-45'
                         )}
                       >
                         <span className="min-w-0 flex-1 truncate font-medium">{epochLabel}</span>
-                        <span className="shrink-0 text-[9px] opacity-70">{selection.version}</span>
+                        <span className="shrink-0 text-[12px] text-[#6b6459]">{selection.version}</span>
                         {previewing && (
-                          <span className="flex shrink-0 items-center gap-0.5 text-[8px] font-bold uppercase tracking-[0.06em] text-[#58705d]">
+                          <span className="flex shrink-0 items-center gap-0.5 text-[11px] font-bold uppercase tracking-[0.06em] text-[#58705d]">
                             <MdVisibility size={11} aria-hidden="true" />
                             Previewing
                           </span>

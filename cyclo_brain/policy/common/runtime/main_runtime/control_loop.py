@@ -33,6 +33,9 @@ if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
 from action_chunk_processing import ActionChunkProcessor  # noqa: E402
 from robot_client import RobotClient  # noqa: E402
 
+from .tt_rtc_timeline import TTActionTimeline
+from rlt_recording import create_rlt_trace_publisher
+
 
 try:  # pragma: no cover - SDK exists only in runtime container here.
     from zenoh_ros2_sdk import get_logger
@@ -58,6 +61,7 @@ ACTION_POLICY_RLT = "rlt"
 ACTION_POLICY_MODES = {ACTION_POLICY_BASE, ACTION_POLICY_RLT}
 
 TT_RTC_SOURCE_HZ = 15.0
+TT_RTC_CONTROL_HZ = 100.0
 TT_RTC_HORIZON = 16
 TT_RTC_DELAY_STEPS = 6
 TT_RTC_ACTION_DIM = 19
@@ -130,11 +134,13 @@ class ControlLoop:
         self._request_thread: Optional[threading.Thread] = None
         self._thread: Optional[threading.Thread] = None
         self._rlt_enabled = False
+        self._rlt_trace = None
         self._active_action_policy_mode = ACTION_POLICY_BASE
         self._pending_action_policy_mode: Optional[str] = None
         self._action_policy_switch_error: Optional[str] = None
         self._active_rlt_robot_override = False
         self._pending_rlt_robot_override: Optional[bool] = None
+        self._tt_rtc_failure_reason: Optional[str] = None
 
     def configure(
         self,
@@ -160,25 +166,32 @@ class ControlLoop:
             tt_rtc_enabled = (
                 self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC
             )
-            self._processor = ActionChunkProcessor(
-                inference_hz=(
-                    TT_RTC_SOURCE_HZ if tt_rtc_enabled else self._inference_hz
-                ),
-                control_hz=self._control_hz,
-                chunk_align_window_s=self._chunk_align_window_s,
-                postprocess=self._postprocess_actions and not tt_rtc_enabled,
-                target_chunk_size=self._target_chunk_size,
-                alignment_mode=self._alignment_mode,
-            )
+            if tt_rtc_enabled:
+                self._processor = TTActionTimeline(
+                    source_hz=TT_RTC_SOURCE_HZ,
+                    control_hz=TT_RTC_CONTROL_HZ,
+                )
+            else:
+                self._processor = ActionChunkProcessor(
+                    inference_hz=self._inference_hz,
+                    control_hz=self._control_hz,
+                    chunk_align_window_s=self._chunk_align_window_s,
+                    postprocess=self._postprocess_actions,
+                    target_chunk_size=self._target_chunk_size,
+                    alignment_mode=self._alignment_mode,
+                )
             self._task_instruction = task_instruction or ""
             self._action_keys = list(action_keys or self._robot.action_keys)
             self._publish_to_robot = bool(publish_to_robot)
             self._rlt_enabled = bool(rlt_enabled)
+            if self._rlt_enabled:
+                self._rlt_trace = create_rlt_trace_publisher()
             self._active_action_policy_mode = ACTION_POLICY_BASE
             self._pending_action_policy_mode = None
             self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
+            self._tt_rtc_failure_reason = None
             self._reset_request_latency_locked()
             self._generation += 1
             logger.info(
@@ -191,6 +204,10 @@ class ControlLoop:
 
     def deconfigure(self) -> None:
         with self._lock:
+            if self._rlt_trace is not None:
+                self._record_rlt_event('buffer_cleared', reason='deconfigure')
+                self._rlt_trace.close()
+                self._rlt_trace = None
             self._running = False
             self._task_instruction = ""
             self._action_keys = []
@@ -202,6 +219,7 @@ class ControlLoop:
             self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
+            self._tt_rtc_failure_reason = None
             self._processor = None
             self._generation += 1
             if self._robot is not None:
@@ -214,10 +232,15 @@ class ControlLoop:
         with self._lock:
             if publish_to_robot is not None:
                 self._set_publish_to_robot_locked(bool(publish_to_robot))
+            # A TT-RTC failure is latched until an explicit START/RESUME.  The
+            # lifecycle command is the operator acknowledgement that permits a
+            # fresh, bounded bootstrap request.
+            self._tt_rtc_failure_reason = None
             self._running = True
 
     def pause(self) -> None:
         with self._lock:
+            self._record_rlt_event('buffer_cleared', reason='pause')
             self._running = False
             if self._processor is not None:
                 self._processor.clear()
@@ -227,10 +250,12 @@ class ControlLoop:
             self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
+            self._tt_rtc_failure_reason = None
             self._mode_condition.notify_all()
 
     def stop(self) -> None:
         with self._lock:
+            self._record_rlt_event('buffer_cleared', reason='stop')
             self._running = False
             if self._processor is not None:
                 self._processor.clear()
@@ -240,7 +265,14 @@ class ControlLoop:
             self._action_policy_switch_error = None
             self._active_rlt_robot_override = False
             self._pending_rlt_robot_override = None
+            self._tt_rtc_failure_reason = None
             self._mode_condition.notify_all()
+
+    @property
+    def tt_rtc_failure_reason(self) -> Optional[str]:
+        """Return the failure that latched TT-RTC in a safe paused state."""
+        with self._lock:
+            return self._tt_rtc_failure_reason
 
     def set_action_policy(
         self,
@@ -477,15 +509,31 @@ class ControlLoop:
                     rtc_prefix_actions
                 )
             except ValueError as error:
-                logger.warning("TT-RTC request discarded: %s", error)
+                self._handle_tt_rtc_failure(
+                    generation,
+                    f"TT-RTC request prefix invalid; inference paused: {error}",
+                )
                 return
             rtc_delay_steps = int(rtc_prefix.shape[0])
         started_at = time.monotonic()
+        recording_id = self._rlt_trace.recording_id if self._rlt_trace else ''
         if (
             action_request_mode == ACTION_REQUEST_MODE_TT_RTC
             and rtc_prefix_captured_at is None
         ):
             rtc_prefix_captured_at = started_at
+        tt_rtc_timeout_s = None
+        if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            tt_rtc_timeout_s = self._tt_rtc_remaining_timeout_s(
+                delay_steps=rtc_delay_steps,
+                prefix_captured_at=float(rtc_prefix_captured_at),
+            )
+            if tt_rtc_timeout_s <= 0.0:
+                self._handle_tt_rtc_failure(
+                    generation,
+                    "TT-RTC deadline expired before the action request was sent",
+                )
+                return
         try:
             if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
                 response = self._requester.get_action(
@@ -495,6 +543,7 @@ class ControlLoop:
                     rtc_delay_steps=rtc_delay_steps,
                     rtc_action_dim=TT_RTC_ACTION_DIM,
                     rtc_prefix_action_list=rtc_prefix.reshape(-1).tolist(),
+                    timeout_s=tt_rtc_timeout_s,
                 )
             else:
                 response = self._requester.get_action(
@@ -587,21 +636,37 @@ class ControlLoop:
                 and self._processor is not None
             ):
                 if action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
-                    committed = self._commit_tt_rtc_chunk_locked(
-                        chunk=chunk,
-                        captured_prefix=rtc_prefix,
-                        delay_steps=rtc_delay_steps,
-                        prefix_captured_at=float(rtc_prefix_captured_at),
-                        action_policy_mode=action_policy_mode,
+                    committed, commit_failure_reason = (
+                        self._commit_tt_rtc_chunk_locked(
+                            chunk=chunk,
+                            captured_prefix=rtc_prefix,
+                            delay_steps=rtc_delay_steps,
+                            prefix_captured_at=float(rtc_prefix_captured_at),
+                            action_policy_mode=action_policy_mode,
+                        )
                     )
                     if committed:
+                        self._record_rlt_event(
+                            'buffer_accepted', recording_id=recording_id,
+                            request_seq=getattr(response, 'seq_id', 0),
+                            action_policy_mode=action_policy_mode,
+                            delay_steps=rtc_delay_steps,
+                            source_queue_size=self._processor.buffer_size,
+                            action_request_mode='tt_rtc',
+                        )
                         self._commit_tt_rtc_action_policy_locked(
                             action_policy_mode
                         )
                     else:
+                        self._record_rlt_event(
+                            'buffer_rejected', recording_id=recording_id,
+                            request_seq=getattr(response, 'seq_id', 0),
+                            reason=commit_failure_reason,
+                        )
                         self._handle_tt_rtc_commit_failure_locked(
                             generation=generation,
                             action_policy_mode=action_policy_mode,
+                            reason=commit_failure_reason,
                         )
                     return
                 buffer_delay_s = self._processor.buffer_size / max(
@@ -617,6 +682,13 @@ class ControlLoop:
                     chunk,
                     scheduled_start_delay_s=scheduled_start_delay_s,
                     align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                )
+                self._record_rlt_event(
+                    'buffer_accepted', recording_id=recording_id,
+                    request_seq=getattr(response, 'seq_id', 0),
+                    action_policy_mode=action_policy_mode,
+                    action_request_mode=action_request_mode,
+                    generated_actions=chunk_size, queued_control_samples=produced,
                 )
                 scheduled_start_text = (
                     "none"
@@ -670,7 +742,7 @@ class ControlLoop:
         delay_steps: int,
         prefix_captured_at: float,
         action_policy_mode: str,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Atomically validate and append one TT-RTC postfix.
 
         The already queued prefix remains the sole source of commands during
@@ -679,54 +751,72 @@ class ControlLoop:
         """
         processor = self._processor
         if processor is None:
-            return False
+            return False, "TT-RTC action processor is unavailable"
         if chunk.ndim != 2 or chunk.shape[1] != TT_RTC_ACTION_DIM:
+            reason = (
+                f"TT-RTC response expected action_dim={TT_RTC_ACTION_DIM}, "
+                f"got shape={tuple(chunk.shape)}"
+            )
             logger.warning(
                 "TT-RTC response discarded: expected action_dim=%d, got %s",
                 TT_RTC_ACTION_DIM,
                 tuple(chunk.shape),
             )
-            return False
+            return False, reason
         remaining_prefix = processor.peek_actions()
         consumed_steps = self._tt_rtc_consumed_prefix_steps(
             captured_prefix,
             remaining_prefix,
         )
         if consumed_steps is None:
+            reason = (
+                "TT-RTC committed prefix changed while inference was in flight"
+            )
             logger.warning(
                 "TT-RTC response discarded: committed prefix changed while "
                 "inference was in flight"
             )
-            return False
+            return False, reason
 
         if action_policy_mode == ACTION_POLICY_BASE:
             if chunk.shape[0] != TT_RTC_HORIZON:
+                reason = (
+                    f"TT-RTC VLA response expected horizon={TT_RTC_HORIZON}, "
+                    f"got {chunk.shape[0]}"
+                )
                 logger.warning(
                     "TT-RTC base response discarded: expected H=%d, got %d",
                     TT_RTC_HORIZON,
                     chunk.shape[0],
                 )
-                return False
+                return False, reason
             if delay_steps and not np.allclose(
                 chunk[:delay_steps],
                 captured_prefix,
                 rtol=1e-6,
                 atol=1e-6,
             ):
+                reason = (
+                    "TT-RTC VLA response did not preserve the committed prefix"
+                )
                 logger.warning(
                     "TT-RTC base response discarded: returned prefix does "
                     "not match the committed action prefix"
                 )
-                return False
+                return False, reason
             postfix = chunk[delay_steps:]
         else:
             if chunk.shape[0] != TT_RTC_RLT_CHUNK_SIZE:
+                reason = (
+                    f"TT-RTC MLP response expected chunk={TT_RTC_RLT_CHUNK_SIZE}, "
+                    f"got {chunk.shape[0]}"
+                )
                 logger.warning(
                     "TT-RTC RLT response discarded: expected C=%d, got %d",
                     TT_RTC_RLT_CHUNK_SIZE,
                     chunk.shape[0],
                 )
-                return False
+                return False, reason
             postfix = chunk
 
         # Check the deadline immediately before enqueue so model execution,
@@ -735,17 +825,21 @@ class ControlLoop:
             0.0,
             time.monotonic() - prefix_captured_at,
         )
-        if delay_steps > 0:
-            deadline_s = delay_steps / TT_RTC_SOURCE_HZ
-            if elapsed_since_capture_s > deadline_s + 1e-9:
-                logger.warning(
-                    "TT-RTC response discarded: capture-to-enqueue latency "
-                    "%.3fs exceeded %d-step deadline %.3fs",
-                    elapsed_since_capture_s,
-                    delay_steps,
-                    deadline_s,
-                )
-                return False
+        deadline_s = self._tt_rtc_deadline_budget_s(delay_steps)
+        if elapsed_since_capture_s > deadline_s + 1e-9:
+            reason = (
+                "TT-RTC capture-to-enqueue deadline exceeded: "
+                f"{elapsed_since_capture_s:.3f}s > {deadline_s:.3f}s "
+                f"for d={delay_steps}"
+            )
+            logger.warning(
+                "TT-RTC response discarded: capture-to-enqueue latency "
+                "%.3fs exceeded %d-step deadline %.3fs",
+                elapsed_since_capture_s,
+                delay_steps,
+                deadline_s,
+            )
+            return False, reason
 
         produced = processor.push_actions(
             postfix,
@@ -764,7 +858,15 @@ class ControlLoop:
             consumed_steps,
             remaining_prefix.shape[0],
         )
-        return True
+        return True, ""
+
+    def _record_rlt_event(self, event, *, recording_id=None, **metadata):
+        if self._rlt_trace is not None:
+            self._rlt_trace.submit(dict(
+                metadata, event=event, control_time_ns=time.time_ns(),
+                timebase='unix_wall_clock_ns', generation=self._generation,
+                execution_verified=False,
+            ), recording_id=recording_id)
 
     def _commit_tt_rtc_action_policy_locked(self, action_policy_mode: str) -> None:
         """Commit a pending TT-RTC route only after its postfix is buffered."""
@@ -790,21 +892,79 @@ class ControlLoop:
         *,
         generation: int,
         action_policy_mode: str,
+        reason: str,
     ) -> None:
-        """Fail an invalid MLP postfix back to VLA without dropping prefix."""
+        """Latch any rejected TT-RTC continuation in a safe paused state."""
         if generation != self._generation or not self._running:
             return
-        if action_policy_mode != ACTION_POLICY_RLT:
-            return
-        if (
-            self._active_action_policy_mode != ACTION_POLICY_RLT
-            and self._pending_action_policy_mode != ACTION_POLICY_RLT
-        ):
-            return
-        self._fallback_rlt_to_base_locked(
-            "TT-RTC MLP response rejected; reverting to VLA action",
-            preserve_buffer=True,
+        route = "MLP" if action_policy_mode == ACTION_POLICY_RLT else "VLA"
+        self._latch_tt_rtc_failure_locked(
+            f"TT-RTC {route} response rejected; inference paused: {reason}"
         )
+
+    @staticmethod
+    def _tt_rtc_deadline_budget_s(delay_steps: int) -> float:
+        """Return the bounded capture-to-enqueue budget for one TT request.
+
+        A normal continuation owns exactly the execution time represented by
+        its committed ``d``-step prefix.  Startup has no committed prefix, so
+        it receives one bounded maximum-delay window rather than falling back
+        to the generic multi-second RPC timeout.
+        """
+        budget_steps = delay_steps if delay_steps > 0 else TT_RTC_DELAY_STEPS
+        return budget_steps / TT_RTC_SOURCE_HZ
+
+    @classmethod
+    def _tt_rtc_remaining_timeout_s(
+        cls,
+        *,
+        delay_steps: int,
+        prefix_captured_at: float,
+    ) -> float:
+        deadline = (
+            float(prefix_captured_at)
+            + cls._tt_rtc_deadline_budget_s(delay_steps)
+        )
+        return max(0.0, deadline - time.monotonic())
+
+    def _handle_tt_rtc_failure(self, generation: int, reason: str) -> None:
+        with self._mode_condition:
+            if generation != self._generation or not self._running:
+                return
+            self._latch_tt_rtc_failure_locked(reason)
+
+    def _latch_tt_rtc_failure_locked(self, reason: str) -> None:
+        """Stop command generation until an explicit lifecycle resume.
+
+        Clearing the queue prevents an expired continuation from executing.
+        Velocity-like robot modalities receive their existing idle command
+        immediately because no subsequent control-loop tick runs while latched.
+        """
+        self._record_rlt_event('buffer_cleared', reason=reason)
+        message = str(reason or "TT-RTC request failed; inference paused")
+        self._running = False
+        if self._processor is not None:
+            self._processor.clear()
+        self._tt_rtc_failure_reason = message
+        self._action_policy_switch_error = message
+        self._active_action_policy_mode = ACTION_POLICY_BASE
+        self._pending_action_policy_mode = None
+        self._active_rlt_robot_override = False
+        self._pending_rlt_robot_override = None
+        self._generation += 1
+
+        if self._publish_to_robot and self._robot is not None:
+            idle = getattr(self._robot, "publish_idle_action", None)
+            if callable(idle):
+                try:
+                    idle(list(self._action_keys))
+                except Exception as error:
+                    logger.error(
+                        "failed to publish idle action while latching TT-RTC: %s",
+                        error,
+                    )
+        logger.error("%s", message)
+        self._mode_condition.notify_all()
 
     @staticmethod
     def _tt_rtc_consumed_prefix_steps(
@@ -836,6 +996,15 @@ class ControlLoop:
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
     ) -> None:
         logger.warning("%s", reason)
+        if (
+            normalize_action_request_mode(action_request_mode)
+            == ACTION_REQUEST_MODE_TT_RTC
+        ):
+            self._handle_tt_rtc_failure(
+                generation,
+                f"TT-RTC action request failed; inference paused: {reason}",
+            )
+            return
         if action_policy_mode != ACTION_POLICY_RLT:
             return
         with self._mode_condition:

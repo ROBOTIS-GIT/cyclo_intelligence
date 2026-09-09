@@ -32,6 +32,7 @@ from typing import Optional
 from huggingface_hub import HfApi
 import yaml
 from interfaces.msg import RecordingStatus
+from cyclo_data.recorder.rlt_recorder import copy_rlt_sidecar
 from cyclo_data.converter.orchestrator import DataConverter
 from cyclo_data.hub.progress_tracker import (
     HuggingFaceLogCapture,
@@ -1127,6 +1128,12 @@ class DataManager:
 
     @staticmethod
     def _copy_episode_sidecars(subtask_dirs: list[Path], out_dir: Path) -> None:
+        for index, seg_dir in enumerate(subtask_dirs):
+            target = out_dir / 'rlt' / f'segment_{index:03d}'
+            if copy_rlt_sidecar(seg_dir / 'rlt', target):
+                info = seg_dir / 'episode_info.json'
+                if info.is_file():
+                    shutil.copy2(info, target / 'source_episode_info.json')
         for name in ('robot.urdf',):
             for seg_dir in subtask_dirs:
                 src = seg_dir / name

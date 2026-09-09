@@ -95,7 +95,7 @@ test('shows the formats supported by the existing conversion backend', async () 
   expect(screen.getByText('Destination valid')).toBeInTheDocument();
   expect(screen.getByText('Output selected')).toBeInTheDocument();
   const pathRow = screen.getByTestId('conversion-path-row');
-  expect(pathRow).toHaveClass('grid-cols-2');
+  expect(pathRow).toHaveClass('pg-conversion-top');
   expect(within(pathRow).getByText('Conversion setup')).toBeInTheDocument();
   expect(within(pathRow).getByLabelText('LeRobot collection root')).toBeInTheDocument();
   const optionsRow = screen.getByTestId('conversion-options-row');

@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 import ast
+from dataclasses import asdict
 from typing import Optional
 
 import cv2
@@ -47,6 +48,7 @@ try:
         TT_RTC_RLT_CHUNK_LENGTH,
         load_tt_rtc_capability,
         parse_tt_rtc_request,
+        validate_tt_rtc_model_contract,
     )
 except ModuleNotFoundError:  # pragma: no cover - repository-local import path.
     from cyclo_brain.policy.groot.runtime.tt_rtc import (
@@ -56,6 +58,7 @@ except ModuleNotFoundError:  # pragma: no cover - repository-local import path.
         TT_RTC_RLT_CHUNK_LENGTH,
         load_tt_rtc_capability,
         parse_tt_rtc_request,
+        validate_tt_rtc_model_contract,
     )
 
 
@@ -100,6 +103,23 @@ def _env_int(name: str, default: int) -> int:
         )
         return default
     return parsed if parsed > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logging.getLogger("groot_inference").warning(
+            "Ignoring invalid %s=%r; using %s",
+            name,
+            value,
+            default,
+        )
+        return default
+    return parsed if np.isfinite(parsed) and parsed > 0.0 else default
 
 
 ACCELERATION_PYTORCH = "pytorch"
@@ -255,11 +275,18 @@ class GR00TInference:
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
         self._rlt_adapter = None
+        self._rlt_trace = None
+        self._rlt_trace_initialized = False
         self._loaded_model_path: Optional[str] = None  # track cached policy path
         self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
         self._loaded_acceleration_engine_path: str = ""
         self._loaded_rlt_enabled: bool = False
         self._loaded_rlt_bundle_path: str = ""
+        self._loaded_publish_to_robot: bool = False
+        self._real_robot_sensor_max_age_s = _env_float(
+            "GROOT_REAL_ROBOT_SENSOR_MAX_AGE_S",
+            0.5,
+        )
         self._tt_rtc_capability = None
         self.policy_info: dict = {
             "video": [],       # e.g. ["cam_left_head", "cam_left_wrist", ...]
@@ -302,6 +329,7 @@ class GR00TInference:
             action_request_mode = str(
                 getattr(request, "action_request_mode", "async") or "async"
             ).strip().lower()
+            publish_to_robot = bool(getattr(request, "publish_to_robot", False))
             if action_request_mode not in {"sync", "async", TT_RTC_REQUEST_MODE}:
                 raise RuntimeError(
                     "Unsupported action_request_mode; expected 'sync', 'async', "
@@ -314,7 +342,10 @@ class GR00TInference:
                         "TT-RTC is unavailable with TensorRT: restart GR00T with "
                         "PyTorch acceleration"
                     )
-                tt_rtc_capability = load_tt_rtc_capability(model_path)
+                tt_rtc_capability = load_tt_rtc_capability(
+                    model_path,
+                    require_deployment_qualified=publish_to_robot,
+                )
                 if not callable(getattr(Gr00tPolicy, "get_action_tt_rtc", None)):
                     raise RuntimeError(
                         self._missing_tt_rtc_runtime_message("base")
@@ -344,6 +375,8 @@ class GR00TInference:
                 and self._loaded_rlt_enabled == rlt_enabled
                 and self._loaded_rlt_bundle_path == rlt_bundle_path
             ):
+                if tt_rtc_capability is not None:
+                    self._validate_loaded_tt_rtc_policy(tt_rtc_capability)
                 self.logger.info(
                     "Reusing cached policy: %s (acceleration=%s)",
                     model_path,
@@ -354,8 +387,16 @@ class GR00TInference:
                     self.robot = None
                 self.init_policy_info()
                 self.init_robot_info(robot_type)
-                self.robot.wait_for_ready(timeout=10.0)
+                sensors_ready = self.robot.wait_for_ready(timeout=10.0)
+                if publish_to_robot and not sensors_ready:
+                    raise RuntimeError(
+                        "Real-robot inference refused: configured sensors did not "
+                        "become ready within 10 seconds"
+                    )
                 self._tt_rtc_capability = tt_rtc_capability
+                self._loaded_publish_to_robot = publish_to_robot
+                if rlt_enabled:
+                    self._ensure_rlt_recording()
                 return {
                     "success": True,
                     "message": self._load_success_message(cached=True),
@@ -379,6 +420,7 @@ class GR00TInference:
                 self._loaded_acceleration_engine_path = ""
                 self._loaded_rlt_enabled = False
                 self._loaded_rlt_bundle_path = ""
+                self._loaded_publish_to_robot = False
                 self._tt_rtc_capability = None
 
             self.logger.info(
@@ -393,10 +435,17 @@ class GR00TInference:
                 model_path=model_path,
                 device="cuda",
             )
+            if tt_rtc_capability is not None:
+                self._validate_loaded_tt_rtc_policy(tt_rtc_capability)
 
             self.init_policy_info()
             self.init_robot_info(robot_type)
-            self.robot.wait_for_ready(timeout=10.0)
+            sensors_ready = self.robot.wait_for_ready(timeout=10.0)
+            if publish_to_robot and not sensors_ready:
+                raise RuntimeError(
+                    "Real-robot inference refused: configured sensors did not "
+                    "become ready within 10 seconds"
+                )
 
             if acceleration_mode == ACCELERATION_TENSORRT_DIT:
                 trt_applied = self._enable_dit_tensorrt(
@@ -423,6 +472,7 @@ class GR00TInference:
                     rlt_bundle_path,
                     model_path,
                 )
+                self._ensure_rlt_recording()
                 qualification = self._rlt_adapter.qualification
                 if self._rlt_adapter.deployment_qualified:
                     self.logger.info(
@@ -444,6 +494,7 @@ class GR00TInference:
             self._loaded_acceleration_engine_path = acceleration_engine_path
             self._loaded_rlt_enabled = rlt_enabled
             self._loaded_rlt_bundle_path = rlt_bundle_path
+            self._loaded_publish_to_robot = publish_to_robot
             self._tt_rtc_capability = tt_rtc_capability
 
             return {
@@ -457,6 +508,7 @@ class GR00TInference:
             self._loaded_acceleration_engine_path = ""
             self._loaded_rlt_enabled = False
             self._loaded_rlt_bundle_path = ""
+            self._loaded_publish_to_robot = False
             self._tt_rtc_capability = None
             self._rlt_adapter = None
             message = self._format_load_error(e)
@@ -854,6 +906,17 @@ class GR00TInference:
                 )
             validator()
 
+    def _validate_loaded_tt_rtc_policy(self, capability) -> None:
+        """Bind a manifest to the model/processor configuration in GPU memory."""
+
+        getter = getattr(self.policy, "get_tt_rtc_model_contract", None)
+        if not callable(getter):
+            raise RuntimeError(
+                "The installed GR00T policy cannot expose its TT-RTC model "
+                "contract; rebuild the GR00T image from the TT-RTC source"
+            )
+        validate_tt_rtc_model_contract(capability, getter())
+
     @staticmethod
     def _missing_tt_rtc_runtime_message(action_policy_mode: str) -> str:
         output_name = "RLT Action MLP" if action_policy_mode == "rlt" else "GR00T VLA"
@@ -865,11 +928,21 @@ class GR00TInference:
             "inference-only RTC option is intentionally not used."
         )
 
+    def _ensure_rlt_recording(self):
+        if not self._rlt_trace_initialized:
+            try:
+                from rlt_recording import create_rlt_trace_publisher
+            except ModuleNotFoundError:
+                from cyclo_brain.policy.common.runtime.rlt_recording import create_rlt_trace_publisher
+            self._rlt_trace = create_rlt_trace_publisher()
+            self._rlt_trace_initialized = True
+
     def _run_tt_rtc_action(
         self,
         observation: dict,
         tt_request,
         action_policy_mode: str,
+        capture_rlt_context: bool = False,
     ) -> dict:
         """Invoke only an explicitly TT-RTC-aware policy/adapter entry point."""
 
@@ -889,6 +962,7 @@ class GR00TInference:
             committed_action_prefix=committed_prefix,
             delay_steps=tt_request.delay_steps,
             action_horizon=TT_RTC_ACTION_HORIZON,
+            **({'capture_context': True} if capture_rlt_context else {}),
         )
         # Match Gr00tPolicy.get_action's public convention while allowing a
         # focused future TT-RTC adapter to return only the action dictionary.
@@ -925,6 +999,19 @@ class GR00TInference:
             return self.fail("Not in inference mode")
 
         try:
+            if self._loaded_publish_to_robot:
+                freshness_validator = getattr(
+                    self.robot,
+                    "validate_observation_freshness",
+                    None,
+                )
+                if not callable(freshness_validator):
+                    return self.fail(
+                        "Real-robot inference refused: RobotClient does not "
+                        "provide an observation freshness watchdog"
+                    )
+                freshness_validator(self._real_robot_sensor_max_age_s)
+
             action_policy_mode = str(
                 getattr(request, "action_policy_mode", "base") or "base"
             ).strip().lower()
@@ -941,8 +1028,14 @@ class GR00TInference:
             if tt_request is not None:
                 self._require_tt_rtc_capability(action_policy_mode)
 
+            if action_policy_mode == 'rlt':
+                self._ensure_rlt_recording()
+            recording_id = self._rlt_trace.recording_id if self._rlt_trace else ''
+            capture_context = bool(recording_id and action_policy_mode == 'rlt')
+            observed_at_ns = time.time_ns()
             images = self.robot.get_images(format="rgb")
             joints = self.robot.get_joint_positions()
+            observation_read_completed_ns = time.time_ns()
             task = request.task_instruction
 
             observation = self.preprocess(images, joints, task)
@@ -961,9 +1054,12 @@ class GR00TInference:
                     observation,
                     tt_request,
                     action_policy_mode,
+                    capture_rlt_context=capture_context,
                 )
             elif action_policy_mode == "rlt":
-                action = self._rlt_adapter.get_action(observation)
+                action = self._rlt_adapter.get_action(
+                    observation, **({'capture_context': True} if capture_context else {}),
+                )
             else:
                 action, _info = self.policy.get_action(observation)
             self.logger.info(
@@ -974,7 +1070,34 @@ class GR00TInference:
             )
             result = self.postprocess_action(action)
             if tt_request is not None:
-                return self._validate_tt_rtc_output(result, action_policy_mode)
+                result = self._validate_tt_rtc_output(result, action_policy_mode)
+            if capture_context and result.get('success'):
+                arrays = self._rlt_adapter.recording_context
+                self._rlt_adapter.recording_context = None
+                arrays['physical_action_chunk'] = np.asarray(result['action_chunk']).reshape(
+                    result['chunk_size'], result['action_dim'],
+                ).copy()
+                arrays['physical_prefix'] = np.asarray(
+                    tt_request.prefix_actions if tt_request else [], dtype=np.float32,
+                ).reshape(-1, TT_RTC_ACTION_DIM)
+                self._rlt_trace.submit({
+                    'event': 'inference', 'request_seq': getattr(request, 'seq_id', 0),
+                    'timebase': 'unix_wall_clock_ns',
+                    'observation_read_started_ns': observed_at_ns,
+                    'observation_read_completed_ns': observation_read_completed_ns,
+                    'inference_completed_ns': time.time_ns(),
+                    'action_policy_mode': action_policy_mode,
+                    'action_request_mode': getattr(request, 'action_request_mode', 'sync'),
+                    'delay_steps': tt_request.delay_steps if tt_request else 0,
+                    'model_path': self._loaded_model_path,
+                    'bundle_path': str(self._rlt_adapter.bundle.root),
+                    'contract': asdict(self._rlt_adapter.spec),
+                    'policy_identity': self._rlt_adapter.recording_identity,
+                    'task_instruction': task,
+                    'action_domain': 'normalized_except_physical_arrays',
+                    'action_keys': list(self.policy_info['action']),
+                    'execution_verified': False,
+                }, arrays, recording_id=recording_id)
             return result
 
         except Exception as e:
@@ -1052,6 +1175,10 @@ class GR00TInference:
 
     def cleanup(self) -> None:
         """Release robot resources. Policy is kept cached for fast restart."""
+        if self._rlt_trace is not None:
+            self._rlt_trace.close()
+        self._rlt_trace = None
+        self._rlt_trace_initialized = False
         if self.robot is not None:
             self.robot.close()
             self.robot = None

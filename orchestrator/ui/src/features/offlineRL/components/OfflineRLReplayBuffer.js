@@ -6,7 +6,6 @@
 import React, {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -34,26 +33,26 @@ import {
   selectOfflineRLReplayBufferPath,
   setOfflineRLReplayBufferPath,
 } from '../offlineRLSlice';
+import ReplayBufferVessel from './ReplayBufferVessel';
 import OfflineRLEpisodeMediaModal from './OfflineRLEpisodeMediaModal';
 
 const REPLAY_CAPACITY = 200;
-const MAX_VISIBLE_CYLINDER_DISCS = 36;
 
 const OUTCOME_STYLE = {
   success: {
     label: 'Success',
     icon: MdCheckCircle,
-    className: 'border-[#b9cbb9] bg-[#e5eee4] text-[#5f7664]',
+    className: 'border-[#b9cbb9] bg-[#e5eee4] text-[#3e6046]',
   },
   failure: {
     label: 'Fail',
     icon: MdErrorOutline,
-    className: 'border-[#dec3bc] bg-[#f2e5e1] text-[#95635b]',
+    className: 'border-[#dec3bc] bg-[#f2e5e1] text-[#824a43]',
   },
   unlabeled: {
     label: 'Unlabeled',
     icon: MdInventory2,
-    className: 'border-[#d9d2c5] bg-[#f0ece4] text-[#756e63]',
+    className: 'border-[#d9d2c5] bg-[#f0ece4] text-[#5e574d]',
   },
 };
 
@@ -196,7 +195,6 @@ export function ReplayBufferStack({
   compositionLabel = 'Buffer composition',
   managerLabel = 'Episode manager',
 }) {
-  const cylinderClipId = `replay-cylinder-${useId().replaceAll(':', '')}`;
   const [query, setQuery] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState('all');
   const managerTotal = Math.max(0, Number(totalCount) || 0);
@@ -267,55 +265,11 @@ export function ReplayBufferStack({
   // Capacity and outcome composition answer different questions. The cylinder
   // is scaled against the fixed buffer capacity; the bar uses stored episodes.
   const occupiedCount = Math.min(REPLAY_CAPACITY, compositionTotal);
-  const emptyCount = Math.max(0, REPLAY_CAPACITY - occupiedCount);
   const capacityPercent = Math.round((occupiedCount / REPLAY_CAPACITY) * 100);
-  const cylinderCenterX = 90;
-  const cylinderRadiusX = 70;
-  const cylinderRadiusY = 7.6;
-  const cylinderTop = 20;
-  const cylinderBaseY = 164;
-  const cylinderHeight = 124;
-  const capacityScale = cylinderHeight / REPLAY_CAPACITY;
-  // Draw every episode as its own thin plate while the buffer is small. Once
-  // the count grows, bounded groups of episodes become thicker plates so this
-  // visualization never adds 200 SVG nodes to the page.
-  const visibleDiscCount = Math.min(occupiedCount, MAX_VISIBLE_CYLINDER_DISCS);
-  // A literal one-pixel capacity scale makes the first few episodes look like
-  // one clipped line. Give small buffers a modest visual floor so every stored
-  // episode remains recognizable as a complete plate. The numeric capacity
-  // badge and data attributes continue to report the exact 200-episode scale.
-  const visualStackHeight = visibleDiscCount > 0
-    ? Math.min(
-      cylinderHeight,
-      Math.max(
-        occupiedCount * capacityScale,
-        Math.min(24, visibleDiscCount * 3.5)
-      )
-    )
-    : 0;
-  const visualDiscStep = visibleDiscCount > 0
-    ? visualStackHeight / visibleDiscCount
-    : 0;
-  const visualDiscs = Array.from({ length: visibleDiscCount }, (_, discIndex) => {
-    const startCount = Math.floor((discIndex * occupiedCount) / visibleDiscCount);
-    const endCount = Math.floor(((discIndex + 1) * occupiedCount) / visibleDiscCount);
-    const sampleIndex = Math.floor((startCount + Math.max(startCount, endCount - 1)) / 2);
-    const outcome = sampleIndex < successCount
-      ? 'success'
-      : sampleIndex < successCount + failureCount
-        ? 'failure'
-        : 'unlabeled';
-    return {
-      key: `${discIndex}-${startCount}-${endCount}`,
-      outcome,
-      bottomY: cylinderBaseY - (discIndex * visualDiscStep),
-      thickness: Math.max(2.2, Math.min(4, visualDiscStep * 0.82)),
-    };
-  });
 
   return (
     <div
-      className="grid min-h-[232px] min-w-0 grid-cols-1 gap-3 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]"
+      className="pg-replay-layout min-w-0 gap-3"
       data-testid="replay-buffer-composition-layout"
     >
       <section
@@ -325,182 +279,47 @@ export function ReplayBufferStack({
       >
         <div className="flex items-start justify-between gap-2">
           <div>
-            <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#756e63]">
+            <div className="text-[14px] font-semibold text-[#39352e]">
               {compositionLabel}
             </div>
-            <div className="mt-0.5 text-[11px] text-[#989083]">{datasetLabel}</div>
+            <div className="mt-0.5 text-[12px] text-[#6b6459]">{datasetLabel}</div>
           </div>
-          <span className="rounded-full border border-[#dcd5c9] bg-white px-2.5 py-1 text-[10px] font-semibold tabular-nums text-[#5d574e]">
+          <span className="rounded-full border border-[#dcd5c9] bg-white px-2.5 py-1 text-[12px] font-semibold tabular-nums text-[#5d574e]">
             {safeTotal} / {REPLAY_CAPACITY}
           </span>
         </div>
 
-        <div className="mt-1 grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(168px,1.32fr)_minmax(0,0.92fr)] items-center gap-2">
-          <svg
-            viewBox="0 0 180 184"
-            className="h-[168px] max-h-[168px] w-full min-w-0 max-w-full shrink"
-            role="img"
-            aria-label={`${datasetLabel} buffer composition`}
-            data-capacity-used={occupiedCount}
-            data-capacity-empty={emptyCount}
-            data-capacity-percent={capacityPercent}
-            data-visible-disc-count={visibleDiscCount}
-          >
-            <defs>
-              <linearGradient id={`${cylinderClipId}-shell`} x1="0" x2="1">
-                <stop offset="0" stopColor="#d9d5cd" />
-                <stop offset="0.24" stopColor="#f6f3ed" />
-                <stop offset="0.68" stopColor="#ece8e0" />
-                <stop offset="1" stopColor="#c9c4ba" />
-              </linearGradient>
-              <linearGradient id={`${cylinderClipId}-success`} x1="0" x2="1">
-                <stop offset="0" stopColor="#5f8066" />
-                <stop offset="0.45" stopColor="#86a38a" />
-                <stop offset="1" stopColor="#58755f" />
-              </linearGradient>
-              <linearGradient id={`${cylinderClipId}-failure`} x1="0" x2="1">
-                <stop offset="0" stopColor="#ad6961" />
-                <stop offset="0.45" stopColor="#d58c81" />
-                <stop offset="1" stopColor="#a85f58" />
-              </linearGradient>
-              <linearGradient id={`${cylinderClipId}-unlabeled`} x1="0" x2="1">
-                <stop offset="0" stopColor="#918b82" />
-                <stop offset="0.45" stopColor="#c5bfb5" />
-                <stop offset="1" stopColor="#8d877e" />
-              </linearGradient>
-            </defs>
-            <rect
-              x={cylinderCenterX - cylinderRadiusX}
-              y={cylinderTop}
-              width={cylinderRadiusX * 2}
-              height={cylinderBaseY - cylinderTop}
-              fill={`url(#${cylinderClipId}-shell)`}
-              fillOpacity="0.62"
-              data-testid="replay-cylinder-empty-capacity"
-            />
-            <ellipse
-              cx={cylinderCenterX}
-              cy={cylinderTop}
-              rx={cylinderRadiusX}
-              ry={cylinderRadiusY}
-              fill="#f8f6f1"
-              fillOpacity="0.9"
-              stroke="#aaa398"
-              strokeWidth="1.35"
-            />
-            <ellipse
-              cx={cylinderCenterX}
-              cy={cylinderTop}
-              rx="57"
-              ry="5.2"
-              fill="#e9e5dd"
-              fillOpacity="0.5"
-              stroke="#cbc5bb"
-            />
-            <ellipse
-              cx={cylinderCenterX}
-              cy={cylinderBaseY}
-              rx={cylinderRadiusX}
-              ry={cylinderRadiusY}
-              fill={`url(#${cylinderClipId}-shell)`}
-              fillOpacity="0.72"
-              stroke="#9b9489"
-              strokeWidth="1.35"
-              data-testid="replay-cylinder-base"
-            />
-            <path
-              d={`M${cylinderCenterX - cylinderRadiusX} ${cylinderTop} L${cylinderCenterX - cylinderRadiusX} ${cylinderBaseY} M${cylinderCenterX + cylinderRadiusX} ${cylinderTop} L${cylinderCenterX + cylinderRadiusX} ${cylinderBaseY}`}
-              fill="none"
-              stroke="#aaa398"
-              strokeWidth="1.35"
-            />
-            <path d="M31 31 L31 151" stroke="#fff" strokeOpacity="0.58" strokeWidth="3" strokeLinecap="round" />
-
-            <g
-              data-testid="replay-cylinder-occupied-capacity"
-              data-rendered-discs={visibleDiscCount}
-              data-full-plate-stack="true"
-              data-center-x={cylinderCenterX}
-              data-radius-x={cylinderRadiusX}
-              data-base-y={cylinderBaseY}
-            >
-              {visualDiscs.map((disc, discIndex) => {
-                const gradientId = disc.outcome === 'success'
-                  ? `${cylinderClipId}-success`
-                  : disc.outcome === 'failure'
-                    ? `${cylinderClipId}-failure`
-                    : `${cylinderClipId}-unlabeled`;
-                const stroke = disc.outcome === 'success'
-                  ? '#4f6f57'
-                  : disc.outcome === 'failure'
-                    ? '#95544e'
-                    : '#7e786f';
-                const topY = disc.bottomY - disc.thickness;
-                return (
-                  <g
-                    key={disc.key}
-                    data-testid="replay-cylinder-disc"
-                    data-outcome={disc.outcome}
-                    data-center-x={cylinderCenterX}
-                    data-radius-x={cylinderRadiusX}
-                    data-bottom-y={disc.bottomY}
-                    data-base-aligned={discIndex === 0 ? 'true' : undefined}
-                  >
-                    <path
-                      d={`M${cylinderCenterX - cylinderRadiusX} ${topY} L${cylinderCenterX - cylinderRadiusX} ${disc.bottomY} A${cylinderRadiusX} ${cylinderRadiusY} 0 0 0 ${cylinderCenterX + cylinderRadiusX} ${disc.bottomY} L${cylinderCenterX + cylinderRadiusX} ${topY} Z`}
-                      fill={`url(#${gradientId})`}
-                      stroke={stroke}
-                      strokeWidth="0.55"
-                      data-testid="replay-cylinder-disc-edge"
-                    />
-                    <ellipse
-                      cx={cylinderCenterX}
-                      cy={topY}
-                      rx={cylinderRadiusX}
-                      ry={cylinderRadiusY}
-                      fill={`url(#${gradientId})`}
-                      stroke={stroke}
-                      strokeWidth="0.75"
-                      data-testid="replay-cylinder-disc-face"
-                    />
-                  </g>
-                );
-              })}
-            </g>
-            <path
-              d={`M${cylinderCenterX - cylinderRadiusX} ${cylinderBaseY} A${cylinderRadiusX} ${cylinderRadiusY} 0 0 0 ${cylinderCenterX + cylinderRadiusX} ${cylinderBaseY}`}
-              fill="none"
-              stroke="#817a70"
-              strokeWidth="1.1"
-              pointerEvents="none"
-              data-testid="replay-cylinder-base-front"
-            />
-          </svg>
+        <div className="mt-1 pg-composition-detail min-h-0 min-w-0 flex-1 items-center gap-2">
+          <ReplayBufferVessel
+            counts={{ success: successCount, failure: failureCount, unlabeled: unlabeledCount }}
+            capacity={REPLAY_CAPACITY}
+            label={`${datasetLabel} buffer composition`}
+          />
 
           <div className="flex min-w-0 flex-col justify-center gap-1.5 self-stretch py-1">
             <div
               className="grid grid-cols-2 gap-1.5"
               data-testid="replay-composition-stats"
             >
-              <div className="rounded-lg border border-[#e5ded3] bg-white px-1.5 py-2 text-center">
+              <div className="px-1.5 py-2 text-center">
                 <div className="text-xl font-bold tabular-nums text-[#3f3b35]">{safeTotal}</div>
-                <div className="text-[9px] font-semibold uppercase tracking-[0.08em] text-[#8c857a]">Episodes</div>
-                <div className="mt-0.5 text-[8px] tabular-nums text-[#aaa296]">
+                <div className="text-[12px] font-medium text-[#5e574d]">Episodes</div>
+                <div className="mt-0.5 text-[12px] tabular-nums text-[#6b6459]">
                   {capacityPercent}% used
                 </div>
               </div>
-              <div className="rounded-lg border border-[#d9e3d8] bg-[#eef4ed] px-1.5 py-2 text-center">
+              <div className="border-l border-[#ded8cc] px-1.5 py-2 text-center">
                 <span className="sr-only">
                   Success rate {successRate === null ? '—' : `${successRate}%`}
                 </span>
                 <div className="text-xl font-bold tabular-nums text-[#58705d]">
                   {successRate === null ? '—' : `${successRate}%`}
                 </div>
-                <div className="text-[9px] font-semibold text-[#6d7d6d]">Success</div>
+                <div className="text-[12px] font-medium text-[#5e574d]">Success</div>
               </div>
             </div>
             <div className="min-w-0" data-testid="replay-outcome-summary">
-              <div className="mb-1 flex items-center justify-between text-[9px] text-[#8c857a]">
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-x-2 text-[12px] text-[#6b6459]">
                 <span>Outcome composition</span>
                 <span className="tabular-nums">{compositionTotal} stored</span>
               </div>
@@ -518,7 +337,7 @@ export function ReplayBufferStack({
               </div>
               <span className="sr-only">Success {successCount} · Fail {failureCount}</span>
               <div
-                className="mt-1.5 grid grid-cols-3 gap-1.5 text-[10px] text-[#756e63]"
+                className="pg-outcome-legend mt-1.5 gap-1.5 text-[12px] text-[#756e63]"
                 data-testid="replay-outcome-legend"
               >
                 {[
@@ -529,7 +348,7 @@ export function ReplayBufferStack({
                   <div key={label} className="flex min-w-0 items-center gap-1">
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
                     <span className="min-w-0 truncate font-semibold" title={label}>{label}</span>
-                    <span className="ml-auto shrink-0 tabular-nums text-[#999185]">{count}</span>
+                    <span className="ml-auto shrink-0 font-semibold tabular-nums text-[#514b42]">{count}</span>
                     <span className="sr-only">{percent}%</span>
                   </div>
                 ))}
@@ -538,7 +357,7 @@ export function ReplayBufferStack({
           </div>
         </div>
         {error && (
-          <div className="mt-2 truncate text-[9px] text-[#a06b61]" title={error}>
+          <div className="mt-2 truncate text-[11px] text-[#a06b61]" title={error}>
             Refresh pending · {error}
           </div>
         )}
@@ -550,10 +369,10 @@ export function ReplayBufferStack({
         data-testid="replay-buffer-episode-manager"
       >
         <div className="flex items-center justify-between gap-2">
-          <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-[#756e63]">
+          <div className="text-[14px] font-semibold text-[#39352e]">
             {managerLabel}
           </div>
-          <span className="text-[9px] tabular-nums text-[#948c80]">
+          <span className="text-[12px] tabular-nums text-[#6b6459]">
             {filteredEpisodes.length} shown
           </span>
         </div>
@@ -568,7 +387,7 @@ export function ReplayBufferStack({
             onChange={(event) => setQuery(event.target.value)}
             aria-label={`Search ${datasetLabel}`}
             placeholder="Search episodes…"
-            className="h-7 w-full rounded-lg border border-[#ddd6ca] bg-[#fbfaf7] pl-8 pr-2.5 text-[10px] text-[#514b42] outline-none focus:border-[#879b89]"
+            className="h-8 w-full rounded-lg border border-[#d5cdbf] bg-[#fbfaf7] pl-8 pr-2.5 text-[13px] text-[#39352e] placeholder:text-[#746d62] outline-none focus:border-[#879b89]"
           />
         </label>
         <div className="mt-1.5 grid grid-cols-4 gap-1" role="group" aria-label={`${datasetLabel} outcome filter`}>
@@ -579,10 +398,10 @@ export function ReplayBufferStack({
               onClick={() => setOutcomeFilter(value)}
               aria-pressed={outcomeFilter === value}
               className={clsx(
-                'h-7 truncate rounded-lg border px-1.5 text-[10px] font-semibold transition-colors',
+                'h-8 truncate rounded-lg border px-1.5 text-[12px] font-semibold transition-colors',
                 outcomeFilter === value
-                  ? 'border-[#8da391] bg-[#e7efe6] text-[#58705d]'
-                  : 'border-[#e1dbd0] bg-white text-[#81796e] hover:bg-[#f5f2ec]'
+                  ? 'border-[#7b9780] bg-[#e7efe6] text-[#3e6046]'
+                  : 'border-transparent bg-transparent text-[#5e574d] hover:bg-[#f2eee6]'
               )}
             >
               {label} {count}
@@ -591,7 +410,7 @@ export function ReplayBufferStack({
         </div>
 
         <div
-          className="mt-1.5 h-[156px] min-h-[156px] max-h-[156px] flex-none space-y-1 overflow-y-auto overscroll-contain rounded-lg border border-[#e4ded3] bg-[#f7f4ee] p-1.5"
+          className="mt-1.5 h-[156px] min-h-[156px] max-h-[156px] flex-none space-y-1 overflow-y-auto overscroll-contain border-t border-[#ded8cc] bg-white py-1.5"
           role="list"
           aria-label={listLabel}
         >
@@ -603,8 +422,8 @@ export function ReplayBufferStack({
                 key={`${episode.index}-${episode.outcome}`}
                 role="listitem"
                 className={clsx(
-                  'flex h-8 items-center gap-2 rounded-md border border-[#e2dbd0] bg-white px-2 text-[10px] font-medium shadow-sm',
-                  onOpen && 'cursor-pointer transition-colors hover:border-[#b8c6b8] hover:bg-[#fbfcfa] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#72917a]'
+                  'flex h-11 items-center gap-2 rounded-md border-b border-[#ece7dd] bg-white px-2 text-[14px] font-medium',
+                  onOpen && 'cursor-pointer transition-colors hover:bg-[#f0f4ed] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#72917a]'
                 )}
                 onClick={onOpen ? () => onOpen(episode) : undefined}
                 onKeyDown={onOpen ? (event) => {
@@ -617,16 +436,16 @@ export function ReplayBufferStack({
                 tabIndex={onOpen ? 0 : undefined}
                 aria-label={onOpen ? `Open episode ${episode.index} video` : undefined}
               >
-                <Icon size={12} className="shrink-0 text-[#81796e]" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[#514b42]">
+                <Icon size={14} className="shrink-0 text-[#6b6459]" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[#302d27]" title={`episode_${String(episode.index).padStart(3, '0')}`}>
                   episode_{String(episode.index).padStart(3, '0')}
                 </span>
-                <span className={clsx('shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold', style.className)}>
+                <span className={clsx('shrink-0 rounded-full border px-1.5 py-0.5 text-[12px] font-semibold', style.className)}>
                   {style.label}
                 </span>
                 {onOpen && (
                   <span
-                    className="flex h-6 shrink-0 items-center gap-1 rounded-md border border-[#ddd6ca] bg-[#faf8f4] px-1.5 text-[9px] font-semibold text-[#6f685d] hover:bg-[#f1ede6]"
+                    className="flex h-6 shrink-0 items-center gap-1 text-[12px] font-medium text-[#5e574d]"
                     aria-hidden="true"
                   >
                     <MdVideocam size={11} aria-hidden="true" /> View
@@ -640,7 +459,7 @@ export function ReplayBufferStack({
                       onDelete(episode.index);
                     }}
                     disabled={deleteDisabled || deletingIndex !== null}
-                    className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#b96862] text-white transition-colors hover:bg-[#a6534e] disabled:cursor-not-allowed disabled:opacity-45"
+                    className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#b96862] text-white transition-colors hover:bg-[#a6534e] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#824a43] disabled:cursor-not-allowed disabled:opacity-45"
                     aria-label={`Delete episode ${episode.index}`}
                     title={`Delete episode_${String(episode.index).padStart(3, '0')}`}
                   >
@@ -652,7 +471,7 @@ export function ReplayBufferStack({
           })}
 
           {!filteredEpisodes.length && (
-            <div className="flex h-full min-h-[120px] flex-col items-center justify-center gap-1 text-center text-[10px] text-[#9a9286]">
+            <div className="flex h-full min-h-[120px] flex-col items-center justify-center gap-1 text-center text-[12px] text-[#6b6459]">
               <MdHourglassEmpty size={15} />
               <span>
                 {loading

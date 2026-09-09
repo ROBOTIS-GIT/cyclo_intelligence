@@ -6,7 +6,7 @@ describe('MultiTaskDiTArchitectureDiagram', () => {
     render(<MultiTaskDiTArchitectureDiagram />);
 
     expect(screen.getByTestId('multi-task-dit-architecture-diagram'))
-      .toHaveTextContent('MultiTaskDiT · Flow-Matching action policy');
+      .toHaveTextContent('Diffusion Transformer Policy');
     expect(screen.getByLabelText('Visual + task encoder: Frozen; fixed'))
       .toBeInTheDocument();
     expect(screen.getByLabelText('Robot-state encoder: Frozen; fixed'))
@@ -15,7 +15,7 @@ describe('MultiTaskDiTArchitectureDiagram', () => {
       'Action Module: conditioning Frozen; Flow-Matching DiT Fire; Trainable; fixed'
     ))
       .toBeInTheDocument();
-    expect(screen.getByText('Frozen conditioning → trainable Flow-Matching DiT'))
+    expect(screen.getByTitle('Frozen conditioning → trainable Flow-Matching DiT'))
       .toBeInTheDocument();
     expect(screen.getByText('DiT · Trainable')).toBeInTheDocument();
     expect(screen.queryByText('Frozen observation conditioning')).not.toBeInTheDocument();

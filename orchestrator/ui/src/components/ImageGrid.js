@@ -111,6 +111,7 @@ export default function ImageGrid({
   columnWeights = null,
   edgeToEdge = false,
   coverCell = false,
+  imageFit = 'cover',
 }) {
   const dispatch = useDispatch();
   const store = useStore();
@@ -372,6 +373,7 @@ export default function ImageGrid({
               readOnly={readOnly}
               edgeToEdge={edgeToEdge}
               coverCell={coverCell}
+              imageFit={imageFit}
               style={fillHeight ? { height: '100%', aspectRatio: 'auto' } : undefined}
             />
             <div className={classTopicLabel}>

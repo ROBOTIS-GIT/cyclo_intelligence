@@ -63,6 +63,7 @@ class ServiceHandler:
             robot_type=request.robot_type,
             task_instruction=request.task_instruction or "",
             action_keys=action_keys,
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
         )
         self._control_loop.configure(
             robot_type=request.robot_type,
@@ -75,10 +76,9 @@ class ServiceHandler:
         return self._make_response(True, response.message or "loaded", action_keys)
 
     def _start(self, request):
+        publish_to_robot = self._require_loaded_publish_mode(request)
         self._session.mark_running()
-        self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
-        )
+        self._control_loop.start(publish_to_robot=publish_to_robot)
         return self._make_response(True, "running")
 
     def _pause(self):
@@ -87,12 +87,23 @@ class ServiceHandler:
         return self._make_response(True, "paused")
 
     def _resume(self, request):
+        publish_to_robot = self._require_loaded_publish_mode(request)
         self._session.mark_resumed(request.task_instruction or "")
         self._control_loop.set_task_instruction(self._session.task_instruction)
-        self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
-        )
+        self._control_loop.start(publish_to_robot=publish_to_robot)
         return self._make_response(True, "resumed")
+
+    def _require_loaded_publish_mode(self, request) -> bool:
+        """Prevent START/RESUME from bypassing Engine load-time safety checks."""
+
+        requested = bool(getattr(request, "publish_to_robot", False))
+        loaded = bool(getattr(self._session, "publish_to_robot", False))
+        if requested != loaded:
+            raise RuntimeError(
+                "Deploy Target differs from the loaded policy; STOP, UNLOAD, "
+                "then LOAD again with the requested simulation/robot target"
+            )
+        return loaded
 
     def _stop(self):
         self._session.mark_stopped()

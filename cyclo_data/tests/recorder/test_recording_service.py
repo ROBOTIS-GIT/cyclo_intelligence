@@ -164,6 +164,16 @@ def _service_with_logger():
     return service, logger
 
 
+def test_rlt_sidecar_flushes_with_existing_episode_writers():
+    service, _ = _service_with_logger()
+    calls = []
+    service._rlt_recorder = SimpleNamespace(stop_episode=lambda: calls.append('rlt'))
+    service._video_recorder = SimpleNamespace(stop_episode=lambda: calls.append('video'))
+    service._camera_info = None
+    service._stop_episode_writers()
+    assert calls == ['rlt', 'video']
+
+
 def test_ensure_data_manager_reuses_same_task_without_candidate_scan(
     monkeypatch,
     tmp_path,

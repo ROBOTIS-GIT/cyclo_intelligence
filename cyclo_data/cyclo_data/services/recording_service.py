@@ -37,6 +37,7 @@ from typing import Optional
 
 from cyclo_data.recorder.camera_info_snapshot import CameraInfoSnapshot
 from cyclo_data.recorder.rosbag_control import RosbagControl
+from cyclo_data.recorder.rlt_recorder import RLTRecorder
 from cyclo_data.recorder.session_manager import DataManager
 from cyclo_data.recorder.transcoder import TranscodeWorker
 from cyclo_data.recorder.video_recorder import VideoRecorder
@@ -83,6 +84,7 @@ class RecordingService:
         self._node = node
         self._status_pub = status_publisher  # umbrella /data/status
         self._rosbag = RosbagControl(node)
+        self._rlt_recorder = RLTRecorder(node)
 
         self._data_manager: Optional[DataManager] = None
         self._robot_type: str = ''
@@ -154,6 +156,7 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._rlt_recorder.close()
         if self._status_timer is not None:
             try:
                 self._status_timer.cancel()
@@ -327,6 +330,9 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _publish_recording_status(self) -> None:
+        rlt_recorder = getattr(self, '_rlt_recorder', None)
+        if rlt_recorder is not None:
+            rlt_recorder.publish_state()
         # Snapshot once — a concurrent _callback teardown could otherwise
         # null self._data_manager between this check and the method call.
         with self._session_lock:
@@ -366,6 +372,10 @@ class RecordingService:
             except Exception as exc:  # noqa: BLE001
                 self._node.get_logger().warn(
                     f'VideoRecorder.recording_warnings() raised: {exc}')
+        if rlt_recorder is not None and hasattr(status, 'recording_warnings'):
+            status.recording_warnings = (
+                list(status.recording_warnings) + rlt_recorder.recording_warnings()
+            )
         if self._video_recorder is not None and hasattr(status, 'camera_monitor_names'):
             try:
                 camera_monitor = self._video_recorder.camera_monitor_snapshot()
@@ -711,6 +721,9 @@ class RecordingService:
 
             dm.start_recording()
             dm_started = True
+            if (getattr(request.task_info, 'task_type', '') == 'inference'
+                    and getattr(self, '_rlt_recorder', None) is not None):
+                self._rlt_recorder.start_episode(episode_dir)
         except Exception as exc:  # noqa: BLE001
             self._cleanup_failed_start(
                 episode_dir=episode_dir,
@@ -872,6 +885,8 @@ class RecordingService:
         for the next episode — only ``close()`` (on shutdown) or
         ``reconfigure()`` (on robot_type change) tears their subs down.
         """
+        if getattr(self, '_rlt_recorder', None) is not None:
+            self._rlt_recorder.stop_episode()
         self._last_video_stats = {}
         self._last_camera_info_files = {}
         if self._video_recorder is not None:

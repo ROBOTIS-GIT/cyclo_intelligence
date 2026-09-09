@@ -63,20 +63,17 @@ const metricStyle = (tone) => {
   switch (tone) {
     case 'critic':
       return {
-        card: 'border-[#ead4c5] bg-[#fff7f1]',
-        label: 'text-[#a06c49]',
+        label: 'text-[#805333]',
         value: 'text-[#6c4934]',
       };
     case 'actor':
       return {
-        card: 'border-[#cfdbce] bg-[#f2f7f1]',
-        label: 'text-[#66806b]',
+        label: 'text-[#49664f]',
         value: 'text-[#405c47]',
       };
     default:
       return {
-        card: 'border-[#d7dbe5] bg-[#f4f6fa]',
-        label: 'text-[#758098]',
+        label: 'text-[#54627b]',
         value: 'text-[#4b5874]',
       };
   }
@@ -84,6 +81,7 @@ const metricStyle = (tone) => {
 
 /** Compact progress summary shared by ACT and the other policy workflows. */
 export default function TrainingLossChart({
+  title = 'Training loss',
   actorLossHistory = [],
   criticLossHistory = [],
   metrics = null,
@@ -130,12 +128,12 @@ export default function TrainingLossChart({
 
   return (
     <section
-      className="min-w-0 rounded-xl border border-[#ddd6ca] bg-white p-3 shadow-[0_1px_2px_rgba(65,57,46,0.04)]"
+      className="min-w-0 rounded-xl bg-white p-2"
       data-testid="training-loss-chart"
     >
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[12px] font-semibold text-[#39352e]">Training loss</h3>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2 text-[10px]">
+        <h3 className="flex flex-wrap items-center gap-2 text-[14px] font-semibold text-[#39352e]">{title}</h3>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2 text-[12px]">
           <span
             className={`rounded-full border px-2 py-1 font-semibold capitalize ${statusStyle(normalizedStatus)}`}
           >
@@ -145,7 +143,7 @@ export default function TrainingLossChart({
             {safePercentage.toFixed(1)}%
           </span>
           <span
-            className="text-[#8d8579]"
+            className="text-[#696256]"
             aria-label={isEta ? 'Training ETA' : 'Training duration'}
           >
             {timingLabel}
@@ -163,7 +161,7 @@ export default function TrainingLossChart({
             onClick={() => setMetricsOpen(true)}
             aria-label="Expand training metrics"
             title="Expand training metrics"
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-[#d8d1c5] bg-[#fbfaf6] text-[#6f675c] transition-colors hover:border-[#aebead] hover:bg-[#e7eee6] hover:text-[#4f6b55] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[#d8d1c5] bg-[#fbfaf6] text-[#6f675c] transition-colors hover:border-[#aebead] hover:bg-[#e7eee6] hover:text-[#4f6b55] focus:outline-none focus:ring-2 focus:ring-[#879b83] focus:ring-offset-1"
           >
             <MdOpenInFull size={13} aria-hidden="true" />
           </button>
@@ -185,7 +183,7 @@ export default function TrainingLossChart({
       </div>
 
       <div
-        className={`mt-2 grid gap-2 text-[10px] ${visibleMetrics.length >= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}
+        className={`mt-2 grid gap-2 divide-x divide-[#e5dfd5] text-[12px] ${visibleMetrics.length >= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}
         data-testid="training-progress-metrics"
       >
         {visibleMetrics.map((metric) => {
@@ -197,11 +195,11 @@ export default function TrainingLossChart({
           return (
             <div
               key={metric?.key || label}
-              className={`min-w-0 rounded-lg border px-2.5 py-2 ${styles.card}`}
+              className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 px-2.5 first:pl-0"
             >
               <span className={styles.label}>{label}</span>
               <strong
-                className={`float-right max-w-[58%] truncate font-mono ${styles.value}`}
+                className={`min-w-0 truncate font-mono text-[20px] font-semibold tabular-nums ${styles.value}`}
                 aria-label={metric?.ariaLabel || `Latest ${label.toLowerCase()}`}
                 title={value}
               >

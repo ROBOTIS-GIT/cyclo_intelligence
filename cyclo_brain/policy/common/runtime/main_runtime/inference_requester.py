@@ -52,6 +52,7 @@ class InferenceRequester:
             model_path=str(getattr(request, "model_path", "") or ""),
             embodiment_tag=str(getattr(request, "embodiment_tag", "") or ""),
             robot_type=str(getattr(request, "robot_type", "") or ""),
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             task_instruction=str(getattr(request, "task_instruction", "") or ""),
             acceleration_mode=str(getattr(request, "acceleration_mode", "") or ""),
             acceleration_engine_path=str(

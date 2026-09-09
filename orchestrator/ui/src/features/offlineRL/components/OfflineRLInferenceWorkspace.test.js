@@ -36,6 +36,7 @@ jest.mock('../../../components/ImageGrid', () => function MockImageGrid({
   columnWeights,
   edgeToEdge,
   coverCell,
+  imageFit,
 }) {
   return (
     <div
@@ -47,6 +48,7 @@ jest.mock('../../../components/ImageGrid', () => function MockImageGrid({
       data-column-weights={columnWeights?.join(',')}
       data-edge-to-edge={String(edgeToEdge)}
       data-cover-cell={String(coverCell)}
+      data-image-fit={imageFit}
     >
       {labels.map((label) => <span key={label}>{label}</span>)}
     </div>
@@ -209,7 +211,7 @@ describe('OfflineRLInferenceWorkspace', () => {
     );
     expect(screen.getByTestId('image-grid')).toHaveAttribute(
       'data-column-weights',
-      '4,5,4'
+      '9,16,9'
     );
     expect(screen.getByTestId('image-grid')).toHaveAttribute(
       'data-edge-to-edge',
@@ -217,7 +219,11 @@ describe('OfflineRLInferenceWorkspace', () => {
     );
     expect(screen.getByTestId('image-grid')).toHaveAttribute(
       'data-cover-cell',
-      'true'
+      'undefined'
+    );
+    expect(screen.getByTestId('image-grid')).toHaveAttribute(
+      'data-image-fit',
+      'contain'
     );
     expect(screen.getByTestId('offline-rl-camera-region')).toHaveClass(
       'flex-1',

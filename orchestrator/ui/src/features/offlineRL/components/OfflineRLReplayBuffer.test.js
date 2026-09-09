@@ -159,7 +159,7 @@ test('renders a 40/60 composition and episode manager with internal scrolling', 
     name: 'MCAP episodes success rate',
   });
   expect(screen.getByTestId('replay-buffer-composition-layout'))
-    .toHaveClass('md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]');
+    .toHaveClass('pg-replay-layout');
   expect(screen.getByTestId('replay-buffer-composition'))
     .toHaveClass('max-w-full', 'overflow-hidden');
   expect(screen.getByTestId('replay-buffer-episode-manager')).toBeInTheDocument();
@@ -167,19 +167,22 @@ test('renders a 40/60 composition and episode manager with internal scrolling', 
     .toHaveClass('grid', 'grid-cols-2');
   expect(screen.getByTestId('replay-outcome-summary')).toBeInTheDocument();
   expect(screen.getByTestId('replay-outcome-legend'))
-    .toHaveClass('text-[10px]', 'gap-1.5');
+    .toHaveClass('text-[12px]', 'gap-1.5');
   expect(screen.getByRole('img', { name: 'MCAP episodes buffer composition' }))
     .toBeInTheDocument();
   expect(screen.getByRole('textbox', { name: 'Search MCAP episodes' }))
     .toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'All 2' }))
-    .toHaveClass('text-[10px]');
+    .toHaveClass('text-[12px]');
   expect(screen.getByRole('button', { name: 'Success 1' }))
-    .toHaveClass('text-[10px]');
+    .toHaveClass('text-[12px]');
   expect(screen.getByText('episode_000').parentElement)
-    .toHaveClass('text-[10px]');
+    .toHaveClass('h-11', 'text-[14px]');
+  expect(screen.getByText('episode_000').parentElement)
+    .not.toHaveClass('shadow-sm');
+  expect(screen.getByText('episode_000')).toHaveClass('text-[#302d27]');
   expect(within(episodeList).getByText('Success'))
-    .toHaveClass('text-[9px]');
+    .toHaveClass('text-[12px]');
   expect(episodeList).toHaveClass(
     'h-[156px]',
     'min-h-[156px]',
@@ -216,8 +219,7 @@ test('keeps unused capacity visible independently from outcome composition', () 
   expect(cylinder).toHaveAttribute('data-capacity-percent', '2');
   expect(cylinder).toHaveAttribute('data-visible-disc-count', '4');
   expect(cylinder).toHaveClass(
-    'h-[168px]',
-    'max-h-[168px]',
+    'pg-buffer-vessel',
     'min-w-0',
     'max-w-full'
   );

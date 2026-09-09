@@ -8,36 +8,13 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from cyclo_brain.model.common.sg2 import SG2_RECORDER_ACTION_NAMES
+
 from .flow_sde_adapter import CYCLO_SG2_CAMERA_KEYS, DEFAULT_TASK_INSTRUCTION
 
 
-# State and action share this exact recorder order.  Keeping the names next to
-# the batch boundary prevents a dimension-only check from silently accepting a
-# different 22-DoF contract.
-CYCLO_SG2_ACTION_NAMES = (
-    "arm_l_joint1",
-    "arm_l_joint2",
-    "arm_l_joint3",
-    "arm_l_joint4",
-    "arm_l_joint5",
-    "arm_l_joint6",
-    "arm_l_joint7",
-    "gripper_l_joint1",
-    "arm_r_joint1",
-    "arm_r_joint2",
-    "arm_r_joint3",
-    "arm_r_joint4",
-    "arm_r_joint5",
-    "arm_r_joint6",
-    "arm_r_joint7",
-    "gripper_r_joint1",
-    "head_joint1",
-    "head_joint2",
-    "lift_joint",
-    "linear_x",
-    "linear_y",
-    "angular_z",
-)
+# Backwards-compatible public name used by existing training entrypoints.
+CYCLO_SG2_ACTION_NAMES = SG2_RECORDER_ACTION_NAMES
 
 
 def canonicalize_training_batch(

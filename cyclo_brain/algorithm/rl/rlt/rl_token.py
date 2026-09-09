@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from hashlib import sha256
-import json
 import math
 import os
 from pathlib import Path
@@ -20,6 +19,11 @@ from typing import Any, Literal
 
 import torch
 from torch import Tensor, nn
+
+from cyclo_brain.algorithm.common import (
+    canonical_json_sha256,
+    validate_lowercase_sha256,
+)
 
 
 TokenSelection = Literal["all", "image"]
@@ -117,24 +121,11 @@ class RLTokenReconstruction:
     valid_tokens: int
 
 
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
 def _digest(value: Any, name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"RLT encoder artifact {name} is invalid")
-    return value
+    return validate_lowercase_sha256(
+        value,
+        error_message=f"RLT encoder artifact {name} is invalid",
+    )
 
 
 def _secure_load(path: str | os.PathLike[str]) -> Mapping[str, Any]:
@@ -184,7 +175,7 @@ def _artifact_fingerprint(
                 "sha256": sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest(),
             }
         )
-    return _canonical_fingerprint(
+    return canonical_json_sha256(
         {
             "schema": _ARTIFACT_FORMAT,
             "model_config": asdict(config),
@@ -503,7 +494,7 @@ def build_frozen_rl_token_encoder_artifact(
         or embeddings.get("width") != model.config.embedding_dim
     ):
         raise ValueError("RLT encoder representation width disagrees")
-    contract_fingerprint = _canonical_fingerprint(representation)
+    contract_fingerprint = canonical_json_sha256(representation)
     state = model.encoder_state_dict()
     if not state:
         raise RuntimeError("RLT encoder export state is empty")
@@ -696,7 +687,7 @@ def load_frozen_rl_token_encoder(
         payload.get("representation_contract_fingerprint"),
         "representation contract fingerprint",
     )
-    if _canonical_fingerprint(representation) != contract_fingerprint:
+    if canonical_json_sha256(representation) != contract_fingerprint:
         raise ValueError("RLT encoder representation contract fingerprint disagrees")
     embeddings = representation.get("embeddings")
     if not isinstance(embeddings, Mapping) or embeddings.get("width") != config.embedding_dim:

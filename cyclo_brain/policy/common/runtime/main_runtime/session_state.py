@@ -20,14 +20,22 @@ class SessionState:
     robot_type: str = ""
     task_instruction: str = ""
     action_keys: List[str] = field(default_factory=list)
+    publish_to_robot: bool = False
 
-    def mark_loaded(self, robot_type: str, task_instruction: str, action_keys: list[str]) -> None:
+    def mark_loaded(
+        self,
+        robot_type: str,
+        task_instruction: str,
+        action_keys: list[str],
+        publish_to_robot: bool = False,
+    ) -> None:
         self.loaded = True
         self.running = False
         self.paused = False
         self.robot_type = robot_type
         self.task_instruction = task_instruction
         self.action_keys = list(action_keys)
+        self.publish_to_robot = bool(publish_to_robot)
 
     def mark_running(self) -> None:
         if not self.loaded:
@@ -58,3 +66,4 @@ class SessionState:
         self.robot_type = ""
         self.task_instruction = ""
         self.action_keys = []
+        self.publish_to_robot = False

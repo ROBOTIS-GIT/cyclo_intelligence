@@ -135,6 +135,18 @@ WORKDIR /gr00t
 # Copy GR00T source from submodule
 # Build context is cyclo_brain/policy/groot/, so paths are relative to that
 COPY Isaac-GR00T/ ./
+COPY patches/isaac_gr00t_training_time_rtc*.patch /tmp/tt_rtc_patches/
+RUN for patch in /tmp/tt_rtc_patches/*.patch; do \
+        if git apply --check "$patch"; then \
+            git apply "$patch"; \
+        elif git apply --reverse --check "$patch"; then \
+            echo "Isaac-GR00T TT-RTC patch already present: $patch"; \
+        else \
+            echo "Isaac-GR00T TT-RTC patch does not match the pinned source: $patch" >&2; \
+            exit 1; \
+        fi; \
+    done \
+    && rm -rf /tmp/tt_rtc_patches
 
 # Patch pyproject.toml to allow Python 3.12 (base image uses 3.12)
 # GR00T officially requires 3.10 but code is compatible with 3.12
@@ -191,13 +203,18 @@ RUN pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 
 
 # Re-apply dependency bounds after unpinned installs. Torch/TorchVision may
 # intentionally differ from GR00T's metadata on amd64, but the supporting
-# packages should still match N1.7 runtime/export requirements.
+# packages should still match N1.7 runtime/export requirements. Keep NumPy on
+# the GR00T/OpenCV 1.x ABI even when an upgraded ONNX dependency asks pip to
+# reconsider transitive packages.
 RUN PIP_CONSTRAINT= pip install --no-cache-dir --upgrade \
+    "numpy==1.26.4" \
+    "ml-dtypes==0.5.4" \
     "cryptography>=44.0.0" \
     "onnxscript" \
     "protobuf>=4.25.1,<7" \
     "typing_extensions>=4.15.0" \
-    "fsspec[http]<=2025.3.0,>=2023.1.0"
+    "fsspec[http]<=2025.3.0,>=2023.1.0" \
+    && python -c "import cv2, ml_dtypes, numpy, onnx, onnxscript; assert (numpy.__version__, ml_dtypes.__version__) == ('1.26.4', '0.5.4'); print(f'NumPy/OpenCV/ONNX ABI: {numpy.__version__} / {cv2.__version__} / {onnx.__version__} / {onnxscript.__version__} / {ml_dtypes.__version__}')"
 
 # Create application directory for the two-process runtime
 WORKDIR /app

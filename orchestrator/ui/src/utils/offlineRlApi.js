@@ -29,264 +29,125 @@ async function requireOk(response, action) {
   return data;
 }
 
-export async function startOfflineRLTraining(request) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/start`, {
+async function getJson(url, action) {
+  return requireOk(await fetch(url, { cache: 'no-store' }), action);
+}
+
+async function postJson(url, payload, action) {
+  return requireOk(await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Offline RL start');
+    body: JSON.stringify(payload),
+  }), action);
+}
+
+export async function startOfflineRLTraining(request) {
+  return postJson(`${OFFLINE_RL_API_BASE}/start`, request, 'Offline RL start');
 }
 
 export async function getOfflineRLStatus() {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Offline RL status');
+  return getJson(`${OFFLINE_RL_API_BASE}/status`, 'Offline RL status');
 }
 
 export async function stopOfflineRLTraining(jobId) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Offline RL stop');
+  return postJson(`${OFFLINE_RL_API_BASE}/stop`, { job_id: jobId }, 'Offline RL stop');
 }
 
 export async function cancelOfflineRLTraining(jobId) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/cancel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Offline RL cancel');
+  return postJson(`${OFFLINE_RL_API_BASE}/cancel`, { job_id: jobId }, 'Offline RL cancel');
 }
 
 export async function startACTTD3CriticWarmup(request) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'ACT-TD3 critic warm-up start');
+  return postJson(`${OFFLINE_RL_API_BASE}/critic-warmup/start`, request, 'ACT-TD3 critic warm-up start');
 }
 
 export async function getACTTD3CriticWarmupStatus() {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'ACT-TD3 critic warm-up status');
+  return getJson(`${OFFLINE_RL_API_BASE}/critic-warmup/status`, 'ACT-TD3 critic warm-up status');
 }
 
 export async function stopACTTD3CriticWarmup(jobId) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/critic-warmup/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'ACT-TD3 critic warm-up stop');
+  return postJson(`${OFFLINE_RL_API_BASE}/critic-warmup/stop`, { job_id: jobId }, 'ACT-TD3 critic warm-up stop');
 }
 
 export async function startImitationLearningTraining(request) {
-  const response = await fetch(`${IMITATION_LEARNING_API_BASE}/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Imitation Learning start');
+  return postJson(`${IMITATION_LEARNING_API_BASE}/start`, request, 'Imitation Learning start');
 }
 
 export async function getImitationLearningStatus() {
-  const response = await fetch(`${IMITATION_LEARNING_API_BASE}/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Imitation Learning status');
+  return getJson(`${IMITATION_LEARNING_API_BASE}/status`, 'Imitation Learning status');
 }
 
 export async function stopImitationLearningTraining(jobId) {
-  const response = await fetch(`${IMITATION_LEARNING_API_BASE}/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Imitation Learning stop');
+  return postJson(`${IMITATION_LEARNING_API_BASE}/stop`, { job_id: jobId }, 'Imitation Learning stop');
 }
 
 export async function startRLTStage1Training(request) {
-  const response = await fetch(`${RLT_STAGE1_API_BASE}/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'RLT Stage 1 start');
+  return postJson(`${RLT_STAGE1_API_BASE}/start`, request, 'RLT Stage 1 start');
 }
 
 export async function getRLTStage1Status() {
-  const response = await fetch(`${RLT_STAGE1_API_BASE}/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'RLT Stage 1 status');
+  return getJson(`${RLT_STAGE1_API_BASE}/status`, 'RLT Stage 1 status');
 }
 
 export async function stopRLTStage1Training(jobId) {
-  const response = await fetch(`${RLT_STAGE1_API_BASE}/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'RLT Stage 1 stop');
+  return postJson(`${RLT_STAGE1_API_BASE}/stop`, { job_id: jobId }, 'RLT Stage 1 stop');
 }
 
 export async function startRLTStage2Training(request) {
-  const response = await fetch(`${RLT_STAGE2_API_BASE}/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'RLT Stage 2 start');
+  return postJson(`${RLT_STAGE2_API_BASE}/start`, request, 'RLT Stage 2 start');
 }
 
 export async function getRLTStage2Status() {
-  const response = await fetch(`${RLT_STAGE2_API_BASE}/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'RLT Stage 2 status');
+  return getJson(`${RLT_STAGE2_API_BASE}/status`, 'RLT Stage 2 status');
 }
 
 export async function stopRLTStage2Training(jobId) {
-  const response = await fetch(`${RLT_STAGE2_API_BASE}/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'RLT Stage 2 stop');
-}
-
-export async function startFlowSDEPPOTraining(request) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Flow-SDE PPO start');
-}
-
-export async function getFlowSDEPPOStatus() {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Flow-SDE PPO status');
-}
-
-export async function stopFlowSDEPPOTraining(jobId) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Flow-SDE PPO stop');
-}
-
-export async function submitFlowSDEPPOOutcome(jobId, outcome) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/outcome`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId, outcome }),
-  });
-  return requireOk(response, 'Flow-SDE PPO outcome');
+  return postJson(`${RLT_STAGE2_API_BASE}/stop`, { job_id: jobId }, 'RLT Stage 2 stop');
 }
 
 export async function startFlowSDEPPOPolicyRollout(request) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/rollout/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Flow-SDE PPO rollout start');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/rollout/start`, request, 'Flow-SDE PPO rollout start');
 }
 
 export async function getFlowSDEPPOPolicyRolloutStatus() {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/rollout/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Flow-SDE PPO rollout status');
+  return getJson(`${FLOW_SDE_PPO_API_BASE}/rollout/status`, 'Flow-SDE PPO rollout status');
 }
 
 export async function stopFlowSDEPPOPolicyRollout(jobId) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/rollout/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Flow-SDE PPO rollout stop');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/rollout/stop`, { job_id: jobId }, 'Flow-SDE PPO rollout stop');
 }
 
 export async function submitFlowSDEPPOPolicyRolloutOutcome(jobId, outcome) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/rollout/outcome`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId, outcome }),
-  });
-  return requireOk(response, 'Flow-SDE PPO rollout outcome');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/rollout/outcome`, { job_id: jobId, outcome }, 'Flow-SDE PPO rollout outcome');
 }
 
 export async function startFlowSDEPPOUpdate(rolloutBundle) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/update/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rollout_bundle: rolloutBundle }),
-  });
-  return requireOk(response, 'Flow-SDE PPO update start');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/update/start`, { rollout_bundle: rolloutBundle }, 'Flow-SDE PPO update start');
 }
 
 export async function getFlowSDEPPOUpdateStatus() {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/update/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Flow-SDE PPO update status');
+  return getJson(`${FLOW_SDE_PPO_API_BASE}/update/status`, 'Flow-SDE PPO update status');
 }
 
 export async function stopFlowSDEPPOUpdate(jobId) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/update/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Flow-SDE PPO update stop');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/update/stop`, { job_id: jobId }, 'Flow-SDE PPO update stop');
 }
 
 export async function startFlowSDEPPOValueWarmup(request) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/value-warmup/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Flow-SDE PPO value warm-up start');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/value-warmup/start`, request, 'Flow-SDE PPO value warm-up start');
 }
 
 export async function getFlowSDEPPOValueWarmupStatus() {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/value-warmup/status`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'Flow-SDE PPO value warm-up status');
+  return getJson(`${FLOW_SDE_PPO_API_BASE}/value-warmup/status`, 'Flow-SDE PPO value warm-up status');
 }
 
 export async function stopFlowSDEPPOValueWarmup(jobId) {
-  const response = await fetch(`${FLOW_SDE_PPO_API_BASE}/value-warmup/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId }),
-  });
-  return requireOk(response, 'Flow-SDE PPO value warm-up stop');
+  return postJson(`${FLOW_SDE_PPO_API_BASE}/value-warmup/stop`, { job_id: jobId }, 'Flow-SDE PPO value warm-up stop');
 }
 
 export async function getOfflineRLDatasetInfo(datasetPath) {
   const query = new URLSearchParams({ dataset_path: datasetPath });
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/dataset?${query}`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'LeRobot dataset inspection');
+  return getJson(`${OFFLINE_RL_API_BASE}/dataset?${query}`, 'LeRobot dataset inspection');
 }
 
 export async function getOfflineRLDatasetEpisodeData(datasetPath, episodeIndex) {
@@ -294,11 +155,7 @@ export async function getOfflineRLDatasetEpisodeData(datasetPath, episodeIndex) 
     dataset_path: datasetPath,
     episode_index: String(episodeIndex),
   });
-  const response = await fetch(
-    `${OFFLINE_RL_API_BASE}/dataset/episode-data?${query}`,
-    { cache: 'no-store' }
-  );
-  return requireOk(response, 'LeRobot episode data');
+  return getJson(`${OFFLINE_RL_API_BASE}/dataset/episode-data?${query}`, 'LeRobot episode data');
 }
 
 export async function getOfflineRLDatasets(rootPath = '') {
@@ -307,29 +164,16 @@ export async function getOfflineRLDatasets(rootPath = '') {
     query.set('root_path', String(rootPath).trim());
   }
   const suffix = query.toString() ? `?${query}` : '';
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/datasets${suffix}`, {
-    cache: 'no-store',
-  });
-  return requireOk(response, 'LeRobot dataset inventory');
+  return getJson(`${OFFLINE_RL_API_BASE}/datasets${suffix}`, 'LeRobot dataset inventory');
 }
 
 export async function reserveOfflineRLDataEpoch(request) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/data-epochs/reserve`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  });
-  return requireOk(response, 'Data Epoch reservation');
+  return postJson(`${OFFLINE_RL_API_BASE}/data-epochs/reserve`, request, 'Data Epoch reservation');
 }
 
 export async function deleteOfflineRLDatasetEpisodes(datasetPath, episodeIndices) {
-  const response = await fetch(`${OFFLINE_RL_API_BASE}/dataset/delete-episodes`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  return postJson(`${OFFLINE_RL_API_BASE}/dataset/delete-episodes`, {
       dataset_path: datasetPath,
       episode_indices: episodeIndices,
-    }),
-  });
-  return requireOk(response, 'LeRobot episode deletion');
+    }, 'LeRobot episode deletion');
 }

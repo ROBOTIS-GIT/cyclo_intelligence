@@ -5,7 +5,6 @@ import {
   getFlowSDEPPOValueWarmupStatus,
   getFlowSDEPPOPolicyRolloutStatus,
   getFlowSDEPPOUpdateStatus,
-  getFlowSDEPPOStatus,
   getImitationLearningStatus,
   getOfflineRLDatasetInfo,
   getOfflineRLDatasetEpisodeData,
@@ -15,7 +14,6 @@ import {
   getRLTStage2Status,
   reserveOfflineRLDataEpoch,
   startACTTD3CriticWarmup,
-  startFlowSDEPPOTraining,
   startFlowSDEPPOValueWarmup,
   startFlowSDEPPOPolicyRollout,
   startFlowSDEPPOUpdate,
@@ -25,14 +23,12 @@ import {
   startRLTStage2Training,
   stopImitationLearningTraining,
   stopACTTD3CriticWarmup,
-  stopFlowSDEPPOTraining,
   stopFlowSDEPPOValueWarmup,
   stopFlowSDEPPOPolicyRollout,
   stopFlowSDEPPOUpdate,
   stopOfflineRLTraining,
   stopRLTStage1Training,
   stopRLTStage2Training,
-  submitFlowSDEPPOOutcome,
   submitFlowSDEPPOPolicyRolloutOutcome,
 } from './offlineRlApi';
 
@@ -409,113 +405,6 @@ describe('offline RL API', () => {
       body: JSON.stringify({ job_id: 'rlt-stage2-job-123' }),
     });
   });
-
-  test('starts live Flow-SDE PPO without an offline dataset payload', async () => {
-    global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'flow-job-1' }));
-    const request = {
-      policy_checkpoint: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
-      policy_type: 'multi_task_dit',
-      algorithm: 'flow_sde_ppo',
-      robot_type: 'ffw_sg2_rev1',
-      task_instruction: 'Pick up the jelly bag',
-    };
-
-    await expect(startFlowSDEPPOTraining(request)).resolves.toEqual({
-      status: 'running',
-      job_id: 'flow-job-1',
-    });
-    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-    });
-  });
-
-  test('forwards an explicitly selected value warm-up bundle to live Flow-SDE PPO', async () => {
-    global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'flow-job-2' }));
-    const request = {
-      policy_checkpoint: '/workspace/checkpoint/multi_task_dit/showroom/pretrained_model',
-      policy_type: 'multi_task_dit',
-      algorithm: 'flow_sde_ppo',
-      robot_type: 'ffw_sg2_rev1',
-      task_instruction: 'Pick up the jelly bag',
-      value_warmup_bundle: '/workspace/checkpoint/multi_task_dit/value_warmup/warmup-job-1',
-    };
-
-    await expect(startFlowSDEPPOTraining(request)).resolves.toEqual({
-      status: 'running',
-      job_id: 'flow-job-2',
-    });
-    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-    });
-  });
-
-  test('forwards an explicitly selected PPO trainer state for continuation', async () => {
-    global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'flow-job-3' }));
-    const request = {
-      policy_checkpoint: '/workspace/checkpoint/multi_task_dit/flow_sde_ppo/flow-job-2/pretrained_model',
-      policy_type: 'multi_task_dit',
-      algorithm: 'flow_sde_ppo',
-      robot_type: 'ffw_sg2_rev1',
-      task_instruction: 'Pick up the jelly bag',
-      resume_checkpoint: '/workspace/checkpoint/multi_task_dit/flow_sde_ppo/flow-job-2/training_state/trainer_state.pt',
-    };
-
-    await expect(startFlowSDEPPOTraining(request)).resolves.toEqual({
-      status: 'running',
-      job_id: 'flow-job-3',
-    });
-    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-    });
-  });
-
-  test('reads Flow-SDE PPO status without browser caching', async () => {
-    global.fetch.mockResolvedValue(jsonResponse({ ready: true, status: 'idle' }));
-
-    await expect(getFlowSDEPPOStatus()).resolves.toEqual({
-      ready: true,
-      status: 'idle',
-    });
-    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/status', {
-      cache: 'no-store',
-    });
-  });
-
-  test('stops the exact Flow-SDE PPO job', async () => {
-    global.fetch.mockResolvedValue(jsonResponse({ status: 'running', job_id: 'flow-job-1' }));
-
-    await stopFlowSDEPPOTraining('flow-job-1');
-
-    expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: 'flow-job-1' }),
-    });
-  });
-
-  test.each(['success', 'fail', 'cancel'])(
-    'submits the %s outcome to the exact Flow-SDE PPO job',
-    async (outcome) => {
-      global.fetch.mockResolvedValue(jsonResponse({
-        status: 'running',
-        job_id: 'flow-job-1',
-      }));
-
-      await submitFlowSDEPPOOutcome('flow-job-1', outcome);
-
-      expect(global.fetch).toHaveBeenCalledWith('/api/flow-sde-ppo/outcome', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: 'flow-job-1', outcome }),
-      });
-    }
-  );
 
   test('uses the dedicated rollout API for on-policy collection', async () => {
     global.fetch.mockResolvedValue(jsonResponse({

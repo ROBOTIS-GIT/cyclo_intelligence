@@ -35,6 +35,7 @@ uint64 seq_id
 string model_path
 string embodiment_tag
 string robot_type
+bool publish_to_robot
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
@@ -65,6 +66,7 @@ class EngineCommandRequest:
     model_path: str = ""
     embodiment_tag: str = ""
     robot_type: str = ""
+    publish_to_robot: bool = False
     task_instruction: str = ""
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
@@ -97,6 +99,7 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         model_path=str(getattr(message, "model_path", "") or ""),
         embodiment_tag=str(getattr(message, "embodiment_tag", "") or ""),
         robot_type=str(getattr(message, "robot_type", "") or ""),
+        publish_to_robot=bool(getattr(message, "publish_to_robot", False)),
         task_instruction=str(getattr(message, "task_instruction", "") or ""),
         acceleration_mode=str(getattr(message, "acceleration_mode", "") or ""),
         acceleration_engine_path=str(
@@ -155,6 +158,7 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "model_path": str(request.model_path),
         "embodiment_tag": str(request.embodiment_tag),
         "robot_type": str(request.robot_type),
+        "publish_to_robot": bool(request.publish_to_robot),
         "task_instruction": str(request.task_instruction),
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),

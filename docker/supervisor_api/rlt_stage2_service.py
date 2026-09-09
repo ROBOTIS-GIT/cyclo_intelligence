@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -29,12 +30,16 @@ import threading
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, StrictInt
+
+try:
+    from supervisor_api import rlt_service_common as _rlt_common
+except ModuleNotFoundError:  # Direct file loading in focused unit tests.
+    from docker.supervisor_api import rlt_service_common as _rlt_common
 
 
 RLT_STAGE2_DATASET_ROOTS = (Path("/workspace/lerobot"),)
@@ -47,12 +52,26 @@ RLT_STAGE2_BUNDLE_ROOTS = (Path("/workspace/checkpoint/rlt/stage2"),)
 RLT_STAGE2_OUTPUT_ROOT = Path("/workspace/checkpoint/rlt/stage2")
 RLT_STAGE2_LOG_ROOT = Path("/tmp/cyclo_rlt_stage2")
 RLT_STAGE2_CACHE_ROOT = "/tmp/cyclo_rlt_stage2_cache"
+RLT_STAGE2_HF_HUB_CACHE = "/huggingface_hub"
+def _repository_root() -> Path:
+    """Locate the live Cyclo source tree in both host and container layouts."""
+
+    configured = os.environ.get("CYCLO_SUPERVISOR_API_REPO_MOUNT", "").strip()
+    candidates = [
+        *((Path(configured),) if configured else ()),
+        Path(__file__).resolve().parents[2],
+        Path("/root/ros2_ws/src/cyclo_intelligence"),
+    ]
+    for candidate in candidates:
+        if (candidate / "cyclo_brain" / "policy" / "groot" / "runtime").is_dir():
+            return candidate
+    # Retain a deterministic path so readiness reports the missing files rather
+    # than failing module import when the repository mount itself is absent.
+    return candidates[0]
+
+
 RLT_STAGE2_RUNTIME_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "cyclo_brain"
-    / "policy"
-    / "groot"
-    / "runtime"
+    _repository_root() / "cyclo_brain" / "policy" / "groot" / "runtime"
 )
 RLT_STAGE2_REQUIRED_RUNTIME_FILES = (
     RLT_STAGE2_RUNTIME_ROOT / "rlt_stage2_dataset.py",
@@ -62,10 +81,12 @@ RLT_STAGE2_TRAIN_UID = 1000
 RLT_STAGE2_TRAIN_GID = 1000
 RLT_STAGE2_LOG_LINES = 100
 RLT_STAGE2_MAX_JSON_BYTES = 2 * 1024 * 1024
+RLT_STAGE2_DISCOVERY_LIMIT = 256
 
 _STAGE1_RUN_FORMAT = "cyclo.groot.rlt.stage1_run/v1"
-_STAGE2_BUNDLE_FORMAT = "cyclo_brain.rlt.stage2_bundle/v1"
+_STAGE2_BUNDLE_FORMAT = "cyclo_brain.rlt.stage2_bundle/v2"
 _STAGE2_QUALIFICATION = "training_only_not_deployment_validated"
+_STAGE2_OUTPUT_PATTERN = re.compile(r"steps_([0-9]+)_([0-9a-f]{12})")
 _STAGE2_SPEC_FIELDS = {
     "reference_contract_fingerprint",
     "rl_token_artifact_fingerprint",
@@ -81,11 +102,20 @@ _STAGE2_SPEC_FIELDS = {
     "schema_version",
 }
 
+_has_symlink_component = _rlt_common.has_symlink_component
+_resolve_existing_path = _rlt_common.resolve_existing_path
+_file_sha256 = _rlt_common.file_sha256
+_canonical_fingerprint = _rlt_common.canonical_json_sha256
+
 
 class RLTStage2StartRequest(BaseModel):
     initialization_mode: Literal["new", "resume"] = "new"
     dataset_paths: list[str] = Field(min_length=1, max_length=128)
     groot_checkpoint: str = ""
+    # Optional compatibility guard for resume callers.  The bundle remains
+    # the authoritative source, but it must name this currently selected
+    # frozen GR00T checkpoint before a new immutable round may start.
+    expected_groot_checkpoint: str = ""
     rl_token_encoder_path: str = ""
     rlt_bundle_path: str = ""
     steps: StrictInt = Field(default=10_000, ge=1, le=10_000_000)
@@ -162,68 +192,11 @@ class _RLTStage2Job:
 
 
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise HTTPException(400, f"Missing or unsafe {label}: {path}")
-    try:
-        if path.stat().st_size > RLT_STAGE2_MAX_JSON_BYTES:
-            raise HTTPException(400, f"{label} is too large: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except HTTPException:
-        raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(400, f"Invalid {label}: {path}") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(400, f"Invalid {label}: expected a JSON object")
-    return payload
-
-
-def _has_symlink_component(root: Path, candidate: Path) -> bool:
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError:
-        return True
-    cursor = root
-    if cursor.is_symlink():
-        return True
-    for part in relative.parts:
-        cursor = cursor / part
-        if cursor.is_symlink():
-            return True
-    return False
-
-
-def _resolve_existing_path(
-    raw_path: str,
-    *,
-    roots: tuple[Path, ...],
-    label: str,
-    directory: bool = True,
-) -> Path:
-    value = str(raw_path or "").strip()
-    path = Path(value)
-    if not value or not path.is_absolute():
-        raise HTTPException(400, f"{label} must be an absolute path")
-    lexical = Path(os.path.abspath(value))
-    for raw_root in roots:
-        try:
-            lexical.relative_to(raw_root)
-        except ValueError:
-            continue
-        if _has_symlink_component(raw_root, lexical):
-            raise HTTPException(400, f"{label} must not contain symbolic links")
-        try:
-            root = raw_root.resolve(strict=True)
-            resolved = lexical.resolve(strict=True)
-            resolved.relative_to(root)
-        except (OSError, ValueError):
-            continue
-        valid_type = resolved.is_dir() if directory else resolved.is_file()
-        if not valid_type:
-            expected = "directory" if directory else "file"
-            raise HTTPException(400, f"{label} must be a {expected}: {lexical}")
-        return resolved
-    allowed = ", ".join(str(root) for root in roots)
-    raise HTTPException(400, f"{label} must be under: {allowed}")
+    return _rlt_common.read_json_object(
+        path,
+        label=label,
+        max_bytes=RLT_STAGE2_MAX_JSON_BYTES,
+    )
 
 
 def _digest(value: object, *, label: str) -> str:
@@ -236,102 +209,44 @@ def _digest(value: object, *, label: str) -> str:
     return value
 
 
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        dict(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
-def _file_sha256(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _dataset_version(dataset: Path) -> str:
-    info = _read_json(dataset / "meta" / "info.json", label="LeRobot metadata")
-    value = str(info.get("codebase_version") or "").strip().lower()
-    if value.startswith("v"):
-        value = value[1:]
-    if value.startswith("2.1"):
-        return "v2.1"
-    if value.startswith("3"):
-        return "v3.0"
-    raise HTTPException(400, f"Unsupported LeRobot codebase_version: {dataset}")
+    return _rlt_common.lerobot_dataset_version(
+        dataset,
+        max_json_bytes=RLT_STAGE2_MAX_JSON_BYTES,
+        unsupported_message=f"Unsupported LeRobot codebase_version: {dataset}",
+    )
 
 
 def _validate_v21_dataset(dataset: Path, *, require_outcomes: bool = True) -> Path:
-    info = _read_json(dataset / "meta" / "info.json", label="LeRobot metadata")
-    if _dataset_version(dataset) != "v2.1":
-        raise HTTPException(400, f"GR00T RLT Stage 2 requires LeRobot v2.1: {dataset}")
-    for path in (dataset / "meta" / "episodes.jsonl", dataset / "meta" / "tasks.jsonl"):
-        if path.is_symlink() or not path.is_file():
-            raise HTTPException(400, f"LeRobot v2.1 metadata is incomplete: {dataset}")
-    features = info.get("features")
-    if require_outcomes and not (
-        isinstance(features, Mapping) and "episode_success" in features
-    ):
-        raise HTTPException(
-            400,
-            f"RLT Stage 2 dataset is missing episode_success labels: {dataset}",
-        )
-    return dataset
-
-
-def _paired_v21_dataset(v30_dataset: Path) -> Path:
-    dataset_root = next(
-        (
-            root.resolve(strict=True)
-            for root in RLT_STAGE2_DATASET_ROOTS
-            if v30_dataset.is_relative_to(root.resolve(strict=True))
+    return _rlt_common.validate_lerobot_dataset(
+        dataset,
+        expected_version="v2.1",
+        max_json_bytes=RLT_STAGE2_MAX_JSON_BYTES,
+        unsupported_message=f"Unsupported LeRobot codebase_version: {dataset}",
+        wrong_version_message=f"GR00T RLT Stage 2 requires LeRobot v2.1: {dataset}",
+        unsafe_metadata_message=f"LeRobot v2.1 metadata is incomplete: {dataset}",
+        outcome_requirement="present" if require_outcomes else "none",
+        missing_outcome_message=(
+            f"RLT Stage 2 dataset is missing episode_success labels: {dataset}"
         ),
-        None,
     )
-    if dataset_root is None:  # pragma: no cover - constrained by caller
-        raise HTTPException(400, "LeRobot dataset escapes its allowed root")
-    manifest_path: Path | None = None
-    cursor = v30_dataset.parent
-    while cursor.is_relative_to(dataset_root):
-        candidate = cursor / "cyclo_data_epoch.json"
-        if candidate.exists() or candidate.is_symlink():
-            manifest_path = candidate
-            break
-        if cursor == dataset_root:
-            break
-        cursor = cursor.parent
-    if manifest_path is None:
-        raise HTTPException(
-            400,
-            "LeRobot v3.0 is not accepted directly by GR00T RLT Stage 2; "
-            "its data epoch has no v2.1 pairing manifest",
-        )
-    manifest = _read_json(manifest_path, label="data epoch manifest")
-    outputs = manifest.get("expected_outputs")
-    if not isinstance(outputs, Mapping):
-        raise HTTPException(400, "Data epoch manifest has no expected_outputs map")
-    raw_v30, raw_v21 = outputs.get("v30"), outputs.get("v21")
-    if not isinstance(raw_v30, str) or not isinstance(raw_v21, str):
-        raise HTTPException(400, "Data epoch has no valid paired LeRobot v2.1 output")
-    recorded_v30 = _resolve_existing_path(
-        raw_v30,
-        roots=RLT_STAGE2_DATASET_ROOTS,
-        label="paired LeRobot v3.0 dataset",
+
+
+def _validate_v30_dataset(dataset: Path, *, require_outcomes: bool = True) -> Path:
+    return _rlt_common.validate_lerobot_dataset(
+        dataset,
+        expected_version="v3.0",
+        max_json_bytes=RLT_STAGE2_MAX_JSON_BYTES,
+        unsupported_message=f"Unsupported LeRobot codebase_version: {dataset}",
+        wrong_version_message=f"GR00T RLT Stage 2 requires LeRobot v3.0: {dataset}",
+        unsafe_metadata_message=(
+            f"LeRobot v3.0 dataset is missing safe episode/task metadata: {dataset}"
+        ),
+        outcome_requirement="boolean" if require_outcomes else "none",
+        missing_outcome_message=(
+            f"RLT Stage 2 dataset is missing episode_success labels: {dataset}"
+        ),
     )
-    if recorded_v30 != v30_dataset:
-        raise HTTPException(400, "Selected v3.0 dataset disagrees with its manifest")
-    paired = _resolve_existing_path(
-        raw_v21,
-        roots=RLT_STAGE2_DATASET_ROOTS,
-        label="paired LeRobot v2.1 dataset",
-    )
-    return _validate_v21_dataset(paired)
 
 
 def _resolve_datasets(raw_paths: list[str]) -> list[Path]:
@@ -346,7 +261,7 @@ def _resolve_datasets(raw_paths: list[str]) -> list[Path]:
         dataset = (
             _validate_v21_dataset(dataset)
             if _dataset_version(dataset) == "v2.1"
-            else _paired_v21_dataset(dataset)
+            else _validate_v30_dataset(dataset)
         )
         if dataset in seen:
             raise HTTPException(400, "dataset_paths resolve to duplicate datasets")
@@ -422,6 +337,41 @@ def _resolve_stage1_encoder(raw_path: str, groot_checkpoint: Path) -> Path:
 
 
 def _validate_bundle_manifest(bundle: Path, manifest: Mapping[str, Any]) -> None:
+    def require_integer(value: object, *, label: str, allow_zero: bool = False) -> int:
+        lower = 0 if allow_zero else 1
+        if isinstance(value, bool) or not isinstance(value, int) or value < lower:
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise HTTPException(400, f"RLT Stage 2 {label} must be a {qualifier} integer")
+        return value
+
+    def validate_replay_record(
+        value: object,
+        *,
+        expected_relative_path: str,
+        label: str,
+    ) -> Path:
+        if not isinstance(value, Mapping) or set(value) != {
+            "relative_path",
+            "byte_count",
+            "sha256",
+        }:
+            raise HTTPException(400, f"RLT Stage 2 training round {label} record is invalid")
+        if value.get("relative_path") != expected_relative_path:
+            raise HTTPException(400, f"RLT Stage 2 training round {label} path is invalid")
+        expected_bytes = require_integer(value.get("byte_count"), label=f"{label} byte_count")
+        expected_digest = _digest(value.get("sha256"), label=f"{label} SHA-256")
+        path = bundle / "replay_cache" / expected_relative_path
+        if (
+            _has_symlink_component(bundle, path)
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != expected_bytes
+        ):
+            raise HTTPException(400, f"RLT Stage 2 training round {label} artifact is invalid")
+        if _file_sha256(path) != expected_digest:
+            raise HTTPException(400, f"RLT Stage 2 training round {label} digest disagrees")
+        return path
+
     required = {
         "format",
         "initialization",
@@ -430,6 +380,7 @@ def _validate_bundle_manifest(bundle: Path, manifest: Mapping[str, Any]) -> None
         "spec_fingerprint",
         "completed_critic_updates",
         "completed_actor_updates",
+        "training_round",
         "artifacts",
         "qualification",
         "manifest_fingerprint",
@@ -505,6 +456,41 @@ def _validate_bundle_manifest(bundle: Path, manifest: Mapping[str, Any]) -> None
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HTTPException(400, f"RLT Stage 2 {name} is invalid")
 
+    from cyclo_brain.contracts.rlt import validate_training_round
+
+    training_round = manifest.get("training_round")
+    try:
+        validate_training_round(training_round)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise HTTPException(400, str(error)) from error
+    replay = training_round["replay"]
+    replay_manifest_path = validate_replay_record(
+        replay.get("manifest"),
+        expected_relative_path="manifest.json",
+        label="replay manifest",
+    )
+    validate_replay_record(
+        replay.get("artifact"),
+        expected_relative_path="replay.pt",
+        label="replay artifact",
+    )
+    replay_manifest_fingerprint = _digest(
+        replay.get("manifest_fingerprint"),
+        label="RLT replay manifest fingerprint",
+    )
+    replay_spec_fingerprint = _digest(
+        replay.get("spec_fingerprint"),
+        label="RLT replay spec fingerprint",
+    )
+    if replay_spec_fingerprint != spec_fingerprint:
+        raise HTTPException(400, "RLT Stage 2 replay spec fingerprint disagrees")
+    replay_manifest = _read_json(
+        replay_manifest_path,
+        label="RLT Stage 2 replay manifest",
+    )
+    if _canonical_fingerprint(replay_manifest) != replay_manifest_fingerprint:
+        raise HTTPException(400, "RLT Stage 2 replay manifest fingerprint disagrees")
+
     artifacts = manifest.get("artifacts")
     relative_paths = {
         "rl_token_encoder": "artifacts/rl_token_encoder.pt",
@@ -579,6 +565,107 @@ def _prepare_output(output: Path) -> None:
         raise HTTPException(500, f"Could not create RLT Stage 2 output: {output}") from exc
 
 
+def _completed_stage2_status(bundle: Path) -> RLTStage2Status:
+    """Strictly validate a published bundle and reconstruct terminal status."""
+
+    resolved_bundle = _resolve_resume_bundle(str(bundle))
+    root = RLT_STAGE2_OUTPUT_ROOT.resolve(strict=True)
+    relative = resolved_bundle.relative_to(root)
+    match = _STAGE2_OUTPUT_PATTERN.fullmatch(resolved_bundle.name)
+    if len(relative.parts) != 1 or match is None:
+        raise HTTPException(400, "RLT Stage 2 output name is invalid")
+    manifest_path = resolved_bundle / "manifest.json"
+    manifest = _read_json(manifest_path, label="RLT Stage 2 manifest")
+    training_round = manifest["training_round"]
+    optimization = training_round["optimization"]
+    steps = optimization["steps"]
+    if steps != int(match.group(1)):
+        raise HTTPException(400, "RLT Stage 2 output steps disagree with its manifest")
+
+    # Dataset paths are status metadata only.  Restore them when the immutable
+    # replay manifest still names safe, existing datasets; a self-contained
+    # bundle remains recoverable even after its source replay was archived.
+    dataset_paths: list[str] = []
+    replay_manifest = _read_json(
+        resolved_bundle / "replay_cache" / "manifest.json",
+        label="RLT Stage 2 replay manifest",
+    )
+    replay_metadata = replay_manifest.get("metadata")
+    recorded_datasets = (
+        replay_metadata.get("dataset_roots")
+        if isinstance(replay_metadata, Mapping)
+        else None
+    )
+    if (
+        isinstance(recorded_datasets, list)
+        and recorded_datasets
+        and all(isinstance(value, str) for value in recorded_datasets)
+    ):
+        try:
+            dataset_paths = [
+                str(path) for path in _resolve_datasets(list(recorded_datasets))
+            ]
+        except HTTPException:
+            dataset_paths = []
+
+    source = manifest["source"]
+    artifacts = manifest["artifacts"]
+    actor_path = resolved_bundle / artifacts["rlt_actor"]["relative_path"]
+    encoder_path = resolved_bundle / artifacts["rl_token_encoder"]["relative_path"]
+    checkpoint_path = resolved_bundle / artifacts["training_state"]["relative_path"]
+    return RLTStage2Status(
+        ready=True,
+        status="completed",
+        phase="complete",
+        percentage=100.0,
+        initialization_mode=manifest["initialization"]["mode"],
+        dataset_paths=list(dataset_paths),
+        resolved_dataset_paths=list(dataset_paths),
+        groot_checkpoint=source["groot_checkpoint"],
+        rl_token_encoder_path=str(encoder_path),
+        output_dir=str(resolved_bundle),
+        actor_artifact_path=str(actor_path),
+        encoder_artifact_path=str(encoder_path),
+        checkpoint_path=str(checkpoint_path),
+        manifest_path=str(manifest_path),
+        completed_steps=steps,
+        total_steps=steps,
+        batch_size=optimization["batch_size"],
+        average_reward=training_round["replay"]["average_reward"],
+        eta_seconds=0.0,
+        message="Recovered completed GR00T RLT Stage 2 bundle",
+        returncode=0,
+    )
+
+
+def _discover_latest_completed_stage2() -> RLTStage2Status | None:
+    """Return the newest fully verified direct bundle, ignoring partial runs."""
+
+    root = RLT_STAGE2_OUTPUT_ROOT
+    if root.is_symlink() or not root.is_dir():
+        return None
+    try:
+        candidates = []
+        for child in root.iterdir():
+            if child.is_symlink() or not child.is_dir():
+                continue
+            if _STAGE2_OUTPUT_PATTERN.fullmatch(child.name) is None:
+                continue
+            manifest = child / "manifest.json"
+            if manifest.is_symlink() or not manifest.is_file():
+                continue
+            candidates.append((manifest.stat().st_mtime_ns, child.name, child))
+    except OSError:
+        return None
+    candidates.sort(reverse=True)
+    for _mtime, _name, candidate in candidates[:RLT_STAGE2_DISCOVERY_LIMIT]:
+        try:
+            return _completed_stage2_status(candidate)
+        except (HTTPException, OSError, KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
 def _runtime_readiness() -> tuple[bool, str]:
     """Report whether the one-shot Stage 2 runtime is actually deployable.
 
@@ -620,6 +707,7 @@ class RLTStage2Supervisor:
         self._readiness_check = readiness_check or _runtime_readiness
         self._lock = threading.Lock()
         self._job: _RLTStage2Job | None = None
+        self._recovered_status = _discover_latest_completed_stage2()
         self._starting = False
         self.router = APIRouter(prefix="/rlt-stage2", tags=["rlt-stage2"])
         self.router.add_api_route(
@@ -645,13 +733,17 @@ class RLTStage2Supervisor:
             "--env", "HOME=/tmp",
             "--env", f"XDG_CACHE_HOME={RLT_STAGE2_CACHE_ROOT}",
             "--env", f"HF_HOME={RLT_STAGE2_CACHE_ROOT}/huggingface",
-            "--env", "HF_HUB_CACHE=/root/.cache/huggingface/hub",
-            "--env", "HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface/hub",
+            "--env", f"HF_HUB_CACHE={RLT_STAGE2_HF_HUB_CACHE}",
+            "--env", f"HUGGINGFACE_HUB_CACHE={RLT_STAGE2_HF_HUB_CACHE}",
+            "--env", f"TRANSFORMERS_CACHE={RLT_STAGE2_HF_HUB_CACHE}",
             "--env", f"TORCH_HOME={RLT_STAGE2_CACHE_ROOT}/torch",
             "--env", f"TRITON_CACHE_DIR={RLT_STAGE2_CACHE_ROOT}/triton",
             "--env", "HF_HUB_OFFLINE=1",
             "--env", "TRANSFORMERS_OFFLINE=1",
             "--env", "HF_DATASETS_OFFLINE=1",
+            "--env", "GROOT_HF_LOCAL_FIRST=1",
+            "--env", "GROOT_PATCH_MISTRAL=1",
+            "--env", "NO_ALBUMENTATIONS_UPDATE=1",
             "--env", "PYTHONPATH=/cyclo_brain_src:/app:/gr00t",
             "--entrypoint", "python", "groot",
             "-m", "runtime.rlt_stage2_training_cli",
@@ -680,6 +772,14 @@ class RLTStage2Supervisor:
     def _status(self, job: _RLTStage2Job | None) -> RLTStage2Status:
         ready, readiness_message = self._readiness_check()
         if job is None:
+            if self._recovered_status is not None:
+                recovered = self._recovered_status.model_copy(deep=True)
+                recovered.ready = ready
+                if not ready:
+                    recovered.message = (
+                        f"{recovered.message}; {readiness_message}"
+                    )
+                return recovered
             return RLTStage2Status(
                 ready=ready,
                 status="idle",
@@ -773,7 +873,10 @@ class RLTStage2Supervisor:
             job.stop_confirmed = True
             job.phase = "stopping"
             job.message = str(payload.get("message") or "RLT Stage 2 stopped")
-        elif event in {"failed", "error"}:
+        elif event in {"failed", "error"} or (
+            event in {"result", "stage2_training_result"}
+            and str(payload.get("status") or "").lower() in {"failed", "error"}
+        ):
             job.phase = "error"
             job.message = str(payload.get("message") or payload.get("error") or "RLT Stage 2 failed")
         return False
@@ -905,6 +1008,17 @@ class RLTStage2Supervisor:
                     label="RLT Stage 2 manifest",
                 )
                 groot_checkpoint = str(manifest["source"]["groot_checkpoint"])
+                if request.expected_groot_checkpoint.strip():
+                    expected_checkpoint = _resolve_groot_checkpoint(
+                        request.expected_groot_checkpoint
+                    )
+                    recorded_checkpoint = Path(os.path.abspath(groot_checkpoint))
+                    if recorded_checkpoint != expected_checkpoint:
+                        raise HTTPException(
+                            409,
+                            "RLT bundle base GR00T checkpoint does not match "
+                            "the currently selected GR00T checkpoint",
+                        )
             job_id = uuid.uuid4().hex
             output = _output_path(job_id, request.steps)
             if bundle_path and Path(bundle_path) == output:

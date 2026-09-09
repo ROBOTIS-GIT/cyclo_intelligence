@@ -16,6 +16,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from cyclo_brain.algorithm.common import atomic_torch_save, module_state_sha256
+from cyclo_brain.contracts.act import policy_update_period_for_epoch_schedule
 from cyclo_brain.model.act import ACT_TRAINABLE_GROUPS
 
 from .learner import ACTTD3Learner, ACTTD3UpdateResult
@@ -24,38 +26,12 @@ from .lerobot_offline import (
     FixedHorizonLeRobotACTTD3Dataset,
     VirtualCumulativeLeRobotACTTD3Dataset,
 )
-from .offline_warmup import _atomic_torch_save, _module_sha256, _positive_integer
+from .offline_warmup import _positive_integer
 from .training_identity import ACTTD3TrainingDataIdentity
 
 
 ProgressCallback = Callable[["ACTTD3OfflineTrainingProgress"], None]
 StopPredicate = Callable[[], bool]
-
-
-def policy_update_period_for_epoch_schedule(
-    critic_epochs: int,
-    actor_equivalent_epochs: int,
-) -> int:
-    """Derive an exact delayed-policy period from replay epoch counts.
-
-    The interleaved learner can perform at most one actor update after each
-    critic update.  Equal epoch counts therefore mean a 1:1 update schedule;
-    larger exact integer ratios retain delayed TD3 updates (for example 10:5
-    gives period 2).  Non-integral ratios would make the advertised actor epoch
-    count disagree with the updates actually performed, so they remain invalid.
-    """
-
-    critic = _positive_integer(critic_epochs, "critic_epochs")
-    actor = _positive_integer(
-        actor_equivalent_epochs,
-        "actor_equivalent_epochs",
-    )
-    if critic < actor or critic % actor:
-        raise ValueError(
-            "ACT-TD3 critic_epochs must be an exact integer multiple of "
-            "actor_equivalent_epochs (1:1 is supported)"
-        )
-    return critic // actor
 
 
 @dataclass(frozen=True)
@@ -574,8 +550,8 @@ def load_policy_local_warmup_critic(
     ):
         raise ValueError("ACT-TD3 critic training-data provenance is invalid")
 
-    actor_sha256 = _module_sha256(learner.actor)
-    actor_target_sha256 = _module_sha256(learner.actor_target)
+    actor_sha256 = module_state_sha256(learner.actor)
+    actor_target_sha256 = module_state_sha256(learner.actor_target)
     if actor_sha256 != actor_target_sha256 or base_policy.get("actor_sha256") != actor_sha256:
         raise ValueError("ACT-TD3 critic base actor identity disagrees")
 
@@ -752,8 +728,8 @@ def load_policy_local_warmup_critic(
     if (
         learner.completed_critic_updates != 0
         or learner.completed_actor_updates != 0
-        or _module_sha256(learner.actor) != actor_sha256
-        or _module_sha256(learner.actor_target) != actor_target_sha256
+        or module_state_sha256(learner.actor) != actor_sha256
+        or module_state_sha256(learner.actor_target) != actor_target_sha256
     ):
         raise RuntimeError("ACT-TD3 critic-only restore changed actor or round counters")
     return latest
@@ -1142,9 +1118,10 @@ class ACTTD3OfflineTrainingRunner:
         }
 
     def _save_checkpoint(self, elapsed_seconds: float) -> None:
-        _atomic_torch_save(
+        atomic_torch_save(
             self.checkpoint_path,
             self._checkpoint_state(elapsed_seconds),
+            sync_directory=True,
         )
         self._durable_critic_updates = self._completed_critic_updates()
 

@@ -15,9 +15,11 @@ if str(GROOT_ROOT) not in sys.path:
     sys.path.insert(0, str(GROOT_ROOT))
 
 from runtime.tt_rtc import (  # noqa: E402
+    TTRTCCapability,
     TTRTCContractError,
     load_tt_rtc_capability,
     parse_tt_rtc_request,
+    validate_tt_rtc_model_contract,
 )
 
 
@@ -30,6 +32,12 @@ def _manifest(*, include_rlt: bool = True) -> dict:
             "action_dimension": 19,
             "action_hz": 15.0,
             "max_delay_steps": 6,
+            "model_action_horizon": 40,
+            "model_action_dimension": 132,
+            "processor_action_horizon": 40,
+            "processor_action_dimension": 132,
+            "num_inference_timesteps": 4,
+            "num_timestep_buckets": 1000,
             "delay_sampling": {
                 "type": "uniform_integer",
                 "min_inclusive": 0,
@@ -51,6 +59,46 @@ def _manifest(*, include_rlt: bool = True) -> dict:
             "reference_horizon": 16,
             "reference_slice": "[d:d+10]",
         }
+    return payload
+
+
+def _loaded_contract(**overrides) -> dict:
+    payload = {
+        "enabled": True,
+        "max_delay_steps": 6,
+        "action_hz": 15.0,
+        "action_horizon": 16,
+        "action_dimension": 19,
+        "model_action_horizon": 40,
+        "model_action_dimension": 132,
+        "processor_action_horizon": 40,
+        "processor_action_dimension": 132,
+        "num_inference_timesteps": 4,
+        "num_timestep_buckets": 1000,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _qualify(payload: dict, *, maximum_ms: float = 350.0) -> dict:
+    payload.update(
+        {
+            "base_groot_checkpoint": {"sha256": "a" * 64},
+            "processor_fingerprint": "b" * 64,
+            "action_schema_fingerprint": "c" * 64,
+            "code_revision": "deadbeef",
+            "qualification": {
+                "status": "deployment_qualified",
+                "deployment": "real_robot",
+                "hardware": "cyclo-real-robot-host",
+                "software_image": "sha256:image",
+                "latency_scope": "preprocess+groot+decode+ipc+enqueue",
+                "latency_ms": {"p99": 320.0, "maximum": maximum_ms},
+                "selected_delay_steps": 6,
+                "measured_at": "2026-09-03T00:00:00Z",
+            },
+        }
+    )
     return payload
 
 
@@ -164,6 +212,83 @@ class TTRTCManifestTests(unittest.TestCase):
 
             with self.assertRaisesRegex(TTRTCContractError, "manifest rlt"):
                 load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_real_robot_requires_measured_deployment_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = _manifest()
+            payload["qualification"] = {
+                "status": "unqualified",
+                "deployment": "simulation_only",
+            }
+            (root / "tt_rtc_manifest.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TTRTCContractError, "simulation-only"):
+                load_tt_rtc_capability(
+                    root,
+                    require_deployment_qualified=True,
+                )
+
+    def test_real_robot_accepts_complete_in_window_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tt_rtc_manifest.json").write_text(
+                json.dumps(_qualify(_manifest())),
+                encoding="utf-8",
+            )
+
+            capability = load_tt_rtc_capability(
+                root,
+                require_deployment_qualified=True,
+            )
+
+            self.assertEqual(
+                capability.payload["qualification"]["status"],
+                "deployment_qualified",
+            )
+
+    def test_real_robot_rejects_qualification_beyond_trained_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tt_rtc_manifest.json").write_text(
+                json.dumps(_qualify(_manifest(), maximum_ms=400.01)),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TTRTCContractError, "400 ms"):
+                load_tt_rtc_capability(
+                    root,
+                    require_deployment_qualified=True,
+                )
+
+    def test_loaded_model_contract_is_cross_checked(self) -> None:
+        payload = _manifest()
+        capability = TTRTCCapability(Path("manifest.json"), payload)
+
+        validate_tt_rtc_model_contract(capability, _loaded_contract())
+        with self.assertRaisesRegex(TTRTCContractError, "loaded_model.action_horizon"):
+            validate_tt_rtc_model_contract(
+                capability,
+                _loaded_contract(action_horizon=40),
+            )
+
+        for field, bad_value in (
+            ("num_timestep_buckets", 999),
+            ("processor_action_horizon", 50),
+            ("processor_action_dimension", 128),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    TTRTCContractError,
+                    f"loaded_model.{field}",
+                ):
+                    validate_tt_rtc_model_contract(
+                        capability,
+                        _loaded_contract(**{field: bad_value}),
+                    )
 
 
 if __name__ == "__main__":

@@ -310,6 +310,10 @@ services:
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
       - ./huggingface:/root/.cache/huggingface
+      # UID 1000 one-shot RLT jobs cannot traverse /root.  Expose the already
+      # populated, public Hub object store at a neutral read-only path so
+      # frozen GR00T/Cosmos loading remains fully offline.
+      - ./huggingface/hub:/huggingface_hub:ro
       # User-visible GR00T models live under /workspace/model/groot.
       # Live-edit SDKs (mounted read-only so the container can't mutate
       # the host tree accidentally).

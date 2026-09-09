@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -26,11 +25,24 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor
+from cyclo_brain.algorithm.common import file_sha256
+
+from cyclo_brain.model.common import (
+    GROOT_REFERENCE_ACTION_HORIZON,
+    RLT_ACTION_DIM,
+    RLT_ACTION_HORIZON,
+)
+
+from .rlt_provenance import (
+    build_groot_rlt_provenance,
+    validate_stage1_encoder_provenance,
+    validate_stage2_bundle_provenance,
+)
 
 
-EXPECTED_CHUNK_LENGTH = 10
-EXPECTED_ACTION_DIM = 19
-EXPECTED_REFERENCE_HORIZON = 16
+EXPECTED_CHUNK_LENGTH = RLT_ACTION_HORIZON
+EXPECTED_ACTION_DIM = RLT_ACTION_DIM
+EXPECTED_REFERENCE_HORIZON = GROOT_REFERENCE_ACTION_HORIZON
 SIMULATION_ONLY_QUALIFICATION = "training_only_not_deployment_validated"
 DEPLOYMENT_QUALIFICATION = "deployment_qualified"
 
@@ -153,50 +165,7 @@ def _rec_to_dtype(value: Any, dtype: torch.dtype) -> Any:
 def _checkpoint_weight_fingerprint(checkpoint: Path) -> str:
     """Reproduce the Stage-1 path-independent GR00T weight identity."""
 
-    suffixes = {".safetensors", ".pth", ".pt", ".bin"}
-    ignored = (
-        "optimizer",
-        "scheduler",
-        "scaler",
-        "rng_state",
-        "trainer_state",
-        "training_args",
-        "training_state",
-        "replay_buffer",
-    )
-    files = []
-    for path in sorted(checkpoint.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"GR00T checkpoint contains a symlink: {path}")
-        if not path.is_file():
-            continue
-        name = path.name.lower()
-        if path.suffix.lower() not in suffixes or name.startswith(ignored):
-            continue
-        digest = sha256()
-        with path.open("rb") as stream:
-            while chunk := stream.read(8 * 1024 * 1024):
-                digest.update(chunk)
-        files.append(
-            {
-                "path": path.relative_to(checkpoint).as_posix(),
-                "size_bytes": path.stat().st_size,
-                "sha256": digest.hexdigest(),
-            }
-        )
-    if not files:
-        raise ValueError("GR00T checkpoint contains no model weight files")
-    core = {
-        "schema_version": 1,
-        "hash_algorithm": "sha256",
-        "file_count": len(files),
-        "total_size_bytes": sum(item["size_bytes"] for item in files),
-        "files": files,
-    }
-    encoded = json.dumps(
-        core, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
+    return build_groot_rlt_provenance(checkpoint).weight_fingerprint
 
 
 class GR00TRLTInferenceAdapter:
@@ -207,6 +176,8 @@ class GR00TRLTInferenceAdapter:
         self.shadow_policy = shadow_policy
         self.bundle = bundle
         self.spec = shadow_policy.spec
+        self.recording_context = None
+        self.recording_identity = {}
         if self.spec.reference_horizon != EXPECTED_REFERENCE_HORIZON:
             raise ValueError(
                 "RLT reference horizon must be "
@@ -217,7 +188,10 @@ class GR00TRLTInferenceAdapter:
             or self.spec.action_dim != EXPECTED_ACTION_DIM
             or self.spec.proprio_dim != EXPECTED_ACTION_DIM
         ):
-            raise ValueError("RLT runtime requires the showroom 10x19 contract")
+            raise ValueError(
+                "RLT runtime requires the showroom "
+                f"{EXPECTED_CHUNK_LENGTH}x{EXPECTED_ACTION_DIM} contract"
+            )
 
     @classmethod
     def load(
@@ -238,18 +212,28 @@ class GR00TRLTInferenceAdapter:
             expected_action_dim=EXPECTED_ACTION_DIM,
         )
 
-        expected_weight = shadow.encoder.representation_contract.get(
-            "policy_weight_fingerprint"
+        provenance = build_groot_rlt_provenance(model_path)
+        validate_stage1_encoder_provenance(
+            shadow.encoder.representation_contract,
+            provenance,
         )
-        if expected_weight:
-            actual_weight = _checkpoint_weight_fingerprint(
-                Path(os.path.abspath(Path(model_path).expanduser()))
-            )
-            if actual_weight != expected_weight:
-                raise ValueError(
-                    "RLT bundle was trained from a different GR00T checkpoint"
-                )
-        return cls(policy, shadow, bundle)
+        actor_root = (
+            bundle.actor.parent.parent
+            if bundle.actor.parent.name == "artifacts"
+            else bundle.root
+        )
+        validate_stage2_bundle_provenance(
+            actor_root,
+            spec=shadow.spec,
+            provenance=provenance,
+        )
+        adapter = cls(policy, shadow, bundle)
+        adapter.recording_identity = {
+            'actor_sha256': file_sha256(bundle.actor),
+            'groot_sha256': provenance.weight_fingerprint,
+            'rl_token_artifact_fingerprint': shadow.spec.rl_token_artifact_fingerprint,
+        }
+        return adapter
 
     @property
     def qualification(self) -> str:
@@ -444,6 +428,7 @@ class GR00TRLTInferenceAdapter:
         observation: Mapping[str, object],
         *,
         reference_offset_steps: int = 0,
+        capture_context: bool = False,
     ) -> dict[str, np.ndarray]:
         """Return an RLT action from a normalized GR00T reference.
 
@@ -454,6 +439,7 @@ class GR00TRLTInferenceAdapter:
         separately by the engine.
         """
 
+        self.recording_context = None
         collated, batched_states = self._prepare(observation)
         model_inputs = collated["inputs"]
         backbone_inputs, action_inputs = self.policy.model.prepare_input(model_inputs)
@@ -488,15 +474,29 @@ class GR00TRLTInferenceAdapter:
                 f"match {expected_reference}"
             )
 
-        candidate = self.shadow_policy(
+        output = self.shadow_policy(
             tokens,
             token_valid,
             image_token,
             proprio,
             reference,
             reference_offset_steps=reference_offset_steps,
-        ).action_mean
-        return self._decode_candidate(candidate, batched_states)
+        )
+        if capture_context:
+            self._capture_context(output, proprio, reference)
+        return self._decode_candidate(output.action_mean, batched_states)
+
+    def _capture_context(self, output, proprio, reference):
+        # Small detached numeric tensors only; never retain VLM graphs/images.
+        self.recording_context = {
+            name: value.detach().float().cpu().numpy().copy()
+            for name, value in {
+                'z_rl': output.z_rl, 'proprio': proprio,
+                'reference_actions': reference,
+                'mlp_reference': output.reference_prefix,
+                'action_mean': output.action_mean,
+            }.items()
+        }
 
     @torch.inference_mode()
     def get_action_tt_rtc(
@@ -506,6 +506,7 @@ class GR00TRLTInferenceAdapter:
         committed_action_prefix: np.ndarray,
         delay_steps: int,
         action_horizon: int,
+        capture_context: bool = False,
     ) -> dict[str, np.ndarray]:
         """Run RLT from an explicitly prefix-conditioned GR00T context.
 
@@ -516,6 +517,7 @@ class GR00TRLTInferenceAdapter:
         guesses those tensors from the decoded VLA action.
         """
 
+        self.recording_context = None
         from runtime.tt_rtc import (
             TT_RTC_ACTION_DIM,
             TT_RTC_ACTION_HORIZON,
@@ -575,15 +577,17 @@ class GR00TRLTInferenceAdapter:
             delay_steps=delay_steps,
         )
 
-        candidate = self.shadow_policy(
+        output = self.shadow_policy(
             tokens,
             token_valid,
             image_token,
             proprio,
             reference,
             reference_offset_steps=delay_steps,
-        ).action_mean
-        return self._decode_candidate(candidate, batched_states)
+        )
+        if capture_context:
+            self._capture_context(output, proprio, reference)
+        return self._decode_candidate(output.action_mean, batched_states)
 
 
 class GR00TRLTTokenExtractor:

@@ -12,14 +12,17 @@ import copy
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from hashlib import sha256
-import json
 import math
 from typing import Any
 
 import torch
 from torch import Tensor, nn
 
+from cyclo_brain.algorithm.common import (
+    canonical_json_sha256,
+    validate_lowercase_sha256,
+)
+from cyclo_brain.model.common import RLT_ACTION_DIM, RLT_ACTION_HORIZON
 from cyclo_brain.model.mlp import RLTGaussianChunkActor
 
 from .shadow import RLTStage2InferenceSpec
@@ -29,30 +32,19 @@ RLTStage2Spec = RLTStage2InferenceSpec
 _LEARNER_STATE_FORMAT = "cyclo_brain.rlt.stage2_learner/v1"
 
 
-def _canonical_fingerprint(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
 def stage2_spec_fingerprint(spec: RLTStage2Spec) -> str:
     if not isinstance(spec, RLTStage2InferenceSpec):
         raise TypeError("RLT Stage 2 spec must be RLTStage2Spec")
-    return _canonical_fingerprint(asdict(spec))
+    return canonical_json_sha256(asdict(spec))
 
 
 def _digest(value: Any, name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"RLT Stage 2 {name} must be a lowercase SHA-256 digest")
-    return value
+    return validate_lowercase_sha256(
+        value,
+        error_message=(
+            f"RLT Stage 2 {name} must be a lowercase SHA-256 digest"
+        ),
+    )
 
 
 def _positive_integer(value: Any, name: str) -> int:
@@ -87,7 +79,10 @@ def _validate_stage2_spec(spec: RLTStage2Spec) -> None:
     if not isinstance(spec, RLTStage2InferenceSpec):
         raise TypeError("RLT Stage 2 spec must be RLTStage2Spec")
     # The active GR00T RLT deployment contract is deliberately not generic.
-    if spec.chunk_length != 10 or spec.action_dim != 19:
+    if (
+        spec.chunk_length != RLT_ACTION_HORIZON
+        or spec.action_dim != RLT_ACTION_DIM
+    ):
         raise ValueError("RLT Stage 2 requires the 10x19 action-chunk contract")
     _digest(spec.reference_contract_fingerprint, "GR00T contract fingerprint")
     _digest(spec.rl_token_artifact_fingerprint, "RL-token artifact fingerprint")
@@ -234,7 +229,7 @@ class RLTStage2Batch:
             raise ValueError("RLT Stage 2 batch must not be empty")
         dtype = self.z_rl.dtype
         device = self.z_rl.device
-        chunk_shape = (batch_size, 10, 19)
+        chunk_shape = (batch_size, RLT_ACTION_HORIZON, RLT_ACTION_DIM)
         for value, name, shape in (
             (self.z_rl, "z_rl", (batch_size, spec.rl_token_dim)),
             (self.proprio, "proprio", (batch_size, spec.proprio_dim)),
@@ -281,7 +276,9 @@ class _RLTQFunction(nn.Module):
     def __init__(self, spec: RLTStage2Spec, hidden_dims: tuple[int, ...]) -> None:
         super().__init__()
         self.network = _mlp(
-            spec.rl_token_dim + spec.proprio_dim + 10 * 19,
+            spec.rl_token_dim
+            + spec.proprio_dim
+            + RLT_ACTION_HORIZON * RLT_ACTION_DIM,
             hidden_dims,
             1,
         )
@@ -396,7 +393,12 @@ class RLTStage2Learner:
             actor.chunk_length,
             actor.action_dim,
         )
-        expected = (spec.rl_token_dim, spec.proprio_dim, 10, 19)
+        expected = (
+            spec.rl_token_dim,
+            spec.proprio_dim,
+            RLT_ACTION_HORIZON,
+            RLT_ACTION_DIM,
+        )
         if (
             actual_actor != expected
             or tuple(actor.hidden_dims) != self.actor_hidden_dims
@@ -467,8 +469,8 @@ class RLTStage2Learner:
             actor = RLTGaussianChunkActor(
                 spec.rl_token_dim,
                 spec.proprio_dim,
-                10,
-                19,
+                RLT_ACTION_HORIZON,
+                RLT_ACTION_DIM,
                 fixed_standard_deviation=config.fixed_standard_deviation,
                 hidden_dims=actor_dims,
             )

@@ -88,6 +88,7 @@ class EngineWorkerTests(unittest.TestCase):
                 seq_id=11,
                 model_path="/models/policy",
                 robot_type="ffw",
+                publish_to_robot=True,
                 task_instruction="pick",
                 acceleration_mode="tensorrt_dit",
                 acceleration_engine_path="/models/policy/dit_model_bf16.trt",
@@ -99,6 +100,7 @@ class EngineWorkerTests(unittest.TestCase):
         self.assertEqual(response.action_keys, ["arm", "gripper"])
         self.assertEqual(engine.loaded_with.model_path, "/models/policy")
         self.assertEqual(engine.loaded_with.robot_type, "ffw")
+        self.assertTrue(engine.loaded_with.publish_to_robot)
         self.assertEqual(engine.loaded_with.acceleration_mode, "tensorrt_dit")
         self.assertEqual(
             engine.loaded_with.acceleration_engine_path,

@@ -47,6 +47,7 @@ import pyarrow.parquet as pq  # noqa: F401
 from cyclo_data.reader.bag_reader import BagReader
 from cyclo_data.reader.metadata_manager import MetadataManager
 from cyclo_data.reader.video_metadata_extractor import VideoMetadataExtractor
+from cyclo_data.recorder.rlt_recorder import copy_rlt_sidecar
 from shared.robot_configs import schema as robot_schema
 
 
@@ -1910,6 +1911,25 @@ class RosbagToLerobotConverterBase:
         })
         pq.write_table(table, path)
         self._log_info(f"Wrote subtasks metadata: {path}")
+
+    def _write_rlt_sidecars(self, output_dir, episodes_data):
+        """Preserve raw RLT traces, not resampled/frame-aligned training rows."""
+        for episode in episodes_data:
+            if episode.source_path is None:
+                continue
+            source = Path(episode.source_path) / 'rlt'
+            target = Path(output_dir) / 'rlt' / f'episode_{episode.episode_index:06d}'
+            if not copy_rlt_sidecar(source, target):
+                continue
+            info = source.parent / 'episode_info.json'
+            if info.is_file():
+                shutil.copy2(info, target / 'source_episode_info.json')
+            (target / 'source.json').write_text(json.dumps({
+                'source_episode_path': str(episode.source_path),
+                'output_episode_index': episode.episode_index,
+                'timebase': 'original_recording_unmodified',
+                'frame_aligned': False,
+            }), encoding='utf-8')
 
     def _write_subtask_annotations(
         self,

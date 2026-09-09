@@ -1,18 +1,10 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { useState } from 'react';
-import RLTArchitectureDiagram, {
-  DEFAULT_RLT_TRAINABLE_GROUPS,
-} from './RLTArchitectureDiagram';
+import { render, screen } from '@testing-library/react';
+import RLTArchitectureDiagram from './RLTArchitectureDiagram';
 
 function ControlledDiagram() {
-  const [trainableGroups, setTrainableGroups] = useState(
-    DEFAULT_RLT_TRAINABLE_GROUPS
-  );
   return (
     <RLTArchitectureDiagram
       policyLabel="GR00T"
-      trainableGroups={trainableGroups}
-      onChange={setTrainableGroups}
     />
   );
 }
@@ -39,25 +31,14 @@ describe('RLTArchitectureDiagram', () => {
     expect(screen.getByText('min(Q1, Q2) · Bellman target')).toBeInTheDocument();
   });
 
-  test('toggles the RL Token Encoder and Action MLP independently', () => {
+  test('shows the paper-faithful fixed Stage-2 trainability contract', () => {
     render(<ControlledDiagram />);
 
-    const tokenEncoder = screen.getByRole('button', {
-      name: 'RL Token Encoder: Frozen; make trainable',
-    });
-    const actionMlp = screen.getByRole('button', {
-      name: 'Action MLP: Trainable; freeze',
-    });
-    expect(tokenEncoder).toHaveAttribute('aria-pressed', 'false');
-    expect(actionMlp).toHaveAttribute('aria-pressed', 'true');
-
-    fireEvent.click(tokenEncoder);
-
-    expect(screen.getByRole('button', {
-      name: 'RL Token Encoder: Trainable; freeze',
-    })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', {
-      name: 'Action MLP: Trainable; freeze',
-    })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('RL Token Encoder: Frozen')).toBeInTheDocument();
+    expect(screen.getByLabelText('Action MLP: Trainable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /RL Token Encoder/i }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Action MLP/i }))
+      .not.toBeInTheDocument();
   });
 });

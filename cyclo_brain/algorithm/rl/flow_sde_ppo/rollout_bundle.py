@@ -22,6 +22,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from cyclo_brain.algorithm.common import file_sha256
+
 from .batch import FlowSDERollout
 from .on_policy import FlowSDEEpisode, FlowSDETransition
 
@@ -150,11 +152,7 @@ def validate_source_policy(source_policy: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+    return f"sha256:{file_sha256(path)}"
 
 
 def _state_dict_sha256(state: Mapping[str, Any], *, name: str) -> str:

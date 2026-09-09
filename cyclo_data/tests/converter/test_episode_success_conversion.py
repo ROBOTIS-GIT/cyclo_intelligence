@@ -71,6 +71,26 @@ def test_episode_info_reads_only_boolean_success_labels(tmp_path):
         converter._apply_episode_info(episode, {"episode_success": 1})
 
 
+def test_rlt_sidecars_follow_output_episode_without_resampling(tmp_path):
+    source = tmp_path / 'source' / '7'
+    (source / 'rlt').mkdir(parents=True)
+    token = np.arange(16, dtype=np.float32)
+    np.savez(source / 'rlt' / 'sample.npz', z_rl=token)
+    (source / 'rlt' / 'events.jsonl').write_text('{"event":"inference"}\n')
+    (source / 'episode_info.json').write_text('{"episode_success":true}')
+    output = tmp_path / 'output'
+    converter = RosbagToLerobotConverterBase(
+        ConversionConfig(repo_id='test', output_dir=output)
+    )
+    episode = _episode(2, True)
+    episode.source_path = source
+    converter._write_rlt_sidecars(output, [episode])
+    saved = output / 'rlt' / 'episode_000002'
+    assert (saved / 'sample.npz').read_bytes() == (source / 'rlt/sample.npz').read_bytes()
+    assert json.loads((saved / 'source.json').read_text())['frame_aligned'] is False
+    assert json.loads((saved / 'source_episode_info.json').read_text())['episode_success'] is True
+
+
 def test_mixed_success_labels_are_rejected(tmp_path):
     converter = RosbagToLerobotConverterBase(
         ConversionConfig(repo_id="test", output_dir=tmp_path)
