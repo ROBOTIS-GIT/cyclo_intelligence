@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 
 # Mock ROS2 modules that are not available outside Docker
 for mod_name in [
@@ -67,15 +68,6 @@ from cyclo_data.converter.to_lerobot_v21 import (
 from cyclo_data.converter import to_lerobot_v21 as v21
 from cyclo_data.converter import base_converter
 from cyclo_data.converter.base_converter import RosbagToLerobotConverterBase
-
-# The host test environment may carry a pandas/numpy ABI mismatch. The v3.0
-# converter only needs pandas for parquet aggregation, not for the video concat
-# tests below, so provide a tiny import stub before loading it.
-if "pandas" not in sys.modules:
-    pandas_stub = types.ModuleType("pandas")
-    pandas_stub.DataFrame = MagicMock
-    pandas_stub.__version__ = "0.0.0"
-    sys.modules["pandas"] = pandas_stub
 
 from cyclo_data.converter import to_lerobot_v30 as v30
 from cyclo_data.converter.to_lerobot_v30 import (
@@ -2087,6 +2079,18 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
         self.assertEqual(self.converter._total_episodes, 0)
         self.assertEqual(self.converter._total_frames, 0)
 
+    def test_v21_task_instructions_are_read_by_task_index(self):
+        self.converter._tasks = {1: 'Place the bottle.', 0: 'Pick up the bottle.'}
+        self.converter._task_names_by_task = {'Pick up the bottle.': 'Dashboard'}
+        (Path(self.temp_dir) / 'meta').mkdir()
+        self.converter._write_tasks_jsonl()
+        rows = [json.loads(line) for line in
+                (Path(self.temp_dir) / 'meta/tasks.jsonl').read_text().splitlines()]
+        # LeRobot v2.1 load_tasks maps explicit task_index -> task, not row indexes.
+        tasks = {row['task_index']: row['task'] for row in rows}
+        self.assertEqual(tasks, self.converter._tasks)
+        self.assertEqual(rows[1]['task_name'], 'Dashboard')
+
     def test_single_segment_archive_is_detected(self):
         episode_dir = Path(self.temp_dir) / "0"
         episode_dir.mkdir()
@@ -3133,6 +3137,39 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
         self.input_a.touch()
         self.input_b.touch()
 
+    def test_v30_task_instructions_use_pandas_index_in_task_index_order(self):
+        self.converter._tasks = {1: 'Place the bottle.', 0: 'Pick up the bottle.'}
+        self.converter._task_names_by_task = {'Pick up the bottle.': 'Dashboard'}
+        self.converter._write_tasks_parquet()
+        path = Path(self.temp_dir) / 'meta/tasks.parquet'
+        tasks = pd.read_parquet(path)
+        self.assertEqual(tasks.index.name, 'task')
+        self.assertEqual(tasks['task_index'].tolist(), [0, 1])
+        # This is the lookup used by LeRobot DatasetReader.
+        for task_index, instruction in self.converter._tasks.items():
+            self.assertEqual(tasks.iloc[task_index].name, instruction)
+        self.assertEqual(tasks.iloc[0]['task_name'], 'Dashboard')
+        # Existing Cyclo readers access the physical Arrow task column.
+        self.assertEqual(v30.pq.read_table(path)['task'].to_pylist(),
+                         ['Pick up the bottle.', 'Place the bottle.'])
+
+    def test_v30_empty_tasks_default_is_also_a_string_index(self):
+        self.converter._tasks = {}
+        self.converter._write_tasks_parquet()
+        tasks = pd.read_parquet(Path(self.temp_dir) / 'meta/tasks.parquet')
+        self.assertEqual(tasks.iloc[0].name, 'default_task')
+        self.assertEqual(tasks.iloc[0]['task_index'], 0)
+
+    def test_v30_task_cache_invalidates_legacy_indexless_format(self):
+        self.converter._tasks = {0: 'Pick up the bottle.'}
+        self.converter._current_data_aggregate_cache_key = {'test': 'dataset'}
+        current = self.converter._tasks_parquet_cache_key()
+        with patch.object(v30, '_V30_TASKS_PARQUET_CACHE_VERSION', 1):
+            legacy = self.converter._tasks_parquet_cache_key()
+        self.assertNotEqual(current, legacy)
+        self.assertNotEqual(self.converter._data_aggregate_cache_digest(current),
+                            self.converter._data_aggregate_cache_digest(legacy))
+
     def test_v30_video_feature_key_uses_rgb_prefix(self):
         self.assertEqual(
             self.converter._video_feature_key("cam_left_head"),
@@ -3416,6 +3453,7 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
 
         tasks_path = Path(self.temp_dir) / "meta/tasks.parquet"
         original_bytes = tasks_path.read_bytes()
+        self.assertEqual(pd.read_parquet(tasks_path).iloc[0].name, 'task')
         self.assertTrue(
             list(
                 (
@@ -3434,6 +3472,7 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
             self.converter._write_tasks_parquet([episode])
 
         self.assertEqual(tasks_path.read_bytes(), original_bytes)
+        self.assertEqual(pd.read_parquet(tasks_path).iloc[0].name, 'task')
 
     def test_v30_subtasks_parquet_reuses_source_cache_on_repeat(self):
         source_dir = Path(self.temp_dir) / "source_episode"
