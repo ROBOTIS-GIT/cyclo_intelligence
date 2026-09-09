@@ -2,7 +2,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import InferencePanel from './InferencePanel';
-import taskReducer from '../features/tasks/taskSlice';
+import taskReducer, { receiveServerInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
@@ -80,6 +80,32 @@ const renderPanel = ({
 describe('InferencePanel initial pose sync settings', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('restores a fresh panel from the backend without submitting its initial defaults', () => {
+    jest.useFakeTimers();
+    try {
+      const { store, sendRecordCommand } = renderPanel();
+      act(() => store.dispatch(receiveServerInferenceTaskInfo({
+        sourceId: 'backend', revision: 4, hasTaskInfo: true,
+        taskInfo: {
+          taskType: 'inference', policyPath: '/models/saved',
+          policyId: 'lerobot:groot', serviceType: 'lerobot', policyType: 'groot',
+          inferenceHz: 30, controlHz: 80, inferenceMode: 'robot',
+          taskInstruction: ['Saved instruction'], initialPoseSync: true,
+          initialPoseSyncDurationS: 7.0,
+        },
+      })));
+      expect(screen.getByPlaceholderText('Enter Policy Path or Repo ID')).toHaveValue('/models/saved');
+      expect(screen.getByRole('spinbutton', { name: 'Dataset FPS' })).toHaveValue(30);
+      expect(screen.getByRole('spinbutton', { name: 'Control Hz' })).toHaveValue(80);
+      expect(screen.getByPlaceholderText('Enter Task Instruction')).toHaveValue('Saved instruction');
+      expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' })).toHaveValue(7);
+      act(() => jest.advanceTimersByTime(1000));
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('preserves but disables initial pose sync in simulation mode', () => {

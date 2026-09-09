@@ -26,7 +26,6 @@ Central manager for ROS2 communication. Handles camera/joint topic subscription,
 | `get_latest_data` | - | Tuple[Dict, Dict, Dict] | Return latest camera/follower/leader messages |
 | `clear_latest_data` | - | - | Clear all cached messages |
 | `publish_action` | joint_msg_datas: Dict | - | Publish joint commands |
-| `publish_inference_status` | phase: int, robot_type: str, error: str | - | Publish InferenceStatus on /task/inference_status |
 | `prepare_rosbag` | topics: List[str] | - | Prepare ROSbag recording |
 | `start_rosbag` | rosbag_uri: str | - | Start ROSbag recording |
 | `stop_rosbag` | - | - | Stop ROSbag recording |
@@ -44,7 +43,6 @@ Central manager for ROS2 communication. Handles camera/joint topic subscription,
 #### Publishers
 | Topic | Message Type | Description |
 |-------|-------------|-------------|
-| `/task/inference_status` | `InferenceStatus` | Current inference phase (record-side phase lives on `/data/recording/status`, owned by cyclo_data) |
 | `heartbeat` | `Empty` | Server heartbeat signal |
 | (dynamic) | `JointTrajectory`/`Twist` | Leader joint command publishing |
 
@@ -100,7 +98,7 @@ history=KEEP_LAST
 | Package | Components |
 |---------|------------|
 | `rclpy` | Node, QoSProfile |
-| `interfaces` | BrowserItem, DatasetInfo, InferenceStatus, BrowseFile, EditDataset, GetDatasetInfo, GetImageTopicList |
+| `interfaces` | BrowserItem, DatasetInfo, BrowseFile, EditDataset, GetDatasetInfo, GetImageTopicList |
 | `rosbag_recorder` | SendCommand |
 | `sensor_msgs` | CompressedImage, JointState |
 | `geometry_msgs` | Twist |

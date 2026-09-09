@@ -31,6 +31,8 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 
+from .policy_validation import validate_checkpoint
+
 
 logger = logging.getLogger("lerobot_engine")
 
@@ -63,7 +65,9 @@ class LoadingMixin:
         config_path = Path(model_path) / "config.json"
         if config_path.exists():
             with open(config_path) as f:
-                policy_type = json.load(f).get("type", "act")
+                checkpoint_config = json.load(f)
+            validate_checkpoint(checkpoint_config, model_path)
+            policy_type = checkpoint_config.get("type", "act")
         else:
             # ACT was the original default; fall back to it for
             # checkpoints saved before ``type`` started being recorded.

@@ -1,0 +1,6 @@
+# WALL-X: modeling_wall_x.preprocess_inputs performs PIL/Qwen image preparation
+# per camera. Keep the original RGB dimensions before that model-owned transform.
+# The pinned model's 20-dimensional state/action limit is checked separately on LOAD.
+backend: torch
+operations:
+  - type: identity

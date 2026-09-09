@@ -21,6 +21,21 @@ export const testPolicyCatalog = {
           requires_instruction: false,
           parameters: [],
         },
+        ...[
+          ['pi0', 'Pi0'],
+          ['pi0_fast', 'Pi0-FAST'],
+          ['eo1', 'EO1'],
+          ['evo1', 'Evo1'],
+          ['wall_x', 'WALL-X'],
+          ['groot', 'GR00T N1.7 (LeRobot)'],
+        ].map(([id, label]) => ({
+          id,
+          policy_id: `lerobot:${id}`,
+          label,
+          aliases: id === 'groot' ? [] : [id],
+          requires_instruction: true,
+          parameters: [],
+        })),
       ],
     },
     {

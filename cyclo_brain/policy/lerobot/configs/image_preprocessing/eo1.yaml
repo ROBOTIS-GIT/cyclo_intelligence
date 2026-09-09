@@ -1,0 +1,6 @@
+# EO1: preserve RGB resolution before the saved Qwen conversation/vision processor.
+# LeRobot policies/eo1/processor_eo1.py owns image conversion and vision encoding.
+# Add Cyclo transforms only when the training dataset used those same transforms.
+backend: torch
+operations:
+  - type: identity

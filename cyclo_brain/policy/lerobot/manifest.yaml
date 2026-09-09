@@ -32,7 +32,11 @@ models:
     requires_instruction: true
   - id: pi0
     label: Pi0
-    aliases: [pi0, pi0_fast]
+    aliases: [pi0]
+    requires_instruction: true
+  - id: pi0_fast
+    label: Pi0-FAST
+    aliases: [pi0_fast]
     requires_instruction: true
   - id: pi05
     label: Pi0.5
@@ -49,4 +53,21 @@ models:
   - id: fastwam
     label: FastWAM
     aliases: [fastwam]
+    requires_instruction: true
+  - id: eo1
+    label: EO1
+    aliases: [eo1]
+    requires_instruction: true
+  - id: evo1
+    label: Evo1
+    aliases: [evo1]
+    requires_instruction: true
+  - id: wall_x
+    label: WALL-X
+    aliases: [wall_x]
+    requires_instruction: true
+  - id: groot
+    label: GR00T N1.7 (LeRobot)
+    # The bare alias groot belongs to the independent groot:n17 Worker.
+    aliases: []
     requires_instruction: true

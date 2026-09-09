@@ -21,6 +21,7 @@ import ROSLIB from 'roslib';
 import { RecordPhase, InferencePhase } from '../constants/taskPhases';
 import {
   receiveServerRecordTaskInfo,
+  receiveServerInferenceTaskInfo,
   setRecordStatus,
   setInferenceStatus,
   selectRobotType,
@@ -68,6 +69,7 @@ import {
 export function useRosTopicSubscription() {
   const recordingStatusTopicRef = useRef(null);
   const inferenceStatusTopicRef = useRef(null);
+  const inferenceStatusExpiryRef = useRef(null);
   const dataStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
@@ -200,6 +202,8 @@ export function useRosTopicSubscription() {
     // Unsubscribe from all topics
     unsubscribeFromTopic(recordingStatusTopicRef, 'Recording status');
     unsubscribeFromTopic(inferenceStatusTopicRef, 'Inference status');
+    clearTimeout(inferenceStatusExpiryRef.current);
+    dispatch(setInferenceStatus({ topicReceived: false, runtimeState: 'unknown' }));
     unsubscribeFromTopic(dataStatusTopicRef, 'Data operation status');
     unsubscribeFromTopic(heartbeatTopicRef, 'Heartbeat');
     unsubscribeFromTopic(trainingStatusTopicRef, 'Training status');
@@ -434,6 +438,19 @@ export function useRosTopicSubscription() {
       });
 
       inferenceStatusTopicRef.current.subscribe((msg) => {
+        if (msg.source_id && typeof msg.has_task_info === 'boolean') {
+          dispatch(receiveServerInferenceTaskInfo({
+            sourceId: msg.source_id,
+            revision: Number(msg.task_info_revision || 0),
+            hasTaskInfo: msg.has_task_info,
+            taskInfo: msg.has_task_info ? rosTaskInfoToUiTaskInfo(msg.task_info) : null,
+          }));
+        }
+        clearTimeout(inferenceStatusExpiryRef.current);
+        // Detect a silent publisher without issuing another runtime query.
+        inferenceStatusExpiryRef.current = setTimeout(() => {
+          dispatch(setInferenceStatus({ topicReceived: false, runtimeState: 'unknown' }));
+        }, 8000);
         // Show the toast once when a new error appears, but DO NOT bail out:
         // we still need to dispatch setInferenceStatus below so the phase
         // update (e.g. backend resetting LOADING → READY after a failed
@@ -462,21 +479,13 @@ export function useRosTopicSubscription() {
           setInferenceStatus({
             inferencePhase: msg.inference_phase || 0,
             error: msg.error || '',
-            topicReceived: true,
-            runtimeState: {
-              [InferencePhase.READY]: 'unloaded',
-              [InferencePhase.LOADING]: 'loading',
-              [InferencePhase.INFERENCING]: 'running',
-              [InferencePhase.PAUSED]: 'paused',
-              [InferencePhase.SYNCING]: 'syncing',
-            }[msg.inference_phase || 0] || 'unknown',
-            ...((msg.inference_phase || 0) === InferencePhase.READY
-              ? {
-                  loadedModelPath: '',
-                  loadedPolicyId: '',
-                  publishToRobot: false,
-                }
-              : {}),
+            topicReceived: Boolean(msg.status_known),
+            runtimeState: msg.runtime_state || 'unknown',
+            loadedModelPath: msg.model_path || '',
+            loadedPolicyId: msg.policy_id || '',
+            publishToRobot: Boolean(msg.publish_to_robot),
+            sourceId: msg.source_id || '',
+            sequence: Number(msg.sequence || 0),
           })
         );
       });

@@ -298,7 +298,7 @@ class SendCommand(BaseAction):
 
     def _status_callback(self, msg: InferenceStatus):
         with self._phase_lock:
-            self._latest_phase = msg.inference_phase
+            self._latest_phase = msg.inference_phase if msg.status_known else None
             self._latest_error = getattr(msg, 'error', '')
 
     def _reset_phase_cache(self):

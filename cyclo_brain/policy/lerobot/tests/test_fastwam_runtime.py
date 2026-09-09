@@ -263,6 +263,24 @@ class FastWamLoadingTest(unittest.TestCase):
         self.assertEqual(policy.to_calls, ["cuda"])
         self.assertEqual(policy.eval_calls, 1)
 
+    def test_pi0_fast_checkpoint_still_selects_its_own_class(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            self.write_config(model_path, "pi0_fast")
+            loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        loading.get_policy_class.assert_called_with("pi0_fast")
+
+    def test_invalid_wall_x_is_rejected_before_constructing_model(self):
+        loading.get_policy_class.reset_mock()
+        with tempfile.TemporaryDirectory() as model_path:
+            (Path(model_path) / "config.json").write_text(json.dumps({
+                "type": "wall_x",
+                "input_features": {"observation.state": {"shape": [22]}},
+                "output_features": {"action": {"shape": [22]}},
+            }))
+            with self.assertRaisesRegex(ValueError, "WALL-X"):
+                loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        loading.get_policy_class.assert_not_called()
+
 
 class FakeChild:
     def __init__(self):

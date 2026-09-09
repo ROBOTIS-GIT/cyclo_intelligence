@@ -160,9 +160,13 @@ class ContainerServiceClient:
         service_prefix: str = "/groot",
         timeout_sec: float = 180.0,
         callback_group: Optional[CallbackGroup] = None,
+        command_observer: Optional[Callable[[bool], None]] = None,
+        inference_only: bool = False,
     ):
         self._node = node
         self._service_prefix = service_prefix
+        self._command_observer = command_observer
+        self._inference_only = inference_only
         self.timeout_sec = timeout_sec
         self.load_timeout_sec = _env_float(
             "INFERENCE_LOAD_TIMEOUT_SEC",
@@ -231,6 +235,9 @@ class ContainerServiceClient:
                 self.service_inference_command,
                 callback_group=self._callback_group,
             )
+            if self._inference_only:
+                self._connected = True
+                return True
             self._stop_client = self._node.create_client(
                 StopTraining,
                 self.service_stop,
@@ -456,16 +463,23 @@ class ContainerServiceClient:
         availability_timeout_sec = (
             self.load_availability_timeout_sec
             if command == self.CMD_LOAD
-            else 10.0
+            else (timeout_sec if command == self.CMD_STATUS else 10.0)
         )
 
-        return self._call_service(
-            self._inference_command_client,
-            request,
-            self.service_inference_command,
-            timeout_sec=timeout_sec,
-            availability_timeout_sec=availability_timeout_sec,
-        )
+        observer = self._command_observer if command != self.CMD_STATUS else None
+        if observer:
+            observer(True)
+        try:
+            return self._call_service(
+                self._inference_command_client,
+                request,
+                self.service_inference_command,
+                timeout_sec=timeout_sec,
+                availability_timeout_sec=availability_timeout_sec,
+            )
+        finally:
+            if observer:
+                observer(False)
 
     # --- Training services ---
 

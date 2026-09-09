@@ -187,6 +187,43 @@ External training hooks are not automatically serialized into saved processors.
 Diffusion temporal observation history remains outside this change: matching
 image sizes does not fix an `n_obs_steps` mismatch.
 
+## Additional Policies
+
+EO1, Evo1, WALL-X, Pi0-FAST and GR00T N1.7 (LeRobot) use the same LeRobot
+Worker. Model settings come from the checkpoint, not new UI overrides.
+Their dependency extras are installed on both AMD64 and ARM64; spatial
+preprocessing defaults preserve RGB sizes and leave model-owned transforms active.
+
+`lerobot:groot` loads **LeRobot-format** checkpoints (`config.json` with
+`type: groot`), saved pre/post processors, statistics and the referenced base
+model assets. It is separate from `groot:n17` in `groot_server`, including its
+TensorRT options. The legacy `groot` alias still selects that independent Worker.
+Missing processor files, incompatible embodiment metadata and observation history
+beyond one frame are rejected, not reconstructed using generic defaults. Raw
+NVIDIA checkpoints are not automatically converted to LeRobot checkpoints.
+N1.7 requires equal camera H/W at its pack step, not necessarily at Cyclo input.
+A saved `image_crop_resize_processor` before packing can align different raw
+sizes. Keep `groot.yaml` at identity in that case; the saved processor owns the
+transform. Use YAML only to reproduce training transforms not saved in that
+pipeline. Cyclo does not invent an automatic resize recipe.
+
+WALL-X's pinned core has a fixed 20-dimensional state/action limit. Cyclo checks
+each dimension independently and requires the effective robot layout to match
+the checkpoint. A 22-dimensional robot is rejected rather than truncated.
+Matching dimensions alone does not prove semantic joint ordering compatibility.
+
+Pi0-FAST is now a distinct selector. Existing Pi0 selections remain valid; the
+checkpoint's type continues to select the actual LeRobot implementation.
+
+New policy integration tests do not prove trained-checkpoint or robot performance.
+No new-model weights are downloaded by the test suite. Real dependency checks
+run separately from mocked Engine tests inside the candidate LeRobot environment:
+
+```bash
+CYCLO_TEST_POLICY_DEPENDENCIES=1 python -m pytest \
+  cyclo_brain/policy/lerobot/tests/test_new_policy_processors.py
+```
+
 ## Validation
 
 ```bash

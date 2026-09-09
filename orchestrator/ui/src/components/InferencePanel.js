@@ -172,7 +172,9 @@ const InferencePanel = () => {
         });
         if (syncGenerationRef.current !== generation) return;
         if (result && result.success) {
-          dispatch(markInferenceTaskInfoSyncSuccess({ taskKey: submittedTaskKey }));
+          dispatch(markInferenceTaskInfoSyncSuccess({
+            taskKey: submittedTaskKey, taskInfo: info,
+          }));
         } else {
           dispatch(markInferenceTaskInfoSyncFailed(
             (result && result.message) || 'Inference task info not synced.'

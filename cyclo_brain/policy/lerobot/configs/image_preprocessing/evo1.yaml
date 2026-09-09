@@ -1,0 +1,6 @@
+# Evo1: its InternVL embedder resizes each camera to image_resolution (448 by default)
+# with bicubic antialiasing, then stacks and normalizes the images.
+# See LeRobot policies/evo1: do not duplicate that resize in Cyclo.
+backend: torch
+operations:
+  - type: identity

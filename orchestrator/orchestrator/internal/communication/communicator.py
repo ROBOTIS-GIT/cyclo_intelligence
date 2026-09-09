@@ -23,7 +23,6 @@ from typing import Any, Callable, Dict, List, Optional
 from interfaces.msg import (
     BrowserItem,
     DatasetInfo,
-    InferenceStatus
 )
 from interfaces.srv import (
     BrowseFile,
@@ -172,16 +171,6 @@ class Communicator:
         """Initialize publishers."""
         self.node.get_logger().info('Initializing publishers...')
 
-        # Inference status publisher — orchestrator owns the inference phase
-        # half of the split (record half lives on /data/recording/status,
-        # published by cyclo_data). See ~/.claude/plans/record-zippy-sunrise.md
-        # and PLAN §10.3 D18.
-        self.inference_status_publisher = self.node.create_publisher(
-            InferenceStatus,
-            '/task/inference_status',
-            self.PUB_QOS_SIZE
-        )
-
         # /task/action_event publisher moved to cyclo_data.recorder.rosbag_control
         # in Step 3 Part C2d-1/-5. cyclo_data owns the recording lifecycle.
 
@@ -229,19 +218,6 @@ class Communicator:
     # rosbag service topic is now only contacted by the cyclo_data node.
 
     # ========== Publishers ==========
-
-    def publish_inference_status(
-        self,
-        phase: int,
-        robot_type: str = '',
-        error: str = '',
-    ) -> None:
-        """Publish an InferenceStatus snapshot on /task/inference_status."""
-        msg = InferenceStatus()
-        msg.inference_phase = phase
-        msg.robot_type = robot_type
-        msg.error = error
-        self.inference_status_publisher.publish(msg)
 
     # publish_action_event moved to cyclo_data.recorder.rosbag_control.RosbagControl
     # (Step 3 Part C2d-1/-5). Orchestrator no longer owns /task/action_event.
@@ -526,7 +502,6 @@ class Communicator:
 
     def _cleanup_publishers(self):
         publisher_names = [
-            'inference_status_publisher',
             'heartbeat_publisher',
         ]
         for publisher_name in publisher_names:

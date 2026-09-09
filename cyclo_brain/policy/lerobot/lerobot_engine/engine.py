@@ -84,6 +84,7 @@ from .io_mapping import IoMappingMixin  # noqa: E402
 from .preprocessing import PreprocessingMixin  # noqa: E402
 from .prediction import PredictionMixin  # noqa: E402
 from .image_preprocessing import load_image_preprocessing  # noqa: E402
+from .policy_validation import validate_requested_policy  # noqa: E402
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -145,6 +146,7 @@ class LeRobotEngine(
             # a training-output root containing ``training_state/``
             # alongside (lerobot-train layout).
             model_path = self._resolve_model_dir(model_path)
+            validate_requested_policy(model_path, getattr(request, "policy_id", ""))
             # Validate before allocating weights, including on cached LOAD.
             image_preprocessing = load_image_preprocessing(model_path)
 

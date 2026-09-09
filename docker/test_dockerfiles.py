@@ -320,7 +320,7 @@ def test_lerobot_images_install_new_policy_inference_extras():
         ]
         assert len(install_lines) == 1, f"Could not identify LeRobot extras in {dockerfile}"
         install_line = install_lines[0]
-        for extra in ("molmoact2", "vla_jepa", "fastwam"):
+        for extra in ("molmoact2", "vla_jepa", "fastwam", "eo1", "evo1", "wallx", "pi", "groot"):
             assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
 
 

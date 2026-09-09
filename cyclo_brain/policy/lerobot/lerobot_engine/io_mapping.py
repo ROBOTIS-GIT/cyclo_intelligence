@@ -27,6 +27,7 @@ import logging
 from typing import Dict, Iterable
 
 from .constants import IMAGE_KEY_PREFIX as _IMAGE_KEY_PREFIX
+from .policy_validation import validate_wall_x_robot
 
 from robot_client import RobotClient
 from robot_client.camera_mapping import resolve_camera_mappings
@@ -91,6 +92,11 @@ class IoMappingMixin:
 
         self._state_modalities = modalities
         self._action_keys = list(modalities)
+
+        validate_wall_x_robot(
+            getattr(getattr(self, "_policy", None), "config", None),
+            self._robot, modalities, self._action_keys,
+        )
 
         # Match the inputs consumed by _build_observation, not every robot camera.
         required = {

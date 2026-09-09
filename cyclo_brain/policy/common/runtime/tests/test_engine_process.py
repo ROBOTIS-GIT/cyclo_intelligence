@@ -60,6 +60,22 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_repository_manifest_exposes_new_policies_in_describe(self):
+        import os
+        from unittest.mock import patch
+        from engine_process.worker import _worker_metadata
+
+        manifest = RUNTIME_ROOT.parents[1] / "lerobot" / "manifest.yaml"
+        with patch.dict(os.environ, {"POLICY_MANIFEST_PATH": str(manifest)}):
+            policy_ids, capabilities = _worker_metadata("lerobot")
+        worker = EngineWorker(FakeEngine(), runtime_id="lerobot",
+                              supported_policy_ids=policy_ids, capabilities=capabilities)
+        response = worker.handle(EngineCommandRequest(command=CMD_DESCRIBE))
+        self.assertTrue(response.success)
+        for name in ("eo1", "evo1", "wall_x", "pi0_fast", "groot"):
+            self.assertIn(f"lerobot:{name}", response.supported_policy_ids)
+        self.assertNotIn("groot:n17", response.supported_policy_ids)
+
     def test_describe_reports_worker_contract_without_loading_model(self) -> None:
         engine = FakeEngine()
         worker = EngineWorker(

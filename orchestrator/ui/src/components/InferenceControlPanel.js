@@ -34,7 +34,6 @@ import {
   markLocalTaskInfoEdited,
   selectInferenceTaskInfo,
   setInferenceMode,
-  setInferenceStatus,
 } from '../features/tasks/taskSlice';
 import { findPolicy, usePolicyCatalog } from '../contexts/PolicyCatalogContext';
 import usePolicyBackendStatus, {
@@ -101,7 +100,7 @@ export default function InferenceControlPanel() {
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
-  const { sendRecordCommand, getInferenceStatus } = useRosServiceCaller();
+  const { sendRecordCommand } = useRosServiceCaller();
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -117,7 +116,6 @@ export default function InferenceControlPanel() {
   const hasRuntimeError = runtimeState === 'error';
   const loadedModelPath = String(inferenceStatus.loadedModelPath || '');
   const inferencePhaseRef = useRef(phase);
-  const statusFailureCountRef = useRef(0);
   const isModelLoaded = ['loaded', 'syncing', 'running', 'paused', 'error'].includes(
     runtimeState
   ) || isInferencing || isPaused || isSyncing;
@@ -142,73 +140,6 @@ export default function InferenceControlPanel() {
   useEffect(() => {
     inferencePhaseRef.current = phase;
   }, [phase]);
-
-  useEffect(() => {
-    let disposed = false;
-    let timerId = null;
-    let inFlight = false;
-    statusFailureCountRef.current = 0;
-
-    const scheduleNext = () => {
-      if (!disposed) {
-        timerId = setTimeout(pollRuntimeStatus, 2000);
-      }
-    };
-
-    const pollRuntimeStatus = async () => {
-      if (disposed || inFlight || inferencePhaseRef.current === InferencePhase.LOADING) {
-        scheduleNext();
-        return;
-      }
-      const phaseAtRequest = inferencePhaseRef.current;
-      inFlight = true;
-      try {
-        const result = await getInferenceStatus();
-        if (disposed) return;
-        if (result?.success && result?.inference_status_known) {
-          statusFailureCountRef.current = 0;
-          const runtimePhase = Number(result.inference_phase || 0);
-          // A request issued before a lifecycle command may return its old
-          // snapshot after the command's phase topic has already arrived.
-          if (inferencePhaseRef.current !== phaseAtRequest) {
-            return;
-          }
-          dispatch(setInferenceStatus({
-            inferencePhase: runtimePhase,
-            error: String(result.inference_error || ''),
-            topicReceived: true,
-            runtimeState: String(result.inference_runtime_state || 'unknown'),
-            loadedModelPath: String(result.inference_model_path || ''),
-            loadedPolicyId: String(result.inference_policy_id || ''),
-            publishToRobot: Boolean(result.inference_publish_to_robot),
-          }));
-        } else {
-          throw new Error(result?.message || 'Inference runtime status unavailable');
-        }
-      } catch (error) {
-        // A stopped or warming backend has no STATUS service yet. Two
-        // consecutive failures avoid flicker on a transient timeout while
-        // ensuring stale READY/RUNNING controls do not remain authoritative.
-        statusFailureCountRef.current += 1;
-        if (!disposed && statusFailureCountRef.current >= 2) {
-          dispatch(setInferenceStatus({
-            topicReceived: false,
-            runtimeState: 'unknown',
-          }));
-        }
-        console.debug('Inference runtime status unavailable:', error);
-      } finally {
-        inFlight = false;
-        scheduleNext();
-      }
-    };
-
-    pollRuntimeStatus();
-    return () => {
-      disposed = true;
-      if (timerId) clearTimeout(timerId);
-    };
-  }, [dispatch, getInferenceStatus, selectedRuntime?.id]);
 
   useEffect(() => {
     toasts
@@ -323,10 +254,6 @@ export default function InferenceControlPanel() {
         String(message).toLowerCase().includes('timeout') &&
         inferencePhaseRef.current === InferencePhase.LOADING
       );
-      const shouldPreserveSyncAfterFailure = () => (
-        inferencePhaseRef.current === InferencePhase.SYNCING &&
-        ['stop_inference', 'finish'].includes(commandString)
-      );
 
       try {
         const result = await sendRecordCommand(commandString, options);
@@ -336,19 +263,10 @@ export default function InferenceControlPanel() {
             return result;
           }
           toast.error(`Command failed: ${result.message || 'Unknown error'}`);
-          // Backend may have left phase in LOADING/INFERENCING after a failed
-          // setup; force the local phase back to READY so the panel becomes
-          // editable and the user can retry.
-          if (!shouldPreserveSyncAfterFailure()) {
-            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-          }
         } else if (result && result.success === true) {
           toast.success(`${commandName} executed successfully`);
         } else {
           toast.error(`${commandName} completed with uncertain status`);
-          if (!shouldPreserveSyncAfterFailure()) {
-            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-          }
         }
         return result;
       } catch (error) {
@@ -369,14 +287,10 @@ export default function InferenceControlPanel() {
         } else {
           toast.error(`Command failed [${commandName}]: ${errorMessage}`);
         }
-        // Same reasoning as the success===false branch above.
-        if (!shouldPreserveSyncAfterFailure()) {
-          dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-        }
         return null;
       }
     },
-    [sendRecordCommand, rosHost, dispatch]
+    [sendRecordCommand, rosHost]
   );
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {

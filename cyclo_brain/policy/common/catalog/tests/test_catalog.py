@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from catalog import CatalogError, load_catalog, normalize_policy_parameters
+from catalog import CatalogError, load_catalog, normalize_policy_parameters, resolve_policy, resolve_policy_id
 
 
 POLICY_ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +19,29 @@ def test_repository_catalog_matches_compose_services():
     }
     assert "lerobot:act" in policy_ids
     assert "groot:n17" in policy_ids
+
+
+@pytest.mark.parametrize("model", ["eo1", "evo1", "wall_x", "pi0_fast", "groot"])
+def test_new_lerobot_policies_are_resolved_from_checkpoint(tmp_path, model):
+    import json
+
+    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+    (tmp_path / "config.json").write_text(json.dumps({"type": model}))
+    policy_id = f"lerobot:{model}"
+    assert resolve_policy_id(catalog, "lerobot", "", tmp_path) == policy_id
+    runtime, policy = resolve_policy(catalog, policy_id)
+    assert policy["requires_instruction"] is True
+    assert runtime["checkpoint_root"] == "/workspace/model/lerobot"
+    assert normalize_policy_parameters(catalog, policy_id, "{}") == "{}"
+
+
+def test_groot_and_pi0_legacy_routes_remain_unambiguous(tmp_path):
+    catalog = load_catalog(POLICY_ROOT)
+    assert resolve_policy(catalog, "groot")[1]["policy_id"] == "groot:n17"
+    assert resolve_policy(catalog, "lerobot:groot")[0]["id"] == "lerobot"
+    assert resolve_policy(catalog, "pi0_fast")[1]["policy_id"] == "lerobot:pi0_fast"
+    (tmp_path / "config.json").write_text('{"type":"pi0_fast"}')
+    assert resolve_policy_id(catalog, "lerobot", "lerobot:pi0", tmp_path) == "lerobot:pi0"
 
 
 def test_policy_parameter_payload_defaults_and_canonicalizes(tmp_path):

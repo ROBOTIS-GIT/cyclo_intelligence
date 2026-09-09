@@ -98,6 +98,21 @@ def test_policy_catalog_candidates_include_baked_image_path():
     assert Path('/opt/cyclo/policy') in _policy_root_candidates()
 
 
+def test_unknown_runtime_snapshot_cannot_complete_a_bt_stage():
+    import threading
+    action = SendCommand.__new__(SendCommand)
+    action._phase_lock = threading.Lock()
+    action._status_callback(types.SimpleNamespace(
+        inference_phase=2, status_known=True, error='',
+    ))
+    assert action._latest_phase == 2
+    action._status_callback(types.SimpleNamespace(
+        inference_phase=2, status_known=False, error='runtime offline',
+    ))
+    assert action._latest_phase is None
+    assert action._latest_error == 'runtime offline'
+
+
 class _DummyNode:
     def create_client(self, *args, **kwargs):
         return object()

@@ -24,10 +24,35 @@ Tests the ROS2 service based communication with Docker containers.
 
 import unittest
 import sys
+from unittest.mock import Mock
 
 
 class TestContainerServiceClient(unittest.TestCase):
     """Test ContainerServiceClient for container communication (inference + training)."""
+
+    def test_status_reader_only_creates_one_client(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        node = Mock()
+        client = ContainerServiceClient(node=node, inference_only=True)
+        self.assertTrue(client.connect())
+        self.assertTrue(client.connect())
+        node.create_client.assert_called_once()
+        self.assertEqual(node.create_client.call_args.args[1], '/policy/inference_command')
+        client.disconnect()
+        node.destroy_client.assert_called_once()
+
+    def test_command_observer_excludes_status_and_balances_on_failure(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        observer = Mock()
+        client = ContainerServiceClient(node=None, command_observer=observer)
+        client._call_service = Mock(return_value='ok')
+        client.inference_command(client.CMD_STATUS, timeout_sec=1.0)
+        observer.assert_not_called()
+        self.assertEqual(client._call_service.call_args.kwargs['availability_timeout_sec'], 1.0)
+        client._call_service.side_effect = RuntimeError('failed')
+        with self.assertRaises(RuntimeError):
+            client.inference_command(client.CMD_PAUSE)
+        self.assertEqual([call.args for call in observer.call_args_list], [(True,), (False,)])
 
     def test_01_import_ros2_interfaces(self):
         """Test that ROS2 interfaces can be imported."""

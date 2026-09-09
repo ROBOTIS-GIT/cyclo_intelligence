@@ -44,9 +44,7 @@ const renderPanel = ({
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
   sendRecordCommand: sendOverride = null,
-  getInferenceStatus: statusOverride = null,
   inferenceStatusKnown = true,
-  statusResponse = null,
   catalog = testPolicyCatalog,
   runtimeStateOverride = null,
 } = {}) => {
@@ -62,11 +60,7 @@ const renderPanel = ({
     [InferencePhase.PAUSED]: 'paused',
     [InferencePhase.SYNCING]: 'syncing',
   }[inferencePhase];
-  const getInferenceStatus = statusOverride || (
-    statusResponse
-      ? jest.fn().mockResolvedValue(statusResponse)
-      : jest.fn(() => new Promise(() => {}))
-  );
+  const getInferenceStatus = jest.fn();
   useRosServiceCaller.mockReturnValue({ sendRecordCommand, getInferenceStatus });
 
   const initialTasks = taskReducer(undefined, { type: '@@INIT' });
@@ -356,23 +350,23 @@ describe('InferenceControlPanel deploy safety', () => {
   });
 
   test('restores running controls from Policy Runtime after the page remounts', async () => {
-    const getInferenceStatus = jest.fn().mockResolvedValue({
-      success: true,
-      inference_status_known: true,
-      inference_phase: InferencePhase.INFERENCING,
-      inference_runtime_state: 'running',
-      inference_model_path: '/policy_checkpoints/lerobot/model',
-      inference_policy_id: 'lerobot:act',
-      inference_publish_to_robot: true,
-    });
-    renderPanel({
+    const { store, getInferenceStatus } = renderPanel({
       inferenceMode: 'robot',
       inferenceStatusKnown: false,
-      getInferenceStatus,
+    });
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.INFERENCING,
+        runtimeState: 'running',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+        loadedPolicyId: 'lerobot:act',
+        publishToRobot: true,
+      }));
     });
 
     await waitFor(() => {
-      expect(getInferenceStatus).toHaveBeenCalled();
+      expect(getInferenceStatus).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: /start inference/i })).toBeDisabled();
       expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
       expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
@@ -385,19 +379,20 @@ describe('InferenceControlPanel deploy safety', () => {
       success: true,
       message: 'resumed',
     });
-    renderPanel({
+    const { store } = renderPanel({
       inferenceMode: 'robot',
       inferenceStatusKnown: false,
       sendRecordCommand,
-      statusResponse: {
-        success: true,
-        inference_status_known: true,
-        inference_phase: InferencePhase.PAUSED,
-        inference_runtime_state: 'paused',
-        inference_model_path: '/policy_checkpoints/lerobot/model',
-        inference_policy_id: 'lerobot:act',
-        inference_publish_to_robot: true,
-      },
+    });
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'paused',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+        loadedPolicyId: 'lerobot:act',
+        publishToRobot: true,
+      }));
     });
 
     const resumeButton = await screen.findByRole('button', { name: /resume inference/i });

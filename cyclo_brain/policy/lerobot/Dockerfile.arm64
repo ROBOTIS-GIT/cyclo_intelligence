@@ -46,7 +46,7 @@ COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 
 # Install training/inference + VLA extras. The base image's CUDA PyTorch
 # already satisfies LeRobot's torch constraints.
-RUN pip install --no-cache-dir ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,hilserl,async,peft]"
+RUN pip install --no-cache-dir ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,eo1,evo1,wallx,pi,groot,hilserl,async,peft]"
 
 COPY cyclo_brain/policy/lerobot/lerobot/ ./
 

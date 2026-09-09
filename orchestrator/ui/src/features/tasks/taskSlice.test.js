@@ -6,6 +6,7 @@ import reducer, {
   markTaskInfoSyncSuccess,
   persistRobotType,
   receiveServerRecordTaskInfo,
+  receiveServerInferenceTaskInfo,
   resolveInitialRobotType,
   ROBOT_TYPE_STORAGE_KEY,
   ROBOT_TYPE_STATUS_GUARD_MS,
@@ -14,6 +15,7 @@ import reducer, {
   selectRobotType,
   setCameraRecordingMonitor,
   setInferenceMode,
+  setInferenceStatus,
   setInferenceTaskInfo,
   setRecordTaskInfo,
   setRecordingMonitor,
@@ -40,6 +42,95 @@ const makeStorage = (initial = {}) => {
 };
 
 describe('taskSlice task ownership', () => {
+  const savedInference = {
+    taskType: 'inference', policyId: 'lerobot:groot', serviceType: 'lerobot',
+    policyPath: '/models/groot', taskInstruction: ['Pick the ball'],
+    inferenceHz: 30, controlHz: 80, chunkAlignWindowS: 0.5,
+    inferenceMode: 'robot', actionRequestMode: 'sync', recordInferenceMode: true,
+    initialPoseSync: true, initialPoseSyncDurationS: 7,
+    policyParameters: { temperature: 0.2 },
+  };
+  const settingsSnapshot = (taskInfo = savedInference, revision = 1, sourceId = 'server') => (
+    receiveServerInferenceTaskInfo({ taskInfo, revision, sourceId, hasTaskInfo: true })
+  );
+
+  test('fresh browsers restore all settings without changing execution state or record identity', () => {
+    for (let browser = 0; browser < 2; browser += 1) {
+      let state = reducer(undefined, setRecordTaskInfo({ taskNum: '7', taskName: 'record' }));
+      state = reducer(state, settingsSnapshot());
+      expect(selectInferenceTaskInfo({ tasks: state })).toMatchObject(savedInference);
+      expect(state.recordTaskInfo).toMatchObject({ taskNum: '7', taskName: 'record' });
+      expect(state.inferenceStatus.loadedModelPath).toBe('');
+      expect(state.inferenceTaskInfoSync.dirty).toBe(false);
+    }
+  });
+
+  test('newer settings win over old snapshots and legacy recording inference echoes', () => {
+    let state = reducer(undefined, settingsSnapshot());
+    const newer = { ...savedInference, policyPath: '/models/next', inferenceHz: 20 };
+    state = reducer(state, settingsSnapshot(newer, 2));
+    state = reducer(state, settingsSnapshot(savedInference, 1));
+    state = reducer(state, receiveServerRecordTaskInfo(savedInference));
+    expect(selectInferenceTaskInfo({ tasks: state })).toMatchObject(newer);
+    state = reducer(state, settingsSnapshot(savedInference, 1, 'restarted-server'));
+    expect(selectInferenceTaskInfo({ tasks: state })).toMatchObject(savedInference);
+  });
+
+  test('snapshots protect incomplete local edits and a late ACK cannot clear a newer edit', () => {
+    let state = reducer(undefined, settingsSnapshot());
+    state = reducer(state, setInferenceTaskInfo({ inferenceHz: '' }));
+    state = reducer(state, markLocalTaskInfoEdited({ source: 'inference' }));
+    state = reducer(state, settingsSnapshot(savedInference, 2));
+    state = reducer(state, markInferenceTaskInfoSyncSuccess({
+      taskInfo: savedInference, taskKey: getInferenceTaskInfoKey(savedInference),
+    }));
+    expect(state.inferenceTaskInfo.inferenceHz).toBe('');
+    expect(state.inferenceTaskInfoSync.dirty).toBe(true);
+    state = reducer(state, setInferenceTaskInfo({ inferenceHz: 25 }));
+    state = reducer(state, settingsSnapshot({ ...savedInference, inferenceHz: 25 }, 3));
+    expect(state.inferenceTaskInfoSync.dirty).toBe(false);
+  });
+
+  test('empty server snapshot does not replace defaults with ROS zero values', () => {
+    const state = reducer(undefined, receiveServerInferenceTaskInfo({
+      sourceId: 'server', revision: 0, hasTaskInfo: false, taskInfo: null,
+    }));
+    expect(state.inferenceTaskInfo).toMatchObject({ controlHz: 100, inferenceHz: 15 });
+    expect(state.inferenceTaskInfoSync.serverTaskInfo).toBeNull();
+  });
+
+  test('record status cannot replace the restored inference instruction or trigger a record save', () => {
+    let state = reducer(undefined, receiveServerRecordTaskInfo({
+      taskType: 'record', taskNum: '7', taskName: 'record', taskInstruction: ['Record prompt'],
+    }));
+    state = reducer(state, settingsSnapshot());
+    expect(state.taskInfoSync.dirty).toBe(false);
+    expect(selectRecordTaskInfo({ tasks: state }).taskInstruction).toEqual(['Record prompt']);
+    state = reducer(state, receiveServerRecordTaskInfo({
+      taskType: 'record', taskNum: '7', taskName: 'record', taskInstruction: ['Other recording'],
+    }));
+    expect(selectInferenceTaskInfo({ tasks: state }).taskInstruction).toEqual(['Pick the ball']);
+    state = reducer(state, setInferenceTaskInfo({ taskInstruction: ['New inference'] }));
+    expect(selectRecordTaskInfo({ tasks: state }).taskInstruction).toEqual(['Other recording']);
+  });
+
+  test('ignores older inference snapshots but accepts a restarted publisher', () => {
+    const running = reducer(undefined, setInferenceStatus({
+      sourceId: 'first', sequence: 5, runtimeState: 'running', topicReceived: true,
+    }));
+    const stale = reducer(running, setInferenceStatus({
+      sourceId: 'first', sequence: 4, runtimeState: 'paused',
+    }));
+    expect(stale.inferenceStatus.runtimeState).toBe('running');
+    const restarted = reducer(stale, setInferenceStatus({
+      sourceId: 'second', sequence: 1, runtimeState: 'paused',
+    }));
+    expect(restarted.inferenceStatus.runtimeState).toBe('paused');
+    const disconnected = reducer(restarted, setInferenceStatus({
+      topicReceived: false, runtimeState: 'unknown',
+    }));
+    expect(disconnected.inferenceStatus.topicReceived).toBe(false);
+  });
   test('defaults inference to simulation mode', () => {
     const state = reducer(undefined, { type: '@@INIT' });
     const inferenceInfo = selectInferenceTaskInfo({ tasks: state });

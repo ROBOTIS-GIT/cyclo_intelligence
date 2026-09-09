@@ -47,6 +47,31 @@ test('model selection comes from catalog and resets model-specific values', () =
   expect(info.accelerationEnginePath).toBe('');
 });
 
+test.each(['eo1', 'evo1', 'wall_x', 'pi0_fast', 'groot'])(
+  'selects LeRobot %s without using the independent GR00T Worker', (model) => {
+    const store = renderSelector({
+      policyId: 'groot:n17', serviceType: 'groot', policyType: 'n17',
+      accelerationMode: 'tensorrt_dit', accelerationEnginePath: '/old.trt',
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Policy model' }), {
+      target: { value: `lerobot:${model}` },
+    });
+    expect(store.getState().tasks.inferenceTaskInfo).toMatchObject({
+      policyId: `lerobot:${model}`, serviceType: 'lerobot', policyType: model,
+      policyParameters: {}, accelerationMode: '', accelerationEnginePath: '',
+    });
+  }
+);
+
+test.each(['pi0', 'pi0_fast', 'groot'])(
+  'restores the saved LeRobot %s selection', async (model) => {
+    const store = renderSelector({ policyId: '', serviceType: 'lerobot', policyType: model });
+    await waitFor(() => {
+      expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe(`lerobot:${model}`);
+    });
+  }
+);
+
 test('legacy service and policy fields are upgraded to a namespaced policy id', async () => {
   const store = renderSelector({
     policyId: '',
@@ -57,6 +82,15 @@ test('legacy service and policy fields are upgraded to a namespaced policy id', 
   await waitFor(() => {
     expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe('groot:n17');
   });
+  expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(false);
+});
+
+test('initial ACT normalization does not submit defaults before backend restoration', async () => {
+  const store = renderSelector({ policyId: '' });
+  await waitFor(() => {
+    expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe('lerobot:act');
+  });
+  expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(false);
 });
 
 test('a runtime with one model resolves legacy runtime-only selection', async () => {

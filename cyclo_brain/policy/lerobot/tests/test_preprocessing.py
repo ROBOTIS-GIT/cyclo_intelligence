@@ -111,6 +111,12 @@ class PreprocessingTest(unittest.TestCase):
         preprocessor._validate_camera_shapes({key: torch.zeros(1, 3, 4, 4),
             "observation.images.wrist": torch.zeros(1, 3, 4, 4)})
 
+    def test_groot_does_not_recheck_removed_raw_camera_keys(self):
+        preprocessor, key, _ = self.camera_preprocessor([{"type": "identity"}])
+        preprocessor._policy.config.type = "groot"
+        # GR00T removes raw camera keys during packing; don't inspect them afterwards.
+        preprocessor._validate_camera_shapes({"video": object()})
+
     def test_xvla_stack_requires_equal_sizes_only_without_internal_resize(self):
         preprocessor, key, _ = self.camera_preprocessor([{"type": "identity"}])
         preprocessor._policy.config.type = "xvla"

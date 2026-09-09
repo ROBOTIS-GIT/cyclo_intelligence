@@ -78,7 +78,7 @@ COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 # Install training/inference + VLA extras. Removed: dynamixel/gamepad/
 # hopejr/lekiwi/reachy2/kinematics (hardware), dev/test/video_benchmark
 # (development), aloha/pusht/phone/libero/metaworld/sarm (simulation).
-RUN uv pip install --no-cache ".[dataset,smolvla,xvla,molmoact2,vla_jepa,fastwam,hilserl,async,peft]"
+RUN uv pip install --no-cache ".[dataset,smolvla,xvla,molmoact2,vla_jepa,fastwam,eo1,evo1,wallx,pi,groot,hilserl,async,peft]"
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
 RUN if [ "$GPU_ARCH" = "blackwell" ]; then \

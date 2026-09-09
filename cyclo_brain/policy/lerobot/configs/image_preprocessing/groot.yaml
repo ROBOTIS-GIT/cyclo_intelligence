@@ -1,0 +1,11 @@
+# LeRobot GR00T N1.7, not the independent groot_server Worker.
+# The saved processor restores eval crop/resize and Qwen vision preprocessing
+# (policies/groot/processor_groot.py). Do not duplicate these operations here.
+# Requires a LeRobot checkpoint and its saved pre/post processors and assets.
+# The N1.7 pack step requires equal H/W, but a saved image_crop_resize_processor
+# can align views BEFORE packing. Keep identity when that step was saved;
+# do not duplicate its resize here. Only reproduce external training transforms
+# in this YAML when they are absent from the saved processor pipeline.
+backend: torch
+operations:
+  - type: identity

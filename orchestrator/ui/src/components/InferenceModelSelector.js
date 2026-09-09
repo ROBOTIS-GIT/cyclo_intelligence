@@ -67,9 +67,14 @@ const InferenceModelSelector = ({ readonly = false }) => {
   useEffect(() => {
     if (status !== 'ready' || options.length === 0) return;
     if (selected) {
-      if (info.policyId === selected.policy_id) return;
-      dispatch(setInferenceTaskInfo({ policyId: selected.policy_id }));
-      dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+      if (info.policyId === selected.policy_id &&
+          info.serviceType === selected.runtime.id && info.policyType === selected.id) return;
+      // Normalizing a restored/default selection is not a user edit.
+      dispatch(setInferenceTaskInfo({
+        policyId: selected.policy_id,
+        serviceType: selected.runtime.id,
+        policyType: selected.id,
+      }));
       return;
     }
     const hasRequestedSelection = Boolean(
@@ -79,7 +84,6 @@ const InferenceModelSelector = ({ readonly = false }) => {
     );
     if (hasRequestedSelection) return;
     dispatch(setInferenceTaskInfo(selectionPatch(options[0], info, options)));
-    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
   }, [dispatch, info, options, selected, status]);
 
   const handleChange = (event) => {

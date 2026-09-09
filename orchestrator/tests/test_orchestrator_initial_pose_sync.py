@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import sys
 import threading
-import time
 import types
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 _MODULE_BACKUPS = {}
@@ -48,9 +48,18 @@ class FakeCommunicator:
     def __init__(self) -> None:
         self.phases = []
         self.inferencing = threading.Event()
+        self.snapshots = []
+        self.messages = []
 
-    def publish_inference_status(self, *, phase, robot_type, error) -> None:
+    def publish(self, msg) -> None:
+        self.messages.append(msg)
+        fields = {key: getattr(msg, key) for key in msg.get_fields_and_field_types()}
+        fields['phase'] = fields.pop('inference_phase')
+        self.publish_inference_status(**fields)
+
+    def publish_inference_status(self, *, phase, robot_type, error, **snapshot) -> None:
         self.phases.append((phase, robot_type, error))
+        self.snapshots.append(dict(phase=phase, error=error, **snapshot))
         if phase == InferenceStatus.INFERENCING:
             self.inferencing.set()
 
@@ -98,10 +107,12 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._state_lock = threading.RLock()
         self.node._inference_lifecycle_lock = threading.Lock()
         self.node.container_service_client = self.client
-        self.node._initial_pose_sync_status_timer = None
-        self.node._initial_pose_sync_status_generation = 0
+        self.node._initial_pose_sync_status_active = False
+        self.node._init_inference_status_monitor()
+        self.node._inference_status_client = self.client
         self.node._initial_pose_sync_hold_pending = False
         self.node.communicator = FakeCommunicator()
+        self.node._inference_status_publisher = self.node.communicator
         self.node.robot_type = "ffw_sg2_rev1"
         self.node.get_logger = lambda: FakeLogger()
         self.node._loaded_inference_policy_path = "/models/policy"
@@ -120,7 +131,47 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node.on_inference = True
 
     def tearDown(self) -> None:
+        self.node._stop_inference_status_monitor()
         self.node._cancel_initial_pose_sync_status()
+
+    def test_inference_settings_survive_status_updates_without_touching_recording(self):
+        task_info = TaskInfo(
+            task_type="inference", policy_path="/models/draft", policy_id="lerobot:groot",
+            inference_hz=30, control_hz=80, chunk_align_window_s=0.5,
+            task_instruction=["Pick the ball"], initial_pose_sync=True,
+            initial_pose_sync_duration_s=7.0,
+        )
+        with patch.object(self.node, '_forward_recording') as recording:
+            response = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.SET_TASK_INFO, task_info=task_info),
+                SendCommand.Response(),
+            )
+        self.assertTrue(response.success, response.message)
+        recording.assert_not_called()
+        first = self.node.communicator.messages[-1]
+        self.assertTrue(first.has_task_info)
+        self.assertEqual(first.task_info, task_info)
+        self.assertEqual(first.task_info_revision, 1)
+        # Request/response objects must not alias the authoritative cache.
+        task_info.policy_path = "/mutated/request"
+        first.task_info.policy_path = "/mutated/message"
+        self.node._prepared_inference_task_info.record_inference_mode = True
+        self.node._publish_inference_phase(InferenceStatus.READY)
+        restored = self.node.communicator.messages[-1]
+        self.assertEqual(restored.task_info.policy_path, "/models/draft")
+        self.assertEqual(restored.task_info.inference_hz, 30)
+        self.assertFalse(restored.task_info.record_inference_mode)
+        self.assertEqual(restored.task_info_revision, 1)
+        self.node._cache_ui_task_info(TaskInfo(
+            task_type="inference", policy_path="/models/updated",
+        ), "SET_TASK_INFO")
+        self.assertEqual(self.node.communicator.messages[-1].task_info_revision, 2)
+
+    def test_status_without_saved_settings_is_explicitly_empty(self):
+        self.node._publish_inference_phase(InferenceStatus.READY)
+        snapshot = self.node.communicator.messages[-1]
+        self.assertFalse(snapshot.has_task_info)
+        self.assertEqual(snapshot.task_info_revision, 0)
 
     def test_task_info_settings_default_validate_and_copy(self) -> None:
         self.assertEqual(
@@ -171,11 +222,13 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._publish_inference_phase(InferenceStatus.LOADING)
         self.node._begin_initial_pose_sync_status(self.client, 0.01)
 
-        self.assertTrue(self.node.communicator.inferencing.wait(timeout=0.5))
+        self.node._poll_inference_status_once()
+        self.node._poll_inference_status_once()
         self.assertEqual(
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
             [
                 InferenceStatus.LOADING,
+                InferenceStatus.SYNCING,
                 InferenceStatus.SYNCING,
                 InferenceStatus.INFERENCING,
             ],
@@ -196,11 +249,12 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         ]
 
         self.node._begin_initial_pose_sync_status(self.client, 0.01)
-        time.sleep(0.15)
+        self.node._poll_inference_status_once()
+        self.node._poll_inference_status_once()
 
         self.assertEqual(
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
-            [InferenceStatus.SYNCING],
+            [InferenceStatus.SYNCING] * 3,
         )
 
     def test_running_runtime_status_is_returned_to_a_reconnected_ui(self) -> None:
@@ -224,6 +278,7 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             },
         )]
 
+        self.node._poll_inference_status_once()
         response = self.node._handle_get_inference_status(
             TaskInfo(),
             SendCommand.Response(),
@@ -266,6 +321,7 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             },
         )]
 
+        self.node._poll_inference_status_once()
         response = self.node._handle_get_inference_status(
             TaskInfo(),
             SendCommand.Response(),
@@ -279,9 +335,11 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
 
     def test_cancel_blocks_stale_completion(self) -> None:
         self.node._begin_initial_pose_sync_status(self.client, 0.02)
-        self.node._cancel_initial_pose_sync_status()
-
-        time.sleep(0.05)
+        def delayed_status(*args, **kwargs):
+            self.node._cancel_initial_pose_sync_status()
+            return SimpleNamespace(success=True, data={'runtime_state': 'running'})
+        with patch.object(self.client, 'inference_command', side_effect=delayed_status):
+            self.node._poll_inference_status_once()
         self.assertEqual(
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
             [InferenceStatus.SYNCING],
@@ -289,9 +347,11 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
 
     def test_client_identity_blocks_stale_completion(self) -> None:
         self.node._begin_initial_pose_sync_status(self.client, 0.02)
-        self.node.container_service_client = object()
-
-        time.sleep(0.05)
+        def delayed_status(*args, **kwargs):
+            self.node.container_service_client = object()
+            return SimpleNamespace(success=True, data={'runtime_state': 'running'})
+        with patch.object(self.client, 'inference_command', side_effect=delayed_status):
+            self.node._poll_inference_status_once()
         self.assertEqual(
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
             [InferenceStatus.SYNCING],
@@ -318,6 +378,132 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
 
         self.assertTrue(succeeded.success)
         self.assertFalse(self.node._initial_pose_sync_hold_pending)
+
+    def test_many_ui_reads_only_use_one_cached_runtime_result(self) -> None:
+        self.client.status_results = [SimpleNamespace(
+            success=True, data={'runtime_state': 'running',
+                                'loaded_policy_id': 'groot:n17'},
+        )]
+        self.node._poll_inference_status_once()
+        task = TaskInfo()
+        task.policy_id = 'lerobot:act'
+        for _ in range(20):
+            response = self.node._handle_get_inference_status(task, SendCommand.Response())
+            self.assertTrue(response.inference_status_known)
+            self.assertEqual(response.inference_policy_id, 'groot:n17')
+        self.assertEqual(self.client.calls, [self.client.CMD_STATUS])
+        snapshot = self.node.communicator.snapshots[-1]
+        self.assertEqual(snapshot['policy_id'], 'groot:n17')
+        self.assertTrue(snapshot['source_id'])
+        self.assertEqual(snapshot['sequence'], 1)
+
+    def test_publishes_without_robot_communicator_and_serializes_full_snapshot(self) -> None:
+        from rclpy.serialization import serialize_message, deserialize_message
+        publisher = self.node._inference_status_publisher
+        self.node.communicator = None
+        self.node._publish_inference_phase(InferenceStatus.INFERENCING)
+        message = deserialize_message(serialize_message(publisher.messages[-1]), InferenceStatus)
+        self.assertTrue(message.status_known)
+        self.assertEqual(message.model_path, '/models/policy')
+        self.assertEqual(message.policy_id, 'lerobot:act')
+        self.assertEqual(message.sequence, 1)
+        self.assertTrue(message.publish_to_robot)
+
+    def test_unreachable_keeps_phase_model_and_hold_until_recovery(self) -> None:
+        self.node._begin_initial_pose_sync_status(self.client, 5.0)
+        self.node._mark_initial_pose_sync_hold_failed(self.client, 'hold failed')
+        self.client.status_results = [SimpleNamespace(success=False, message='offline')]
+        self.node._poll_inference_status_once()
+        snapshot = self.node.communicator.snapshots[-1]
+        self.assertFalse(snapshot['status_known'])
+        self.assertEqual(snapshot['phase'], InferenceStatus.SYNCING)
+        self.assertEqual(snapshot['model_path'], '/models/policy')
+        self.assertTrue(self.node._initial_pose_sync_hold_pending)
+        self.client.status_results = [SimpleNamespace(
+            success=True, data={'runtime_state': 'paused'},
+        )]
+        self.node._poll_inference_status_once()
+        self.assertTrue(self.node.communicator.snapshots[-1]['status_known'])
+        self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.SYNCING)
+        self.assertTrue(self.node._initial_pose_sync_hold_pending)
+        self.assertNotIn(self.client.CMD_UNLOAD, self.client.calls)
+
+    def test_command_in_flight_discards_earlier_status(self) -> None:
+        self.node._publish_inference_phase(InferenceStatus.PAUSED)
+        def delayed_status(*args, **kwargs):
+            self.node._observe_inference_command(True)
+            self.node._publish_inference_phase(InferenceStatus.INFERENCING)
+            self.node._observe_inference_command(False)
+            return SimpleNamespace(success=True, data={'runtime_state': 'paused'})
+        with patch.object(self.client, 'inference_command', side_effect=delayed_status):
+            self.node._poll_inference_status_once()
+        self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.INFERENCING)
+        self.assertEqual(len(self.node.communicator.snapshots), 2)
+
+    def test_loading_republishes_progress_without_status_rpc(self) -> None:
+        self.node._publish_inference_phase(InferenceStatus.LOADING)
+        self.node._poll_inference_status_once()
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.LOADING)
+        self.assertEqual(self.node.communicator.snapshots[-1]['sequence'], 2)
+
+    def test_pending_cleanup_does_not_rediscover_old_policy(self) -> None:
+        self.node._observe_inference_command(True)
+        self.node._poll_inference_status_once()
+        self.assertEqual(self.client.calls, [])
+        self.node._observe_inference_command(False)
+
+    def test_monitor_runs_without_ui_and_stops_without_lifecycle_commands(self) -> None:
+        self.client.status_results = [SimpleNamespace(
+            success=True, data={'runtime_state': 'running'},
+        )]
+        self.node._start_inference_status_monitor()
+        self.assertTrue(self.node.communicator.inferencing.wait(timeout=1.0))
+        self.node._stop_inference_status_monitor()
+        self.assertFalse(self.node._inference_status_thread.is_alive())
+        self.assertEqual(self.client.calls, [self.client.CMD_STATUS])
+        self.assertTrue(self.client.disconnected.is_set())
+
+    def test_invalid_result_does_not_publish_ready(self) -> None:
+        self.node._publish_inference_phase(InferenceStatus.INFERENCING)
+        self.client.status_results = [SimpleNamespace(
+            success=True, data={'runtime_state': 'unexpected'},
+        )]
+        self.node._poll_inference_status_once()
+        snapshot = self.node.communicator.snapshots[-1]
+        self.assertFalse(snapshot['status_known'])
+        self.assertEqual(snapshot['phase'], InferenceStatus.INFERENCING)
+
+    def test_restart_recovers_active_runtime_independently_of_ui(self) -> None:
+        self.node.container_service_client = None
+        self.node._client_cb_group = object()
+        self.client.status_results = [SimpleNamespace(
+            success=True, data={'runtime_state': 'syncing',
+                                'loaded_policy_id': 'groot:n17'},
+        )]
+        with patch('orchestrator.orchestrator_node.ContainerServiceClient') as factory:
+            factory.CMD_STATUS = self.client.CMD_STATUS
+            self.node._poll_inference_status_once()
+            self.assertEqual(factory.call_args.kwargs['service_prefix'], '/groot')
+            factory.return_value.connect.assert_called_once()
+            self.assertIs(self.node.container_service_client, factory.return_value)
+        self.assertTrue(self.node._initial_pose_sync_status_active)
+
+    def test_status_reader_connects_once_to_unified_endpoint(self) -> None:
+        self.node._inference_status_client = None
+        self.node._client_cb_group = object()
+        with patch('orchestrator.orchestrator_node.ContainerServiceClient') as factory:
+            factory.return_value.inference_command.return_value = SimpleNamespace(
+                success=True, data={'runtime_state': 'unloaded'},
+            )
+            self.node._poll_inference_status_once()
+            self.node._poll_inference_status_once()
+            factory.assert_called_once_with(
+                node=self.node, service_prefix='/policy',
+                callback_group=self.node._client_cb_group, inference_only=True,
+            )
+            factory.return_value.connect.assert_called_once()
+            self.assertEqual(factory.return_value.inference_command.call_count, 2)
 
     def test_teardown_hold_failure_does_not_unload_or_disconnect(self) -> None:
         self.client.stop_results = [
