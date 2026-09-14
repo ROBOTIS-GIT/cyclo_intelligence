@@ -9,6 +9,57 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_worker_healthcheck_rejects_down_normally_up_and_status_errors():
+    states = (
+        ("up (pid 123) 4 seconds", "true", "0", True),
+        ("down (exitcode 1) 4 seconds, normally up", "false", "0", False),
+        ("s6-svstat: unable to read supervise/status", "", "1", False),
+    )
+    for backend in ("lerobot", "groot"):
+        for arch in ("amd64", "arm64"):
+            path = REPO_ROOT / f"cyclo_brain/policy/{backend}/Dockerfile.{arch}"
+            contents = path.read_text()
+            command = next(line.strip() for line in contents.splitlines()
+                           if "/run/service/engine-process" in line)
+            command = command.removeprefix("&& ").removesuffix(" \\")
+            assert "test -s /run/cyclo/engine-process.ready" in contents
+            for raw, structured, exit_code, healthy in states:
+                result = subprocess.run(
+                    ["bash", "-c", '''
+svstat() {
+    if [ "$1" = "-o" ]; then printf '%s\\n' "$STRUCTURED_STATE";
+    else printf '%s\\n' "$RAW_STATE"; fi
+    return "$STAT_EXIT"
+}
+S6_SVSTAT=svstat
+''' + command],
+                    env={**os.environ, "RAW_STATE": raw,
+                         "STRUCTURED_STATE": structured, "STAT_EXIT": exit_code},
+                    capture_output=True, text=True,
+                )
+                assert (result.returncode == 0) == healthy, (path, raw, result.stderr)
+
+
+def test_arm64_build_pip_ignores_inherited_index_configuration():
+    contents = (REPO_ROOT / "docker/Dockerfile.arm64").read_text()
+    commands = [
+        line.removeprefix("RUN ").removesuffix(" \\")
+        for line in contents.splitlines()
+        if line.startswith("RUN ") and "pip install" in line
+    ]
+    assert len(commands) == 3
+    for command in commands:
+        result = subprocess.run(
+            ["bash", "-c", 'pip() { printf "%s" "$PIP_CONFIG_FILE"; }; ' + command],
+            env={**os.environ, "PIP_CONFIG_FILE": "/inherited/pip.conf"},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout == "/dev/null"
+    assert "ENV PIP_CONFIG_FILE" not in contents
+
+
 def test_lerobot_image_preprocessing_defaults_and_editable_mount():
     source = "cyclo_brain/policy/lerobot/configs/"
     for arch in ("amd64", "arm64"):
@@ -120,7 +171,6 @@ def test_ros_zenoh_runtime_env_file_is_not_referenced_by_images_or_s6():
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.arm64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.amd64",
         REPO_ROOT / "docker" / "s6-services" / "common" / "ros2_service_run.sh",
-        REPO_ROOT / "docker" / "s6-services" / "policy-runtime" / "run",
         REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "engine-process" / "run",
     )
 
@@ -130,10 +180,36 @@ def test_ros_zenoh_runtime_env_file_is_not_referenced_by_images_or_s6():
         assert "ros_zenoh.env" not in contents, f"{path} references the old runtime env file"
 
 
+def test_policy_runtime_is_launch_managed_not_an_independent_s6_service():
+    services = REPO_ROOT / "docker/s6-services"
+    assert not (services / "policy-runtime").exists()
+    assert not (services / "user/contents.d/policy-runtime").exists()
+    compose = (REPO_ROOT / "docker/docker-compose.yml").read_text()
+    assert "/run/service/policy-runtime" not in compose
+    assert "stop_grace_period: 80s" in compose
+    for arch in ("amd64", "arm64"):
+        assert "s6-rc.d/policy-runtime" not in (REPO_ROOT / f"docker/Dockerfile.{arch}").read_text()
+
+
+def test_ros_services_allow_their_finish_script_to_complete():
+    root = REPO_ROOT / "docker/s6-services"
+    for name in ("cyclo_intelligence", "orchestrator", "cyclo_data", "bt_node"):
+        service = root / name
+        if name == "cyclo_data":
+            # ros2 run waits for its child after SIGINT; retain default SIGTERM.
+            assert not (service / "down-signal").exists()
+        else:
+            assert int((service / "down-signal").read_text()) == 2
+        assert int((service / "timeout-finish").read_text()) == 35000
+    # Runtime launch may need 40 s, then its group cleanup up to 30 s. The
+    # container must not truncate either phase with the old 45 s grace period.
+    assert int((root / "cyclo_intelligence/timeout-kill").read_text()) == 40000
+    assert "TIMEOUT=30" in (root / "common/ros2_service_finish.sh").read_text()
+
+
 def test_s6_services_run_through_interactive_bashrc_shell():
     paths = (
         REPO_ROOT / "docker" / "s6-services" / "common" / "ros2_service_run.sh",
-        REPO_ROOT / "docker" / "s6-services" / "policy-runtime" / "run",
         REPO_ROOT / "cyclo_brain" / "policy" / "common" / "s6-services" / "engine-process" / "run",
     )
 
@@ -306,6 +382,38 @@ def test_policy_compose_keeps_image_defaults_in_images():
         assert "ACTION_CHUNK_PROCESSING_SDK_PATH" not in contents
 
 
+def test_policy_images_override_inherited_huggingface_cache_paths():
+    services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
+    for runtime in ("lerobot", "groot"):
+        assert "./huggingface:/root/.cache/huggingface" in services[runtime]["volumes"]
+        for arch in ("amd64", "arm64"):
+            path = REPO_ROOT / f"cyclo_brain/policy/{runtime}/Dockerfile.{arch}"
+            contents = path.read_text()
+            assert "ENV HF_HOME=/root/.cache/huggingface" in contents
+            for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+                assert f"ENV {name}=/root/.cache/huggingface/hub" in contents, (
+                    f"{path}: inherited {name} can bypass the persistent Compose cache"
+                )
+
+
+def test_worker_dependency_constraints_reach_the_package_manager():
+    for runtime in ("lerobot", "groot"):
+        path = REPO_ROOT / f"cyclo_brain/policy/{runtime}/Dockerfile.amd64"
+        install = next(line for line in path.read_text().splitlines()
+                       if line.startswith("RUN ") and "pip install" in line
+                       and "eclipse-zenoh" in line)
+        install = install.removeprefix("RUN ").removesuffix("\\").strip()
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["bash", "-c", 'uv() { printf "%s\\n" "$@"; }; '
+                 'pip() { printf "%s\\n" "$@"; }; ' + install],
+                cwd=directory, capture_output=True, text=True, check=True,
+            )
+            for requirement in ("rosbags>=0.11.0", "GitPython>=3.1.18", "json5>=0.9.14"):
+                assert requirement in result.stdout.splitlines(), runtime
+            assert not list(Path(directory).iterdir()), "Version constraints became shell output files"
+
+
 def test_lerobot_images_install_new_policy_inference_extras():
     dockerfiles = (
         REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.arm64",
@@ -320,8 +428,10 @@ def test_lerobot_images_install_new_policy_inference_extras():
         ]
         assert len(install_lines) == 1, f"Could not identify LeRobot extras in {dockerfile}"
         install_line = install_lines[0]
-        for extra in ("molmoact2", "vla_jepa", "fastwam", "eo1", "evo1", "wallx", "pi", "groot"):
+        for extra in ("molmoact2", "vla_jepa", "fastwam", "multi_task_dit", "wallx", "pi", "groot"):
             assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
+        extras = install_line.split('".[', 1)[1].split(']', 1)[0].split(',')
+        assert not {"eo1", "evo1"}.intersection(extras)
 
 
 def test_policy_build_contexts_use_runtime_specific_ignore_files():
@@ -385,6 +495,9 @@ def test_policy_workers_install_only_the_shared_engine_service():
             ) in contents
             assert "rm -rf /etc/s6-overlay/s6-rc.d/main-runtime" in contents
             assert "rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/main-runtime" in contents
+            assert (
+                "COPY cyclo_brain/policy/common/catalog/ /policy_runtime/catalog/"
+            ) in contents
 
 
 def test_groot_amd64_keeps_numpy_compatible_with_opencv():

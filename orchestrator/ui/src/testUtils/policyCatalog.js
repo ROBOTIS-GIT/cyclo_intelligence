@@ -23,9 +23,8 @@ export const testPolicyCatalog = {
         },
         ...[
           ['pi0', 'Pi0'],
-          ['pi0_fast', 'Pi0-FAST'],
-          ['eo1', 'EO1'],
-          ['evo1', 'Evo1'],
+          ['pi05', 'Pi0.5'],
+          ['multi_task_dit', 'Multi-Task DiT'],
           ['wall_x', 'WALL-X'],
           ['groot', 'GR00T N1.7 (LeRobot)'],
         ].map(([id, label]) => ({

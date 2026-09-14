@@ -9,6 +9,7 @@ uint8 GET_ACTION    = 1
 uint8 UNLOAD_POLICY = 2
 uint8 DESCRIBE      = 3
 uint8 STATUS        = 4
+uint8 UPDATE_CONTEXT = 5
 
 uint8 command
 
@@ -26,6 +27,9 @@ string acceleration_engine_path
 # Validated by Policy Runtime before forwarding to Engine.
 string policy_id
 string policy_parameters_json
+
+# Validated execution facts; empty preserves the legacy stateless contract.
+string execution_context_json
 ---
 uint64 seq_id
 bool success

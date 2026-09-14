@@ -25,6 +25,7 @@ from catalog import (
     resolve_policy_id,
     resolve_runtime,
 )
+from inference_context.contract import LoadedExecution
 
 
 CMD_LOAD, CMD_START, CMD_PAUSE, CMD_RESUME, CMD_STOP, CMD_UNLOAD = 0, 1, 2, 3, 4, 5
@@ -56,9 +57,15 @@ class ServiceHandler:
         self._loading_runtime_id = ""
         self._worker_mutations: dict[str, str] = {}
         self._lock = threading.RLock()
+        self._shutdown_requested = threading.Event()
+
+    def begin_shutdown(self) -> None:
+        self._shutdown_requested.set()
 
     def handle(self, request, *, backend_override: str = ""):
         with self._lock:
+            if self._shutdown_requested.is_set():
+                return self._make_response(False, "Policy Runtime is shutting down")
             cmd = int(request.command)
             try:
                 if cmd == CMD_LOAD:
@@ -174,6 +181,13 @@ class ServiceHandler:
         if acceleration_mode == "pytorch":
             acceleration_engine_path = ""
         try:
+            execution = LoadedExecution.from_json(getattr(response, "capabilities_json", ""))
+            execution_options = {}
+            if execution.context is not None:
+                execution_options = {
+                    "execution_context": execution.context,
+                    "execution_contract": execution.contract,
+                }
             self._control_loop.configure(
                 robot_type=request.robot_type,
                 task_instruction=request.task_instruction or "",
@@ -187,6 +201,7 @@ class ServiceHandler:
                 initial_pose_sync_duration_s=(
                     float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
                 ),
+                **execution_options,
             )
             applied_config = self._control_loop.configuration_snapshot()
         except Exception as configure_error:
@@ -276,7 +291,8 @@ class ServiceHandler:
         self._session.set_publish_to_robot(
             bool(getattr(request, "publish_to_robot", False))
         )
-        return self._make_response(True, "syncing" if syncing else "running")
+        message = "preparing" if self._runtime_state() == "preparing" else ("syncing" if syncing else "running")
+        return self._make_response(True, message)
 
     def _pause(self):
         if not self._session.running:
@@ -299,7 +315,8 @@ class ServiceHandler:
         self._session.set_publish_to_robot(
             bool(getattr(request, "publish_to_robot", False))
         )
-        return self._make_response(True, "syncing" if syncing else "resumed")
+        message = "preparing" if self._runtime_state() == "preparing" else ("syncing" if syncing else "resumed")
+        return self._make_response(True, message)
 
     def _stop(self):
         hold_ok = self._control_loop.stop()
@@ -319,8 +336,17 @@ class ServiceHandler:
                 False,
                 "current-pose hold is pending; retry STOP before UNLOAD",
             )
+        if getattr(self._control_loop, "prediction_pending", lambda: False)():
+            return self._make_response(
+                False, "command publication stopped; prediction is still finishing, retry UNLOAD shortly",
+            )
         requester = self._active_requester or self._requester
         if requester is None:
+            # A successful LOAD rollback already released the central requester.
+            if not self._session.loaded and not self._session.running:
+                self._control_loop.deconfigure()
+                self._session.mark_unloaded()
+                return self._make_response(True, "already unloaded")
             return self._make_response(False, "policy worker requester is unavailable")
         response = requester.unload_policy()
         if not response.success:
@@ -352,6 +378,8 @@ class ServiceHandler:
             return "unloaded"
         if self._control_loop.initial_pose_sync_hold_required():
             return "syncing"
+        if getattr(self._control_loop, "preparing", lambda: False)():
+            return "preparing"
         if self._session.paused:
             return "paused"
         if self._session.running:
@@ -417,6 +445,8 @@ class ServiceHandler:
                 "",
             )
         try:
+            if self._shutdown_requested.is_set():
+                return False, "Policy Runtime is shutting down", ""
             if runtime_id in self._worker_mutations:
                 return False, "another worker operation is already in progress", ""
             allowed, reason = self.can_mutate_worker(runtime_id)

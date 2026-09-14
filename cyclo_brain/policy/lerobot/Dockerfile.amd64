@@ -78,7 +78,7 @@ COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 # Install training/inference + VLA extras. Removed: dynamixel/gamepad/
 # hopejr/lekiwi/reachy2/kinematics (hardware), dev/test/video_benchmark
 # (development), aloha/pusht/phone/libero/metaworld/sarm (simulation).
-RUN uv pip install --no-cache ".[dataset,smolvla,xvla,molmoact2,vla_jepa,fastwam,eo1,evo1,wallx,pi,groot,hilserl,async,peft]"
+RUN uv pip install --no-cache ".[dataset,smolvla,xvla,molmoact2,vla_jepa,fastwam,multi_task_dit,wallx,pi,groot,hilserl,async,peft]"
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
 RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
@@ -99,7 +99,7 @@ COPY cyclo_brain/policy/lerobot/lerobot/ ./
 # IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled
 # zenoh-c version (1.6.x). Mismatched versions cause service call
 # failures despite discovery working.
-RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
+RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" "GitPython>=3.1.18" "json5>=0.9.14" pyyaml \
     && mkdir -p /zenoh_sdk /robot_client_sdk /orchestrator_config /policy_runtime /app
 
 # Bake every source dependency required by the Engine worker. Production must
@@ -107,6 +107,8 @@ RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
 COPY cyclo_brain/policy/common/runtime/__init__.py cyclo_brain/policy/common/runtime/engine.py cyclo_brain/policy/common/runtime/hf_token_sync.py /policy_runtime/
 COPY cyclo_brain/policy/common/runtime/engine_process/ /policy_runtime/engine_process/
+COPY cyclo_brain/policy/common/runtime/inference_context/ /policy_runtime/inference_context/
+COPY cyclo_brain/policy/common/catalog/ /policy_runtime/catalog/
 COPY cyclo_brain/policy/lerobot/lerobot_engine/ /app/lerobot_engine/
 COPY cyclo_brain/policy/lerobot/configs/ /app/configs/
 COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
@@ -119,6 +121,10 @@ RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
 
 # HuggingFace cache (bind-mounted from compose so weights survive rebuild).
 ENV HF_HOME=/root/.cache/huggingface
+# Override legacy cache paths inherited from the base image as well.
+ENV HF_HUB_CACHE=/root/.cache/huggingface/hub
+ENV HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface/hub
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
 ENV HF_LEROBOT_HOME=/root/.cache/huggingface/lerobot
 ENV TORCH_HOME=/root/.cache/torch
 
@@ -150,7 +156,7 @@ WORKDIR /lerobot
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
      && [ -n "$S6_SVSTAT" ] \
-     && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     && [ "$("$S6_SVSTAT" -o up /run/service/engine-process)" = "true" ] \
      && test -s /run/cyclo/engine-process.ready \
      || exit 1
 

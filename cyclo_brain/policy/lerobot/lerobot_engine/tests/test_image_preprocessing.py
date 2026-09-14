@@ -21,6 +21,13 @@ image_preprocessing = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(image_preprocessing)
 
 
+@pytest.mark.parametrize("policy_type", ["eo1", "evo1", "pi0_fast"])
+def test_removed_policy_has_no_default_preprocessing(tmp_path, policy_type):
+    (tmp_path / "config.json").write_text(json.dumps({"type": policy_type}))
+    with pytest.raises(FileNotFoundError, match=policy_type):
+        image_preprocessing.load_image_preprocessing(tmp_path)
+
+
 class ImagePreprocessingTest(unittest.TestCase):
     def test_rotates_wrist_image_from_640x480_to_480x640(self):
         image = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -99,6 +106,32 @@ def test_torch_antialias_matches_training_transform():
         rtol=0,
         atol=0,
     )
+
+
+def test_multi_task_dit_test_preset_matches_training_for_mixed_cameras(tmp_path):
+    features = {
+        KEY: {"shape": [3, 376, 672]},
+        WRIST: {"shape": [3, 424, 240]},
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps({"type": "multi_task_dit", "input_features": features})
+    )
+    transform = image_preprocessing.load_image_preprocessing(tmp_path)
+    rng = np.random.default_rng(42)
+    for key, feature in features.items():
+        _, height, width = feature["shape"]
+        image = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+        result = transform.apply(image, key)
+        assert result.shape == (1, 3, 224, 224)
+        torch.testing.assert_close(
+            result,
+            F.interpolate(
+                tensor(image), (224, 224), mode="bilinear",
+                align_corners=False, antialias=True,
+            ),
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.parametrize("backend", ["torch", "opencv"])
@@ -225,7 +258,7 @@ def test_file_reload_snapshot_and_missing_invalid_files(tmp_path):
         image_preprocessing.load_image_preprocessing(tmp_path, tmp_path)
 
 
-def test_all_catalog_policies_have_valid_defaults():
+def test_all_catalog_policies_have_valid_defaults(monkeypatch):
     root = MODULE_PATH.parents[1]
     manifest = yaml.safe_load((root / "manifest.yaml").read_text())
     names = {
@@ -233,8 +266,17 @@ def test_all_catalog_policies_have_valid_defaults():
         for model in manifest["models"]
         for name in [model["id"], *model.get("aliases", [])]
     }
-    assert {p.stem for p in image_preprocessing.CONFIG_DIR.glob("*.yaml")} == names
-    for name in names:
+    profiles = {p.stem for p in image_preprocessing.CONFIG_DIR.glob("*.yaml")}
+    assert names <= profiles, f"Catalog policies without preprocessing: {names - profiles}"
+    # Unlisted profiles may be under validation, but must belong to a real
+    # integration rather than silently collecting orphaned configuration files.
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.syspath_prepend(str(root.parent / "common" / "runtime"))
+    from lerobot_engine.adapters import AdapterDefinition, resolve_adapter
+
+    for name in profiles - names:
+        assert resolve_adapter(name) != AdapterDefinition(), f"Orphaned profile: {name}"
+    for name in profiles:
         config = yaml.safe_load(
             (image_preprocessing.CONFIG_DIR / f"{name}.yaml").read_text()
         )

@@ -143,6 +143,8 @@ COPY cyclo_brain/policy/groot/groot_engine/ /app/groot_engine/
 COPY cyclo_brain/policy/groot/scripts/ /app/scripts/
 COPY cyclo_brain/policy/common/runtime/__init__.py cyclo_brain/policy/common/runtime/engine.py cyclo_brain/policy/common/runtime/hf_token_sync.py /policy_runtime/
 COPY cyclo_brain/policy/common/runtime/engine_process/ /policy_runtime/engine_process/
+COPY cyclo_brain/policy/common/runtime/inference_context/ /policy_runtime/inference_context/
+COPY cyclo_brain/policy/common/catalog/ /policy_runtime/catalog/
 COPY cyclo_brain/policy/groot/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
@@ -165,6 +167,10 @@ RUN mkdir -p /usr/share/glvnd/egl_vendor.d && \
 EOF
 
 ENV HF_HOME=/root/.cache/huggingface
+# Override legacy cache paths inherited from the base image as well.
+ENV HF_HUB_CACHE=/root/.cache/huggingface/hub
+ENV HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface/hub
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
 ENV TORCH_HOME=/root/.cache/torch
 
 ENV ZENOH_SDK_PATH=/zenoh_sdk
@@ -200,7 +206,7 @@ WORKDIR /gr00t
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
      && [ -n "$S6_SVSTAT" ] \
-     && "$S6_SVSTAT" /run/service/engine-process 2>&1 | grep -q "up" \
+     && [ "$("$S6_SVSTAT" -o up /run/service/engine-process)" = "true" ] \
      && test -s /run/cyclo/engine-process.ready \
      || exit 1
 

@@ -157,6 +157,20 @@ def make_response(
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_shutdown_rejects_lifecycle_requests_and_worker_mutations(self):
+        handler, _, _ = self._handler(backend="lerobot")
+        handler.begin_shutdown()
+        for command in (CMD_LOAD, CMD_START, CMD_RESUME, CMD_UNLOAD):
+            response = handler.handle(SimpleNamespace(command=command))
+            self.assertFalse(response.success)
+            self.assertIn("shutting down", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(handler._requester.unload_count, 0)
+        allowed, reason, token = handler.begin_worker_mutation("lerobot")
+        self.assertFalse(allowed)
+        self.assertIn("shutting down", reason)
+        self.assertEqual(token, "")
+
     def test_worker_mutation_does_not_wait_for_load(self):
         handler, _, _ = self._handler(backend="lerobot")
         entered = threading.Event()
@@ -268,6 +282,27 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(unloaded.loaded_model_path, "")
         self.assertFalse(unloaded.publish_to_robot)
 
+    def test_preparation_is_reported_and_pending_prediction_blocks_unload(self):
+        handler, session, loop = self._handler()
+        handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/model", robot_type="test",
+                                      task_instruction="pick", publish_to_robot=True))
+        loop.preparing = lambda: True
+        result = handler.handle(SimpleNamespace(command=CMD_START, publish_to_robot=True))
+        self.assertTrue(result.success)
+        self.assertEqual(result.runtime_state, "preparing")
+        self.assertEqual(result.message, "preparing")
+        self.assertEqual(handler.runtime_snapshot()["runtime_state"], "preparing")
+        loop.preparing = lambda: False
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_STOP)).success)
+        loop.prediction_pending = lambda: True
+        response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+        self.assertFalse(response.success)
+        self.assertIn("still finishing", response.message)
+        self.assertTrue(session.loaded)
+        self.assertEqual(loop.deconfigure_count, 0)
+        loop.prediction_pending = lambda: False
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_UNLOAD)).success)
+
     def test_unload_failure_preserves_loaded_session_and_control_loop(self) -> None:
         handler, session, loop = self._handler()
         handler.handle(SimpleNamespace(
@@ -325,6 +360,45 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         recovered = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
         self.assertTrue(recovered.success)
         self.assertEqual(recovered.runtime_state, "unloaded")
+
+    def test_central_runtime_cleanup_after_load_rollback_is_idempotent(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        requester = handler._requester
+        handler._requester = None
+        handler._active_requester = None
+        handler._worker_registry = SimpleNamespace(requester=lambda *_args: requester)
+        loop.set_requester = lambda _requester: None
+        loop.configure_error = ValueError("preview-only is unsupported")
+        request = SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                  robot_type="ffw", task_instruction="pick")
+        self.assertFalse(handler.handle(request).success)
+        self.assertFalse(session.loaded)
+        self.assertIsNone(handler._active_requester)
+        self.assertEqual(requester.unload_count, 1)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_STOP)).success)
+        for _ in range(2):
+            response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+            self.assertTrue(response.success, response.message)
+            self.assertEqual(response.runtime_state, "unloaded")
+        self.assertEqual(requester.unload_count, 1)
+        loop.configure_error = None
+        self.assertTrue(handler.handle(request).success)
+
+    def test_absent_requester_cannot_hide_loaded_hold_or_prediction_state(self):
+        for state in ("loaded", "hold", "prediction"):
+            with self.subTest(state=state):
+                handler, session, loop = self._handler()
+                if state == "loaded":
+                    self.assertTrue(handler.handle(SimpleNamespace(
+                        command=CMD_LOAD, model_path="/models/policy",
+                        robot_type="ffw", task_instruction="pick",
+                    )).success)
+                loop.hold_pending = state == "hold"
+                loop.prediction_pending = lambda: state == "prediction"
+                handler._requester = None
+                handler._active_requester = None
+                self.assertFalse(handler.handle(SimpleNamespace(command=CMD_UNLOAD)).success)
+                self.assertEqual(loop.deconfigure_count, 0)
 
     def test_unload_is_blocked_while_policy_is_running(self) -> None:
         handler, session, _loop = self._handler()

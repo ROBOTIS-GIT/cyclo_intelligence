@@ -32,6 +32,11 @@ if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
 
 from action_chunk_processing import ActionChunkProcessor  # noqa: E402
 from robot_client import RobotClient  # noqa: E402
+from inference_context.execution import ExecutionContext  # noqa: E402
+from .execution_feedback import ExecutionFeedback  # noqa: E402
+from .step_schedule import StepSchedule  # noqa: E402
+from inference_context.contract import ExecutionContract  # noqa: E402
+from inference_context.timing import action_latency  # noqa: E402
 
 
 try:  # pragma: no cover - SDK exists only in runtime container here.
@@ -116,6 +121,15 @@ class ControlLoop:
         self._lock = threading.RLock()
         self._robot: Optional[RobotClient] = None
         self._processor: Optional[ActionChunkProcessor] = None
+        self._feedback = None
+        self._step_schedule = None
+        self._initial_action_timeout_s = None
+        self._observation_warmup_timeout_s = None
+        self._preparation_needed = False
+        self._preparation_active = False
+        self._feedback_io_lock = threading.Lock()
+        self._feedback_dirty = False
+        self._feedback_thread = None
         self._task_instruction = ""
         self._action_keys: list[str] = []
         self._publish_to_robot = False
@@ -129,6 +143,7 @@ class ControlLoop:
         self._generation = 0
         self._shutdown = threading.Event()
         self._request_thread: Optional[threading.Thread] = None
+        self._request_reserved = False
         self._thread: Optional[threading.Thread] = None
 
     def configure(
@@ -143,12 +158,21 @@ class ControlLoop:
         chunk_align_window_s: Optional[float] = None,
         initial_pose_sync: bool = False,
         initial_pose_sync_duration_s: float = 5.0,
+        execution_context: ExecutionContext | None = None,
+        execution_contract: ExecutionContract | None = None,
     ) -> None:
         duration_s = float(initial_pose_sync_duration_s)
         if not math.isfinite(duration_s) or not 1.0 <= duration_s <= 60.0:
             raise ValueError(
                 "initial_pose_sync_duration_s must be between 1.0 and 60.0"
             )
+        contract = execution_contract or ExecutionContract()
+        if contract.is_step and execution_context is None:
+            raise ValueError("step execution requires a contextual Worker session")
+        if contract.observation_warmup_timeout_s is not None and execution_context is None:
+            raise ValueError("observation warmup requires a contextual Worker session")
+        if contract.is_step and not publish_to_robot:
+            raise ValueError("step execution requires command receipts; preview-only is unsupported")
         with self._lock:
             self.deconfigure()
             self._control_hz = positive_finite_or_default(
@@ -173,7 +197,7 @@ class ControlLoop:
                 subscribe_state=bool(publish_to_robot),
                 subscribe_sensors=False,
             )
-            self._processor = ActionChunkProcessor(
+            processing = dict(
                 inference_hz=self._inference_hz,
                 control_hz=self._control_hz,
                 chunk_align_window_s=self._chunk_align_window_s,
@@ -181,6 +205,22 @@ class ControlLoop:
                 target_chunk_size=self._target_chunk_size,
                 alignment_mode=self._alignment_mode,
             )
+            self._step_schedule = StepSchedule(self._inference_hz) if contract.is_step else None
+            self._initial_action_timeout_s = contract.initial_action_timeout_s
+            self._observation_warmup_timeout_s = contract.observation_warmup_timeout_s
+            if self._observation_warmup_timeout_s is not None:
+                base_timeout = self._initial_action_timeout_s or self._requester.get_action_timeout_s
+                self._initial_action_timeout_s = base_timeout + self._observation_warmup_timeout_s
+            self._preparation_needed = self._initial_action_timeout_s is not None
+            self._preparation_active = False
+            if self._step_schedule:
+                # A public select_action result is already one model step.
+                processing.update(postprocess=False, target_chunk_size=None)
+            self._feedback = (
+                ExecutionFeedback(execution_context, pending_command_count=contract.pending_command_count, **processing)
+                if execution_context is not None else None
+            )
+            self._processor = self._feedback.buffer if self._feedback else ActionChunkProcessor(**processing)
             self._task_instruction = task_instruction or ""
             self._action_keys = list(action_keys or self._robot.action_keys)
             self._publish_to_robot = bool(publish_to_robot)
@@ -228,6 +268,13 @@ class ControlLoop:
             self._initial_pose_sync_deadline = None
             self._initial_pose_sync_hold_pending = False
             self._processor = None
+            self._feedback = None
+            self._step_schedule = None
+            self._initial_action_timeout_s = None
+            self._observation_warmup_timeout_s = None
+            self._preparation_needed = False
+            self._preparation_active = False
+            self._feedback_dirty = False
             self._generation += 1
             if self._robot is not None:
                 self._robot.close()
@@ -236,6 +283,8 @@ class ControlLoop:
 
     def start(self, publish_to_robot: Optional[bool] = None) -> bool:
         with self._lock:
+            if self._initial_action_timeout_s is not None and self.prediction_pending():
+                raise RuntimeError("previous prediction is still finishing; retry START after it completes")
             if self._initial_pose_sync_hold_pending:
                 raise RuntimeError(
                     "initial pose sync hold is still pending - STOP again first"
@@ -249,24 +298,83 @@ class ControlLoop:
             )
             if not should_sync:
                 self._running = True
+                if self._feedback:
+                    self._feedback.phase = "running"
                 return False
             if self._robot is None or self._processor is None:
                 raise RuntimeError("LOAD first")
-            robot = self._robot
-            processor = self._processor
-            task_instruction = self._task_instruction
-            action_keys = list(self._action_keys)
-            duration_s = self._initial_pose_sync_duration_s
             generation = self._generation
             self._running = False
             self._initial_pose_sync_in_progress = False
             self._initial_pose_sync_deadline = None
+            if self._feedback:
+                self._feedback.phase = "syncing"
+            if self._initial_action_timeout_s is not None:
+                self._request_reserved = True
+                self._preparation_active = True
+                self._request_thread = threading.Thread(
+                    target=self._prepare_pose_sync, args=(generation,), daemon=True,
+                )
+                try:
+                    self._request_thread.start()
+                except Exception:
+                    self._request_reserved = False
+                    self._preparation_active = False
+                    raise
+                return True
+        return self._start_pose_sync(generation)
+
+    def preparing(self) -> bool:
+        with self._lock:
+            return self._preparation_active or (
+                self._running and self._preparation_needed and not self._initial_pose_sync_in_progress
+            )
+
+    def prediction_pending(self) -> bool:
+        with self._lock:
+            return self._request_reserved or (
+                self._request_thread is not None and self._request_thread.is_alive()
+            )
+
+    def _prepare_pose_sync(self, generation):
+        try:
+            self._start_pose_sync(generation)
+        except Exception as exc:
+            self._report_fault(f"initial prediction failed: {exc}", generation=generation)
+        finally:
+            with self._lock:
+                self._request_reserved = False
+                if generation == self._generation:
+                    self._preparation_active = False
+
+    def _start_pose_sync(self, generation):
+        with self._lock:
+            if generation != self._generation:
+                raise RuntimeError("initial pose sync cancelled")
+            robot, processor = self._robot, self._processor
+            task_instruction = self._task_instruction
+            action_keys = list(self._action_keys)
+            duration_s = self._initial_pose_sync_duration_s
+            timeout_s = self._initial_action_timeout_s
 
         started_at = time.monotonic()
-        response = self._requester.get_action(task_instruction)
-        latency_s = time.monotonic() - started_at
-        self._record_request_latency(latency_s)
-        chunk = self._decode_action_response(response)
+        try:
+            response = self._get_action_with_feedback(task_instruction, generation, timeout_s=timeout_s)
+            latency_s = time.monotonic() - started_at
+            if self._observation_warmup_timeout_s is None:
+                self._record_request_latency(latency_s)
+            chunk = self._decode_action_response(response)
+            if self._observation_warmup_timeout_s is not None:
+                latency_s = action_latency(response.capabilities_json, latency_s)
+                self._record_request_latency(latency_s)
+            if self._step_schedule and len(chunk) != 1:
+                raise ValueError("step pose sync requires exactly one action")
+        except Exception:
+            with self._lock:
+                if self._feedback and generation == self._generation:
+                    self._clear_plan_locked("initial pose request failed", "error")
+            self._schedule_feedback_update()
+            raise
 
         with self._lock:
             if (
@@ -275,7 +383,7 @@ class ControlLoop:
                 or processor is not self._processor
             ):
                 raise RuntimeError("initial pose sync cancelled")
-            processor.clear()
+            self._clear_plan_locked("initial pose sync target", "syncing")
             try:
                 robot.publish_initial_pose_sync(
                     chunk[0],
@@ -286,6 +394,9 @@ class ControlLoop:
                 self._running = False
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_deadline = None
+                if self._feedback:
+                    self._clear_plan_locked("initial pose publication failed", "error")
+                    self._schedule_feedback_update()
                 raise
             self._initial_pose_sync_in_progress = True
             self._initial_pose_sync_deadline = time.monotonic() + duration_s
@@ -299,6 +410,9 @@ class ControlLoop:
             return True
 
     def pause(self) -> bool:
+        return self._pause("paused", "pause")
+
+    def _pause(self, phase, reason) -> bool:
         robot = None
         action_keys: list[str] = []
         with self._lock:
@@ -306,6 +420,7 @@ class ControlLoop:
                 (
                     self._initial_pose_sync_in_progress
                     or self._initial_pose_sync_hold_pending
+                    or self._feedback is not None
                 )
                 and self._publish_to_robot
                 and self._robot is not None
@@ -314,8 +429,8 @@ class ControlLoop:
                 robot = self._robot
                 action_keys = list(self._action_keys)
             self._running = False
-            if self._processor is not None:
-                self._processor.clear()
+            self._preparation_active = False
+            self._clear_plan_locked(reason, "error" if should_hold else phase)
             self._initial_pose_sync_deadline = None
             self._generation += 1
             if should_hold:
@@ -333,16 +448,20 @@ class ControlLoop:
                         self._initial_pose_sync_in_progress = True
                         self._initial_pose_sync_hold_pending = True
                 logger.error("failed to hold current pose during sync pause: %s", e)
+                self._schedule_feedback_update()
                 return False
             with self._lock:
                 if robot is not self._robot:
                     return False
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_hold_pending = False
+                if self._feedback:
+                    self._feedback.phase = phase
+        self._schedule_feedback_update()
         return True
 
     def stop(self) -> bool:
-        return self.pause()
+        return self._pause("stopped", "stop")
 
     def set_requester(self, requester) -> None:
         with self._lock:
@@ -369,14 +488,16 @@ class ControlLoop:
                 "initial_pose_sync_duration_s": self._initial_pose_sync_duration_s,
             }
 
-    def emergency_stop(self, reason: str) -> bool:
+    def emergency_stop(self, reason: str, *, expected_generation=None) -> bool | None:
         """Clear queued commands and hold the latest real-robot joint pose."""
         robot = None
         action_keys: list[str] = []
         with self._lock:
+            if expected_generation is not None and expected_generation != self._generation:
+                return None
             self._running = False
-            if self._processor is not None:
-                self._processor.clear()
+            self._preparation_active = False
+            self._clear_plan_locked(reason[:1024], "error")
             self._generation += 1
             self._initial_pose_sync_deadline = None
             should_hold = (
@@ -391,6 +512,7 @@ class ControlLoop:
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_hold_pending = False
         logger.error("policy runtime safety stop: %s", reason)
+        self._schedule_feedback_update()
         if robot is None:
             return True
         try:
@@ -417,6 +539,8 @@ class ControlLoop:
             self._set_publish_to_robot_locked(bool(publish_to_robot))
 
     def _set_publish_to_robot_locked(self, publish_to_robot: bool) -> None:
+        if self._step_schedule and not publish_to_robot:
+            raise ValueError("step execution requires command receipts; preview-only is unsupported")
         if self._publish_to_robot == publish_to_robot:
             return
         if self._robot is not None:
@@ -428,13 +552,18 @@ class ControlLoop:
             if callable(set_state_subscription):
                 set_state_subscription(publish_to_robot)
         self._publish_to_robot = publish_to_robot
-        if self._processor is not None:
-            self._processor.clear()
+        self._clear_plan_locked("publish mode changed", "running" if self._running else "ready")
         self._generation += 1
 
     def set_task_instruction(self, task_instruction: str) -> None:
         with self._lock:
-            self._task_instruction = task_instruction or ""
+            instruction = task_instruction or ""
+            if self._feedback and instruction != self._task_instruction:
+                if self._initial_pose_sync_in_progress or self._initial_pose_sync_hold_pending:
+                    raise RuntimeError("stop pose sync before changing a contextual instruction")
+                self._clear_plan_locked("instruction changed", self._feedback.phase)
+                self._generation += 1
+            self._task_instruction = instruction
 
     def run_background(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -461,6 +590,14 @@ class ControlLoop:
         self.deconfigure()
 
     def tick(self) -> None:
+        fault = self._tick_once()
+        if fault is not None:
+            reason, generation = fault
+            self._report_fault(reason, generation=generation)
+
+    def _tick_once(self):
+        fault = None
+        request_thread = None
         with self._lock:
             if not self._running or self._robot is None or self._processor is None:
                 return
@@ -485,15 +622,25 @@ class ControlLoop:
                                     "failed to publish idle action during pose sync: %s",
                                     e,
                                 )
+                                if self._feedback:
+                                    self._running = False
+                                    return f"failed to publish sync idle action: {e}", generation
                     return
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_completed = True
                 self._initial_pose_sync_deadline = None
+                if self._feedback:
+                    self._clear_plan_locked("initial pose sync complete", "running")
                 logger.info(
                     "initial pose sync complete; requesting a fresh action chunk"
                 )
 
-            action = processor.pop_action()
+            command = None
+            if self._feedback:
+                command = processor.take(repeat_last=True) if self._step_schedule else processor.take()
+                action = None if command is None else np.asarray(command.values, dtype=command.dtype)
+            else:
+                action = processor.pop_action()
             if action is not None:
                 preview = getattr(robot, "publish_action_preview", None)
                 if callable(preview):
@@ -503,9 +650,26 @@ class ControlLoop:
                         logger.warning("failed to publish action preview: %s", e)
                 if publish_to_robot:
                     try:
-                        robot.publish_action(action, action_keys)
+                        if self._feedback:
+                            expired = self._step_schedule and self._step_schedule.velocity_expired(
+                                command.prediction_id, time.monotonic(),
+                            )
+                            options = {"zero_twist": True} if expired else {}
+                            emitted = robot.publish_action_with_receipt(action, action_keys, **options)
+                            processor.finish(command.command_id, status="published", emitted_values=emitted,
+                                             reason="step period elapsed" if expired else "")
+                            if self._step_schedule:
+                                self._step_schedule.published(command.prediction_id, time.monotonic())
+                        else:
+                            robot.publish_action(action, action_keys)
                     except Exception as e:
                         logger.error("failed to publish robot action: %s", e)
+                        if self._feedback:
+                            processor.finish(command.command_id, status="failed", reason=str(e)[:1024])
+                            self._running = False
+                            fault = f"failed to publish robot action: {e}"
+                elif self._feedback:
+                    processor.finish(command.command_id, status="discarded", reason="preview-only")
             elif publish_to_robot:
                 idle = getattr(robot, "publish_idle_action", None)
                 if callable(idle):
@@ -513,16 +677,36 @@ class ControlLoop:
                         idle(action_keys)
                     except Exception as e:
                         logger.error("failed to publish idle robot action: %s", e)
+                        if self._feedback:
+                            self._running = False
+                            fault = f"failed to publish idle robot action: {e}"
 
-            should_request = self._should_request_actions(processor)
+            should_request = fault is None and self._should_request_actions(processor)
+            if should_request:
+                self._request_reserved = True
+                request_thread = threading.Thread(
+                    target=self._run_reserved_request,
+                    args=(task_instruction, generation, action_request_mode), daemon=True,
+                )
+                self._request_thread = request_thread
 
-        if should_request:
-            self._request_thread = threading.Thread(
-                target=self._request_and_buffer,
-                args=(task_instruction, generation, action_request_mode),
-                daemon=True,
-            )
-            self._request_thread.start()
+        if fault is not None:
+            return fault, generation
+        if request_thread is not None:
+            try:
+                request_thread.start()
+            except Exception as e:
+                with self._lock:
+                    self._request_reserved = False
+                    self._request_thread = None
+                return f"could not start inference request: {e}", generation
+
+    def _run_reserved_request(self, *args):
+        try:
+            self._request_and_buffer(*args)
+        finally:
+            with self._lock:
+                self._request_reserved = False
 
     def _request_and_buffer(
         self,
@@ -533,20 +717,27 @@ class ControlLoop:
         action_request_mode = normalize_action_request_mode(action_request_mode)
         started_at = time.monotonic()
         try:
-            response = self._requester.get_action(task_instruction)
+            with self._lock:
+                timeout_s = self._initial_action_timeout_s if self._preparation_needed else None
+            response = self._get_action_with_feedback(task_instruction, generation, timeout_s=timeout_s)
         except Exception as e:
-            latency_s = time.monotonic() - started_at
-            self._record_request_latency(latency_s)
             logger.warning("get_action raised: %s", e)
-            self._report_fault(f"get_action raised: {e}")
+            self._report_fault(f"get_action raised: {e}", generation=generation)
             return
         latency_s = time.monotonic() - started_at
-        self._record_request_latency(latency_s)
+        with self._lock:
+            if generation != self._generation:
+                return
+        if self._observation_warmup_timeout_s is None:
+            self._record_request_latency(latency_s)
         try:
             chunk = self._decode_action_response(response)
+            if self._observation_warmup_timeout_s is not None:
+                latency_s = action_latency(response.capabilities_json, latency_s)
+                self._record_request_latency(latency_s)
         except ValueError as e:
             logger.warning("get_action response rejected: %s", e)
-            self._report_fault(f"get_action failed: {e}")
+            self._report_fault(f"get_action failed: {e}", generation=generation)
             return
         with self._lock:
             if (
@@ -564,11 +755,29 @@ class ControlLoop:
                     if action_request_mode == ACTION_REQUEST_MODE_SYNC
                     else latency_s + buffer_delay_s
                 )
-                produced = self._processor.push_actions(
-                    chunk,
-                    scheduled_start_delay_s=scheduled_start_delay_s,
-                    align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
-                )
+                if self._feedback:
+                    try:
+                        if self._step_schedule:
+                            self._step_schedule.accepted(response.seq_id, chunk)
+                        produced = self._processor.enqueue(
+                            response.seq_id, chunk, scheduled_start_delay_s,
+                            align=self._step_schedule is None and action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                        ).command_count
+                    except Exception as e:
+                        self._running = False
+                        fault = str(e)
+                    else:
+                        fault = None
+                        self._preparation_needed = False
+                else:
+                    fault = None
+                    produced = self._processor.push_actions(
+                        chunk,
+                        scheduled_start_delay_s=scheduled_start_delay_s,
+                        align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                    )
+                if fault is not None:
+                    produced = 0
                 scheduled_start_text = (
                     "none"
                     if scheduled_start_delay_s is None
@@ -585,14 +794,88 @@ class ControlLoop:
                     buffer_delay_s,
                     scheduled_start_text,
                 )
+            else:
+                fault = None
+        if fault is not None:
+            self._report_fault(f"action buffering failed: {fault}", generation=generation)
 
-    def _report_fault(self, reason: str) -> None:
-        hold_ok = self.emergency_stop(reason)
+    def _report_fault(self, reason: str, *, generation=None) -> None:
+        hold_ok = self.emergency_stop(reason, expected_generation=generation)
+        if hold_ok is None:
+            return
         if self._fault_callback is not None:
             try:
                 self._fault_callback(reason, hold_ok)
             except Exception as e:
                 logger.error("policy runtime fault callback failed: %s", e)
+
+    def _clear_plan_locked(self, reason, phase):
+        self._preparation_needed = self._initial_action_timeout_s is not None
+        if self._step_schedule:
+            self._step_schedule.reset()
+        if self._feedback:
+            self._feedback.reset(reason, phase)
+        elif self._processor is not None:
+            self._processor.clear()
+
+    def _get_action_with_feedback(self, instruction, generation, *, timeout_s=None):
+        # All feedback projection/serialization and Worker waits run outside tick.
+        with self._feedback_io_lock:
+            with self._lock:
+                if generation != self._generation:
+                    raise RuntimeError("inference generation cancelled")
+                feedback, requester = self._feedback, self._requester
+                capture = feedback.capture() if feedback else None
+            context = feedback.project(capture) if feedback else None
+            options = {} if timeout_s is None else {"timeout_s": timeout_s}
+            response = (
+                requester.get_action(instruction, context=context, **options)
+                if context is not None else requester.get_action(instruction, **options)
+            )
+            with self._lock:
+                if feedback is not None and feedback is self._feedback and response.success:
+                    feedback.acknowledge(context)
+            return response
+
+    def _schedule_feedback_update(self):
+        with self._lock:
+            if self._feedback is None:
+                return
+            self._feedback_dirty = True
+            if self._feedback_thread is not None:
+                return
+            self._feedback_thread = threading.Thread(target=self._flush_feedback, daemon=True)
+            try:
+                self._feedback_thread.start()
+            except Exception as e:
+                self._feedback_thread = None
+                logger.warning("could not start execution feedback update: %s", e)
+
+    def _flush_feedback(self):
+        while True:
+            with self._feedback_io_lock:
+                with self._lock:
+                    if not self._feedback_dirty or self._feedback is None:
+                        self._feedback_thread = None
+                        return
+                    self._feedback_dirty = False
+                    feedback, requester = self._feedback, self._requester
+                try:
+                    with self._lock:
+                        if feedback is not self._feedback:
+                            continue
+                        capture = feedback.capture()
+                    context = feedback.project(capture)
+                    response = requester.update_context(context)
+                    if not response.success:
+                        raise RuntimeError(response.message)
+                    with self._lock:
+                        if feedback is self._feedback:
+                            feedback.acknowledge(context)
+                except Exception as e:
+                    # Do not turn an unacknowledged update into a successful ACK,
+                    # or wait for a Worker ACK before carrying out a safety hold.
+                    logger.warning("execution feedback update failed: %s", e)
 
     @staticmethod
     def _decode_action_response(response) -> np.ndarray:
@@ -612,8 +895,12 @@ class ControlLoop:
         return data.reshape(response.chunk_size, response.action_dim)
 
     def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
+        if self._request_reserved:
+            return False
         if self._request_thread is not None and self._request_thread.is_alive():
             return False
+        if self._step_schedule:
+            return self._step_schedule.can_request(time.monotonic(), processor.buffer_size)
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
             return processor.buffer_size <= 0
         return processor.buffer_size < self._refill_threshold(processor)
@@ -655,7 +942,7 @@ class ControlLoop:
 
     def _tick_period(self) -> float:
         with self._lock:
-            if self._processor is None:
+            if self._processor is None or self._step_schedule is not None:
                 hz = self._control_hz
             else:
                 hz = self._processor.output_hz

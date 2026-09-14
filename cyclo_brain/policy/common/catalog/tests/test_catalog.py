@@ -21,7 +21,7 @@ def test_repository_catalog_matches_compose_services():
     assert "groot:n17" in policy_ids
 
 
-@pytest.mark.parametrize("model", ["eo1", "evo1", "wall_x", "pi0_fast", "groot"])
+@pytest.mark.parametrize("model", ["wall_x", "groot", "pi0", "pi05", "multi_task_dit"])
 def test_new_lerobot_policies_are_resolved_from_checkpoint(tmp_path, model):
     import json
 
@@ -39,9 +39,22 @@ def test_groot_and_pi0_legacy_routes_remain_unambiguous(tmp_path):
     catalog = load_catalog(POLICY_ROOT)
     assert resolve_policy(catalog, "groot")[1]["policy_id"] == "groot:n17"
     assert resolve_policy(catalog, "lerobot:groot")[0]["id"] == "lerobot"
-    assert resolve_policy(catalog, "pi0_fast")[1]["policy_id"] == "lerobot:pi0_fast"
-    (tmp_path / "config.json").write_text('{"type":"pi0_fast"}')
+    assert resolve_policy(catalog, "pi0")[1]["policy_id"] == "lerobot:pi0"
+    (tmp_path / "config.json").write_text('{"type":"pi0"}')
     assert resolve_policy_id(catalog, "lerobot", "lerobot:pi0", tmp_path) == "lerobot:pi0"
+
+
+@pytest.mark.parametrize("model", ["eo1", "evo1", "pi0_fast", "lingbot_va"])
+def test_removed_policies_cannot_resolve_from_id_alias_or_checkpoint(tmp_path, model):
+    import json
+
+    catalog = load_catalog(POLICY_ROOT)
+    for policy_id in (model, f"lerobot:{model}"):
+        with pytest.raises(CatalogError, match="unknown policy id"):
+            resolve_policy(catalog, policy_id)
+    (tmp_path / "config.json").write_text(json.dumps({"type": model}))
+    with pytest.raises(CatalogError, match="not supported"):
+        resolve_policy_id(catalog, "lerobot", "", tmp_path)
 
 
 def test_policy_parameter_payload_defaults_and_canonicalizes(tmp_path):

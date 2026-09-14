@@ -111,9 +111,10 @@ def test_dynamic_engine_command_definition_matches_ros_service() -> None:
     dynamic_fields = _field_lines(definitions.ENGINE_COMMAND_REQUEST_DEF)
 
     assert dynamic_fields == service_fields
-    assert dynamic_fields[-2:] == [
+    assert dynamic_fields[-3:] == [
         "string policy_id",
         "string policy_parameters_json",
+        "string execution_context_json",
     ]
     dynamic_response_fields = _field_lines(
         definitions.ENGINE_COMMAND_RESPONSE_DEF

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import sys
 import types
 import unittest
+from unittest import mock
 
 import numpy as np
 import torch
@@ -75,6 +76,37 @@ class Preprocessor(PreprocessingMixin):
 
 
 class PreprocessingTest(unittest.TestCase):
+    def test_input_plan_is_compiled_once_for_repeated_predictions(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
+        with mock.patch.object(preprocessing, "latest_input_plan", wraps=preprocessing.latest_input_plan) as compile_plan:
+            for _ in range(10):
+                preprocessor._build_observation("task")
+        self.assertEqual(compile_plan.call_count, 1)
+
+    def test_step_prefers_readiness_checked_selected_snapshot(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
+
+        class SelectiveRobot(FakeRobot):
+            def get_input_snapshot(self):
+                raise AssertionError("must not copy all inputs while waiting")
+
+            def get_required_input_snapshot(self, sources, *, max_age_s, after_s):
+                assert sources == {"joint:follower_arm"}
+                assert max_age_s == 1. and after_s == 9.
+                self.calls += 1
+                if self.calls < 3:
+                    raise ValueError("joint:follower_arm: stale")
+                return {"images": {}, "joint_positions": {"follower_arm": np.ones(2)},
+                        "sensors": {}, "reception_monotonic_timestamps": {"joint:follower_arm": 10.}}
+
+        preprocessor._robot = SelectiveRobot([1., 2.])
+        preprocessor._robot.calls = 0
+        with mock.patch.object(preprocessing.time, "monotonic", return_value=10.1), \
+                mock.patch.object(preprocessing.time, "sleep"):
+            batch = preprocessor._build_observation("task", require_received=True, observation_after_s=9.)
+        self.assertIn(STATE_KEY, batch)
+        self.assertEqual(preprocessor._robot.calls, 3)
+
     def camera_preprocessor(self, operations):
         preprocessor = Preprocessor([1.0, 2.0], expected=2)
         key = "observation.images.head"
@@ -151,6 +183,56 @@ class PreprocessingTest(unittest.TestCase):
             batch[STATE_KEY].numpy(),
             np.asarray([[1.0, 2.0]], dtype=np.float32),
         )
+
+    def test_step_waits_for_each_required_source_before_transforming(self):
+        preprocessor, key, image = self.camera_preprocessor([{"type": "identity"}])
+
+        class SnapshotRobot(FakeRobot):
+            def get_input_snapshot(self):
+                return next(snapshots)
+
+        preprocessor._robot = SnapshotRobot([1., 2.])
+        preprocessor._robot._config = {"cameras": {"head": {"rotation_deg": 270}}}
+
+        def snapshot(camera_stamp, joint_stamp):
+            return {"images": {"head": image}, "joint_positions": {"follower_arm": [1., 2.]},
+                    "sensors": {}, "reception_monotonic_timestamps": {
+                        "camera:head": camera_stamp, "joint:follower_arm": joint_stamp}}
+
+        # A fresh joint alone is not enough. Unused cameras/sensors are not required.
+        snapshots = iter([snapshot(9., 10.1), snapshot(10.1, 9.), snapshot(10.2, 10.2)])
+        with mock.patch.object(preprocessing.time, "monotonic", return_value=10.3), \
+                mock.patch.object(preprocessing.time, "sleep") as sleep, \
+                mock.patch.object(preprocessor, "_transform_image", wraps=preprocessor._transform_image) as transform:
+            batch = preprocessor._build_observation("pick", require_received=True, observation_after_s=10.)
+        self.assertIn(key, batch)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(transform.call_count, 1)
+        self.assertEqual(batch["task"], ["pick"])
+
+    def test_step_missing_timestamps_fail_before_model_preprocessing(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
+        with mock.patch.object(preprocessor, "_transform_state") as transform:
+            result = preprocessor._build_observation("pick", require_received=True)
+        self.assertIn("timestamped RobotClient", result["error"])
+        transform.assert_not_called()
+
+    def test_step_stale_snapshot_has_bounded_wait_and_explicit_source_error(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
+
+        class SnapshotRobot(FakeRobot):
+            def get_input_snapshot(self):
+                return {"images": {}, "joint_positions": {"follower_arm": [1., 2.]}, "sensors": {},
+                        "reception_monotonic_timestamps": {"joint:follower_arm": 5.}}
+
+        preprocessor._robot = SnapshotRobot([1., 2.])
+        with mock.patch.object(preprocessing.time, "monotonic", side_effect=[10., 10., 11.]), \
+                mock.patch.object(preprocessing.time, "sleep") as sleep, \
+                mock.patch.object(preprocessor, "_transform_state") as transform:
+            result = preprocessor._build_observation("pick", require_received=True)
+        self.assertIn("joint:follower_arm: stale", result["error"])
+        self.assertEqual(sleep.call_count, 1)
+        transform.assert_not_called()
 
 
 if __name__ == "__main__":

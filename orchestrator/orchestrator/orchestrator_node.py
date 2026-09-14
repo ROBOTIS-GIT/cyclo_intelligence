@@ -937,6 +937,7 @@ class OrchestratorNode(Node):
         self._inference_status_wake = threading.Event()
         self._inference_status_generation = 0
         self._inference_commands_pending = 0
+        self._inference_verified_stop = None
         self._inference_status_snapshot = dict(
             phase=InferenceStatus.READY, error='', status_known=False,
             runtime_state='unknown', model_path='', policy_id='',
@@ -958,6 +959,8 @@ class OrchestratorNode(Node):
 
     def _observe_inference_command(self, starting: bool) -> None:
         with self._state_lock:
+            if starting:
+                self._inference_verified_stop = None
             self._inference_commands_pending += 1 if starting else -1
             self._inference_status_generation += 1
         self._inference_status_wake.set()
@@ -991,7 +994,8 @@ class OrchestratorNode(Node):
     def _inference_status_busy(self) -> bool:
         return (self._inference_commands_pending > 0
                 or self._inference_lifecycle_lock.locked()
-                or self._inference_status_snapshot['phase'] == InferenceStatus.LOADING)
+                or (self._inference_status_snapshot['phase'] == InferenceStatus.LOADING
+                    and self._inference_status_snapshot['runtime_state'] != 'preparing'))
 
     def _poll_inference_status_once(self) -> None:
         with self._state_lock:
@@ -1020,7 +1024,7 @@ class OrchestratorNode(Node):
             if not result.success:
                 raise RuntimeError(result.message or 'Policy runtime status unavailable')
             if runtime_state not in {
-                'unloaded', 'loaded', 'syncing', 'running', 'paused', 'error'
+                'unloaded', 'loaded', 'preparing', 'syncing', 'running', 'paused', 'error'
             }:
                 raise ValueError(f'Invalid policy runtime state: {runtime_state!r}')
             error = ''
@@ -1050,6 +1054,8 @@ class OrchestratorNode(Node):
     @staticmethod
     def _runtime_state_to_inference_phase(runtime_state: str) -> int:
         state = str(runtime_state or '').strip().lower()
+        if state == 'preparing':
+            return InferenceStatus.LOADING
         if state == 'syncing':
             return InferenceStatus.SYNCING
         if state == 'running':
@@ -1231,28 +1237,84 @@ class OrchestratorNode(Node):
             )
         return result
 
+    def _resume_inference_client(
+        self, client, *, task_instruction, publish_to_robot,
+        initial_pose_sync_duration_s, restart_timer=False,
+    ):
+        # LOAD and cleanup run on background threads. Do not queue a stale
+        # RESUME behind their long RPCs or hold the state lock during transport.
+        if not self._inference_lifecycle_lock.acquire(blocking=False):
+            raise RuntimeError('Inference lifecycle operation in progress; retry when it finishes')
+        try:
+            def check_owner():
+                if (self.container_service_client is not client
+                        or getattr(self, '_inference_cleanup_client', None) is client):
+                    raise RuntimeError('Inference session changed or cleanup is pending; RESUME cancelled')
+
+            with self._state_lock:
+                check_owner()
+            result = client.inference_command(
+                ContainerServiceClient.CMD_RESUME,
+                task_instruction=task_instruction,
+                publish_to_robot=publish_to_robot,
+            )
+            with self._state_lock:
+                check_owner()
+                if result.success:
+                    self._loaded_inference_publish_to_robot = publish_to_robot
+                    self._set_session_active(
+                        on_inference=True,
+                        start_time=time.perf_counter() if restart_timer else None,
+                    )
+                    if (getattr(result, 'data', None) or {}).get('runtime_state') == 'preparing':
+                        self._apply_inference_runtime_status(result)
+                        self._broadcast_inference_status()
+                    elif (result.message or '').strip().lower() == 'syncing':
+                        self._begin_initial_pose_sync_status(client, initial_pose_sync_duration_s)
+                    else:
+                        self._publish_inference_phase(InferenceStatus.INFERENCING)
+            return result
+        finally:
+            self._inference_lifecycle_lock.release()
+
     def _stop_initial_pose_sync_for_teardown(
         self,
         client: ContainerServiceClient,
         force: bool = False,
     ) -> bool:
+        with self._state_lock:
+            if self.container_service_client is not client:
+                raise RuntimeError('Inference session changed before Stop')
+            self._inference_verified_stop = None
         sync_is_active = self._initial_pose_sync_is_active(client)
         if not sync_is_active and not force:
             return False
         if sync_is_active:
             self._cancel_initial_pose_sync_status()
+        # Stop remains available during a long lifecycle RPC. Only an exclusive
+        # Stop can be reused as proof for a later UNLOAD without another Stop.
+        exclusive = self._inference_lifecycle_lock.acquire(blocking=False)
         try:
-            stop_result = client.inference_command(ContainerServiceClient.CMD_STOP)
-        except Exception as exc:
-            message = f'Current-pose hold failed: {exc}'
-            self._mark_initial_pose_sync_hold_failed(client, message)
-            raise RuntimeError(message) from exc
-        if not stop_result.success:
-            message = stop_result.message or 'Current-pose hold failed; retry'
-            self._mark_initial_pose_sync_hold_failed(client, message)
-            raise RuntimeError(message)
-        self._clear_initial_pose_sync_hold_pending(client)
-        return True
+            try:
+                stop_result = client.inference_command(ContainerServiceClient.CMD_STOP)
+            except Exception as exc:
+                message = f'Current-pose hold failed: {exc}'
+                self._mark_initial_pose_sync_hold_failed(client, message)
+                raise RuntimeError(message) from exc
+            if not stop_result.success:
+                message = stop_result.message or 'Current-pose hold failed; retry'
+                self._mark_initial_pose_sync_hold_failed(client, message)
+                raise RuntimeError(message)
+            with self._state_lock:
+                if self.container_service_client is not client:
+                    raise RuntimeError('Inference session changed during Stop')
+                self._clear_initial_pose_sync_hold_pending(client)
+                if exclusive and self._inference_commands_pending == 0:
+                    self._inference_verified_stop = (client, self._inference_status_generation)
+            return True
+        finally:
+            if exclusive:
+                self._inference_lifecycle_lock.release()
 
     def _prepare_active_initial_pose_sync_teardown(
         self,
@@ -1804,32 +1866,18 @@ class OrchestratorNode(Node):
                         )
                         self._teardown_inference_client()
                     else:
-                        resume_result = existing_client.inference_command(
-                            ContainerServiceClient.CMD_RESUME,
+                        resume_result = self._resume_inference_client(
+                            existing_client,
                             task_instruction=task_instruction,
                             publish_to_robot=publish_to_robot,
+                            initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
+                            restart_timer=True,
                         )
                         if resume_result.success:
-                            with self._state_lock:
-                                self._loaded_inference_publish_to_robot = (
-                                    publish_to_robot
-                                )
-                            self._set_session_active(
-                                on_inference=True,
-                                start_time=time.perf_counter(),
-                            )
                             needs_initial_pose_sync = (
                                 (resume_result.message or '').strip().lower()
                                 == 'syncing'
                             )
-                            if needs_initial_pose_sync:
-                                self._begin_initial_pose_sync_status(
-                                    existing_client,
-                                    loaded_initial_pose_sync_duration_s,
-                                )
-                            else:
-                                self._publish_inference_phase(
-                                    InferenceStatus.INFERENCING)
                             response.success = True
                             response.message = (
                                 'Initial pose sync started'
@@ -1893,6 +1941,13 @@ class OrchestratorNode(Node):
                     robot_type = self.robot_type
 
                     def _load_and_start():
+                        def _owns_session():
+                            with self._state_lock:
+                                return (
+                                    self.container_service_client is client
+                                    and getattr(self, '_inference_cleanup_client', None) is not client
+                                )
+
                         try:
                             def _call_load():
                                 return client.inference_command(
@@ -1923,11 +1978,12 @@ class OrchestratorNode(Node):
                                 )
 
                             with self._inference_lifecycle_lock:
-                                with self._state_lock:
-                                    if self.container_service_client is not client:
-                                        return
+                                if not _owns_session():
+                                    return
 
                                 load_result = _call_load()
+                                if not _owns_session():
+                                    return
                                 if (
                                     not load_result.success
                                     and self._is_policy_already_loaded_message(
@@ -1942,37 +1998,29 @@ class OrchestratorNode(Node):
                                     stop_result = client.inference_command(
                                         ContainerServiceClient.CMD_STOP
                                     )
+                                    if not _owns_session():
+                                        return
                                     if not stop_result.success:
-                                        self.get_logger().warning(
+                                        raise RuntimeError(
                                             'STOP before LOAD retry failed: '
                                             f'{stop_result.message}'
                                         )
                                     unload_result = client.inference_command(
                                         ContainerServiceClient.CMD_UNLOAD
                                     )
+                                    if not _owns_session():
+                                        return
                                     if not unload_result.success:
-                                        self.get_logger().warning(
+                                        raise RuntimeError(
                                             'UNLOAD before LOAD retry failed: '
                                             f'{unload_result.message}'
                                         )
                                     load_result = _call_load()
+                                    if not _owns_session():
+                                        return
 
                                 if not load_result.success:
-                                    self.get_logger().error(
-                                        f'Async LOAD failed: {load_result.message}'
-                                    )
-                                    self._teardown_inference_client(
-                                        expected_client=client
-                                    )
-                                    self._publish_inference_phase(
-                                        InferenceStatus.READY,
-                                        error=load_result.message,
-                                    )
-                                    return
-
-                                with self._state_lock:
-                                    if self.container_service_client is not client:
-                                        return
+                                    raise RuntimeError(f'Async LOAD failed: {load_result.message}')
 
                                 action_keys = load_result.data.get('action_keys', [])
                                 self.get_logger().info(
@@ -1983,21 +2031,13 @@ class OrchestratorNode(Node):
                                     ContainerServiceClient.CMD_START,
                                     publish_to_robot=publish_to_robot,
                                 )
-                                if not start_result.success:
-                                    self.get_logger().error(
-                                        f'Async START failed: {start_result.message}'
-                                    )
-                                    self._teardown_inference_client(
-                                        expected_client=client
-                                    )
-                                    self._publish_inference_phase(
-                                        InferenceStatus.READY,
-                                        error=start_result.message,
-                                    )
+                                if not _owns_session():
                                     return
+                                if not start_result.success:
+                                    raise RuntimeError(f'Async START failed: {start_result.message}')
 
                                 with self._state_lock:
-                                    if self.container_service_client is not client:
+                                    if not _owns_session():
                                         return
 
                                     self._loaded_inference_policy_path = (
@@ -2037,32 +2077,42 @@ class OrchestratorNode(Node):
                                         requested_initial_pose_sync_duration_s
                                     )
 
-                                self._set_session_active(
-                                    on_inference=True,
-                                    start_time=time.perf_counter(),
-                                )
-                                if (
-                                    (start_result.message or '').strip().lower()
-                                    == 'syncing'
-                                ):
-                                    self._begin_initial_pose_sync_status(
-                                        client,
-                                        requested_initial_pose_sync_duration_s,
+                                    self._set_session_active(
+                                        on_inference=True,
+                                        start_time=time.perf_counter(),
                                     )
-                                else:
-                                    self._publish_inference_phase(
-                                        InferenceStatus.INFERENCING
-                                    )
+                                    if (getattr(start_result, 'data', None) or {}).get('runtime_state') == 'preparing':
+                                        self._apply_inference_runtime_status(start_result)
+                                        self._broadcast_inference_status()
+                                    elif (
+                                        (start_result.message or '').strip().lower()
+                                        == 'syncing'
+                                    ):
+                                        self._begin_initial_pose_sync_status(
+                                            client,
+                                            requested_initial_pose_sync_duration_s,
+                                        )
+                                    else:
+                                        self._publish_inference_phase(
+                                            InferenceStatus.INFERENCING
+                                        )
                         except Exception as e:
                             self.get_logger().error(
-                                f'Async LOAD/START error: {e}', exc_info=True
+                                f'Async LOAD/START error: {e}\n{traceback.format_exc()}'
                             )
                             try:
+                                with self._state_lock:
+                                    if not _owns_session():
+                                        return
+                                    # Cleanup owns the eventual READY transition.
+                                    # A rejected hold/unload must not appear ready.
+                                    self._inference_status_generation += 1
+                                    self._inference_status_snapshot['runtime_state'] = 'error'
+                                    self._inference_status_snapshot['error'] = str(e)
+                                    self._broadcast_inference_status()
                                 self._teardown_inference_client(
-                                    expected_client=client
-                                )
-                                self._publish_inference_phase(
-                                    InferenceStatus.READY, error=str(e)
+                                    expected_client=client,
+                                    completion_error=str(e),
                                 )
                             except Exception:
                                 pass
@@ -2251,7 +2301,16 @@ class OrchestratorNode(Node):
                 snapshot_on_recording, snapshot_on_inference = (
                     self._snapshot_session_state()
                 )
-                if not snapshot_on_recording and not snapshot_on_inference:
+                # LOAD can fail before on_inference becomes true. Retained
+                # client ownership still requires Clear to retry STOP/UNLOAD.
+                with self._state_lock:
+                    inference_clear_pending = (
+                        request.command == SendCommand.Request.FINISH
+                        and request.task_info.task_type == 'inference'
+                        and self.container_service_client is not None
+                    )
+                if (not snapshot_on_recording and not snapshot_on_inference
+                        and not inference_clear_pending):
                     # Not recording — CANCEL/RERECORD have nothing to
                     # do at idle. Do not forward a targetless CANCEL here:
                     # a concurrent joystick/UI START could otherwise turn
@@ -2345,25 +2404,12 @@ class OrchestratorNode(Node):
                                 if request.task_info.task_instruction
                                 else ''
                             )
-                            result = client.inference_command(
-                                ContainerServiceClient.CMD_RESUME,
+                            result = self._resume_inference_client(
+                                client,
                                 task_instruction=task_instruction,
                                 publish_to_robot=loaded_publish_to_robot,
+                                initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
                             )
-                            if result.success:
-                                self.on_inference = True
-                                needs_initial_pose_sync = (
-                                    (result.message or '').strip().lower()
-                                    == 'syncing'
-                                )
-                                if needs_initial_pose_sync:
-                                    self._begin_initial_pose_sync_status(
-                                        client,
-                                        loaded_initial_pose_sync_duration_s,
-                                    )
-                                else:
-                                    self._publish_inference_phase(
-                                        InferenceStatus.INFERENCING)
                             response.success = result.success
                             response.message = result.message or 'Inference resumed'
                         else:
@@ -2510,14 +2556,10 @@ class OrchestratorNode(Node):
                             )
                             if self.timer_manager:
                                 self.timer_manager.stop(timer_name='collection')
-                            # Flip UI out of INFERENCING/PAUSED immediately.
-                            self._publish_inference_phase(InferenceStatus.READY)
+                            # Cleanup is asynchronous. Only its UNLOAD ACK may
+                            # clear the runtime session and publish READY.
                             response.success = True
-                            response.message = (
-                                cd_result.response.message
-                                if (cd_result.response is not None)
-                                else (cd_result.message or 'Inference cleared')
-                            )
+                            response.message = 'Inference cleanup requested'
                         else:
                             if (cd_result.success
                                     and cd_result.response is not None
@@ -3062,6 +3104,7 @@ class OrchestratorNode(Node):
         self,
         expected_client=None,
         stop_verified_client=None,
+        completion_error='',
     ):
         """Tear down the container service client (STOP + UNLOAD + disconnect).
 
@@ -3074,6 +3117,8 @@ class OrchestratorNode(Node):
         with self._state_lock:
             client = self.container_service_client
             if expected_client is not None and client is not expected_client:
+                return
+            if client is None or getattr(self, '_inference_cleanup_client', None) is client:
                 return
             sync_was_active = (
                 client is not None
@@ -3091,57 +3136,91 @@ class OrchestratorNode(Node):
                 )
             )
 
-        stop_verified = stop_verified_client is client
+            stop_verified = (stop_verified_client is client and
+                             self._inference_verified_stop == (client, self._inference_status_generation))
         if sync_stop_required and not stop_verified:
             stop_verified = self._stop_initial_pose_sync_for_teardown(
                 client,
                 force=True,
             )
 
-        # Atomic swap: detach the client under the lock so concurrent
-        # callers (RESUME path, joystick handler, daemon thread) can't
-        # both grab the same client and double-disconnect.
+        # Reserve cleanup, but retain ownership until STOP and UNLOAD succeed.
+        # Long model predictions can temporarily reject UNLOAD after Stop.
         with self._state_lock:
             if self.container_service_client is not client:
                 return
             if expected_client is not None and client is not expected_client:
                 return
-            self._initial_pose_sync_status_active = False
+            if client is None or getattr(self, '_inference_cleanup_client', None) is client:
+                return
+            stop_verified = (stop_verified and self._inference_verified_stop ==
+                             (client, self._inference_status_generation))
+            self._inference_cleanup_client = client
             self._inference_status_generation += 1
-            self.container_service_client = None
-            self._loaded_inference_policy_path = ''
-            self._loaded_inference_policy_id = ''
-            self._loaded_inference_policy_parameters_json = '{}'
-            self._loaded_inference_publish_to_robot = False
-            self._loaded_inference_acceleration_mode = 'pytorch'
-            self._loaded_inference_acceleration_engine_path = ''
-            self._loaded_inference_action_request_mode = 'async'
-            self._loaded_inference_control_hz = 100
-            self._loaded_inference_inference_hz = 15
-            self._loaded_inference_chunk_align_window_s = 0.3
-            self._loaded_inference_initial_pose_sync = False
-            self._loaded_inference_initial_pose_sync_duration_s = 5.0
-            self._initial_pose_sync_hold_pending = False
-            if client is not None:
-                # Cover the gap before the cleanup thread acquires its lock.
-                self._observe_inference_command(True)
-        if client is None:
-            return
+            self._observe_inference_command(True)
+            stop_generation = self._inference_status_generation if stop_verified else None
 
         def _cleanup():
+            completed = False
             try:
                 with self._inference_lifecycle_lock:
-                    if not stop_verified:
-                        client.inference_command(ContainerServiceClient.CMD_STOP)
-                    client.inference_command(ContainerServiceClient.CMD_UNLOAD)
+                    with self._state_lock:
+                        if self.container_service_client is not client:
+                            # Both clients address the same global runtime. A
+                            # replacement LOAD may have won this lock first;
+                            # release only the obsolete local client in that case.
+                            completed = True
+                            return
+                        stop_is_current = (stop_generation is not None and
+                                           stop_generation == self._inference_status_generation)
+                    if not stop_is_current:
+                        stopped = client.inference_command(ContainerServiceClient.CMD_STOP)
+                        if not stopped.success:
+                            raise RuntimeError(f'STOP rejected: {stopped.message}')
+                    with self._state_lock:
+                        if self.container_service_client is not client:
+                            completed = True
+                            return
+                    unloaded = client.inference_command(ContainerServiceClient.CMD_UNLOAD)
+                    if not unloaded.success:
+                        raise RuntimeError(f'UNLOAD rejected: {unloaded.message}')
+                    with self._state_lock:
+                        if self.container_service_client is client:
+                            self.container_service_client = None
+                            self._loaded_inference_policy_path = ''
+                            self._loaded_inference_policy_id = ''
+                            self._loaded_inference_policy_parameters_json = '{}'
+                            self._loaded_inference_publish_to_robot = False
+                            self._loaded_inference_acceleration_mode = 'pytorch'
+                            self._loaded_inference_acceleration_engine_path = ''
+                            self._loaded_inference_action_request_mode = 'async'
+                            self._loaded_inference_control_hz = 100
+                            self._loaded_inference_inference_hz = 15
+                            self._loaded_inference_chunk_align_window_s = 0.3
+                            self._loaded_inference_initial_pose_sync = False
+                            self._loaded_inference_initial_pose_sync_duration_s = 5.0
+                            self._initial_pose_sync_status_active = False
+                            self._initial_pose_sync_hold_pending = False
+                            self._publish_inference_phase(
+                                InferenceStatus.READY, error=completion_error,
+                            )
+                    completed = True
             except Exception as e:
                 self.get_logger().error(f'Error tearing down inference: {e}')
+                with self._state_lock:
+                    if self.container_service_client is client:
+                        self._inference_status_snapshot['error'] = str(e)
+                        self._broadcast_inference_status()
             finally:
-                try:
-                    client._cancelled.set()
-                    client.disconnect()
-                except Exception:
-                    pass
+                if completed:
+                    try:
+                        client._cancelled.set()
+                        client.disconnect()
+                    except Exception:
+                        pass
+                with self._state_lock:
+                    if self._inference_cleanup_client is client:
+                        self._inference_cleanup_client = None
                 self._observe_inference_command(False)
 
         threading.Thread(target=_cleanup, daemon=True).start()

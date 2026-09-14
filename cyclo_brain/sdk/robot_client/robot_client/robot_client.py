@@ -28,6 +28,7 @@ import time
 import threading
 import logging
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Union
 
@@ -182,6 +183,7 @@ class RobotClient:
         subscribe_images: bool = True,
         subscribe_state: bool = True,
         subscribe_sensors: bool = True,
+        defer_subscriptions: bool = False,
     ):
         section = robot_schema.load_robot_section(robot_type)
         # Phase 4: yaml is VLA-semantic (observation.images / state +
@@ -201,10 +203,14 @@ class RobotClient:
         self._subscribe_images = bool(subscribe_images)
         self._subscribe_state = bool(subscribe_state)
         self._subscribe_sensors = bool(subscribe_sensors)
+        self._defer_subscriptions = bool(defer_subscriptions)
+        self._subscription_selection = None
         self._action_groups = robot_schema.get_action_groups(section)
 
         # Thread-safe data stores
         self._lock = threading.Lock()
+        self._observation_capture = None
+        self._observation_sequence = 0
         self._images: dict[str, np.ndarray] = {}
         self._image_timestamps: dict[str, float] = {}
         self._joint_positions: dict[str, np.ndarray] = {}
@@ -266,8 +272,44 @@ class RobotClient:
     # Initialization
     # ------------------------------------------------------------------ #
 
+    def _selected_names(self, kind):
+        selection = getattr(self, "_subscription_selection", None)
+        return self._config.get(kind, {}) if selection is None else selection[kind]
+
+    def start_observation_subscriptions(self, *, camera_names, joint_groups, sensor_names):
+        """Start a deferred client's declared inputs once, after LOAD mapping.
+
+        This is not live reconfiguration. A new LOAD creates a new RobotClient;
+        command-publishing clients keep their existing default subscriptions.
+        """
+        if self._closed or not self._defer_subscriptions:
+            raise RuntimeError("observation subscriptions require a fresh deferred client")
+        selected = {"cameras": frozenset(camera_names), "joint_groups": frozenset(joint_groups),
+                    "sensors": frozenset(sensor_names)}
+        enabled = {"cameras": self._subscribe_images, "joint_groups": self._subscribe_state,
+                   "sensors": self._subscribe_sensors}
+        for kind, names in selected.items():
+            missing = names - self._config.get(kind, {}).keys()
+            if missing or (names and not enabled[kind]):
+                raise ValueError(f"Invalid observation subscription selection {kind}: {sorted(names)}")
+        capture = self._observation_capture
+        if capture is not None:
+            prefixes = {"camera": "cameras", "joint": "joint_groups", "sensor": "sensors"}
+            for source in capture.sources:
+                kind, name = source.split(":", 1)
+                name = name.split(".", 1)[0] if kind == "sensor" else name
+                if name not in selected[prefixes[kind]]:
+                    raise ValueError(f"subscription selection omits captured source: {source}")
+        self._subscription_selection = selected
+        self._defer_subscriptions = False
+        try:
+            self._init_subscriptions()
+        except Exception:
+            self.close()
+            raise
+
     def _init_subscriptions(self):
-        """Subscribe to all configured topics.
+        """Subscribe to configured topics, or the declared LOAD selection.
 
         Joint groups carrying a ``parent`` field have no physical topic of
         their own — they're synthetic per-modality views over a sibling
@@ -275,8 +317,10 @@ class RobotClient:
         by name-based slicing inside the callback.
         """
         # Cameras
-        if self._subscribe_images:
+        if self._subscribe_images and not self._defer_subscriptions:
             for cam_name, cam_cfg in self._config.get("cameras", {}).items():
+                if cam_name not in self._selected_names("cameras"):
+                    continue
                 sub = ROS2Subscriber(
                     topic=cam_cfg["topic"],
                     msg_type=cam_cfg["msg_type"],
@@ -290,18 +334,20 @@ class RobotClient:
         self._joint_children: dict[str, list[str]] = {}
         for child_name, child_cfg in self._config.get("joint_groups", {}).items():
             parent = child_cfg.get("parent")
-            if parent:
+            if parent and child_name in self._selected_names("joint_groups"):
                 self._joint_children.setdefault(parent, []).append(child_name)
 
-        if self._subscribe_state:
+        if self._subscribe_state and not self._defer_subscriptions:
             self._init_state_subscriptions()
 
         # Additional sensors. ``sensor_cfg`` may carry an optional
         # ``type_hash`` override — escape hatch for messages where
         # zenoh_ros2_sdk's hash computation needs to be pinned to a known
         # wire hash. Default is auto-compute via the SDK.
-        if self._subscribe_sensors:
+        if self._subscribe_sensors and not self._defer_subscriptions:
             for sensor_name, sensor_cfg in self._config.get("sensors", {}).items():
+                if sensor_name not in self._selected_names("sensors"):
+                    continue
                 sub_kwargs = dict(
                     topic=sensor_cfg["topic"],
                     msg_type=sensor_cfg["msg_type"],
@@ -316,6 +362,9 @@ class RobotClient:
     def _init_state_subscriptions(self) -> None:
         if self._state_subscribers:
             return
+        groups = self._config.get("joint_groups", {})
+        physical = {groups[name].get("parent") or name for name in self._selected_names("joint_groups")}
+        topics: dict[tuple[str, str], list[str]] = {}
         for group_name, group_cfg in self._config.get("joint_groups", {}).items():
             if group_cfg.get("parent"):
                 logger.debug(
@@ -323,17 +372,23 @@ class RobotClient:
                     f"(synthetic view of {group_cfg['parent']})"
                 )
                 continue
+            if group_name not in physical:
+                continue
+            topics.setdefault((group_cfg["topic"], group_cfg["msg_type"]), []).append(group_name)
+        for (topic, msg_type), group_names in topics.items():
             subscriber = ROS2Subscriber(
-                topic=group_cfg["topic"],
-                msg_type=group_cfg["msg_type"],
-                callback=lambda msg, name=group_name: self._update_joint(name, msg),
+                topic=topic,
+                msg_type=msg_type,
+                callback=lambda msg, names=tuple(group_names): self._update_joint_groups(names, msg),
             )
             self._state_subscribers.append(subscriber)
             self._subscribers.append(subscriber)
-            logger.debug(f"Subscribed joint: {group_name} -> {group_cfg['topic']}")
+            logger.debug(f"Subscribed joints: {group_names} -> {topic}")
 
     def set_state_subscription(self, enabled: bool) -> None:
         """Enable or disable the joint-state subscription used for safe hold."""
+        if self._defer_subscriptions:
+            raise RuntimeError("start declared observation subscriptions before toggling state")
         enabled = bool(enabled)
         if enabled == self._subscribe_state:
             return
@@ -407,6 +462,66 @@ class RobotClient:
     # Callback handlers
     # ------------------------------------------------------------------ #
 
+    def attach_observation_capture(self, capture) -> None:
+        """Attach one opt-in numeric reception sink, without replaying cached data.
+
+        The sink exposes frozen ``sources`` and a non-throwing ``record`` method.
+        record runs under the data lock and must only copy/store bounded samples:
+        no inference, network I/O or calls back into this client. Sink failures
+        must be latched and surfaced by its reader, not ignored.
+        """
+        available = set()
+        if self._subscribe_images:
+            available.update(f"camera:{key}" for key in self._selected_names("cameras"))
+        if self._subscribe_state:
+            available.update(f"joint:{key}" for key in self._selected_names("joint_groups"))
+        if self._subscribe_sensors:
+            fields = {
+                "odom": ("position", "orientation", "linear_velocity", "angular_velocity"),
+                "cmd_vel": ("linear", "angular"),
+            }
+            for sensor in self._selected_names("sensors"):
+                available.update(f"sensor:{sensor}.{key}" for key in fields.get(sensor, ()))
+        if not isinstance(capture.sources, frozenset) or not callable(capture.record):
+            raise TypeError("capture requires frozen sources and record()")
+        missing = capture.sources - available
+        if missing:
+            raise ValueError(f"Unavailable observation capture sources: {sorted(missing)}")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("RobotClient is closed")
+            if self._observation_capture is not None:
+                raise RuntimeError("An observation capture is already attached")
+            self._observation_capture = capture
+
+    def detach_observation_capture(self, capture) -> None:
+        """After return, no subscriber callback can append to this sink."""
+        with self._lock:
+            if self._observation_capture is capture:
+                self._observation_capture = None
+
+    def reset_observation_capture(self, capture) -> None:
+        """Reset a session's history at a subscriber callback barrier."""
+        with self._lock:
+            if self._observation_capture is not capture:
+                raise RuntimeError("The observation capture is not attached")
+            capture.reset()
+
+    def _capture_observation(self, source: str, value: np.ndarray) -> None:
+        # Called under _lock. This time identifies decoded data becoming available,
+        # not a sensor hardware timestamp or a later latest-value read.
+        received_s = time.monotonic()
+        if not hasattr(self, "_input_received_monotonic"):
+            self._input_received_monotonic = {}
+        self._input_received_monotonic[source] = received_s
+        capture = getattr(self, "_observation_capture", None)
+        if capture is None or source not in capture.sources:
+            return
+        self._observation_sequence += 1
+        if source.startswith("camera:"):
+            value = value[..., ::-1]  # Capture RGB; the existing latest store stays BGR.
+        capture.record(source, self._observation_sequence, received_s, value)
+
     def _update_image(self, cam_name: str, msg):
         """CompressedImage -> BGR numpy array."""
         try:
@@ -419,18 +534,19 @@ class RobotClient:
                 with self._lock:
                     self._images[cam_name] = img
                     self._image_timestamps[cam_name] = time.time()
+                    self._capture_observation(f"camera:{cam_name}", img)
         except Exception as e:
             logger.warning(f"Failed to decode image from {cam_name}: {e}")
 
     def _update_joint(self, group_name: str, msg):
-        """JointState -> np.ndarray(float32).
+        """Update one physical joint group and its synthetic views."""
+        self._update_joint_groups((group_name,), msg)
 
-        Stores the full vector under ``group_name``. If the group has
-        synthetic children (other yaml groups with ``parent: <group_name>``),
-        slice each child's positions out of the message by joint name and
-        store the slice under the child's group name too — so callers
-        like ``get_joint_positions("follower_arm_left")`` see the same
-        per-modality surface as before the upper-body collapse.
+    def _update_joint_groups(self, group_names: tuple[str, ...], msg):
+        """Parse one physical message, then atomically update all logical views.
+
+        Physical groups retain the full vector; only synthetic children slice
+        by joint name. Stored arrays are replaced, never modified in place.
         """
         try:
             msg_names = list(msg.name) if hasattr(msg, 'name') else []
@@ -439,30 +555,30 @@ class RobotClient:
             effort = list(msg.effort) if hasattr(msg.effort, '__iter__') else []
             now = time.time()
             received_monotonic = time.monotonic()
+            position_array = np.array(position, dtype=np.float32) if position else None
+            velocity_array = np.array(velocity, dtype=np.float32) if velocity else None
+            effort_array = np.array(effort, dtype=np.float32) if effort else None
             with self._lock:
-                if position:
-                    self._joint_positions[group_name] = np.array(position, dtype=np.float32)
-                    if msg_names:
-                        self._joint_positions_by_name.update(
-                            {
-                                name: float(value)
-                                for name, value in zip(msg_names, position)
-                            }
-                        )
-                        self._joint_position_timestamps_by_name.update(
-                            {
-                                name: received_monotonic
-                                for name, _value in zip(msg_names, position)
-                            }
-                        )
-                if velocity:
-                    self._joint_velocities[group_name] = np.array(velocity, dtype=np.float32)
-                if effort:
-                    self._joint_efforts[group_name] = np.array(effort, dtype=np.float32)
-                self._joint_timestamps[group_name] = now
+                if position and msg_names:
+                    self._joint_positions_by_name.update(
+                        {name: float(value) for name, value in zip(msg_names, position)}
+                    )
+                    self._joint_position_timestamps_by_name.update(
+                        {name: received_monotonic for name, _value in zip(msg_names, position)}
+                    )
+                for group_name in group_names:
+                    if position_array is not None:
+                        self._joint_positions[group_name] = position_array
+                        self._capture_observation(f"joint:{group_name}", position_array)
+                    if velocity_array is not None:
+                        self._joint_velocities[group_name] = velocity_array
+                    if effort_array is not None:
+                        self._joint_efforts[group_name] = effort_array
+                    self._joint_timestamps[group_name] = now
 
                 # Propagate to synthetic child views.
-                children = getattr(self, "_joint_children", {}).get(group_name, [])
+                children = [child for group_name in group_names
+                            for child in getattr(self, "_joint_children", {}).get(group_name, [])]
                 if children and msg_names:
                     name_to_idx = {n: i for i, n in enumerate(msg_names)}
                     for child in children:
@@ -476,7 +592,7 @@ class RobotClient:
                             # message carries every joint we expect.
                             logger.debug(
                                 f"{child}: joint {missing} missing from "
-                                f"{group_name} message"
+                                f"{group_names} message"
                             )
                             continue
                         if position:
@@ -492,8 +608,10 @@ class RobotClient:
                                 [effort[i] for i in indices], dtype=np.float32
                             )
                         self._joint_timestamps[child] = now
+                        if position:
+                            self._capture_observation(f"joint:{child}", self._joint_positions[child])
         except Exception as e:
-            logger.warning(f"Failed to parse joint from {group_name}: {e}")
+            logger.warning(f"Failed to parse joint from {group_names}: {e}")
 
     def _update_sensor(self, sensor_name: str, msg):
         """Parse sensor messages (Odometry, Twist, etc.)."""
@@ -521,6 +639,12 @@ class RobotClient:
             with self._lock:
                 self._sensors[sensor_name] = data
                 self._sensor_timestamps[sensor_name] = time.time()
+                if not hasattr(self, "_input_received_monotonic"):
+                    self._input_received_monotonic = {}
+                self._input_received_monotonic[f"sensor:{sensor_name}"] = time.monotonic()
+                for field, value in data.items():
+                    if isinstance(value, np.ndarray):
+                        self._capture_observation(f"sensor:{sensor_name}.{field}", value)
         except Exception as e:
             logger.warning(f"Failed to parse sensor {sensor_name}: {e}")
 
@@ -550,6 +674,89 @@ class RobotClient:
         if format == "rgb":
             result = {k: cv2.cvtColor(v, cv2.COLOR_BGR2RGB) for k, v in result.items()}
         return result
+
+    def get_input_snapshot(self) -> dict:
+        return self.get_required_input_snapshot()
+
+    def get_required_input_snapshot(
+        self, sources=None, *, max_age_s=None, after_s=None, max_age_by_source=None,
+        readiness_check=None,
+    ) -> dict:
+        """Copy the latest inputs under one lock, without temporal alignment.
+
+        Sensor timestamps retain their existing wall-clock reception semantics.
+        captured_monotonic_s describes this read. reception_monotonic_timestamps
+        describes actual callback updates, also when optional history is disabled.
+        With explicit sources, validate readiness before copying/converting any
+        pixels. Callbacks replace image arrays, so snapshot references survive
+        subsequent updates; the RGB conversion makes the caller-owned copy.
+        readiness_check may inspect bounded capture metadata at the same clock
+        anchor. It runs under the callback lock and must not reenter RobotClient,
+        perform model work, or do network I/O.
+        """
+        if max_age_s is not None and (not math.isfinite(max_age_s) or max_age_s <= 0):
+            raise ValueError("max_age_s must be finite and positive")
+        if after_s is not None and (not math.isfinite(after_s) or after_s < 0):
+            raise ValueError("after_s must be a non-negative monotonic timestamp")
+        requested = None if sources is None else frozenset(sources)
+        ages = {} if max_age_by_source is None else dict(max_age_by_source)
+        if any(age is not None and (type(age) not in (float, int)
+                                   or not math.isfinite(age) or age <= 0) for age in ages.values()):
+            raise ValueError("per-source maximum ages must be positive and finite or None")
+        if requested is None and (max_age_s is not None or after_s is not None or ages):
+            raise ValueError("readiness checks require explicit input sources")
+        if requested is not None and not ages.keys() <= requested:
+            raise ValueError("maximum age specified for an unrequested source")
+        if readiness_check is not None and not callable(readiness_check):
+            raise TypeError("readiness_check must be callable")
+        with self._lock:
+            captured = time.monotonic()
+            received = getattr(self, "_input_received_monotonic", {})
+            stores = {"camera": self._images, "joint": self._joint_positions, "sensor": self._sensors}
+            if requested is not None:
+                for source in sorted(requested):
+                    kind, _, name = source.partition(":")
+                    parent, dot, field = name.partition(".") if kind == "sensor" else (name, "", "")
+                    if kind not in stores or parent not in stores[kind]:
+                        raise ValueError(f"Missing input source: {source}")
+                    if dot and field not in stores[kind][parent]:
+                        raise ValueError(f"Missing input source: {source}")
+                    age = ages.get(source, max_age_s)
+                    if age is not None or after_s is not None or source in ages:
+                        stamp = received.get(source)
+                        if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                                or stamp < 0 or stamp > captured):
+                            raise ValueError(f"{source}: missing or invalid reception timestamp")
+                        if after_s is not None and stamp <= after_s:
+                            raise ValueError(f"{source}: observation predates publication barrier {after_s:g}")
+                        if age is not None and captured - stamp > age:
+                            raise ValueError(f"{source}: stale observation age={captured - stamp:.3f}s")
+            if readiness_check is not None:
+                readiness_check(captured)
+
+            def selected(kind, values):
+                return {key: value for key, value in values.items()
+                        if requested is None or f"{kind}:{key}" in requested
+                        or (kind == "sensor" and any(source.startswith(f"sensor:{key}.") for source in requested))}
+
+            images = selected("camera", self._images)
+            joints = {key: value.copy() for key, value in selected("joint", self._joint_positions).items()}
+            sensors = deepcopy(selected("sensor", self._sensors))
+            timestamps = {
+                "images": selected("camera", self._image_timestamps),
+                "joints": selected("joint", self._joint_timestamps),
+                "sensors": selected("sensor", self._sensor_timestamps),
+            }
+            received = {key: value for key, value in received.items()
+                        if requested is None or key in requested}
+        return {
+            "images": {key: cv2.cvtColor(value, cv2.COLOR_BGR2RGB) for key, value in images.items()},
+            "joint_positions": joints,
+            "sensors": sensors,
+            "reception_wall_timestamps": timestamps,
+            "captured_monotonic_s": captured,
+            "reception_monotonic_timestamps": received,
+        }
 
     def get_image(
         self,
@@ -687,6 +894,30 @@ class RobotClient:
                     self._command_joint_names.get(publisher_key, []),
                     segment,
                 )
+
+    def publish_action_with_receipt(
+        self, action: np.ndarray, action_keys: Optional[list[str]] = None,
+        *, zero_twist: bool = False,
+    ) -> np.ndarray:
+        """Validate all groups and return the values sent by a successful publish.
+
+        This is a transport receipt, not a controller execution acknowledgement.
+        Any exception (including partial multi-topic publication) means callers
+        must not record a successful whole-vector publication.
+        zero_twist preserves position targets but stops velocity modalities when
+        a model step expires. The receipt reports zeros, not the original action.
+        """
+        segments = self._build_action_segments(action, action_keys)
+        emitted = []
+        for publisher, joint_names, values, msg_type in segments:
+            if msg_type == "geometry_msgs/msg/Twist":
+                if zero_twist:
+                    values = np.zeros(3, dtype=np.float64)
+                values = self._publish_twist(publisher, values)
+            else:
+                self._publish_joint_trajectory(publisher, joint_names, values)
+            emitted.extend(values)
+        return np.asarray(emitted, dtype=np.float64)
 
     def publish_idle_action(self, action_keys: Optional[list[str]] = None) -> None:
         """Publish safe idle commands for velocity-like action topics.
@@ -942,7 +1173,7 @@ class RobotClient:
             return "mobile"
         return action_key
 
-    def _publish_twist(self, publisher: ROS2Publisher, values: np.ndarray) -> None:
+    def _publish_twist(self, publisher: ROS2Publisher, values: np.ndarray) -> np.ndarray:
         Vector3 = get_message_class("geometry_msgs/msg/Vector3")
         linear_x = float(values[0]) if len(values) > 0 else 0.0
         linear_y = float(values[1]) if len(values) > 1 else 0.0
@@ -962,6 +1193,7 @@ class RobotClient:
             z=filtered_angular_z,
         )
         publisher.publish(linear=linear, angular=angular)
+        return np.array([filtered_linear_x, filtered_linear_y, filtered_angular_z], dtype=np.float64)
 
     def _publish_joint_trajectory(
         self,
@@ -1095,9 +1327,9 @@ class RobotClient:
     ) -> list[str]:
         """Report absent inputs without requiring unused robot capabilities."""
         if camera_names is None:
-            camera_names = self._config.get("cameras", {}) if self._subscribe_images else ()
+            camera_names = self._selected_names("cameras") if self._subscribe_images else ()
         if joint_groups is None:
-            joint_groups = self._config.get("joint_groups", {}) if self._subscribe_state else ()
+            joint_groups = self._selected_names("joint_groups") if self._subscribe_state else ()
         missing = []
         with self._lock:
             for cam in camera_names:
@@ -1154,6 +1386,8 @@ class RobotClient:
         if hasattr(self, '_closed') and self._closed:
             return
         self._closed = True
+        with self._lock:
+            self._observation_capture = None
         for sub in self._subscribers:
             try:
                 sub.close()

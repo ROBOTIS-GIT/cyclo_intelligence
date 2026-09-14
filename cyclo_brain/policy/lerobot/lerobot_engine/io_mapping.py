@@ -27,7 +27,7 @@ import logging
 from typing import Dict, Iterable
 
 from .constants import IMAGE_KEY_PREFIX as _IMAGE_KEY_PREFIX
-from .policy_validation import validate_wall_x_robot
+from .adapters import resolve_adapter
 
 from robot_client import RobotClient
 from robot_client.camera_mapping import resolve_camera_mappings
@@ -41,7 +41,7 @@ class IoMappingMixin:
 
     def _init_robot(self, robot_type: str) -> None:
         """Create RobotClient + resolve camera / state mappings."""
-        self._robot = RobotClient(robot_type)
+        self._robot = RobotClient(robot_type, defer_subscriptions=True)
 
         # Cameras: only those that match a policy input key
         # ``observation.images.<cam>``. Cameras advertised by the robot
@@ -93,17 +93,17 @@ class IoMappingMixin:
         self._state_modalities = modalities
         self._action_keys = list(modalities)
 
-        validate_wall_x_robot(
-            getattr(getattr(self, "_policy", None), "config", None),
-            self._robot, modalities, self._action_keys,
-        )
+        definition = getattr(self, "_adapter_definition", None)
+        if definition is None:
+            definition = resolve_adapter(getattr(self._policy.config, "type", None))
+        if definition.layout_validator is not None:
+            definition.layout_validator(self._policy.config, self._robot, modalities, self._action_keys)
 
-        # Match the inputs consumed by _build_observation, not every robot camera.
-        required = {
-            "camera_names": list(self._cameras),
-            "joint_groups": [f"follower_{name}" for name in modalities if name != "mobile"],
-            "sensor_names": ["odom"] if self._has_mobile_state else [],
-        }
+        # Compile the model's declared input plan before readiness checks. A
+        # sensor present in robot config need not be an input of this model.
+        _, input_session = self._observation_plan(getattr(self, "_step_adapter", None) is not None)
+        required = input_session.required_observations
+        self._robot.start_observation_subscriptions(**required)
         if not self._robot.wait_for_ready(timeout=10.0, **required):
             missing = self._robot.get_missing_observations(**required)
             raise RuntimeError(
@@ -116,6 +116,10 @@ class IoMappingMixin:
         )
 
     def _teardown_robot(self) -> None:
+        for session in getattr(self, "_observation_sessions", {}).values():
+            session.close()
+        self._observation_sessions = {}
+        self._input_context = None
         if self._robot is not None:
             try:
                 self._robot.close()

@@ -29,12 +29,17 @@ const response = (payload, ok = true) => ({
 test('BT catalog helpers preserve legacy aliases and separate both GR00T Workers', () => {
   expect(findPolicy(testPolicyCatalog, 'groot').policy_id).toBe('groot:n17');
   expect(findPolicy(testPolicyCatalog, 'lerobot:groot').runtime.id).toBe('lerobot');
-  expect(findPolicy(testPolicyCatalog, 'pi0_fast').policy_id).toBe('lerobot:pi0_fast');
-  for (const id of ['eo1', 'evo1', 'wall_x', 'pi0_fast', 'groot']) {
+  for (const id of ['wall_x', 'groot', 'multi_task_dit']) {
     const policy = policyOptions(testPolicyCatalog).find((item) => item.value === `lerobot:${id}`);
     expect(policy.requires_instruction).toBe(true);
     expect(policy.runtime.capabilities.operations).toEqual([]);
   }
+});
+
+test.each(['eo1', 'evo1', 'pi0_fast', 'lingbot_va'])('excluded %s is unavailable to Inference and BT', (id) => {
+  expect(findPolicy(testPolicyCatalog, id)).toBeFalsy();
+  expect(findPolicy(testPolicyCatalog, `lerobot:${id}`)).toBeFalsy();
+  expect(policyOptions(testPolicyCatalog).some((item) => item.value === `lerobot:${id}`)).toBe(false);
 });
 
 describe('PolicyCatalogProvider', () => {

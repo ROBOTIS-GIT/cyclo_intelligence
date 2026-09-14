@@ -50,6 +50,7 @@ from zenoh_ros2_sdk import ROS2ServiceServer, ROS2Subscriber, get_logger  # noqa
 
 from .control_loop import ControlLoop  # noqa: E402
 from .runtime_control import RuntimeControlServer  # noqa: E402
+from .process_lock import runtime_process_lock  # noqa: E402
 from .service_handler import ServiceHandler  # noqa: E402
 from .session_state import SessionState  # noqa: E402
 from .worker_registry import (  # noqa: E402
@@ -126,6 +127,7 @@ class PolicyRuntime:
         self._active_since: float | None = None
 
     def start(self) -> None:
+        self._remove_ready_marker()
         self._control_loop.run_background()
         self._start_services()
         self._start_heartbeat_subscribers()
@@ -142,13 +144,17 @@ class PolicyRuntime:
             self._shutdown.wait(timeout=1.0)
 
     def shutdown(self) -> None:
-        snapshot = self._handler.runtime_snapshot()
-        if snapshot["runtime_state"] in {"running", "syncing", "error"}:
-            for _ in range(3):
-                if self._handler.fail_safe("policy runtime shutting down"):
-                    break
-                time.sleep(0.1)
         self._shutdown.set()
+        self._handler.begin_shutdown()
+        self._remove_ready_marker()
+        snapshot = self._handler.runtime_snapshot()
+        if snapshot.get("hold_pending") or snapshot["runtime_state"] in {"preparing", "running", "syncing", "error"}:
+            # Retain joint subscriptions and command publishers until hold succeeds.
+            # Launch's eventual SIGKILL cannot be made safe here; a controller
+            # command watchdog is still required for forced termination.
+            while not self._handler.fail_safe("policy runtime shutting down"):
+                logger.error("Shutdown waiting for current-pose hold; robot watchdog required if force-killed")
+                time.sleep(0.5)
         if self._monitor_thread is not None:
             self._monitor_thread.join(timeout=2.0)
             self._monitor_thread = None
@@ -170,6 +176,7 @@ class PolicyRuntime:
         self._remove_ready_marker()
 
     def request_shutdown(self, *_args) -> None:
+        self._handler.begin_shutdown()
         self._shutdown.set()
 
     def _start_services(self) -> None:
@@ -216,6 +223,7 @@ class PolicyRuntime:
             ROS2Subscriber(
                 topic="/heartbeat",
                 msg_type="std_msgs/msg/Empty",
+                msg_definition="# Empty message\n",
                 callback=lambda _msg: self._record_orchestrator_heartbeat(),
                 router_ip=self._router_ip,
                 router_port=self._router_port,
@@ -256,7 +264,7 @@ class PolicyRuntime:
         )
         while not self._shutdown.wait(0.25):
             snapshot = self._handler.runtime_snapshot()
-            active = snapshot["runtime_state"] in {"running", "syncing"}
+            active = snapshot["runtime_state"] in {"preparing", "running", "syncing"}
             if not active:
                 self._active_since = None
                 continue
@@ -282,6 +290,8 @@ class PolicyRuntime:
 
     def _handle_control_request(self, request: dict) -> dict:
         operation = str(request.get("operation", "status"))
+        if self._shutdown.is_set() and operation != "status":
+            return {"ok": False, "error": "Policy Runtime is shutting down"}
         if operation == "status":
             return {"ok": True, **self._handler.runtime_snapshot(blocking=False)}
         if operation == "can_mutate_worker":
@@ -312,7 +322,7 @@ class PolicyRuntime:
         if operation == "worker_status":
             runtime_id = str(request.get("runtime_id", ""))
             self._require_runtime_id(runtime_id)
-            return {"ok": True, **self._workers.describe(runtime_id)}
+            return {"ok": True, **self._workers.status_snapshot(runtime_id)}
         return {"ok": False, "error": f"unknown operation: {operation}"}
 
     def _require_runtime_id(self, runtime_id: str) -> None:
@@ -331,7 +341,7 @@ class PolicyRuntime:
     def _write_ready_marker(self) -> None:
         marker = self._ready_marker_path()
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("ready\n", encoding="utf-8")
+        marker.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
     def _remove_ready_marker(self) -> None:
         try:
@@ -365,17 +375,18 @@ MainRuntime = PolicyRuntime
 
 
 def main() -> None:  # pragma: no cover - container entrypoint.
-    runtime = PolicyRuntime(
-        router_ip=os.environ.get("ZENOH_ROUTER_IP", "127.0.0.1"),
-        router_port=int(os.environ.get("ZENOH_ROUTER_PORT", "7447")),
-        domain_id=int(os.environ.get("ROS_DOMAIN_ID", "30")),
-    )
-    signal.signal(signal.SIGTERM, runtime.request_shutdown)
-    signal.signal(signal.SIGINT, runtime.request_shutdown)
-    try:
-        runtime.start()
-    finally:
-        runtime.shutdown()
+    with runtime_process_lock():
+        runtime = PolicyRuntime(
+            router_ip=os.environ.get("ZENOH_ROUTER_IP", "127.0.0.1"),
+            router_port=int(os.environ.get("ZENOH_ROUTER_PORT", "7447")),
+            domain_id=int(os.environ.get("ROS_DOMAIN_ID", "30")),
+        )
+        signal.signal(signal.SIGTERM, runtime.request_shutdown)
+        signal.signal(signal.SIGINT, runtime.request_shutdown)
+        try:
+            runtime.start()
+        finally:
+            runtime.shutdown()
 
 
 if __name__ == "__main__":

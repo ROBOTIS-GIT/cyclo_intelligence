@@ -15,6 +15,26 @@ validation = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validation)
 
 
+@pytest.mark.parametrize("state,action", [(22, 22), (24, 22), (22, 16)])
+def test_step_layout_does_not_require_equal_state_and_action_dimensions(state, action):
+    config = SimpleNamespace(input_features={"observation.state": {"shape": [state]}},
+                             output_features={"action": {"shape": [action]}})
+    robot = Mock()
+    robot.get_joint_names.return_value = list(range(state - 3))
+    robot._action_groups = {
+        "arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": list(range(action - 3))},
+        "mobile": {"msg_type": "geometry_msgs/msg/Twist"},
+    }
+    from lerobot_engine.adapters import resolve_adapter
+    validate = resolve_adapter("multi_task_dit").layout_validator
+    validate(config, robot, ["arm", "mobile"], ["arm", "mobile"])
+    for field in (config.input_features["observation.state"], config.output_features["action"]):
+        field["shape"][0] += 1
+        with pytest.raises(ValueError, match="no padding/truncation"):
+            validate(config, robot, ["arm", "mobile"], ["arm", "mobile"])
+        field["shape"][0] -= 1
+
+
 @pytest.mark.parametrize("config", [{"model_type": "gr00t_n1_7"}, {"type": "act"}])
 def test_lerobot_groot_selection_rejects_raw_or_other_checkpoints(tmp_path, config):
     (tmp_path / "config.json").write_text(json.dumps(config))
@@ -23,7 +43,7 @@ def test_lerobot_groot_selection_rejects_raw_or_other_checkpoints(tmp_path, conf
 
 
 def test_legacy_pi0_selection_does_not_restrict_checkpoint_type(tmp_path):
-    (tmp_path / "config.json").write_text('{"type": "pi0_fast"}')
+    (tmp_path / "config.json").write_text('{"type": "pi05"}')
     validation.validate_requested_policy(tmp_path, "lerobot:pi0")
 
 
@@ -53,7 +73,7 @@ def test_wall_x_rejects_config_that_disagrees_with_fixed_core(key, value, tmp_pa
         validation.validate_checkpoint(wall_config(**{key: value}), tmp_path)
 
 
-@pytest.mark.parametrize("policy", ["eo1", "evo1", "wall_x", "groot"])
+@pytest.mark.parametrize("policy", ["wall_x", "groot"])
 def test_new_policy_history_is_not_silently_duplicated(policy, tmp_path):
     with pytest.raises(ValueError, match="history"):
         validation.validate_checkpoint({"type": policy, "n_obs_steps": 2}, tmp_path)
@@ -65,11 +85,13 @@ def test_wall_x_robot_layout(state, action, valid):
     robot = Mock()
     robot.get_joint_names.return_value = list(range(state))
     robot._action_groups = {"arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": list(range(action))}}
+    from lerobot_engine.adapters import resolve_adapter
+    validate = resolve_adapter("wall_x").layout_validator
     if valid:
-        validation.validate_wall_x_robot(config, robot, ["arm"], ["arm"])
+        validate(config, robot, ["arm"], ["arm"])
     else:
         with pytest.raises(ValueError, match="dimension"):
-            validation.validate_wall_x_robot(config, robot, ["arm"], ["arm"])
+            validate(config, robot, ["arm"], ["arm"])
     robot.publish_action.assert_not_called()
 
 

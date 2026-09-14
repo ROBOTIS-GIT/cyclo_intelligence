@@ -56,17 +56,61 @@ class IoMappingCameraTest(unittest.TestCase):
                 robot.wait_for_ready.return_value = ready
                 robot.get_missing_observations.return_value = ["joint:follower_arm"]
                 engine = IoMappingMixin()
+                engine._policy = types.SimpleNamespace(config=types.SimpleNamespace(type="act"))
                 engine._policy_image_keys = lambda: {"observation.images.required_eye"}
-                with mock.patch.object(io_mapping, "RobotClient", return_value=robot):
+                engine._observation_plan = lambda _: (None, types.SimpleNamespace(required_observations={
+                    "camera_names": ["required_eye"], "joint_groups": ["follower_arm"], "sensor_names": ["odom"],
+                }))
+                with mock.patch.object(io_mapping, "RobotClient", return_value=robot) as construct:
                     if ready:
                         engine._init_robot("some_robot")
                     else:
                         with self.assertRaisesRegex(RuntimeError, "joint:follower_arm"):
                             engine._init_robot("some_robot")
+                construct.assert_called_once_with("some_robot", defer_subscriptions=True)
+                robot.start_observation_subscriptions.assert_called_once_with(
+                    camera_names=["required_eye"], joint_groups=["follower_arm"], sensor_names=["odom"],
+                )
                 robot.wait_for_ready.assert_called_once_with(
                     timeout=10.0, camera_names=["required_eye"],
                     joint_groups=["follower_arm"], sensor_names=["odom"],
                 )
+
+    def test_adapter_layout_validation_runs_before_waiting_for_observations(self):
+        from lerobot_engine.adapters import AdapterDefinition
+
+        robot = mock.Mock()
+        robot.camera_names = []
+        robot._config = {"joint_groups": {"follower_arm": {"role": "follower"}}}
+        config = types.SimpleNamespace(type="custom")
+        validate = mock.Mock(side_effect=ValueError("custom model layout mismatch"))
+        engine = IoMappingMixin()
+        engine._policy = types.SimpleNamespace(config=config)
+        engine._adapter_definition = AdapterDefinition(layout_validator=validate)
+        engine._policy_image_keys = lambda: set()
+        with mock.patch.object(io_mapping, "RobotClient", return_value=robot):
+            with self.assertRaisesRegex(ValueError, "custom model layout mismatch"):
+                engine._init_robot("some_robot")
+        validate.assert_called_once_with(config, robot, ["arm"], ["arm"])
+        robot.wait_for_ready.assert_not_called()
+        robot.start_observation_subscriptions.assert_not_called()
+
+    def test_readiness_uses_declared_sources_not_all_robot_config_modalities(self):
+        robot = mock.Mock()
+        robot.camera_names = ["head"]
+        robot._config = {"joint_groups": {"follower_arm": {"role": "follower"},
+                                          "follower_unused": {"role": "follower"}},
+                         "sensors": {"odom": {}}}
+        engine = IoMappingMixin()
+        engine._policy = types.SimpleNamespace(config=types.SimpleNamespace(type="custom"))
+        engine._policy_image_keys = lambda: {"observation.images.head"}
+        required = {"camera_names": [], "joint_groups": ["follower_arm"], "sensor_names": []}
+        engine._observation_plan = mock.Mock(return_value=(None, types.SimpleNamespace(required_observations=required)))
+        with mock.patch.object(io_mapping, "RobotClient", return_value=robot):
+            engine._init_robot("some_robot")
+        engine._observation_plan.assert_called_once_with(False)
+        robot.wait_for_ready.assert_called_once_with(timeout=10.0, **required)
+        robot.start_observation_subscriptions.assert_called_once_with(**required)
 
     def test_missing_checkpoint_image_metadata_keeps_legacy_default_keys(self):
         self.assertEqual(

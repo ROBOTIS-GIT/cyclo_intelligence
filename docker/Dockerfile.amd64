@@ -183,8 +183,7 @@ RUN mkdir -p /usr/local/lib/s6-services && \
     cp /etc/s6-overlay/s6-rc.d/common/ros2_service_finish.sh /usr/local/lib/s6-services/ && \
     rm -rf /etc/s6-overlay/s6-rc.d/common && \
     chmod +x /usr/local/lib/s6-services/ros2_service_run.sh \
-             /usr/local/lib/s6-services/ros2_service_finish.sh \
-             /etc/s6-overlay/s6-rc.d/policy-runtime/run
+             /usr/local/lib/s6-services/ros2_service_finish.sh
 
 RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node && \
     chown -R nobody:nogroup /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node && \

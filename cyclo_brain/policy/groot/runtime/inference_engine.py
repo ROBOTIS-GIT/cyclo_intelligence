@@ -27,6 +27,7 @@ Original Step 1 location: cyclo_brain/policy/groot/inference.py.
 Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
 """
 import logging
+import gc
 import os
 import sys
 import tempfile
@@ -305,13 +306,7 @@ class GR00TInference:
                     model_path,
                     acceleration_mode,
                 )
-                if self.robot is not None:
-                    self.robot.close()
-                    self.robot = None
-                self.policy = None
-                self._loaded_model_path = None
-                self._loaded_acceleration_mode = ACCELERATION_PYTORCH
-                self._loaded_acceleration_engine_path = ""
+                self.cleanup()
 
             self.logger.info(
                 "Loading GR00T policy from: %s (acceleration=%s)",
@@ -354,12 +349,15 @@ class GR00TInference:
                 "action_keys": list(self.policy_info["action"]),
             }
         except Exception as e:
-            self._loaded_model_path = None
-            self._loaded_acceleration_mode = ACCELERATION_PYTORCH
-            self._loaded_acceleration_engine_path = ""
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
-            return self.fail(message)
+        # Leave the exception scope before collecting model allocations: its
+        # traceback can retain a partially constructed policy and CUDA tensors.
+        try:
+            self.cleanup()
+        except Exception as cleanup_error:
+            self.logger.warning("Cleanup after LOAD failure raised: %s", cleanup_error)
+        return self.fail(message)
 
     @staticmethod
     def _normalize_acceleration_mode(value: str) -> str:
@@ -809,17 +807,26 @@ class GR00TInference:
         }
 
     def cleanup(self) -> None:
-        """Release robot resources. Policy is kept cached for fast restart."""
-        if self.robot is not None:
-            self.robot.close()
-            self.robot = None
-
+        """Release the model on UNLOAD; only repeated LOAD may reuse weights."""
+        robot, self.robot = self.robot, None
+        self.policy = None
+        self._loaded_model_path = None
+        self._loaded_acceleration_mode = ACCELERATION_PYTORCH
+        self._loaded_acceleration_engine_path = ""
         self.policy_info = {k: [] for k in self.policy_info}
         self.robot_info = {
             "cameras": [],
+            "camera_sources": {},
             "joints": {},
             "camera_rotations": {},
         }
+        try:
+            if robot is not None:
+                robot.close()
+        finally:
+            gc.collect()
+            if torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
 
     @staticmethod
     def fail(message: str) -> dict:

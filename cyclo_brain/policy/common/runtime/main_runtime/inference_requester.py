@@ -17,10 +17,12 @@ from engine_process.protocol import (
     CMD_LOAD_POLICY,
     CMD_STATUS,
     CMD_UNLOAD_POLICY,
+    CMD_UPDATE_CONTEXT,
     EngineCommandRequest,
     EngineCommandResponse,
     response_from_message,
 )
+from inference_context.execution import ExecutionContext
 
 
 DEFAULT_LOAD_POLICY_TIMEOUT_S = 7200.0
@@ -42,10 +44,15 @@ class InferenceRequester:
         self._lock = threading.Lock()
         self._call_lock = threading.Lock()
         self._get_action_in_flight = False
+        self._failed_context = None
 
     def has_pending_get_action(self) -> bool:
         with self._lock:
             return self._get_action_in_flight
+
+    @property
+    def get_action_timeout_s(self) -> float:
+        return self._get_action_timeout_s
 
     def load_policy(self, request: Any, timeout_s: float | None = None) -> EngineCommandResponse:
         seq_id = self._next_seq_id()
@@ -64,14 +71,24 @@ class InferenceRequester:
             policy_parameters_json=str(
                 getattr(request, "policy_parameters_json", "") or ""
             ),
+            execution_context_json=str(getattr(request, "execution_context_json", "") or ""),
         )
         return self._call(
             engine_request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
-    def get_action(self, task_instruction: str, timeout_s: float | None = None) -> EngineCommandResponse:
+    def get_action(
+        self, task_instruction: str, timeout_s: float | None = None,
+        *, context: ExecutionContext | None = None,
+    ) -> EngineCommandResponse:
+        context_json = "" if context is None else context.to_json()
         with self._lock:
+            context_key = (context.session_id, context.generation) if context is not None else None
+            if context_key is not None and context_key == self._failed_context:
+                return EngineCommandResponse(
+                    success=False, message="previous inference failed; reset execution generation before retrying",
+                )
             if self._get_action_in_flight:
                 return EngineCommandResponse(
                     success=False,
@@ -84,15 +101,29 @@ class InferenceRequester:
             command=CMD_GET_ACTION,
             seq_id=seq_id,
             task_instruction=task_instruction or "",
+            execution_context_json=context_json,
         )
         try:
-            return self._call(
+            response = self._call(
                 request,
                 self._get_action_timeout_s if timeout_s is None else timeout_s,
             )
+            if context_key is not None and not response.success:
+                with self._lock:
+                    self._failed_context = context_key
+            return response
         finally:
             with self._lock:
                 self._get_action_in_flight = False
+
+    def update_context(self, context: ExecutionContext, timeout_s: float = 2.0) -> EngineCommandResponse:
+        """Send from a lifecycle/feedback dispatcher, never the control tick."""
+        request = EngineCommandRequest(
+            command=CMD_UPDATE_CONTEXT,
+            seq_id=self._next_seq_id(),
+            execution_context_json=context.to_json(),
+        )
+        return self._call(request, timeout_s)
 
     def unload_policy(self, timeout_s: float | None = None) -> EngineCommandResponse:
         seq_id = self._next_seq_id()

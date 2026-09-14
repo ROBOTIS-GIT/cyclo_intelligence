@@ -481,6 +481,10 @@ def _docker_client() -> docker.DockerClient:
     return docker.from_env()
 
 
+class PolicyRuntimeUnavailable(RuntimeError):
+    """No runtime listener, not evidence that a model worker has failed."""
+
+
 def _runtime_control_request(payload: dict, timeout_s: float = 2.5) -> dict:
     path = os.environ.get(
         "POLICY_RUNTIME_CONTROL_SOCKET",
@@ -498,6 +502,12 @@ def _runtime_control_request(payload: dict, timeout_s: float = 2.5) -> dict:
             if not chunk:
                 break
             chunks.append(chunk)
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        raise PolicyRuntimeUnavailable(
+            "Cyclo Policy Runtime is not running or is starting. "
+            "Start cyclo_intelligence and wait for runtime readiness. "
+            "Worker safety could not be verified."
+        ) from exc
     except (OSError, socket.timeout) as exc:
         raise RuntimeError(f"Policy Runtime control socket unavailable: {exc}") from exc
     finally:
@@ -1741,6 +1751,10 @@ async def backend_status(name: str) -> BackendStatus:
                     f"Protocol {worker.get('protocol_version', '')}; "
                     f"state {worker.get('engine_state', '')}"
                 )
+        except PolicyRuntimeUnavailable as exc:
+            worker_compatible = False
+            worker_readiness = "waiting"
+            worker_message = str(exc)
         except Exception as exc:
             worker_compatible = False
             worker_readiness = "error"

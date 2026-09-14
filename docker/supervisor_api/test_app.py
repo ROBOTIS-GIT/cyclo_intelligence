@@ -734,6 +734,23 @@ def test_backend_status_preserves_readiness_and_real_errors(monkeypatch):
     })
     assert asyncio.run(app.backend_status("lerobot")).worker_compatible is True
 
+    def missing_runtime(_):
+        raise app.PolicyRuntimeUnavailable("Cyclo Policy Runtime is not running or is starting")
+
+    monkeypatch.setattr(app, "_runtime_control_request", missing_runtime)
+    status = asyncio.run(app.backend_status("lerobot"))
+    assert status.worker_readiness == "waiting"
+    assert status.worker_compatible is False
+    with pytest.raises(app.HTTPException) as exc:
+        app._begin_worker_mutation("lerobot")
+    assert exc.value.status_code == 503
+
+
+def test_absent_runtime_socket_has_distinct_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLICY_RUNTIME_CONTROL_SOCKET", str(tmp_path / "missing.sock"))
+    with pytest.raises(app.PolicyRuntimeUnavailable, match="Start cyclo_intelligence"):
+        app._runtime_control_request({"operation": "status"})
+
 
 def test_backend_start_keeps_running_container(monkeypatch):
     class FakeContainer:

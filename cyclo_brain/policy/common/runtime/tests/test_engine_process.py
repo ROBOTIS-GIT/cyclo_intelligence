@@ -60,6 +60,47 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_status_endpoint_is_read_only_and_closes_with_worker(self):
+        from unittest.mock import Mock, patch
+        from engine_process.protocol import CMD_UPDATE_CONTEXT
+
+        services = []
+
+        def server(**kwargs):
+            service = SimpleNamespace(
+                response_msg_class=SimpleNamespace, close=Mock(), **kwargs
+            )
+            services.append(service)
+            return service
+
+        worker = EngineWorker(FakeEngine(), runtime_id="lerobot")
+        worker._shutdown.set()
+        with patch("engine_process.worker.ROS2ServiceServer", side_effect=server), \
+             patch.object(worker, "_start_heartbeat"), \
+             patch.object(worker, "_write_ready_marker"), \
+             patch.object(worker, "_remove_ready_marker"):
+            worker.start_service("/lerobot/engine_command", "localhost", 7447, 173, "worker")
+            self.assertEqual([s.service_name for s in services], [
+                "/lerobot/engine_command", "/lerobot/engine_status"
+            ])
+            status = services[1].callback
+            # Even a busy command handler must not block metadata reads.
+            with worker._command_lock:
+                for command in (CMD_DESCRIBE, CMD_STATUS):
+                    response = status(EngineCommandRequest(command=command, seq_id=17))
+                    self.assertTrue(response.success)
+                    self.assertEqual(response.seq_id, 17)
+            with patch.object(worker, "handle", side_effect=AssertionError("mutation")):
+                for command in (CMD_LOAD_POLICY, CMD_GET_ACTION, CMD_UNLOAD_POLICY,
+                                CMD_UPDATE_CONTEXT, 255):
+                    response = status(EngineCommandRequest(command=command, seq_id=18))
+                    self.assertFalse(response.success)
+                    self.assertEqual(response.seq_id, 18)
+            worker.shutdown()
+            worker.shutdown()
+        for service in services:
+            service.close.assert_called_once()
+
     def test_repository_manifest_exposes_new_policies_in_describe(self):
         import os
         from unittest.mock import patch
@@ -72,8 +113,10 @@ class EngineWorkerTests(unittest.TestCase):
                               supported_policy_ids=policy_ids, capabilities=capabilities)
         response = worker.handle(EngineCommandRequest(command=CMD_DESCRIBE))
         self.assertTrue(response.success)
-        for name in ("eo1", "evo1", "wall_x", "pi0_fast", "groot"):
+        for name in ("wall_x", "groot", "pi0", "pi05", "multi_task_dit"):
             self.assertIn(f"lerobot:{name}", response.supported_policy_ids)
+        for name in ("eo1", "evo1", "pi0_fast", "lingbot_va"):
+            self.assertNotIn(f"lerobot:{name}", response.supported_policy_ids)
         self.assertNotIn("groot:n17", response.supported_policy_ids)
 
     def test_describe_reports_worker_contract_without_loading_model(self) -> None:

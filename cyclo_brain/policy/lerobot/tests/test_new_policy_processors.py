@@ -22,7 +22,7 @@ from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
 
 
-MODELS = ["eo1", "evo1", "wall_x", "pi0_fast", "groot"]
+MODELS = ["wall_x", "groot"]
 FEATURES = {
     "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(6,)),
     "observation.images.head": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 48, 64)),
@@ -48,22 +48,15 @@ def batch():
 def test_real_policy_import_and_saved_config_roundtrip(name, tmp_path):
     cls = get_policy_class(name)
     importlib.import_module(f"lerobot.policies.{name}.processor_{name}")
-    kwargs = {}
-    if name == "eo1":
-        from transformers import Qwen2_5_VLConfig
-
-        # Supply local config metadata; do not download the default Qwen config.
-        kwargs["vlm_config"] = Qwen2_5_VLConfig().to_dict()
-    config = cls.config_class(device="cpu", input_features=FEATURES, output_features=OUTPUT, **kwargs)
+    config = cls.config_class(device="cpu", input_features=FEATURES, output_features=OUTPUT)
     config.save_pretrained(tmp_path)
     restored = PreTrainedConfig.from_pretrained(tmp_path)
     assert restored.type == name
     assert restored.input_features == config.input_features
 
 
-@pytest.mark.parametrize("name", ["wall_x", "evo1"])
-def test_saved_real_processors_preserve_mixed_cameras_and_chunk_shape(name, tmp_path):
-    config = get_policy_class(name).config_class(device="cpu", input_features=FEATURES, output_features=OUTPUT)
+def test_wall_x_saved_real_processors_preserve_mixed_cameras_and_chunk_shape(tmp_path):
+    config = get_policy_class("wall_x").config_class(device="cpu", input_features=FEATURES, output_features=OUTPUT)
     pre, post = make_pre_post_processors(config, dataset_stats=STATS)
     pre.save_pretrained(tmp_path)
     post.save_pretrained(tmp_path)
@@ -74,20 +67,9 @@ def test_saved_real_processors_preserve_mixed_cameras_and_chunk_shape(name, tmp_
         observed = pre(batch())
         assert observed["observation.images.head"].shape[-2:] == (48, 64)
         assert observed["observation.images.wrist"].shape[-2:] == (32, 40)
-        result = post(torch.zeros(1, 4, config.max_action_dim if name == "evo1" else 6))
+        result = post(torch.zeros(1, 4, 6))
         assert result.shape == (1, 4, 6)
         assert torch.isfinite(result).all()
-
-
-def test_eo1_real_conversation_keeps_camera_shapes_and_instruction():
-    from lerobot.policies.eo1.processor_eo1 import EO1ConversationTemplateStep
-
-    pre = PolicyProcessorPipeline(steps=[EO1ConversationTemplateStep(input_features=FEATURES, chunk_size=4)])
-    result = pre(batch())
-    content = result["messages"][0][1]["content"]
-    assert content[0]["image"].shape == (3, 48, 64)
-    assert content[1]["image"].shape == (3, 32, 40)
-    assert "pick up the object" in content[2]["text"]
 
 
 def test_groot_validation_accepts_real_serialized_pack_and_decode(tmp_path):

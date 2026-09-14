@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -59,6 +60,10 @@ def runtime_health_failure_reason(
 
 
 class WorkerRegistry:
+    _STATUS_REFRESH_S = 1.0
+    _STATUS_MAX_AGE_S = 3.0
+    _STATUS_IDLE_S = 10.0
+
     def __init__(
         self,
         catalog: dict[str, Any],
@@ -77,11 +82,17 @@ class WorkerRegistry:
         self._client_factory = client_factory
         self._requesters: dict[str, InferenceRequester] = {}
         self._status_requesters: dict[str, InferenceRequester] = {}
+        self._requester_locks: dict[tuple[str, str], threading.Lock] = {}
         self._heartbeat_at: dict[str, float] = {}
         self._heartbeat_payload: dict[str, dict[str, Any]] = {}
         self._validated_instance: dict[str, str] = {}
         self._describe_wait_since: dict[str, float] = {}
         self._lock = threading.RLock()
+        self._status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._status_last_requested: dict[str, float] = {}
+        self._status_threads: dict[str, threading.Thread] = {}
+        self._status_shutdown = threading.Event()
+        self._closed = False
 
     @property
     def runtime_ids(self) -> list[str]:
@@ -119,6 +130,70 @@ class WorkerRegistry:
             "engine_state": response.engine_state,
             "heartbeat_age_s": self.heartbeat_age(runtime_id),
         }
+
+    def status_snapshot(self, runtime_id: str) -> dict[str, Any]:
+        """Nonblocking shared readiness; never use this cache to authorize LOAD."""
+        resolve_runtime(self._catalog, runtime_id)
+        now = time.monotonic()
+        with self._lock:
+            if self._closed:
+                return {"readiness": "error", "message": "Policy Runtime is shutting down"}
+            self._status_last_requested[runtime_id] = now
+            if runtime_id not in self._status_threads:
+                thread = threading.Thread(target=self._poll_status, args=(runtime_id,), daemon=True,
+                                          name=f"worker-status-{runtime_id}")
+                self._status_threads[runtime_id] = thread
+                try:
+                    thread.start()
+                except Exception:
+                    self._status_threads.pop(runtime_id, None)
+                    raise
+            cached = self._status_cache.get(runtime_id)
+            heartbeat_at = self._heartbeat_at.get(runtime_id)
+            payload = self._heartbeat_payload.get(runtime_id, {})
+            if cached is None or now - cached[0] > self._STATUS_MAX_AGE_S:
+                return {"readiness": "waiting", "message": "Checking model worker response..."}
+            status = copy.deepcopy(cached[1])
+            if "worker_instance_id" not in status:
+                return status
+            observed = payload.get("worker_instance_id")
+            if heartbeat_at is not None and observed != status["worker_instance_id"]:
+                return {"readiness": "waiting", "message": (
+                    "Worker restarted; checking compatibility..." if observed
+                    else "Waiting for an identified worker heartbeat..."
+                )}
+            age = None if heartbeat_at is None else max(0., now - heartbeat_at)
+            status["heartbeat_age_s"] = age
+            # Descriptor compatibility is cached briefly; live state and age
+            # come from the same worker instance's most recent heartbeat.
+            if observed == status["worker_instance_id"] and isinstance(payload.get("engine_state"), str):
+                status["engine_state"] = payload["engine_state"]
+            return status
+
+    def _poll_status(self, runtime_id: str) -> None:
+        try:
+            while not self._status_shutdown.is_set():
+                with self._lock:
+                    idle = time.monotonic() - self._status_last_requested.get(runtime_id, 0.)
+                    if self._closed or idle >= self._STATUS_IDLE_S:
+                        return
+                try:
+                    status = self.describe(runtime_id)
+                except Exception as exc:
+                    status = {"readiness": "error", "message": str(exc)}
+                with self._lock:
+                    if self._closed:
+                        return
+                    now = time.monotonic()
+                    self._status_cache[runtime_id] = (now, status)
+                    if now - self._status_last_requested.get(runtime_id, 0.) >= self._STATUS_IDLE_S:
+                        return
+                if self._status_shutdown.wait(self._STATUS_REFRESH_S):
+                    return
+        finally:
+            with self._lock:
+                if self._status_threads.get(runtime_id) is threading.current_thread():
+                    self._status_threads.pop(runtime_id, None)
 
     def _describe_timeout_status(self, runtime_id: str) -> dict[str, Any]:
         now = time.monotonic()
@@ -178,12 +253,19 @@ class WorkerRegistry:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
+            self._status_shutdown.set()
+            threads = list(self._status_threads.values())
             requesters = [
                 *self._requesters.values(),
                 *self._status_requesters.values(),
             ]
             self._requesters.clear()
             self._status_requesters.clear()
+            self._status_cache.clear()
+            self._status_last_requested.clear()
+        for thread in threads:
+            thread.join(timeout=3.0)
         for requester in requesters:
             close = getattr(requester, "close", None)
             if callable(close):
@@ -194,26 +276,40 @@ class WorkerRegistry:
                     client.close()
 
     def _get_or_create(self, runtime_id: str) -> InferenceRequester:
-        resolve_runtime(self._catalog, runtime_id)
-        with self._lock:
-            existing = self._requesters.get(runtime_id)
-            if existing is not None:
-                return existing
-            requester = self._make_requester(runtime_id, purpose="inference")
-            self._requesters[runtime_id] = requester
-            return requester
+        return self._get_requester(runtime_id, purpose="inference")
 
     def _get_or_create_status_requester(
         self,
         runtime_id: str,
     ) -> InferenceRequester:
+        return self._get_requester(runtime_id, purpose="status")
+
+    def _get_requester(self, runtime_id: str, *, purpose: str) -> InferenceRequester:
+        resolve_runtime(self._catalog, runtime_id)
+        requesters = self._status_requesters if purpose == "status" else self._requesters
         with self._lock:
-            existing = self._status_requesters.get(runtime_id)
+            if self._closed:
+                raise RuntimeError("Worker registry is closed")
+            existing = requesters.get(runtime_id)
             if existing is not None:
                 return existing
-            requester = self._make_requester(runtime_id, purpose="status")
-            self._status_requesters[runtime_id] = requester
-            return requester
+            creation_lock = self._requester_locks.setdefault((runtime_id, purpose), threading.Lock())
+        # SDK/session creation may wait for middleware. It cannot hold the lock
+        # used by heartbeat callbacks, cached status reads or another runtime.
+        with creation_lock:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("Worker registry is closed")
+                existing = requesters.get(runtime_id)
+                if existing is not None:
+                    return existing
+            requester = self._make_requester(runtime_id, purpose=purpose)
+            with self._lock:
+                if not self._closed:
+                    requesters[runtime_id] = requester
+                    return requester
+            requester.close()
+            raise RuntimeError("Worker registry closed during client creation")
 
     def _make_requester(
         self,
@@ -222,7 +318,7 @@ class WorkerRegistry:
         purpose: str,
     ) -> InferenceRequester:
         client = self._client_factory(
-            service_name=f"/{runtime_id}/engine_command",
+            service_name=f"/{runtime_id}/engine_{'status' if purpose == 'status' else 'command'}",
             router_ip=self._router_ip,
             router_port=self._router_port,
             domain_id=self._domain_id,
@@ -265,6 +361,8 @@ class WorkerRegistry:
                 f"worker runtime mismatch: expected {runtime_id!r}, "
                 f"got {descriptor.runtime_id!r}"
             )
+        if not isinstance(descriptor.worker_instance_id, str) or not descriptor.worker_instance_id.strip():
+            raise WorkerCompatibilityError("worker descriptor requires a non-empty instance ID")
         runtime = resolve_runtime(self._catalog, runtime_id)
         expected_policy_ids = sorted(
             model["policy_id"] for model in runtime.get("models", [])

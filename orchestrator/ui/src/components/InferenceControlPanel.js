@@ -113,10 +113,11 @@ export default function InferenceControlPanel() {
   const isSyncing = phase === InferencePhase.SYNCING;
   const isStatusKnown = Boolean(inferenceStatus.topicReceived);
   const runtimeState = String(inferenceStatus.runtimeState || 'unknown');
+  const isPreparing = runtimeState === 'preparing';
   const hasRuntimeError = runtimeState === 'error';
   const loadedModelPath = String(inferenceStatus.loadedModelPath || '');
   const inferencePhaseRef = useRef(phase);
-  const isModelLoaded = ['loaded', 'syncing', 'running', 'paused', 'error'].includes(
+  const isModelLoaded = ['loaded', 'preparing', 'syncing', 'running', 'paused', 'error'].includes(
     runtimeState
   ) || isInferencing || isPaused || isSyncing;
   const canResume = isPaused &&
@@ -419,7 +420,7 @@ export default function InferenceControlPanel() {
     : (catalogError || 'Policy catalog is unavailable');
   const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
     backendReadiness.ready && !hasRuntimeError;
-  const stopEnabled = isInferencing || isSyncing;
+  const stopEnabled = isInferencing || isSyncing || isPreparing;
   const clearEnabled = isModelLoaded;
   const startDescription = !isStatusKnown
     ? 'Checking inference session status'
@@ -440,6 +441,7 @@ export default function InferenceControlPanel() {
     ? (inferenceStatus.error || 'Policy Runtime failed. Clear the session before restarting.')
     : isBackendStartBlocked
     ? backendReadiness.message
+    : isPreparing ? 'Preparing first action...'
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner =
     !isStatusKnown || isInferencing || isLoading || isSyncing || isBackendWarming;

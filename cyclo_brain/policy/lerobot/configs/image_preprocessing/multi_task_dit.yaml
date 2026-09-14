@@ -1,0 +1,12 @@
+# LeRobot MultiTaskDiTPolicy._prepare_batch stacks cameras before the encoder's
+# optional resize/crop. Cameras must already have equal H/W at that point.
+# Active test preset: the 1,000-step inference_context_campaign_20260910 checkpoint
+# used external Torch bilinear resize to 224x224 with antialias enabled.
+# This is not a universal Multi-Task DiT training default. Match a different
+# checkpoint's training transforms explicitly; use identity if none are needed.
+backend: torch
+operations:
+  - type: resize
+    size: [224, 224]
+    interpolation: bilinear
+    antialias: true

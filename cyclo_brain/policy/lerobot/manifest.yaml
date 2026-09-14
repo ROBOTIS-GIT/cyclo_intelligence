@@ -22,6 +22,10 @@ models:
     label: Diffusion
     aliases: [diffusion]
     requires_instruction: false
+  - id: multi_task_dit
+    label: Multi-Task DiT
+    aliases: [multi_task_dit]
+    requires_instruction: true
   - id: smolvla
     label: SmolVLA
     aliases: [smolvla]
@@ -33,10 +37,6 @@ models:
   - id: pi0
     label: Pi0
     aliases: [pi0]
-    requires_instruction: true
-  - id: pi0_fast
-    label: Pi0-FAST
-    aliases: [pi0_fast]
     requires_instruction: true
   - id: pi05
     label: Pi0.5
@@ -53,14 +53,6 @@ models:
   - id: fastwam
     label: FastWAM
     aliases: [fastwam]
-    requires_instruction: true
-  - id: eo1
-    label: EO1
-    aliases: [eo1]
-    requires_instruction: true
-  - id: evo1
-    label: Evo1
-    aliases: [evo1]
     requires_instruction: true
   - id: wall_x
     label: WALL-X

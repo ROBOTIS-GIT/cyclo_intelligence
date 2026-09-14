@@ -6,7 +6,7 @@ inference. They are deployed in different images.
 ```text
 cyclo_intelligence image                  Worker image
 ┌──────────────────────────────┐          ┌──────────────────────────┐
-│ policy-runtime s6 service    │  Zenoh   │ engine-process s6 service│
+│ launch-managed runtime       │  Zenoh   │ engine-process s6 service│
 │                              │          │                          │
 │ ServiceHandler               │ request  │ EngineWorker             │
 │ SessionState                 │─────────>│ <backend>_engine          │
@@ -73,16 +73,60 @@ The Supervisor uses `/run/cyclo/policy-runtime.sock` to reserve Worker
 start/stop/recreate operations. A Worker used by a loaded session, or one with
 a pending hold, cannot be changed through the Supervisor API.
 
+### Worker Status Snapshots
+
+Supervisor's `worker_status` request reads a shared, nonblocking snapshot from
+WorkerRegistry. Network `DESCRIBE` probes run on a separate status client, at most
+one probe loop per runtime, approximately once per second while readers remain
+interested. Ten seconds without a read stops that loop. A slow or disconnected
+Worker must not occupy the serial Unix lifecycle handler or block another Worker.
+SDK client construction also occurs outside the heartbeat/status lock; concurrent
+requests for the same client share one construction.
+
+Descriptor snapshots expire after three seconds. Reading a snapshot does not
+extend its lifetime. Heartbeat age and engine state are read from the latest
+matching Worker instance; a new or unidentified instance cannot reuse old
+compatibility results. Expired/unavailable snapshots report waiting, and a probe's
+compatibility failure replaces any previous ready result.
+
+These snapshots are UI diagnostics, not authority to execute or mutate a Worker.
+LOAD still performs a fresh descriptor handshake. The active-session heartbeat
+watchdog and mutation reservation/hold checks retain their independent paths.
+No frontend polling request directly triggers a second simultaneous Worker probe.
+
 ## Environment
 
-The s6 services run through interactive bash so `/root/.bashrc` supplies the
-ROS/Zenoh settings:
+The common `cyclo_intelligence` ROS launch starts Runtime first and starts its
+ROS clients only after the ready marker identifies the new Runtime PID.
+Runtime and Orchestrator remain separate processes but inherit the same launch
+environment. The s6-managed common launch and Worker services use interactive
+bash; manual launch inherits the current shell's environment:
 
 ```bash
 export ROS_DOMAIN_ID=30
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 ```
+
+After editing `/root/.bashrc`, use a new shell (or source it) and restart the
+**common launch**, not only `orchestrator_node`. The component-only
+`orchestrator` and `cyclo_data` launch commands do not start Policy Runtime.
+Do not run the manual common launch while the s6 `cyclo_intelligence` unit is
+already running. A process lock rejects a second Runtime before it can replace
+the existing control socket or publish robot commands.
+
+Runtime exit shuts down the common launch; Orchestrator exit also shuts down
+its launch. There is no Runtime-only respawn or automatic inference resume.
+Runtime shutdown rejects new lifecycle requests and Worker mutations, clears
+the action plan, and retries failed holds while retaining robot I/O. Launch
+allows 30 seconds before SIGTERM and another 5 before SIGKILL. A controller
+command watchdog is mandatory: SIGKILL, missing joint feedback and power loss
+cannot guarantee a successful software hold.
+
+Docker health checks cover the always-on UI/management services; they do not
+mean inference is ready. With the common launch stopped, Supervisor reports
+Runtime unavailable and still denies Worker mutations whose safety cannot be
+verified. Start the common launch before managing Workers through the UI.
 
 Runtime fallbacks include:
 

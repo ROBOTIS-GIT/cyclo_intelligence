@@ -132,6 +132,19 @@ describe('InferenceControlPanel deploy safety', () => {
     jest.clearAllMocks();
   });
 
+  test('preparation shows first-action progress and leaves Stop and Clear available', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferencePhase: InferencePhase.LOADING,
+      runtimeStateOverride: 'preparing',
+    });
+    expect(screen.getByText('Preparing first action...')).toBeInTheDocument();
+    const stop = screen.getByRole('button', { name: /Pause inference/i });
+    expect(stop).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Stop inference and unload model/i })).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+  });
+
   test('blocks inference when the policy catalog cannot be loaded', async () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('catalog offline'));
     const { sendRecordCommand } = renderPanel({ catalog: null });
@@ -333,10 +346,11 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(screen.getByText('Synchronizing initial robot pose...')).toBeInTheDocument();
   });
 
-  test('requires Clear before restarting a failed policy session', () => {
+  test.each([InferencePhase.PAUSED, InferencePhase.LOADING])(
+    'requires Clear before restarting a failed policy session in phase %s', (inferencePhase) => {
     renderPanel({
       inferenceMode: 'robot',
-      inferencePhase: InferencePhase.PAUSED,
+      inferencePhase,
       runtimeStateOverride: 'error',
     });
 

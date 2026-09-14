@@ -51,6 +51,85 @@ RobotClient = robot_client_impl.RobotClient
 
 
 class InitialPoseSyncCommandTest(unittest.TestCase):
+    def test_expired_step_stops_twist_and_preserves_position_target_and_receipt(self):
+        client = self._make_client("ffw_sg2_rev1")
+        keys = list(client._action_keys)
+        action = np.ones(self._action_dimension(client, keys))
+        original = action.copy()
+        receipt = client.publish_action_with_receipt(action, keys, zero_twist=True)
+        expected = []
+        offset = 0
+        for key in keys:
+            cfg = client._action_groups[key]
+            messages = client._command_publishers[f"leader_{key}"].messages
+            if cfg["msg_type"] == "geometry_msgs/msg/Twist":
+                width = 3
+                expected.extend([0.] * width)
+                assert messages[-1]["linear"].x == 0.
+                assert messages[-1]["linear"].y == 0.
+                assert messages[-1]["angular"].z == 0.
+            else:
+                width = len(cfg["joint_names"])
+                expected.extend(action[offset:offset + width])
+            offset += width
+        np.testing.assert_array_equal(receipt, expected)
+        np.testing.assert_array_equal(action, original)
+
+    def test_publication_receipt_contains_deadband_adjusted_values(self):
+        client = self._make_client("ffw_sg2_rev1")
+        client._cmd_vel_linear_deadband = 0.01
+        client._cmd_vel_angular_deadband = 0.02
+        keys = list(client._action_keys)
+        action = np.full(self._action_dimension(client, keys), 0.005)
+        receipt = client.publish_action_with_receipt(action, keys)
+        offset = 0
+        expected = []
+        for key in keys:
+            cfg = client._action_groups[key]
+            width = 3 if cfg["msg_type"] == "geometry_msgs/msg/Twist" else len(cfg["joint_names"])
+            expected.extend([0.] * width if cfg["msg_type"] == "geometry_msgs/msg/Twist" else action[offset:offset + width])
+            offset += width
+        np.testing.assert_array_equal(receipt, expected)
+        assert all(len(p.messages) == 1 for p in client._command_publishers.values())
+
+    def test_receipt_validates_every_publisher_before_sending_anything(self):
+        client = self._make_client("ffw_sg2_rev1")
+        keys = list(client._action_keys)
+        action = np.ones(self._action_dimension(client, keys))
+        client._command_publishers.pop(f"leader_{keys[-1]}")
+        with self.assertRaisesRegex(RuntimeError, "publisher unavailable"):
+            client.publish_action_with_receipt(action, keys)
+        assert all(not p.messages for p in client._command_publishers.values())
+
+    def test_partial_publish_failure_never_returns_a_successful_receipt(self):
+        client = self._make_client("ffw_sg2_rev1")
+        keys = list(client._action_keys)
+        action = np.ones(self._action_dimension(client, keys))
+        failing = client._command_publishers[f"leader_{keys[-1]}"]
+        failing.publish = mock.Mock(side_effect=RuntimeError("transport failed"))
+        with self.assertRaisesRegex(RuntimeError, "transport failed"):
+            client.publish_action_with_receipt(action, keys)
+        assert client._command_publishers[f"leader_{keys[0]}"].messages
+
+    def test_input_snapshot_is_independent_and_converts_bgr_to_rgb(self):
+        with mock.patch.object(RobotClient, "_init_subscriptions"):
+            client = RobotClient("ffw_sg2_rev1")
+        client._images["eye"] = np.array([[[1, 2, 3]]], dtype=np.uint8)
+        client._joint_positions["arm"] = np.array([0.5], dtype=np.float32)
+        client._sensors["odom"] = {"linear_velocity": [1., 0., 0.]}
+        client._image_timestamps["eye"] = 123.
+        snapshot = client.get_input_snapshot()
+        np.testing.assert_array_equal(snapshot["images"]["eye"], [[[3, 2, 1]]])
+        snapshot["images"]["eye"][:] = 9
+        snapshot["joint_positions"]["arm"][:] = 9
+        snapshot["sensors"]["odom"]["linear_velocity"][0] = 9
+        assert client._images["eye"][0, 0, 0] == 1
+        assert client._joint_positions["arm"][0] == 0.5
+        assert client._sensors["odom"]["linear_velocity"][0] == 1
+        assert snapshot["reception_wall_timestamps"]["images"]["eye"] == 123.
+        assert snapshot["captured_monotonic_s"] > 0
+        client.close()
+
     def test_readiness_can_select_required_inputs_without_model_specific_names(self):
         with mock.patch.object(RobotClient, "_init_subscriptions"):
             client = RobotClient("ffw_sg2_rev1")

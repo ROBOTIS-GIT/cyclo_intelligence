@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 _MODULE_BACKUPS = {}
@@ -36,6 +37,7 @@ _install_module_stub(
 from interfaces.msg import InferenceStatus, TaskInfo  # noqa: E402
 from interfaces.srv import SendCommand  # noqa: E402
 from orchestrator.orchestrator_node import OrchestratorNode  # noqa: E402
+from orchestrator.internal.communication.container_service_client import ContainerServiceClient  # noqa: E402
 
 for _module_name, _previous_module in _MODULE_BACKUPS.items():
     if _previous_module is None:
@@ -71,12 +73,16 @@ class FakeLogger:
     def error(self, *_args, **_kwargs) -> None:
         pass
 
+    def warning(self, *_args, **_kwargs) -> None:
+        pass
+
 
 class FakeInferenceClient:
     def __init__(self) -> None:
         self.calls = []
         self.pause_results = []
         self.stop_results = []
+        self.unload_results = []
         self.status_results = []
         self.disconnected = threading.Event()
         self._cancelled = threading.Event()
@@ -87,6 +93,8 @@ class FakeInferenceClient:
             return self.pause_results.pop(0)
         if command == self.CMD_STOP and self.stop_results:
             return self.stop_results.pop(0)
+        if command == self.CMD_UNLOAD and self.unload_results:
+            return self.unload_results.pop(0)
         if command == self.CMD_STATUS and self.status_results:
             return self.status_results.pop(0)
         return SimpleNamespace(success=True, message="ok")
@@ -133,6 +141,260 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.node._stop_inference_status_monitor()
         self.node._cancel_initial_pose_sync_status()
+
+    def prepare_async_load(self, client):
+        self.node.container_service_client = None
+        self.node._client_cb_group = object()
+        self.node.init_robot_control_parameters_from_user_task = Mock()
+        with patch('orchestrator.orchestrator_node.ContainerServiceClient') as factory, \
+                patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            factory.return_value = client
+            for name in ('CMD_LOAD', 'CMD_START', 'CMD_STOP', 'CMD_UNLOAD'):
+                setattr(factory, name, getattr(ContainerServiceClient, name))
+            response = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.START_INFERENCE,
+                                    task_info=TaskInfo(task_type='inference', policy_path='/models/new',
+                                                       policy_id='lerobot:act', control_hz=80,
+                                                       inference_hz=20, chunk_align_window_s=0.25)),
+                SendCommand.Response(),
+            )
+        self.assertTrue(response.success, response.message)
+        return thread.call_args.kwargs['target']
+
+    def resume_request(self, command):
+        self.client._service_prefix = '/lerobot'
+        return self.node.user_interaction_callback(
+            SendCommand.Request(command=command, task_info=TaskInfo(
+                task_type='inference', policy_path='/models/policy', policy_id='lerobot:act',
+                control_hz=100, inference_hz=15, chunk_align_window_s=0.3,
+                initial_pose_sync=True, initial_pose_sync_duration_s=5.0,
+                task_instruction=['pick'],
+            )), SendCommand.Response())
+
+    def test_resume_does_not_send_commands_during_reserved_cleanup(self):
+        for command in (SendCommand.Request.START_INFERENCE, SendCommand.Request.RESUME_INFERENCE):
+            with self.subTest(command=command):
+                self.node._inference_cleanup_client = self.client
+                self.client.calls.clear()
+                result = self.resume_request(command)
+                self.assertFalse(result.success)
+                self.assertFalse(self.client.calls)
+
+    def test_resume_reply_cannot_activate_replacement_session(self):
+        for command in (SendCommand.Request.START_INFERENCE, SendCommand.Request.RESUME_INFERENCE):
+            for message in ('ok', 'syncing', 'LOAD first'):
+                with self.subTest(command=command, message=message):
+                    replacement = FakeInferenceClient()
+                    self.node.container_service_client = self.client
+                    self.node.on_inference = True
+                    self.node._initial_pose_sync_status_active = False
+                    def replace_session(*args, **kwargs):
+                        self.node.container_service_client = replacement
+                        self.node.on_inference = False
+                        return SimpleNamespace(success=message != 'LOAD first', message=message)
+                    with patch.object(self.client, 'inference_command', side_effect=replace_session), \
+                            patch.object(self.node, '_teardown_inference_client') as teardown, \
+                            patch.object(self.node, '_publish_inference_phase') as publish:
+                        result = self.resume_request(command)
+                    self.assertFalse(result.success)
+                    self.assertFalse(self.node.on_inference)
+                    self.assertIs(self.node.container_service_client, replacement)
+                    self.assertFalse(self.node._initial_pose_sync_status_active)
+                    publish.assert_not_called()
+                    teardown.assert_not_called()
+
+    def test_resume_rejects_busy_lifecycle_without_waiting_or_rpc(self):
+        self.node._inference_lifecycle_lock.acquire()
+        try:
+            for command in (SendCommand.Request.START_INFERENCE, SendCommand.Request.RESUME_INFERENCE):
+                result = self.resume_request(command)
+                self.assertFalse(result.success)
+                self.assertIn('lifecycle operation in progress', result.message)
+                self.assertFalse(self.client.calls)
+        finally:
+            self.node._inference_lifecycle_lock.release()
+
+    def test_resume_transport_does_not_hold_state_lock_and_respects_new_cleanup(self):
+        reserved = threading.Event()
+        def reserve_cleanup():
+            with self.node._state_lock:
+                self.node._inference_cleanup_client = self.client
+            reserved.set()
+
+        def reply(*args, **kwargs):
+            self.assertTrue(self.node._inference_lifecycle_lock.locked())
+            thread = threading.Thread(target=reserve_cleanup)
+            thread.start()
+            try:
+                self.assertTrue(reserved.wait(1.0), 'state lock blocked cleanup during RESUME RPC')
+            finally:
+                thread.join(1.0)
+            return SimpleNamespace(success=True, message='ok')
+
+        with patch.object(self.client, 'inference_command', side_effect=reply), \
+                patch.object(self.node, '_publish_inference_phase') as publish:
+            response = self.resume_request(SendCommand.Request.RESUME_INFERENCE)
+        self.assertFalse(response.success)
+        publish.assert_not_called()
+        self.assertFalse(self.node._inference_lifecycle_lock.locked())
+
+    def test_resume_shared_path_preserves_running_syncing_preparing_and_failure(self):
+        for command in (SendCommand.Request.START_INFERENCE, SendCommand.Request.RESUME_INFERENCE):
+            for phase in ('running', 'syncing', 'preparing', 'failure', 'exception'):
+                with self.subTest(command=command, phase=phase):
+                    result = SimpleNamespace(success=phase != 'failure', message=phase,
+                                             data={'runtime_state': phase})
+                    effect = RuntimeError('transport unavailable') if phase == 'exception' else None
+                    with patch.object(self.client, 'inference_command', return_value=result, side_effect=effect) as rpc, \
+                            patch.object(self.node, '_publish_inference_phase') as publish, \
+                            patch.object(self.node, '_begin_initial_pose_sync_status') as sync, \
+                            patch.object(self.node, '_apply_inference_runtime_status') as preparing:
+                        response = self.resume_request(command)
+                    self.assertEqual(response.success, phase not in ('failure', 'exception'))
+                    self.assertEqual(rpc.call_count, 1)
+                    self.assertEqual(rpc.call_args.args[0], ContainerServiceClient.CMD_RESUME)
+                    self.assertEqual(rpc.call_args.kwargs['task_instruction'], 'pick')
+                    self.assertFalse(self.node._inference_lifecycle_lock.locked())
+                    self.assertEqual(publish.call_count, int(phase == 'running'))
+                    self.assertEqual(sync.call_count, int(phase == 'syncing'))
+                    self.assertEqual(preparing.call_count, int(phase == 'preparing'))
+
+    def test_superseded_async_load_or_start_cannot_publish_or_retry_for_new_session(self):
+        for stage in (ContainerServiceClient.CMD_LOAD, ContainerServiceClient.CMD_START):
+            for outcome in ('failure', 'already_loaded', 'exception', 'success'):
+                with self.subTest(stage=stage, outcome=outcome):
+                    client = Mock()
+                    load = self.prepare_async_load(client)
+                    replacement = FakeInferenceClient()
+
+                    def complete(command, **kwargs):
+                        if command == stage:
+                            self.node.container_service_client = replacement
+                            self.node._loaded_inference_policy_path = '/models/replacement'
+                            if outcome == 'exception':
+                                raise RuntimeError('old request failed')
+                            return SimpleNamespace(success=outcome == 'success', data={}, message=(
+                                'already loaded; UNLOAD first' if outcome == 'already_loaded' else 'old response'))
+                        return SimpleNamespace(success=True, message='ok', data={})
+
+                    client.inference_command.side_effect = complete
+                    before = list(self.node.communicator.phases)
+                    load()
+                    expected = [ContainerServiceClient.CMD_LOAD]
+                    if stage == ContainerServiceClient.CMD_START:
+                        expected.append(ContainerServiceClient.CMD_START)
+                    self.assertEqual([c.args[0] for c in client.inference_command.call_args_list], expected)
+                    self.assertEqual(self.node.communicator.phases, before)
+                    self.assertIs(self.node.container_service_client, replacement)
+                    self.assertEqual(replacement.calls, [])
+
+    def test_clear_reserved_during_load_prevents_start(self):
+        client = Mock()
+        load = self.prepare_async_load(client)
+
+        def complete(command, **kwargs):
+            self.node._inference_cleanup_client = client
+            return SimpleNamespace(success=True, message='ok', data={})
+
+        client.inference_command.side_effect = complete
+        load()
+        self.assertEqual([c.args[0] for c in client.inference_command.call_args_list],
+                         [ContainerServiceClient.CMD_LOAD])
+
+    def test_load_retry_requires_stop_and_unload_success(self):
+        for failed_command in (ContainerServiceClient.CMD_STOP, ContainerServiceClient.CMD_UNLOAD):
+            with self.subTest(failed_command=failed_command):
+                client = Mock()
+                load = self.prepare_async_load(client)
+                calls = []
+
+                def complete(command, **kwargs):
+                    calls.append(command)
+                    if command == ContainerServiceClient.CMD_LOAD:
+                        return SimpleNamespace(success=False, message='already loaded; UNLOAD first')
+                    return SimpleNamespace(success=command != failed_command, message='hold/prediction pending')
+
+                client.inference_command.side_effect = complete
+                with patch.object(self.node, '_teardown_inference_client'):
+                    load()
+                expected = [ContainerServiceClient.CMD_LOAD, ContainerServiceClient.CMD_STOP]
+                if failed_command == ContainerServiceClient.CMD_UNLOAD:
+                    expected.append(ContainerServiceClient.CMD_UNLOAD)
+                self.assertEqual(calls, expected)
+                self.assertNotEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.READY)
+
+    def test_successful_load_retry_preserves_parameters_and_starts_once(self):
+        client = Mock()
+        load = self.prepare_async_load(client)
+        client.inference_command.side_effect = [
+            SimpleNamespace(success=False, message='already loaded; UNLOAD first'),
+            SimpleNamespace(success=True, message='stopped'),
+            SimpleNamespace(success=True, message='unloaded'),
+            SimpleNamespace(success=True, message='loaded', data={'action_keys': ['arm']}),
+            SimpleNamespace(success=True, message='running', data={}),
+        ]
+        load()
+        calls = client.inference_command.call_args_list
+        self.assertEqual([c.args[0] for c in calls], [0, 4, 5, 0, 1])
+        self.assertEqual(calls[0].kwargs, calls[3].kwargs)
+        self.assertEqual(calls[0].kwargs['control_hz'], 80)
+        self.assertEqual(calls[0].kwargs['inference_hz'], 20)
+        self.assertEqual(calls[0].kwargs['chunk_align_window_s'], 0.25)
+        self.assertEqual(calls[0].kwargs['policy_id'], 'lerobot:act')
+        self.assertEqual(self.node._loaded_inference_policy_path, '/models/new')
+        self.assertEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.INFERENCING)
+
+    def test_replacement_during_load_retry_prevents_remaining_commands(self):
+        for stage in (ContainerServiceClient.CMD_STOP, ContainerServiceClient.CMD_UNLOAD):
+            with self.subTest(stage=stage):
+                client = Mock()
+                load = self.prepare_async_load(client)
+                replacement = FakeInferenceClient()
+
+                def complete(command, **kwargs):
+                    if command == ContainerServiceClient.CMD_LOAD:
+                        return SimpleNamespace(success=False, message='already loaded; UNLOAD first')
+                    if command == stage:
+                        self.node.container_service_client = replacement
+                    return SimpleNamespace(success=True, message='ok', data={})
+
+                client.inference_command.side_effect = complete
+                before = list(self.node.communicator.phases)
+                load()
+                expected = [0, 4] if stage == ContainerServiceClient.CMD_STOP else [0, 4, 5]
+                self.assertEqual([c.args[0] for c in client.inference_command.call_args_list], expected)
+                self.assertEqual(self.node.communicator.phases, before)
+
+    def test_failed_load_becomes_ready_only_after_cleanup_acknowledgement(self):
+        client = Mock()
+        client._cancelled = threading.Event()
+        load = self.prepare_async_load(client)
+        logger = FakeLogger()
+        errors = []
+
+        def log_error(message, **kwargs):
+            allowed = {'throttle_duration_sec', 'throttle_time_source_type', 'skip_first', 'once'}
+            if set(kwargs) - allowed:
+                raise TypeError('unsupported ROS logger options')
+            errors.append(message)
+
+        logger.error = log_error
+        self.node.get_logger = lambda: logger
+        self.node._loaded_inference_initial_pose_sync = False
+        client.inference_command.return_value = SimpleNamespace(success=False, message='load failed')
+        with patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            load()
+        self.assertTrue(any('Async LOAD/START error' in message for message in errors))
+        self.assertEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.LOADING)
+        self.assertEqual(self.node._inference_status_snapshot['runtime_state'], 'error')
+        self.assertIn('load failed', self.node._inference_status_snapshot['error'])
+        self.assertIs(self.node._inference_cleanup_client, client)
+        client.inference_command.return_value = SimpleNamespace(success=True, message='ok')
+        thread.call_args.kwargs['target']()
+        self.assertEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.READY)
+        self.assertIn('load failed', self.node._inference_status_snapshot['error'])
+        client.disconnect.assert_called_once()
+        self.assertIsNone(self.node.container_service_client)
 
     def test_inference_settings_survive_status_updates_without_touching_recording(self):
         task_info = TaskInfo(
@@ -447,6 +709,20 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.LOADING)
         self.assertEqual(self.node.communicator.snapshots[-1]['sequence'], 2)
 
+    def test_preparation_keeps_polling_until_runtime_really_runs(self):
+        self.client.status_results = [
+            SimpleNamespace(success=True, data={'runtime_state': 'preparing'}),
+            SimpleNamespace(success=True, data={'runtime_state': 'running'}),
+        ]
+        self.node._poll_inference_status_once()
+        first = self.node.communicator.snapshots[-1]
+        self.assertEqual(first['phase'], InferenceStatus.LOADING)
+        self.assertEqual(first['runtime_state'], 'preparing')
+        self.assertFalse(self.node._inference_status_busy())
+        self.node._poll_inference_status_once()
+        self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.INFERENCING)
+        self.assertEqual(self.client.calls, [self.client.CMD_STATUS, self.client.CMD_STATUS])
+
     def test_pending_cleanup_does_not_rediscover_old_policy(self) -> None:
         self.node._observe_inference_command(True)
         self.node._poll_inference_status_once()
@@ -566,6 +842,181 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             self.client.calls,
             [self.client.CMD_STOP, self.client.CMD_UNLOAD],
         )
+
+    def test_preverified_stop_expires_after_an_intervening_command(self):
+        self.node._begin_initial_pose_sync_status(self.client, 60.0)
+        verified = self.node._prepare_active_initial_pose_sync_teardown()
+        # Real ContainerServiceClient reports both edges of mutating requests.
+        self.node._observe_inference_command(True)
+        self.node._observe_inference_command(False)
+        self.node._teardown_inference_client(stop_verified_client=verified)
+        self.assertTrue(self.client.disconnected.wait(1.0))
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP, self.client.CMD_STOP, self.client.CMD_UNLOAD])
+
+    def test_stop_verification_expires_while_cleanup_waits_for_lifecycle(self):
+        with patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            self.node._teardown_inference_client()
+            cleanup = thread.call_args.kwargs['target']
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+        self.node._observe_inference_command(True)
+        self.node._observe_inference_command(False)
+        cleanup()
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP, self.client.CMD_STOP, self.client.CMD_UNLOAD])
+
+    def test_duplicate_teardown_does_not_repeat_sync_stop(self):
+        with patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            self.node._teardown_inference_client()
+            cleanup = thread.call_args.kwargs['target']
+            self.node._teardown_inference_client()
+        self.assertEqual(thread.call_count, 1)
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+        cleanup()
+
+    def test_replaced_client_cannot_verify_stop_or_unload(self):
+        replacement = FakeInferenceClient()
+        def replace_during_stop(command, **kwargs):
+            self.client.calls.append(command)
+            self.node.container_service_client = replacement
+            return SimpleNamespace(success=True, message='stopped')
+        with patch.object(self.client, 'inference_command', side_effect=replace_during_stop), \
+                patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            with self.assertRaisesRegex(RuntimeError, 'session changed'):
+                self.node._teardown_inference_client()
+        thread.assert_not_called()
+        self.assertIs(self.node.container_service_client, replacement)
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+
+    def test_stop_during_busy_lifecycle_is_immediate_but_not_reused(self):
+        thread_class = threading.Thread
+        finished = threading.Event()
+        errors = []
+        def teardown():
+            try:
+                self.node._teardown_inference_client()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+        self.node._inference_lifecycle_lock.acquire()
+        try:
+            with patch('orchestrator.orchestrator_node.threading.Thread') as factory:
+                runner = thread_class(target=teardown)
+                runner.start()
+                self.assertTrue(finished.wait(1.0), 'Stop waited for an unrelated lifecycle RPC')
+                runner.join(1.0)
+                self.assertFalse(errors)
+                cleanup = factory.call_args.kwargs['target']
+            self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+            self.assertIsNone(self.node._inference_verified_stop)
+        finally:
+            self.node._inference_lifecycle_lock.release()
+        cleanup()
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP, self.client.CMD_STOP, self.client.CMD_UNLOAD])
+
+    def test_async_stop_reply_for_replaced_client_never_unloads_replacement(self):
+        self.node._loaded_inference_initial_pose_sync = False
+        replacement = FakeInferenceClient()
+        def replace_during_stop(command, **kwargs):
+            self.client.calls.append(command)
+            self.node.container_service_client = replacement
+            return SimpleNamespace(success=True, message='stopped')
+        with patch('orchestrator.orchestrator_node.threading.Thread') as factory:
+            self.node._teardown_inference_client()
+            cleanup = factory.call_args.kwargs['target']
+        with patch.object(self.client, 'inference_command', side_effect=replace_during_stop):
+            cleanup()
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+        self.assertIs(self.node.container_service_client, replacement)
+        self.assertTrue(self.client.disconnected.is_set())
+        self.assertFalse(replacement.disconnected.is_set())
+
+    def test_unload_rejection_preserves_client_for_clear_retry(self) -> None:
+        self.client.unload_results = [SimpleNamespace(success=False, message='prediction pending')]
+        self.node._teardown_inference_client()
+        deadline = time.monotonic() + 1
+        while getattr(self.node, '_inference_cleanup_client', None) is not None:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertIs(self.node.container_service_client, self.client)
+        self.assertFalse(self.client.disconnected.is_set())
+        self.assertFalse(self.client._cancelled.is_set())
+        self.assertTrue(any('UNLOAD rejected' in s['error'] for s in self.node.communicator.snapshots))
+        self.node._teardown_inference_client()
+        self.assertTrue(self.client.disconnected.wait(1))
+        self.assertIsNone(self.node.container_service_client)
+
+    def test_non_sync_stop_rejection_prevents_unload_and_disconnect(self) -> None:
+        self.node._loaded_inference_initial_pose_sync = False
+        self.client.stop_results = [SimpleNamespace(success=False, message='hold failed')]
+        self.node._teardown_inference_client()
+        deadline = time.monotonic() + 1
+        while getattr(self.node, '_inference_cleanup_client', None) is not None:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual(self.client.calls, [self.client.CMD_STOP])
+        self.assertIs(self.node.container_service_client, self.client)
+        self.assertFalse(self.client.disconnected.is_set())
+
+    def test_clear_retries_failed_load_cleanup_even_without_active_session(self):
+        self.node.on_inference = False
+        self.node.on_recording = False
+        self.node.timer_manager = None
+        self.node._loaded_inference_initial_pose_sync = False
+        self.node._publish_inference_phase(InferenceStatus.LOADING)
+        self.client.unload_results = [SimpleNamespace(success=False, message='worker unavailable')]
+        with patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            self.node._teardown_inference_client()
+        thread.call_args.kwargs['target']()
+        self.assertIs(self.node.container_service_client, self.client)
+        with patch.object(self.node, '_forward_recording', return_value=SimpleNamespace(success=False)), \
+                patch('orchestrator.orchestrator_node.threading.Thread') as retry:
+            response = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.FINISH,
+                                    task_info=TaskInfo(task_type='inference')),
+                SendCommand.Response(),
+            )
+        self.assertTrue(response.success, response.message)
+        self.assertNotEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.READY)
+        retry.call_args.kwargs['target']()
+        self.assertIsNone(self.node.container_service_client)
+        self.assertTrue(self.client.disconnected.is_set())
+        self.assertEqual(self.node._inference_status_snapshot['phase'], InferenceStatus.READY)
+
+    def test_idle_record_finish_does_not_clear_pending_inference(self):
+        self.node.on_inference = False
+        self.node.on_recording = False
+        with patch.object(self.node, '_teardown_inference_client') as cleanup, \
+                patch.object(self.node, '_forward_recording') as recording:
+            response = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.FINISH,
+                                    task_info=TaskInfo(task_type='record')),
+                SendCommand.Response(),
+            )
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, 'Not currently recording')
+        cleanup.assert_not_called()
+        recording.assert_not_called()
+        self.assertIs(self.node.container_service_client, self.client)
+
+    def test_delayed_cleanup_cannot_stop_or_unload_a_replacement_session(self) -> None:
+        self.node._loaded_inference_initial_pose_sync = False
+        with patch('orchestrator.orchestrator_node.threading.Thread') as thread:
+            self.node._teardown_inference_client()
+            cleanup = thread.call_args.kwargs['target']
+        # Another LOAD/START wins the lifecycle lock before the queued cleanup.
+        replacement = FakeInferenceClient()
+        self.node.container_service_client = replacement
+        self.node._loaded_inference_policy_path = '/models/replacement'
+        self.node._publish_inference_phase(InferenceStatus.INFERENCING)
+        cleanup()
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(replacement.calls, [])
+        self.assertTrue(self.client.disconnected.is_set())
+        self.assertFalse(replacement.disconnected.is_set())
+        self.assertIs(self.node.container_service_client, replacement)
+        self.assertEqual(self.node._loaded_inference_policy_path, '/models/replacement')
+        self.assertEqual(self.node.communicator.phases[-1][0], InferenceStatus.INFERENCING)
+        self.assertIsNone(self.node._inference_cleanup_client)
 
 
 if __name__ == "__main__":

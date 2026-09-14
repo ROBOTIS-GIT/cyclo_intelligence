@@ -39,6 +39,8 @@ FROM robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0 AS runtime
 # ARM64 wheels — so override at the env level so every subsequent pip
 # command bypasses the broken default.
 ENV PIP_INDEX_URL=https://pypi.org/simple
+# Scope config isolation to build commands: the base's pip.conf also adds a
+# stale NGC extra index. Keep runtime user pip configuration usable.
 
 ARG S6_OVERLAY_VERSION=3.2.1.0
 
@@ -147,7 +149,7 @@ RUN apt-get update && \
 # compiled against 1.x. Keep pyarrow below 25.0.0: that release has
 # crashed in the aarch64 dataset-backed Parquet reader while serving
 # replay sidecars.
-RUN pip install --no-cache-dir --break-system-packages \
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages \
         setuptools==68.1.2 'numpy<2' \
         psutil matplotlib pandas huggingface_hub \
         mcap mcap-ros2-support pyarrow==24.0.0 \
@@ -230,7 +232,7 @@ RUN mkdir -p /var/run/agent && chmod 777 /var/run/agent
 # s6-agent service wraps.
 RUN git clone -b main https://github.com/ROBOTIS-GIT/cyclo_manager.git /opt/cyclo_manager
 ENV PYTHONPATH=/opt/cyclo_manager
-RUN pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
 
 # UI static build from stage 1
 COPY --from=ui-builder /ui/build /usr/share/nginx/html
@@ -252,8 +254,7 @@ RUN mkdir -p /usr/local/lib/s6-services && \
     cp /etc/s6-overlay/s6-rc.d/common/ros2_service_finish.sh /usr/local/lib/s6-services/ && \
     rm -rf /etc/s6-overlay/s6-rc.d/common && \
     chmod +x /usr/local/lib/s6-services/ros2_service_run.sh \
-             /usr/local/lib/s6-services/ros2_service_finish.sh \
-             /etc/s6-overlay/s6-rc.d/policy-runtime/run
+             /usr/local/lib/s6-services/ros2_service_finish.sh
 
 # Log directories — logutil-service runs as 'nobody' by default
 RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node && \
@@ -266,7 +267,7 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
 # 501 stubs until the §4.8 follow-up adds docker-py.
 COPY docker/supervisor_api /opt/supervisor_api
 COPY docker/docker-compose.yml docker/docker-compose.override.yml /opt/cyclo/docker/
-RUN pip install --no-cache-dir --break-system-packages \
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages \
         -r /opt/supervisor_api/requirements.txt
 
 # nginx must start from s6; disable the systemd daemon pidfile

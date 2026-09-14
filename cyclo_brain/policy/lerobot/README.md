@@ -108,7 +108,7 @@ the interpolation/crop used to create the training dataset.
 | YAML | Shipped Cyclo operation | Basis / limitation |
 | --- | --- | --- |
 | ACT | identity | Separate camera backbones; external training transforms must be configured explicitly. |
-| SmolVLA, Pi0, Pi0-FAST, Pi0.5 | identity | Preserve native aspect ratio for policy-owned resize/padding. |
+| SmolVLA, Pi0, Pi0.5 | identity | Preserve native aspect ratio for policy-owned resize/padding. |
 | XVLA | identity | Training and inference share internal resize + padding when checkpoint `resize_imgs_with_padding` is set. With `None`, both require equal camera sizes before stacking; reproduce any external training transform in YAML. |
 | MolmoAct2 | identity | Retain the checkpoint image processor. |
 | FastWAM | identity | Retain internal per-view resize/concatenation. |
@@ -189,7 +189,30 @@ image sizes does not fix an `n_obs_steps` mismatch.
 
 ## Additional Policies
 
-EO1, Evo1, WALL-X, Pi0-FAST and GR00T N1.7 (LeRobot) use the same LeRobot
+### Multi-Task DiT
+
+Select `Multi-Task DiT` (`lerobot:multi_task_dit`) in Inference or BT. It uses
+the existing LeRobot Worker and a publication-paced step adapter around the
+model's public `select_action` API. The model owns its observation/action queues;
+step execution bypasses chunk interpolation and asynchronous prefetch. Actual
+command publication is required; preview-only execution is unsupported.
+
+The current `multi_task_dit.yaml` is the test preset for the local 1,000-step
+checkpoint: external Torch bilinear resize to 224x224 with antialias enabled.
+It is not a universal model default. For that checkpoint, use Dataset FPS 30 and
+instruction `pick up the bottle and place it into basket`. Its state/action
+dimensions are both 22. Checkpoint path inside the standard workspace mount:
+
+```text
+/workspace/inference_context_campaign_20260910/models/multi_task_dit
+```
+
+Match preprocessing and state/action ordering before selecting another checkpoint.
+LingBot-VA remains excluded pending action-space integration.
+
+### WALL-X And GR00T
+
+WALL-X and GR00T N1.7 (LeRobot) use the same LeRobot
 Worker. Model settings come from the checkpoint, not new UI overrides.
 Their dependency extras are installed on both AMD64 and ARM64; spatial
 preprocessing defaults preserve RGB sizes and leave model-owned transforms active.
@@ -212,8 +235,10 @@ each dimension independently and requires the effective robot layout to match
 the checkpoint. A 22-dimensional robot is rejected rather than truncated.
 Matching dimensions alone does not prove semantic joint ordering compatibility.
 
-Pi0-FAST is now a distinct selector. Existing Pi0 selections remain valid; the
-checkpoint's type continues to select the actual LeRobot implementation.
+EO1, Evo1 and Pi0-FAST are excluded from Cyclo's inference Catalog and its
+preprocessing presets. Saved selections for these models are unavailable; select
+a supported model and matching checkpoint. Pi0 and Pi0.5 remain supported.
+The pinned upstream repository and existing user checkpoints are unchanged.
 
 New policy integration tests do not prove trained-checkpoint or robot performance.
 No new-model weights are downloaded by the test suite. Real dependency checks

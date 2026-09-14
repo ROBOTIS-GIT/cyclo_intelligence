@@ -105,12 +105,14 @@ services:
 
     privileged: true
     restart: unless-stopped
+    # Allow launch shutdown (40 s) and process-group cleanup (35 s) to finish.
+    stop_grace_period: 80s
     runtime: nvidia
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/nginx | grep -q up && \"$$S6_SVSTAT\" /run/service/supervisor_api | grep -q up && \"$$S6_SVSTAT\" /run/service/s6-agent | grep -q up && \"$$S6_SVSTAT\" /run/service/policy-runtime | grep -q up && test -s /run/cyclo/policy-runtime.ready",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/nginx | grep -q up && \"$$S6_SVSTAT\" /run/service/supervisor_api | grep -q up && \"$$S6_SVSTAT\" /run/service/s6-agent | grep -q up",
         ]
       interval: 30s
       timeout: 10s

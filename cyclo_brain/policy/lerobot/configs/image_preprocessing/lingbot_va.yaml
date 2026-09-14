@@ -1,0 +1,8 @@
+# Candidate step adapter; not yet exposed by the production catalog.
+# LeRobot LingBotVAPolicy._camera_frame_tensor resizes each camera with Torch
+# bilinear (align_corners=False), using checkpoint height/width and layout.
+# Training _encode_training_clip applies the corresponding internal transform.
+# Do not resize again here unless the dataset had an additional spatial transform.
+backend: torch
+operations:
+  - type: identity

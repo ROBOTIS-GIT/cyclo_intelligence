@@ -8,6 +8,7 @@ import numpy as np
 import sys
 import types
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -33,7 +34,8 @@ class GR00TEngineFactoryTests(unittest.TestCase):
             ROTATE_180=1,
             ROTATE_90_COUNTERCLOCKWISE=2,
         )
-        _install_stub("torch", inference_mode=lambda: None)
+        _install_stub("torch", inference_mode=lambda: None,
+                      cuda=types.SimpleNamespace(is_initialized=lambda: False, empty_cache=Mock()))
         _install_stub("gr00t")
         _install_stub("gr00t.model")
         _install_stub("gr00t.data")
@@ -76,6 +78,79 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.create_engine()
 
         self.assertIsInstance(engine, module.GR00TInference)
+
+    def load_module(self):
+        spec = importlib.util.spec_from_file_location("groot_lifecycle_under_test", INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_cleanup_releases_weights_cache_and_robot_even_when_close_fails(self):
+        for fail_close in (False, True):
+            with self.subTest(fail_close=fail_close):
+                module = self.load_module()
+                engine = module.create_engine()
+                robot = Mock()
+                if fail_close:
+                    robot.close.side_effect = RuntimeError("close failed")
+                engine.policy, engine.robot = object(), robot
+                engine._loaded_model_path = '/model'
+                if fail_close:
+                    with self.assertRaisesRegex(RuntimeError, 'close failed'):
+                        engine.cleanup()
+                else:
+                    engine.cleanup()
+                self.assertIsNone(engine.policy)
+                self.assertIsNone(engine.robot)
+                self.assertIsNone(engine._loaded_model_path)
+                self.assertFalse(engine.is_ready)
+                engine.cleanup()
+                robot.close.assert_called_once()
+
+    def test_repeated_load_reuses_weights_but_load_after_cleanup_does_not(self):
+        module = self.load_module()
+        engine = module.create_engine()
+        robots = []
+        def init_robot(_):
+            robot = Mock()
+            robots.append(robot)
+            engine.robot = robot
+        engine.init_robot_info = init_robot
+        engine.init_policy_info = Mock()
+        request = types.SimpleNamespace(model_path='/model', robot_type='test', acceleration_mode='pytorch')
+        with patch.object(module, 'Gr00tPolicy', side_effect=lambda **kwargs: object()) as factory, \
+                patch.object(engine, '_sync_hf_token_for_gated_backbones'):
+            self.assertTrue(engine.load_policy(request)['success'])
+            policy = engine.policy
+            self.assertTrue(engine.load_policy(request)['success'])
+            self.assertIs(engine.policy, policy)
+            self.assertEqual(factory.call_count, 1)
+            robots[0].close.assert_called_once()
+            engine.cleanup()
+            self.assertTrue(engine.load_policy(request)['success'])
+            self.assertEqual(factory.call_count, 2)
+            self.assertIsNot(engine.policy, policy)
+            engine.cleanup()
+
+    def test_failed_robot_setup_does_not_retain_loaded_weights(self):
+        module = self.load_module()
+        engine = module.create_engine()
+        robot = Mock()
+        def fail_robot(_):
+            engine.robot = robot
+            raise RuntimeError('invalid camera layout')
+        engine.init_robot_info = fail_robot
+        engine.init_policy_info = Mock()
+        request = types.SimpleNamespace(model_path='/model', robot_type='test', acceleration_mode='pytorch')
+        with patch.object(module, 'Gr00tPolicy', return_value=object()), \
+                patch.object(engine, '_sync_hf_token_for_gated_backbones'):
+            response = engine.load_policy(request)
+        self.assertFalse(response['success'])
+        self.assertIn('invalid camera layout', response['message'])
+        self.assertIsNone(engine.policy)
+        self.assertIsNone(engine.robot)
+        self.assertIsNone(engine._loaded_model_path)
+        robot.close.assert_called_once()
 
     def test_acceleration_request_resolves_model_local_engine_path(self):
         spec = importlib.util.spec_from_file_location(

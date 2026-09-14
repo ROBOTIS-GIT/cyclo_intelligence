@@ -98,11 +98,22 @@ class WorkerRegistryTests(unittest.TestCase):
         self.assertTrue(clients[0].closed)
 
     def test_requester_rejects_incompatible_protocol(self):
-        descriptor = self._descriptor(protocol_version="2.0")
+        descriptor = self._descriptor(protocol_version="1.0")
         registry, _clients = self._registry(descriptor)
 
         with self.assertRaisesRegex(WorkerCompatibilityError, "incompatible"):
             registry.requester("lerobot", "lerobot:act")
+
+    def test_requester_rejects_old_context_wire_budget_before_load(self):
+        descriptor = self._descriptor(protocol_version="2.0")
+        registry, clients = self._registry(descriptor)
+        try:
+            with self.assertRaisesRegex(WorkerCompatibilityError, "incompatible"):
+                registry.requester("lerobot", "lerobot:act")
+            # FakeClient only permits DESCRIBE: no model operation was sent.
+            self.assertTrue(clients)
+        finally:
+            registry.close()
 
     def test_requester_rejects_policy_missing_from_worker(self):
         descriptor = self._descriptor(
@@ -140,6 +151,8 @@ class WorkerRegistryTests(unittest.TestCase):
         registry.describe("lerobot")
 
         self.assertEqual(len(clients), 2)
+        self.assertEqual(clients[0].kwargs["service_name"], "/lerobot/engine_command")
+        self.assertEqual(clients[1].kwargs["service_name"], "/lerobot/engine_status")
         self.assertFalse(clients[0].closed)
         self.assertFalse(clients[1].closed)
         registry.close()

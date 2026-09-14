@@ -47,7 +47,7 @@ test('model selection comes from catalog and resets model-specific values', () =
   expect(info.accelerationEnginePath).toBe('');
 });
 
-test.each(['eo1', 'evo1', 'wall_x', 'pi0_fast', 'groot'])(
+test.each(['wall_x', 'groot', 'multi_task_dit'])(
   'selects LeRobot %s without using the independent GR00T Worker', (model) => {
     const store = renderSelector({
       policyId: 'groot:n17', serviceType: 'groot', policyType: 'n17',
@@ -63,7 +63,7 @@ test.each(['eo1', 'evo1', 'wall_x', 'pi0_fast', 'groot'])(
   }
 );
 
-test.each(['pi0', 'pi0_fast', 'groot'])(
+test.each(['pi0', 'pi05', 'groot', 'multi_task_dit'])(
   'restores the saved LeRobot %s selection', async (model) => {
     const store = renderSelector({ policyId: '', serviceType: 'lerobot', policyType: model });
     await waitFor(() => {
@@ -105,16 +105,16 @@ test('a runtime with one model resolves legacy runtime-only selection', async ()
   });
 });
 
-test('an explicit unknown policy is not silently replaced', () => {
+test.each(['future:unknown', 'lerobot:eo1', 'lerobot:evo1', 'lerobot:pi0_fast'])(
+  'unavailable policy %s is not silently replaced', (policyId) => {
+  const [serviceType, policyType] = policyId.split(':');
   const store = renderSelector({
-    policyId: 'future:unknown',
-    serviceType: 'future',
-    policyType: 'unknown',
+    policyId, serviceType, policyType,
   });
 
   expect(screen.getByRole('option', { name: 'Selected policy is unavailable' }))
     .toBeInTheDocument();
-  expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe('future:unknown');
+  expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe(policyId);
 });
 
 test('switching away removes task fields owned only by the previous model', () => {

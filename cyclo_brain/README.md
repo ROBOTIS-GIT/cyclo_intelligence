@@ -55,8 +55,9 @@ cyclo_brain/
 ```
 
 The Python package is still named `main_runtime` for source compatibility,
-but it runs only as the central `policy-runtime` s6 service in the Cyclo
-container. Worker images contain only `engine-process`.
+but it runs as a separate process owned by `cyclo_intelligence_bringup.launch.py`
+in the Cyclo container. It starts and stops with Orchestrator, not as an
+independent s6 service. Worker images contain only `engine-process`.
 
 ## External And Worker APIs
 

@@ -29,7 +29,8 @@ CMD_GET_ACTION = 1
 CMD_UNLOAD_POLICY = 2
 CMD_DESCRIBE = 3
 CMD_STATUS = 4
-ENGINE_PROTOCOL_VERSION = "1.0"
+CMD_UPDATE_CONTEXT = 5
+ENGINE_PROTOCOL_VERSION = "3.0"
 
 
 ENGINE_COMMAND_REQUEST_DEF = """\
@@ -43,6 +44,7 @@ string acceleration_mode
 string acceleration_engine_path
 string policy_id
 string policy_parameters_json
+string execution_context_json
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -74,6 +76,7 @@ class EngineCommandRequest:
     acceleration_engine_path: str = ""
     policy_id: str = ""
     policy_parameters_json: str = ""
+    execution_context_json: str = ""
 
 
 @dataclass
@@ -110,6 +113,7 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         policy_parameters_json=str(
             getattr(message, "policy_parameters_json", "") or ""
         ),
+        execution_context_json=str(getattr(message, "execution_context_json", "") or ""),
     )
 
 
@@ -169,6 +173,7 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "acceleration_engine_path": str(request.acceleration_engine_path),
         "policy_id": str(request.policy_id),
         "policy_parameters_json": str(request.policy_parameters_json),
+        "execution_context_json": str(request.execution_context_json),
     }
 
 

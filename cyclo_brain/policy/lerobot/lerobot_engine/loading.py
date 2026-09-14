@@ -17,6 +17,7 @@ of the ``/app/lerobot_engine/`` package.
 Owns:
 - ``_resolve_model_dir``: auto-descend lerobot training-output roots.
 - ``_load_policy_assets``: load weights + stored pre/post processors.
+- ``_prepare_policy_predictor``: prepare the adapter's optional batch predictor.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 
 from .policy_validation import validate_checkpoint
+from .adapters import resolve_adapter
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -76,28 +78,11 @@ class LoadingMixin:
         logger.info("Policy type: %s", policy_type)
         PolicyClass = get_policy_class(policy_type)
 
-        # FastWAM's text encoder must stay on the CPU. Its default config can
-        # auto-select CUDA inside ``from_pretrained`` and exhaust VRAM before
-        # the offload hook runs, so pin only this policy's initial load to CPU.
-        if policy_type == "fastwam":
-            policy_config = PreTrainedConfig.from_pretrained(model_path)
-            policy_config.device = "cpu"
-            policy = PolicyClass.from_pretrained(model_path, config=policy_config)
+        loader = resolve_adapter(policy_type).policy_loader
+        if loader is not None:
+            policy = loader(PolicyClass, PreTrainedConfig, model_path, device)
         else:
-            policy = PolicyClass.from_pretrained(model_path)
-
-        # MolmoAct2 errors out unless the action mode is set. We run the
-        # continuous (flow matching) head; a checkpoint that names one keeps it.
-        if policy_type == "molmoact2" and not getattr(
-            policy.config, "inference_action_mode", None
-        ):
-            policy.config.inference_action_mode = "continuous"
-
-        if policy_type == "fastwam":
-            policy = policy.eval()
-            logger.info("FastWAM weights loaded on CPU for selective offload")
-        else:
-            policy = policy.to(device).eval()
+            policy = PolicyClass.from_pretrained(model_path).to(device).eval()
             logger.info("Policy weights loaded on %s", device)
 
         # Restore serialized steps and statistics. Dataset-side transforms
@@ -111,3 +96,10 @@ class LoadingMixin:
         )
         logger.info("Pre/post processors loaded")
         return policy, preprocessor, postprocessor
+
+    def _prepare_policy_predictor(self, request: Any) -> None:
+        """Prepare once per weights load; cached LOAD keeps the predictor."""
+        factory = resolve_adapter(self._policy.config.type).predictor_factory
+        self._chunk_predictor = factory(self._policy, self._device, request) if factory else None
+        if factory is not None and not callable(self._chunk_predictor):
+            raise TypeError("adapter predictor_factory must return a callable")
