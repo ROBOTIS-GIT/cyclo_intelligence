@@ -29,6 +29,39 @@ class FakeEngineClient:
 
 
 class InferenceRequesterTests(unittest.TestCase):
+    def test_async_budget_survives_wire_round_trip(self):
+        from engine_process.protocol import request_from_message, request_to_message_kwargs
+        from types import SimpleNamespace
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=1)])
+        requester = InferenceRequester(client)
+        self.assertTrue(requester.policy_update(12, '/bundle', max_updates=750).success)
+        decoded = request_from_message(SimpleNamespace(**request_to_message_kwargs(client.calls[0][0])))
+        self.assertEqual(decoded.rlt_max_updates, 750)
+        self.assertEqual(decoded.command, 12)
+
+    def test_replay_selection_command_forwards_multiple_and_empty_paths(self):
+        from engine_process.protocol import request_from_message, request_to_message_kwargs
+        from types import SimpleNamespace
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=n) for n in (1, 2)])
+        requester = InferenceRequester(client)
+        for paths in (['/data/a', '/data/b'], []):
+            self.assertTrue(requester.policy_update(14, '/bundle', paths).success)
+            request = client.calls[-1][0]
+            decoded = request_from_message(SimpleNamespace(**request_to_message_kwargs(request)))
+            self.assertEqual(decoded.rlt_dataset_paths, paths)
+            self.assertEqual(decoded.command, 14)
+
+    def test_policy_update_uses_existing_bundle_field_and_does_not_start_actions(self):
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=1)])
+        requester = InferenceRequester(client)
+        self.assertTrue(requester.policy_update(11, '/bundle').success)
+        request, _ = client.calls[0]
+        self.assertEqual(request.command, 11)
+        self.assertEqual(request.rlt_bundle_path, '/bundle')
+        self.assertFalse(requester.has_pending_get_action())
+        with self.assertRaisesRegex(ValueError, 'Unknown'):
+            requester.policy_update(1, '/bundle')
+
     def test_load_policy_default_timeout_is_long_enough_for_model_load(self) -> None:
         client = FakeEngineClient(
             [EngineCommandResponse(success=True, seq_id=1)]

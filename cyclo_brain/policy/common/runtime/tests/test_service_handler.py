@@ -80,6 +80,38 @@ def make_response(success, message="", action_keys=None):
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_dataset_selection_is_forwarded_without_starting_inference(self):
+        handler, session, loop = self._handler()
+        calls = []
+        handler._requester.policy_update = lambda command, bundle, **kwargs: (
+            calls.append((command, bundle, kwargs)) or SimpleNamespace(success=True, message='selected'))
+        session.mark_loaded(robot_type='ffw', task_instruction='pick', action_keys=['arm'])
+        for paths in (['/data/a', '/data/b'], []):
+            self.assertTrue(handler.handle(SimpleNamespace(command=14, rlt_bundle_path='/bundle',
+                                                          rlt_dataset_paths=paths)).success)
+            self.assertEqual(calls[-1], (14, '/bundle', {'dataset_paths': paths}))
+        self.assertEqual(loop.starts, [])
+        self.assertEqual(loop.action_policy_modes, [])
+        self.assertTrue(handler.handle(SimpleNamespace(command=12, rlt_bundle_path='/bundle',
+                                                      rlt_max_updates=750)).success)
+        self.assertEqual(calls[-1], (12, '/bundle', {'max_updates': 750}))
+        self.assertEqual(loop.starts, [])
+
+    def test_policy_update_requires_loaded_session_and_preserves_action_mode(self):
+        handler, session, loop = self._handler()
+        calls = []
+        handler._requester.policy_update = lambda command, bundle: (
+            calls.append((command, bundle)) or SimpleNamespace(success=True, message='queued')
+        )
+        request = SimpleNamespace(command=11, rlt_bundle_path='/bundle')
+        self.assertFalse(handler.handle(request).success)
+        self.assertEqual(calls, [])
+        session.mark_loaded(robot_type='ffw', task_instruction='pick', action_keys=['arm'])
+        self.assertTrue(handler.handle(request).success)
+        self.assertEqual(calls, [(11, '/bundle')])
+        self.assertEqual(loop.action_policy_modes, [])
+        self.assertEqual(loop.starts, [])
+
     def _handler(self):
         session = SessionState()
         loop = FakeControlLoop()

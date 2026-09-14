@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from .rlt_provenance import RLT_ACTION_GROUP_NAMES, RLT_CAMERA_KEYS
+from .rlt_provenance import RLT_ACTION_GROUP_NAMES, RLT_CAMERA_KEYS, rlt_action_group_names
 from .rlt_lerobot_v30 import (
     read_dataset_json,
     read_dataset_jsonl,
@@ -97,6 +97,7 @@ class RLTStage1LeRobotV21Source:
         *,
         parquet_reader: ParquetReader | None = None,
         video_reader: VideoReader | None = None,
+        action_dim: int = 19,
     ) -> None:
         self.root = Path(root).expanduser().absolute()
         if self.root.is_symlink() or not self.root.is_dir():
@@ -127,7 +128,7 @@ class RLTStage1LeRobotV21Source:
         try:
             self._state_indices = {
                 group: tuple(state_names.index(name) for name in names)
-                for group, names in STATE_GROUP_NAMES.items()
+                for group, names in rlt_action_group_names(action_dim).items()
             }
         except ValueError as error:
             raise RLTStage1DatasetError(
@@ -274,7 +275,7 @@ class RLTStage1LeRobotV21Source:
             "state": {
                 key: np.stack([sample[1][key] for sample in samples])
                 .astype(np.float32, copy=False)[:, None, :]
-                for key in STATE_GROUP_NAMES
+                for key in samples[0][1]
             },
             "language": {
                 LANGUAGE_KEY: [[sample[2]] for sample in samples],
@@ -292,6 +293,7 @@ class RLTStage1LeRobotV30Source:
         parquet_rows_reader: ParquetRowsReader | None = None,
         parquet_slice_reader: ParquetSliceReader | None = None,
         video_segment_reader: VideoSegmentReader | None = None,
+        action_dim: int = 19,
     ) -> None:
         self.root = Path(root).expanduser().absolute()
         self._layout = RLTLeRobotV30Layout(
@@ -309,7 +311,7 @@ class RLTStage1LeRobotV30Source:
         try:
             self._state_indices = {
                 group: tuple(state_names.index(name) for name in names)
-                for group, names in STATE_GROUP_NAMES.items()
+                for group, names in rlt_action_group_names(action_dim).items()
             }
         except ValueError as error:
             raise RLTStage1DatasetError(
@@ -385,13 +387,14 @@ class RLTStage1LeRobotV30Source:
 
 def open_rlt_stage1_source(
     root: str | Path,
+    *, action_dim: int = 19,
 ) -> RLTStage1LeRobotV21Source | RLTStage1LeRobotV30Source:
     """Open a supported LeRobot source without rewriting the dataset."""
 
     version = lerobot_codebase_version(root)
     if version == "v2.1":
-        return RLTStage1LeRobotV21Source(root)
-    return RLTStage1LeRobotV30Source(root)
+        return RLTStage1LeRobotV21Source(root, action_dim=action_dim)
+    return RLTStage1LeRobotV30Source(root, action_dim=action_dim)
 
 
 __all__ = [

@@ -27,6 +27,16 @@ import numpy as np
 CMD_LOAD_POLICY = 0
 CMD_GET_ACTION = 1
 CMD_UNLOAD_POLICY = 2
+# Shared numeric commands on InferenceCommand and EngineCommand.
+CMD_POLICY_UPDATE_STATUS = 8
+CMD_POLICY_AUTO_APPLY_ON = 9
+CMD_POLICY_AUTO_APPLY_OFF = 10
+CMD_POLICY_APPLY = 11
+CMD_ASYNC_RL_ON = 12
+CMD_ASYNC_RL_OFF = 13
+CMD_ASYNC_RL_DATASETS = 14
+CMD_ASYNC_RL_SAVE = 15
+POLICY_UPDATE_COMMANDS = frozenset(range(8, 16))
 
 
 ENGINE_COMMAND_REQUEST_DEF = """\
@@ -41,6 +51,8 @@ string acceleration_mode
 string acceleration_engine_path
 bool rlt_enabled
 string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
 string action_policy_mode
 string action_request_mode
 int32 rtc_delay_steps
@@ -72,6 +84,8 @@ class EngineCommandRequest:
     acceleration_engine_path: str = ""
     rlt_enabled: bool = False
     rlt_bundle_path: str = ""
+    rlt_dataset_paths: List[str] = field(default_factory=list)
+    rlt_max_updates: int = 0
     action_policy_mode: str = "base"
     action_request_mode: str = "async"
     rtc_delay_steps: int = 0
@@ -107,6 +121,8 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         ),
         rlt_enabled=bool(getattr(message, "rlt_enabled", False)),
         rlt_bundle_path=str(getattr(message, "rlt_bundle_path", "") or ""),
+        rlt_dataset_paths=list(getattr(message, "rlt_dataset_paths", []) or []),
+        rlt_max_updates=int(getattr(message, 'rlt_max_updates', 0) or 0),
         action_policy_mode=str(
             getattr(message, "action_policy_mode", "") or "base"
         ),
@@ -164,6 +180,8 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "acceleration_engine_path": str(request.acceleration_engine_path),
         "rlt_enabled": bool(request.rlt_enabled),
         "rlt_bundle_path": str(request.rlt_bundle_path),
+        "rlt_dataset_paths": list(request.rlt_dataset_paths),
+        "rlt_max_updates": int(request.rlt_max_updates),
         "action_policy_mode": str(request.action_policy_mode),
         "action_request_mode": str(request.action_request_mode),
         "rtc_delay_steps": int(request.rtc_delay_steps),

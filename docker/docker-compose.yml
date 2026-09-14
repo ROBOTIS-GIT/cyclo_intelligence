@@ -323,6 +323,7 @@ services:
       - ../cyclo_brain/algorithm:/cyclo_brain_src/cyclo_brain/algorithm:ro
       - ../cyclo_brain/model:/cyclo_brain_src/cyclo_brain/model:ro
       # Common policy runtime shared with LeRobot.
+      - ../cyclo_brain/contracts:/cyclo_brain_src/cyclo_brain/contracts:ro
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # GR00T keeps backend-local app services, while preserving the image's
       # s6-overlay built-in bundles.

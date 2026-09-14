@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -146,6 +147,12 @@ class RLTStage2TrainingCLITests(unittest.TestCase):
             provenance.action_normalization_id,
         )
         self.assertEqual(spec.action_codec_id, provenance.action_codec_id)
+        dual_arm = _spec_from_encoder(
+            encoder, action_hz=15.0,
+            provenance=replace(provenance, action_dim=16, reference_horizon=32),
+        )
+        self.assertEqual((dual_arm.reference_horizon, dual_arm.action_dim), (32, 16))
+        self.assertEqual((dual_arm.proprio_dim, dual_arm.chunk_length), (16, 10))
 
     def test_main_reports_machine_readable_error_event(self) -> None:
         argv = [

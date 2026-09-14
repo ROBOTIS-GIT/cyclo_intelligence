@@ -38,11 +38,7 @@ from cyclo_brain.algorithm.rl.rlt import (
     load_frozen_rl_token_encoder,
     validate_stage2_replay_lineage,
 )
-from cyclo_brain.model.common import (
-    GROOT_REFERENCE_ACTION_HORIZON,
-    RLT_ACTION_DIM,
-    RLT_ACTION_HORIZON,
-)
+from cyclo_brain.model.common import RLT_ACTION_HORIZON
 
 from .rlt_cli_common import (
     json_line,
@@ -111,10 +107,10 @@ def _spec_from_encoder(
         ),
         rl_token_artifact_fingerprint=encoder.artifact_fingerprint,
         rl_token_dim=int(encoder.config.embedding_dim),
-        proprio_dim=RLT_ACTION_DIM,
-        reference_horizon=GROOT_REFERENCE_ACTION_HORIZON,
+        proprio_dim=provenance.action_dim,
+        reference_horizon=provenance.reference_horizon,
         chunk_length=RLT_ACTION_HORIZON,
-        action_dim=RLT_ACTION_DIM,
+        action_dim=provenance.action_dim,
         action_hz=float(action_hz),
         action_normalization_id=provenance.action_normalization_id,
         action_codec_id=provenance.action_codec_id,
@@ -176,9 +172,10 @@ def _progress(
 def _load_sources(
     roots: Sequence[Path],
     config: RLTStage2DatasetConfig,
+    action_dim: int = 19,
 ) -> tuple[RLTStage2Source, ...]:
     sources = tuple(
-        open_rlt_stage2_source(root, expected_fps=config.expected_fps)
+        open_rlt_stage2_source(root, expected_fps=config.expected_fps, action_dim=action_dim)
         for root in roots
     )
     if not sources:
@@ -287,7 +284,6 @@ def run(args: argparse.Namespace) -> int:
         resolved_directory(path, "LeRobot dataset") for path in args.dataset_root
     )
     dataset_config = RLTStage2DatasetConfig()
-    sources = _load_sources(dataset_roots, dataset_config)
     initial_run: RLTStage2Run | None = None
     if args.initialization_mode == "new":
         if not args.groot_checkpoint or not args.rl_token_encoder or args.rlt_bundle:
@@ -323,6 +319,7 @@ def run(args: argparse.Namespace) -> int:
         overlap_description="an input",
     )
     provenance = build_groot_rlt_provenance(checkpoint)
+    sources = _load_sources(dataset_roots, dataset_config, provenance.action_dim)
     checkpoint_fingerprint = provenance.checkpoint_fingerprint
     encoder_cpu = load_frozen_rl_token_encoder(encoder_path, device="cpu")
     _validate_encoder_checkpoint_identity(encoder_cpu, provenance)

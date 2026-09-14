@@ -59,6 +59,21 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_policy_update_commands_preserve_sequence_and_reject_other_engines(self):
+        engine = FakeEngine()
+        request = EngineCommandRequest(command=11, seq_id=52, rlt_bundle_path='/bundle')
+        worker = EngineWorker(engine)
+        rejected = worker.handle(request)
+        self.assertFalse(rejected.success)
+        self.assertEqual(rejected.seq_id, 52)
+        engine.policy_update_command = lambda req: {
+            'success': req.rlt_bundle_path == '/bundle', 'message': 'queued',
+        }
+        accepted = worker.handle(request)
+        self.assertTrue(accepted.success)
+        self.assertEqual(accepted.message, 'queued')
+        self.assertEqual(accepted.seq_id, 52)
+
     def test_load_response_carries_model_shape_without_new_message_fields(self):
         engine = FakeEngine()
         engine.load_policy = lambda _request: {"success": True, "chunk_size": 32, "action_dim": 16}

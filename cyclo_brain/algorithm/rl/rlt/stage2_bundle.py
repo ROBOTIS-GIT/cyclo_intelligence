@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, fields
 import json
 import os
@@ -21,7 +22,7 @@ from cyclo_brain.algorithm.common import (
     canonical_json_sha256,
     file_sha256,
 )
-from cyclo_brain.model.common import RLT_ACTION_DIM, RLT_ACTION_HORIZON
+from cyclo_brain.model.common import RLT_ACTION_HORIZON
 
 from cyclo_brain.contracts.rlt import (
     validate_training_round,
@@ -326,7 +327,7 @@ def build_stage2_training_round(
     replay_root: str | os.PathLike[str],
     *,
     expected_spec_fingerprint: str,
-    reference_seed: int,
+    reference_seed: int | None,
     feature_batch_size: int,
     sampling_seed: int,
     batch_size: int,
@@ -371,7 +372,9 @@ def build_stage2_training_round(
         raise ValueError("RLT Stage 2 replay reward contract is invalid")
     datasets = _validate_dataset_snapshots(metadata)
     expected_reference = {
-        "seed": _positive_integer(reference_seed, "reference seed", allow_zero=True),
+        "seed": None if reference_seed is None else _positive_integer(
+            reference_seed, "reference seed", allow_zero=True
+        ),
         "feature_batch_size": _positive_integer(
             feature_batch_size, "feature batch size"
         ),
@@ -452,6 +455,7 @@ class RLTStage2Run:
     parent_bundle_fingerprint: str | None = None
     training_round: dict[str, Any] | None = None
     replay_root: Path | None = None
+    async_state: dict[str, Any] | None = None
 
     def bind_training_round(
         self,
@@ -470,6 +474,7 @@ class RLTStage2Run:
             )
         self.training_round = validated
         self.replay_root = root
+        self.async_state = None
 
     @classmethod
     def new(
@@ -645,7 +650,7 @@ class RLTStage2Run:
             raise ValueError("RLT Stage 2 bundled encoder contract disagrees")
 
         checkpoint = _secure_torch_load(training_path)
-        if set(checkpoint) != {
+        if set(checkpoint) - {"async_state"} != {
             "format",
             "source",
             "learner",
@@ -682,6 +687,21 @@ class RLTStage2Run:
                 "RLT Stage 2 learner construction contract is invalid"
             ) from error
         learner.load_state_dict(learner_state)
+        async_state = checkpoint.get('async_state')
+        if async_state is not None:
+            if (not isinstance(async_state, dict)
+                or set(async_state) != {'format', 'sampling_generator', 'history'}
+                or async_state['format'] != 'cyclo.rlt.async_training/v1'):
+                raise ValueError('RLT Async RL checkpoint fields are invalid')
+            generator = torch.Generator()
+            generator.set_state(async_state['sampling_generator'])
+            history = async_state['history']
+            if (not isinstance(history, list) or not history
+                or not isinstance(history[-1], dict)
+                or history[-1].get('ending_critic_updates') != learner.completed_critic_updates):
+                raise ValueError('RLT Async RL replay history disagrees with update counters')
+            if history[-1].get('dataset_snapshot_fingerprint') != training_round['datasets']['snapshot_fingerprint']:
+                raise ValueError('RLT Async RL replay history disagrees with saved replay')
         if (
             manifest.get("completed_critic_updates")
             != learner.completed_critic_updates
@@ -696,7 +716,7 @@ class RLTStage2Run:
             device=device,
             dtype=learner.dtype,
             expected_chunk_length=RLT_ACTION_HORIZON,
-            expected_action_dim=RLT_ACTION_DIM,
+            expected_action_dim=spec.action_dim,
         )
         if shadow.spec != spec or not _tensor_mapping_equal(
             shadow.actor.state_dict(), learner.actor.state_dict()
@@ -710,9 +730,10 @@ class RLTStage2Run:
             parent_bundle_fingerprint=manifest_fingerprint,
             training_round=training_round,
             replay_root=replay_root,
+            async_state=async_state,
         )
 
-    def _actor_artifact(self) -> dict[str, Any]:
+    def _actor_artifact(self, learner_state) -> dict[str, Any]:
         if self.training_round is None:
             raise ValueError("RLT Stage 2 training round has not been bound")
         source_fingerprint = canonical_json_sha256(
@@ -725,8 +746,8 @@ class RLTStage2Run:
             "spec_fingerprint": stage2_spec_fingerprint(self.learner.spec),
             "config": asdict(self.learner.config),
             "actor_hidden_dims": tuple(self.learner.actor.hidden_dims),
-            "completed_critic_updates": self.learner.completed_critic_updates,
-            "completed_actor_updates": self.learner.completed_actor_updates,
+            "completed_critic_updates": learner_state['completed_critic_updates'],
+            "completed_actor_updates": learner_state['completed_actor_updates'],
             "replay_artifact": {
                 "contract": "precomputed_frozen_features/v1",
                 "training_round_fingerprint": self.training_round[
@@ -736,16 +757,25 @@ class RLTStage2Run:
             "source_manifest_fingerprint": source_fingerprint,
             "actor": {
                 name: value.detach().cpu().clone()
-                for name, value in self.learner.actor.state_dict().items()
+                for name, value in learner_state['actor'].items()
             },
             "diagnostic_count": 0,
             "last_diagnostic": None,
             "qualification": _QUALIFICATION,
         }
 
-    def save(self, bundle_root: str | os.PathLike[str]) -> Path:
+    def save(
+        self, bundle_root: str | os.PathLike[str], *,
+        learner_state=None, verification_slot=nullcontext,
+    ) -> Path:
         """Atomically publish artifacts first and the authoritative manifest last."""
 
+        if learner_state is None and self.learner.update_pending:
+            raise RuntimeError("Finish the pending RLT update before saving a bundle")
+        # An immutable CPU snapshot allows Async RL to resume during disk I/O.
+        state = self.learner.state_dict() if learner_state is None else learner_state
+        if state['contract'] != self.learner._contract():
+            raise ValueError('RLT snapshot learner contract disagrees')
         self.source.validate_spec(self.learner.spec)
         if self.training_round is None or self.replay_root is None:
             raise ValueError("RLT Stage 2 training round has not been bound")
@@ -763,21 +793,23 @@ class RLTStage2Run:
         actor_path = root / _ACTOR_RELATIVE
         training_path = root / _TRAINING_RELATIVE
         _atomic_copy(self.encoder_artifact_path, encoder_path)
-        encoder = load_frozen_rl_token_encoder(encoder_path, device="cpu")
+        with verification_slot():
+            encoder = load_frozen_rl_token_encoder(encoder_path, device="cpu")
         if (
             encoder.artifact_fingerprint != self.source.rl_token_artifact_fingerprint
             or encoder.representation_contract_fingerprint
             != self.source.representation_contract_fingerprint
         ):
             raise RuntimeError("RLT Stage 2 copied encoder verification failed")
-        atomic_torch_save(actor_path, self._actor_artifact())
+        atomic_torch_save(actor_path, self._actor_artifact(state))
         atomic_torch_save(
             training_path,
             {
                 "format": _TRAINING_STATE_FORMAT,
                 "source": asdict(self.source),
-                "learner": self.learner.state_dict(),
+                "learner": state,
                 "training_round": training_round,
+                **({'async_state': self.async_state} if self.async_state is not None else {}),
             },
         )
         initialization = {
@@ -790,8 +822,8 @@ class RLTStage2Run:
             "source": asdict(self.source),
             "spec": asdict(self.learner.spec),
             "spec_fingerprint": stage2_spec_fingerprint(self.learner.spec),
-            "completed_critic_updates": self.learner.completed_critic_updates,
-            "completed_actor_updates": self.learner.completed_actor_updates,
+            "completed_critic_updates": state['completed_critic_updates'],
+            "completed_actor_updates": state['completed_actor_updates'],
             "training_round": training_round,
             "artifacts": {
                 "rl_token_encoder": _file_record(encoder_path, _ENCODER_RELATIVE),
@@ -815,14 +847,15 @@ class RLTStage2Run:
             newline=False,
         )
         # Full round-trip verification is intentionally part of save.
-        RLTStage2Run.resume(
-            root,
-            device=self.learner.device,
-            expected_groot_checkpoint_fingerprint=(
-                self.source.groot_checkpoint_fingerprint
-            ),
-            expected_replay_root=self.replay_root,
-        )
+        with verification_slot():
+            RLTStage2Run.resume(
+                root,
+                device=self.learner.device,
+                expected_groot_checkpoint_fingerprint=(
+                    self.source.groot_checkpoint_fingerprint
+                ),
+                expected_replay_root=self.replay_root,
+            )
         self.encoder_artifact_path = encoder_path
         return root
 

@@ -126,7 +126,9 @@ def validate_training_round(value: Any) -> None:
         "feature_batch_size",
     }:
         raise ValueError("RLT Stage 2 reference extraction fields are invalid")
-    _positive_integer(reference.get("seed"), "reference seed", allow_zero=True)
+    # Live feature extraction preserves the inference RNG instead of reseeding it.
+    if reference.get("seed") is not None:
+        _positive_integer(reference.get("seed"), "reference seed", allow_zero=True)
     _positive_integer(reference.get("feature_batch_size"), "feature batch size")
 
     optimization = value.get("optimization")

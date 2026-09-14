@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from typing import List, Optional
+from engine_process.protocol import POLICY_UPDATE_COMMANDS
 
 
 CMD_LOAD, CMD_START, CMD_PAUSE, CMD_RESUME, CMD_STOP, CMD_UNLOAD = 0, 1, 2, 3, 4, 5
@@ -27,6 +28,17 @@ class ServiceHandler:
     def handle(self, request):
         cmd = int(request.command)
         try:
+            if cmd in POLICY_UPDATE_COMMANDS:
+                if not self._session.loaded:
+                    return self._make_response(False, "LOAD first")
+                response = self._requester.policy_update(
+                    cmd, str(getattr(request, "rlt_bundle_path", "") or ""),
+                    **({'dataset_paths': list(getattr(request, 'rlt_dataset_paths', []) or [])}
+                       if cmd == 14 else {}),
+                    **({'max_updates': int(getattr(request, 'rlt_max_updates', 0) or 0)}
+                       if cmd == 12 else {}),
+                )
+                return self._make_response(response.success, response.message)
             if cmd == CMD_LOAD:
                 return self._load(request)
             if cmd == CMD_START:

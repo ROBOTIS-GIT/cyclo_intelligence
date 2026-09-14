@@ -347,13 +347,11 @@ def load_tt_rtc_capability(
         raise AssertionError("Internal TT-RTC horizon contract is inconsistent")
 
     if require_rlt:
-        if (horizon, dimension) != (TT_RTC_ACTION_HORIZON, TT_RTC_ACTION_DIM):
-            raise TTRTCContractError("Current RLT bundle requires a 16x19 reference; 32x16 is VLA-only")
         rlt = _as_plain_mapping(payload.get("rlt"), "rlt")
         _exact_integer(rlt.get("chunk_length"), TT_RTC_RLT_CHUNK_LENGTH, "rlt.chunk_length")
         _exact_integer(
             rlt.get("reference_horizon"),
-            TT_RTC_ACTION_HORIZON,
+            horizon,
             "rlt.reference_horizon",
         )
         expected_reference_slice = f"[d:d+{TT_RTC_RLT_CHUNK_LENGTH}]"

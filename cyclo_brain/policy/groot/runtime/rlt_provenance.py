@@ -11,7 +11,7 @@ Model weights alone do not identify an executable robot policy.  GR00T's
 processor configuration and normalization statistics change both the frozen
 features consumed by RLT and the physical meaning of a normalized action.
 This module derives path-independent SHA-256 identities from those assets and
-from the exact SG2 recorder-to-19D mapping used by the RLT Action MLP.
+from the exact SG2 recorder-to-16D/19D mapping used by the RLT Action MLP.
 """
 
 from __future__ import annotations
@@ -33,10 +33,6 @@ from cyclo_brain.model.common.sg2 import (
     GROOT_RLT_PROCESSOR_GROUPS,
     RLT_ACTION_DIM,
     RLT_ACTION_GROUP_NAMES,
-    RLT_DROPPED_RECORDER_INDICES,
-    RLT_DROPPED_RECORDER_NAMES,
-    RLT_SELECTED_RECORDER_INDICES,
-    RLT_SELECTED_RECORDER_NAMES,
     SG2_RECORDER_ACTION_NAMES,
     SG2_ROBOT_TYPE,
 )
@@ -85,6 +81,8 @@ class GR00TRLTProvenance:
     checkpoint_fingerprint: str
     action_normalization_id: str
     action_codec_id: str
+    reference_horizon: int = GROOT_REFERENCE_ACTION_HORIZON
+    action_dim: int = RLT_ACTION_DIM
 
 
 def _reject_constant(value: str) -> None:
@@ -148,9 +146,23 @@ def _sequence(value: Any, name: str) -> tuple[Any, ...]:
     return tuple(value)
 
 
-def rlt_action_codec_contract() -> dict[str, Any]:
+def rlt_action_group_names(action_dim: int = RLT_ACTION_DIM) -> dict[str, tuple[str, ...]]:
+    """Named SG2 groups; never truncate recorder columns by position."""
+    if action_dim not in (16, 19):
+        raise RLTProvenanceError("RLT action dimension must be 16 or 19")
+    return {
+        key: names for key, names in RLT_ACTION_GROUP_NAMES.items()
+        if action_dim == 19 or key != "odometry"
+    }
+
+
+def rlt_action_codec_contract(action_dim: int = RLT_ACTION_DIM) -> dict[str, Any]:
     """Return the complete named recorder-to-MLP action mapping."""
 
+    groups = rlt_action_group_names(action_dim)
+    names = tuple(name for values in groups.values() for name in values)
+    selected = tuple(SG2_RECORDER_ACTION_NAMES.index(name) for name in names)
+    dropped = tuple(i for i in range(len(SG2_RECORDER_ACTION_NAMES)) if i not in selected)
     return {
         "schema": _CODEC_SCHEMA,
         "robot_type": SG2_ROBOT_TYPE,
@@ -161,21 +173,21 @@ def rlt_action_codec_contract() -> dict[str, Any]:
         },
         "mapping": {
             "operation": "select-by-name-then-concatenate",
-            "group_order": list(RLT_ACTION_GROUPS),
+            "group_order": list(groups),
             "group_names": {
-                group: list(RLT_ACTION_GROUP_NAMES[group]) for group in RLT_ACTION_GROUPS
+                group: list(values) for group, values in groups.items()
             },
-            "selected_source_indices": list(RLT_SELECTED_RECORDER_INDICES),
-            "output_names": list(RLT_SELECTED_RECORDER_NAMES),
-            "dropped_source_indices": list(RLT_DROPPED_RECORDER_INDICES),
-            "dropped_names": list(RLT_DROPPED_RECORDER_NAMES),
-            "output_dimension": RLT_ACTION_DIM,
+            "selected_source_indices": list(selected),
+            "output_names": list(names),
+            "dropped_source_indices": list(dropped),
+            "dropped_names": [SG2_RECORDER_ACTION_NAMES[i] for i in dropped],
+            "output_dimension": action_dim,
         },
     }
 
 
-def rlt_action_codec_id() -> str:
-    return f"sha256:{canonical_sha256(rlt_action_codec_contract())}"
+def rlt_action_codec_id(action_dim: int = RLT_ACTION_DIM) -> str:
+    return f"sha256:{canonical_sha256(rlt_action_codec_contract(action_dim))}"
 
 
 def _validate_modality_config(processor: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -209,12 +221,15 @@ def _validate_modality_config(processor: Mapping[str, Any]) -> Mapping[str, Any]
         raise RLTProvenanceError(
             f"RLT camera order must be {RLT_CAMERA_KEYS}, got {video_keys}"
         )
-    if state_keys != RLT_ACTION_GROUPS or action_keys != RLT_ACTION_GROUPS:
+    if state_keys != action_keys or action_keys not in (
+        RLT_ACTION_GROUPS, tuple(rlt_action_group_names(16))
+    ):
         raise RLTProvenanceError(
-            "RLT state/action modality order must be arm_left, arm_right, odometry"
+            "RLT state/action modality order must be arm_left, arm_right[, odometry]"
         )
-    if action_offsets != tuple(range(GROOT_REFERENCE_ACTION_HORIZON)):
-        raise RLTProvenanceError("RLT GR00T reference horizon must be indices 0..15")
+    horizon = 16 if action_keys == RLT_ACTION_GROUPS else 32
+    if action_offsets != tuple(range(horizon)):
+        raise RLTProvenanceError(f"RLT GR00T reference horizon must be indices 0..{horizon - 1}")
     action_configs = _sequence(
         embodiment["action"].get("action_configs"), "RLT action action_configs"
     )
@@ -224,7 +239,7 @@ def _validate_modality_config(processor: Mapping[str, Any]) -> Mapping[str, Any]
         "format": "DEFAULT",
         "state_key": None,
     }
-    if len(action_configs) != len(RLT_ACTION_GROUPS) or any(
+    if len(action_configs) != len(action_keys) or any(
         value != expected_action_config for value in action_configs
     ):
         raise RLTProvenanceError(
@@ -245,7 +260,7 @@ def _validate_modality_config(processor: Mapping[str, Any]) -> Mapping[str, Any]
     return kwargs
 
 
-def _selected_statistics(statistics: Mapping[str, Any]) -> dict[str, Any]:
+def _selected_statistics(statistics: Mapping[str, Any], action_dim: int = RLT_ACTION_DIM) -> dict[str, Any]:
     embodiment = _mapping(
         statistics.get(GROOT_EMBODIMENT),
         f"statistics.{GROOT_EMBODIMENT}",
@@ -254,7 +269,7 @@ def _selected_statistics(statistics: Mapping[str, Any]) -> dict[str, Any]:
     for domain in ("state", "action"):
         source = _mapping(embodiment.get(domain), f"statistics.{domain}")
         groups: dict[str, Any] = {}
-        for group in RLT_ACTION_GROUPS:
+        for group in rlt_action_group_names(action_dim):
             values = _mapping(source.get(group), f"statistics.{domain}.{group}")
             expected_width = len(RLT_ACTION_GROUP_NAMES[group])
             normalized: dict[str, Any] = {}
@@ -364,7 +379,10 @@ def build_groot_rlt_provenance(
     statistics = _mapping(assets["statistics.json"], "statistics.json")
     embodiment_ids = _mapping(assets["embodiment_id.json"], "embodiment_id.json")
     kwargs = _validate_modality_config(processor)
-    selected_statistics = _selected_statistics(statistics)
+    action_modality = kwargs["modality_configs"][GROOT_EMBODIMENT]["action"]
+    action_dim = sum(len(RLT_ACTION_GROUP_NAMES[key]) for key in action_modality["modality_keys"])
+    reference_horizon = len(action_modality["delta_indices"])
+    selected_statistics = _selected_statistics(statistics, action_dim)
     embodiment_id = embodiment_ids.get(GROOT_EMBODIMENT)
     if isinstance(embodiment_id, bool) or not isinstance(embodiment_id, int):
         raise RLTProvenanceError("GR00T new_embodiment ID is invalid")
@@ -383,7 +401,7 @@ def build_groot_rlt_provenance(
         "statistics": selected_statistics,
     }
     action_normalization_id = f"sha256:{canonical_sha256(normalization_contract)}"
-    action_codec_id = rlt_action_codec_id()
+    action_codec_id = rlt_action_codec_id(action_dim)
 
     processor_contract = {
         "processor_config": processor,
@@ -408,6 +426,8 @@ def build_groot_rlt_provenance(
         checkpoint_fingerprint=checkpoint_fingerprint,
         action_normalization_id=action_normalization_id,
         action_codec_id=action_codec_id,
+        reference_horizon=reference_horizon,
+        action_dim=action_dim,
     )
 
 

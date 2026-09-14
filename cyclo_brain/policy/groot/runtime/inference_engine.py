@@ -28,6 +28,8 @@ Original Step 1 location: cyclo_brain/policy/groot/inference.py.
 Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
 """
 import logging
+import json
+import gc
 import os
 import sys
 import tempfile
@@ -169,12 +171,16 @@ def build_trt_engine(
     engine_path: str,
     workspace_mb: Optional[int] = None,
     tt_rtc_capability=None,
+    release_model_after_export: bool = False,
 ):
     """Export DiT to ONNX and build TensorRT engine automatically.
 
     Uses DiTInputCapture and export_dit_to_onnx from GR00T deployment scripts,
     then builds the TRT engine via build_tensorrt_engine.build_engine().
     Takes ~3-5 min on Orin.
+
+    The standalone converter may release its disposable policy after export.
+    This option clears policy.model; callers retaining the policy must leave it off.
     """
     from scripts.deployment.build_tensorrt_engine import (
         build_engine,
@@ -260,6 +266,16 @@ def build_trt_engine(
                 widened = list(shape)
                 widened[1] = max(widened[1], 512)
                 max_shapes[name] = tuple(widened)
+
+        if release_model_after_export:
+            # Only the standalone conversion process opts in. ONNX and shape
+            # profiles are now sufficient; do not keep GR00T alongside the builder.
+            torch.cuda.synchronize()
+            policy.model = None
+            del capture
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info("Released conversion-only GR00T model before TensorRT build")
 
         build_engine(
             onnx_path=onnx_path,
@@ -414,6 +430,8 @@ class GR00TInference:
                 }
 
             if self.policy is not None:
+                if self._rlt_adapter is not None:
+                    self._rlt_adapter.close_async_training(dispose=True)
                 self.logger.info(
                     "Reloading GR00T policy due to model/runtime change "
                     "(model=%s, acceleration=%s)",
@@ -1029,7 +1047,49 @@ class GR00TInference:
             )
         return result
 
+    def policy_update_command(self, request) -> dict:
+        """Control staged MLP application; never switch the VLA/RLT action route."""
+        try:
+            from engine_process import protocol as commands
+        except ModuleNotFoundError:
+            from cyclo_brain.policy.common.runtime.engine_process import protocol as commands
+        try:
+            adapter = self._rlt_adapter
+            if not self.is_ready or adapter is None:
+                raise RuntimeError("Load GR00T with an RLT bundle first")
+            expected = str(getattr(request, "rlt_bundle_path", "") or "").strip()
+            if not expected or os.path.abspath(expected) != str(adapter.bundle.root):
+                raise RuntimeError("Selected RLT bundle differs from the loaded bundle")
+            updates = adapter.policy_updates
+            if request.command == commands.CMD_POLICY_AUTO_APPLY_ON:
+                updates.set_auto_apply(True)
+            elif request.command == commands.CMD_POLICY_AUTO_APPLY_OFF:
+                updates.set_auto_apply(False)
+            elif request.command == commands.CMD_POLICY_APPLY:
+                updates.request_apply()
+            elif request.command in (commands.CMD_ASYNC_RL_ON, commands.CMD_ASYNC_RL_OFF):
+                adapter.set_async_training(request.command == commands.CMD_ASYNC_RL_ON,
+                    max_updates=getattr(request, 'rlt_max_updates', 0) or None)
+            elif request.command == commands.CMD_ASYNC_RL_DATASETS:
+                adapter.select_async_datasets(list(getattr(request, 'rlt_dataset_paths', []) or []))
+            elif request.command == commands.CMD_ASYNC_RL_SAVE:
+                adapter._async_checkpoint.start()
+            elif request.command != commands.CMD_POLICY_UPDATE_STATUS:
+                raise ValueError("Unknown RLT policy update command")
+            return {"success": True, "message": json.dumps({
+                **updates.status(), **adapter.async_training_status(),
+            })}
+        except Exception as error:
+            return self.fail(str(error))
+
     def get_action_chunk(self, request) -> dict:
+        adapter = self._rlt_adapter
+        if adapter is not None and hasattr(adapter, 'inference_slot'):
+            with adapter.inference_slot():
+                return self._get_action_chunk(request)
+        return self._get_action_chunk(request)
+
+    def _get_action_chunk(self, request) -> dict:
         """Build observation from RobotClient, run inference, return action chunk."""
         if not self.is_ready:
             return self.fail("Not in inference mode")
@@ -1122,7 +1182,7 @@ class GR00TInference:
                 ).copy()
                 arrays['physical_prefix'] = np.asarray(
                     tt_request.prefix_actions if tt_request else [], dtype=np.float32,
-                ).reshape(-1, TT_RTC_ACTION_DIM)
+                ).reshape(-1, result['action_dim'])
                 self._rlt_trace.submit({
                     'event': 'inference', 'request_seq': getattr(request, 'seq_id', 0),
                     'timebase': 'unix_wall_clock_ns',
@@ -1218,6 +1278,8 @@ class GR00TInference:
 
     def cleanup(self) -> None:
         """Release robot resources. Policy is kept cached for fast restart."""
+        if self._rlt_adapter is not None and hasattr(self._rlt_adapter, 'close_async_training'):
+            self._rlt_adapter.close_async_training()
         if self._rlt_trace is not None:
             self._rlt_trace.close()
         self._rlt_trace = None

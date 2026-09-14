@@ -136,6 +136,7 @@ def main() -> int:
             engine_path,
             workspace_mb=args.workspace_mb,
             tt_rtc_capability=capability,
+            release_model_after_export=True,
         )
         if not os.path.exists(engine_path) or os.path.getsize(engine_path) <= 0:
             raise RuntimeError(

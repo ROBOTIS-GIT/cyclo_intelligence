@@ -14,6 +14,9 @@ jest.mock('react-hot-toast', () => ({
   success: jest.fn(),
 }));
 
+// Service/data synchronization has its own tests; this suite owns layout/deploy.
+jest.mock('../components/RltDatasetSelectionSync', () => () => null);
+
 jest.mock('../features/offlineRL/components/OfflineRLInferenceWorkspace', () => {
   return function MockOfflineRLInferenceWorkspace({
     isActive,

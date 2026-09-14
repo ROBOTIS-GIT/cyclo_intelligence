@@ -33,6 +33,7 @@ import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
+import RltPolicyUpdateControl from './RltPolicyUpdateControl';
 import Tooltip from './Tooltip';
 import { InferencePhase } from '../constants/taskPhases';
 import { DEFAULT_PATHS } from '../constants/paths';
@@ -126,7 +127,7 @@ const InferencePanel = ({
   const syncGenerationRef = useRef(0);
   const syncTimerRef = useRef(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand, callService } = useRosServiceCaller();
 
   useEffect(() => {
     if (!isRobotMode && info.recordInferenceMode) {
@@ -567,6 +568,11 @@ const InferencePanel = ({
           {isUpdatingInstruction ? 'Updating…' : 'Update Task Instruction'}
         </button>
       </div>
+      {isRltCapableModel && (
+        <RltPolicyUpdateControl callService={callService}
+          available={Boolean(info.rltEnabled)}
+          bundlePath={info.rltBundlePath || ''} />
+      )}
     </div>
   ) : null;
 

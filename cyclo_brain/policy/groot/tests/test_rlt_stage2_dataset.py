@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import torch
@@ -17,6 +20,7 @@ if str(GROOT_ROOT) not in sys.path:
     sys.path.insert(0, str(GROOT_ROOT))
 
 from runtime.rlt_stage2_dataset import (  # noqa: E402
+    GR00TRLTStage2Extractor,
     CAMERA_KEYS,
     RLTStage2DatasetConfig,
     RLTStage2FeatureReplay,
@@ -60,17 +64,20 @@ def _spec() -> RLTStage2Spec:
 
 
 class _FakeExtractor:
-    def __init__(self) -> None:
+    def __init__(self, action_dim=19) -> None:
         self.extracted_samples = 0
+        self.action_dim = action_dim
 
     def extract(self, observation):
         left = torch.from_numpy(observation["state"]["arm_left"][:, -1])
         right = torch.from_numpy(observation["state"]["arm_right"][:, -1])
-        odometry = torch.from_numpy(observation["state"]["odometry"][:, -1])
-        proprio = torch.cat((left, right, odometry), dim=-1).float()
+        parts = [left, right]
+        if self.action_dim == 19:
+            parts.append(torch.from_numpy(observation["state"]["odometry"][:, -1]))
+        proprio = torch.cat(parts, dim=-1).float()
         batch = proprio.shape[0]
         z_rl = proprio[:, :8].clone()
-        reference = proprio[:, None, :].expand(batch, 16, 19).clone()
+        reference = proprio[:, None, :].expand(batch, 32 if self.action_dim == 16 else 16, self.action_dim).clone()
         self.extracted_samples += batch
         return {
             "z_rl": z_rl,
@@ -81,12 +88,69 @@ class _FakeExtractor:
     def normalize_actions(self, action_groups, state_groups):
         del state_groups
         return np.concatenate(
-            [action_groups[key] for key in ("arm_left", "arm_right", "odometry")],
+            [action_groups[key] for key in action_groups],
             axis=-1,
         ).astype(np.float32)
 
 
 class RLTStage2DatasetTests(unittest.TestCase):
+    def test_extractor_preserves_32x16_reference_and_arm_order(self) -> None:
+        model, encoder = torch.nn.Module(), torch.nn.Module()
+        encoder.config = SimpleNamespace(embedding_dim=8)
+        encoder.forward = lambda *_: torch.ones(2, 8)
+        model.prepare_input = lambda _: (None, {"state": torch.ones(2, 1, 132)})
+        model.backbone = lambda _: {
+            "backbone_features": torch.ones(2, 4, 8),
+            "backbone_attention_mask": torch.ones(2, 4, dtype=torch.bool),
+            "image_mask": torch.ones(2, 4, dtype=torch.bool),
+        }
+        padded = torch.arange(2 * 40 * 132).reshape(2, 40, 132).float()
+        model.action_head = SimpleNamespace(get_action=lambda *_: {"action_pred": padded})
+        apply_action = Mock(side_effect=lambda action, *_, **__: action)
+        policy = SimpleNamespace(
+            model=model, embodiment_tag="new_embodiment",
+            processor=SimpleNamespace(state_action_processor=SimpleNamespace(apply_action=apply_action)),
+            modality_configs={key: SimpleNamespace(modality_keys=("arm_left", "arm_right"), delta_indices=list(range(32))) for key in ("action", "state")},
+        )
+        extractor = GR00TRLTStage2Extractor(policy, encoder)
+        extractor._prepare = lambda _: {"inputs": {}}
+        features = extractor.extract({})
+        torch.testing.assert_close(features["reference_actions"], padded[:, :32, :16])
+        self.assertEqual(features["proprio"].shape, (2, 16))
+        groups = {"arm_left": np.ones((3, 8)), "arm_right": np.full((3, 8), 2)}
+        normalized = extractor.normalize_actions(groups, groups)
+        np.testing.assert_array_equal(normalized, np.concatenate(list(groups.values()), axis=-1))
+        self.assertFalse(features["reference_actions"].requires_grad)
+
+    def test_dual_arm_replay_roundtrip_for_both_lerobot_versions(self) -> None:
+        for version in ("v2.1", "v3.0"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "dataset"
+                if version == "v2.1":
+                    self._make_dataset(root)
+                    source = RLTStage2LeRobotV21Source(
+                        root, action_dim=16, parquet_reader=self._parquet_reader,
+                        video_reader=self._video_reader,
+                    )
+                else:
+                    self._make_v30_dataset(root)
+                    source = RLTStage2LeRobotV30Source(
+                        root, action_dim=16, parquet_rows_reader=self._v30_rows,
+                        parquet_slice_reader=self._v30_slice,
+                        video_segment_reader=self._v30_video,
+                    )
+                spec = replace(_spec(), action_dim=16, proprio_dim=16, reference_horizon=32)
+                replay = materialize_rlt_stage2_replay(
+                    (source,), extractor=_FakeExtractor(16), spec=spec,
+                    output_root=Path(temporary) / "replay", feature_batch_size=2,
+                )
+                self.assertEqual(replay.tensors["executed_actions"].shape, (5, 10, 16))
+                self.assertEqual(replay.tensors["proprio"].shape, (5, 16))
+                self.assertEqual(replay.metadata["action_codec"], "arm_left_8+arm_right_8/v1")
+                torch.testing.assert_close(replay.tensors["executed_actions"][0, 0], torch.arange(16).float() + 10000)
+                restored = RLTStage2FeatureReplay.load(Path(temporary) / "replay", expected_spec=spec)
+                restored.batch([0, 1], device="cpu").validate(spec)
+
     def _make_dataset(
         self,
         root: Path,

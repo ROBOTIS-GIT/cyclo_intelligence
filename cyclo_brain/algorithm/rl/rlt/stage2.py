@@ -22,7 +22,7 @@ from cyclo_brain.algorithm.common import (
     canonical_json_sha256,
     validate_lowercase_sha256,
 )
-from cyclo_brain.model.common import RLT_ACTION_DIM, RLT_ACTION_HORIZON
+from cyclo_brain.model.common import RLT_ACTION_HORIZON
 from cyclo_brain.model.mlp import RLTGaussianChunkActor
 
 from .shadow import RLTStage2InferenceSpec
@@ -78,12 +78,13 @@ def _hidden_dims(value: Sequence[int], name: str) -> tuple[int, ...]:
 def _validate_stage2_spec(spec: RLTStage2Spec) -> None:
     if not isinstance(spec, RLTStage2InferenceSpec):
         raise TypeError("RLT Stage 2 spec must be RLTStage2Spec")
-    # The active GR00T RLT deployment contract is deliberately not generic.
+    # Preserve the legacy profile alongside the 32-step dual-arm GR00T profile.
     if (
         spec.chunk_length != RLT_ACTION_HORIZON
-        or spec.action_dim != RLT_ACTION_DIM
+        or (spec.reference_horizon, spec.action_dim) not in ((16, 19), (32, 16))
+        or spec.proprio_dim != spec.action_dim
     ):
-        raise ValueError("RLT Stage 2 requires the 10x19 action-chunk contract")
+        raise ValueError("RLT Stage 2 requires a 10-step chunk with a 16x19 or 32x16 reference")
     _digest(spec.reference_contract_fingerprint, "GR00T contract fingerprint")
     _digest(spec.rl_token_artifact_fingerprint, "RL-token artifact fingerprint")
 
@@ -229,7 +230,7 @@ class RLTStage2Batch:
             raise ValueError("RLT Stage 2 batch must not be empty")
         dtype = self.z_rl.dtype
         device = self.z_rl.device
-        chunk_shape = (batch_size, RLT_ACTION_HORIZON, RLT_ACTION_DIM)
+        chunk_shape = (batch_size, spec.chunk_length, spec.action_dim)
         for value, name, shape in (
             (self.z_rl, "z_rl", (batch_size, spec.rl_token_dim)),
             (self.proprio, "proprio", (batch_size, spec.proprio_dim)),
@@ -278,7 +279,7 @@ class _RLTQFunction(nn.Module):
         self.network = _mlp(
             spec.rl_token_dim
             + spec.proprio_dim
-            + RLT_ACTION_HORIZON * RLT_ACTION_DIM,
+            + spec.chunk_length * spec.action_dim,
             hidden_dims,
             1,
         )
@@ -289,7 +290,7 @@ class _RLTQFunction(nn.Module):
 
 
 class RLTStage2TwinCritic(nn.Module):
-    """Two parameter-independent scalar Q functions over one 10x19 chunk."""
+    """Two parameter-independent scalar Q functions over one action chunk."""
 
     def __init__(
         self,
@@ -396,8 +397,8 @@ class RLTStage2Learner:
         expected = (
             spec.rl_token_dim,
             spec.proprio_dim,
-            RLT_ACTION_HORIZON,
-            RLT_ACTION_DIM,
+            spec.chunk_length,
+            spec.action_dim,
         )
         if (
             actual_actor != expected
@@ -448,6 +449,7 @@ class RLTStage2Learner:
         )
         self.completed_critic_updates = 0
         self.completed_actor_updates = 0
+        self._pending_update: tuple[RLTStage2Batch, float, float] | None = None
 
     @classmethod
     def create(
@@ -465,12 +467,13 @@ class RLTStage2Learner:
         actor_dims = _hidden_dims(actor_hidden_dims, "actor hidden_dims")
         critic_dims = _hidden_dims(critic_hidden_dims, "critic hidden_dims")
         with torch.random.fork_rng(devices=[], enabled=True):
-            torch.manual_seed(random_seed)
+            # Initialization is CPU-only; do not reseed a live VLA's CUDA RNG.
+            torch.random.default_generator.manual_seed(random_seed)
             actor = RLTGaussianChunkActor(
                 spec.rl_token_dim,
                 spec.proprio_dim,
-                RLT_ACTION_HORIZON,
-                RLT_ACTION_DIM,
+                spec.chunk_length,
+                spec.action_dim,
                 fixed_standard_deviation=config.fixed_standard_deviation,
                 hidden_dims=actor_dims,
             )
@@ -538,6 +541,22 @@ class RLTStage2Learner:
             )
 
     def update(self, batch: RLTStage2Batch) -> RLTStage2Update:
+        """Existing synchronous entry point, with unchanged optimization order."""
+        self.update_critic(batch)
+        return self.finish_update()
+
+    @property
+    def update_pending(self) -> bool:
+        return self._pending_update is not None
+
+    def update_critic(self, batch: RLTStage2Batch) -> None:
+        """Run one critic step, then yield before the optional actor/target step.
+
+        A single caller must serialize these methods. Keep the batch tensors
+        unchanged until finish_update(); no autograd graph spans this boundary.
+        """
+        if self.update_pending:
+            raise RuntimeError("Finish the pending RLT update before starting another")
         batch.validate(self.spec)
         if batch.z_rl.device != self.device or batch.z_rl.dtype != self.dtype:
             raise ValueError("RLT Stage 2 batch and learner must share dtype/device")
@@ -546,6 +565,8 @@ class RLTStage2Learner:
         critic_loss = nn.functional.mse_loss(q1, target) + nn.functional.mse_loss(
             q2, target
         )
+        if not bool(torch.isfinite(critic_loss)):
+            raise FloatingPointError('RLT Stage 2 critic loss became non-finite before optimizer step')
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
         self._clip(
@@ -556,6 +577,17 @@ class RLTStage2Learner:
         self.critic_optimizer.step()
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.completed_critic_updates += 1
+        self._pending_update = (
+            batch,
+            float(critic_loss.detach().cpu().item()),
+            float(target.detach().mean().cpu().item()),
+        )
+
+    def finish_update(self) -> RLTStage2Update:
+        """Finish the pending update using its original batch, without resampling."""
+        if self._pending_update is None:
+            raise RuntimeError("No pending RLT update to finish")
+        batch, critic_loss, target_mean = self._pending_update
 
         actor_due = (
             self.completed_critic_updates % self.config.critic_updates_per_actor == 0
@@ -593,6 +625,8 @@ class RLTStage2Learner:
                     negative_q
                     + self.config.policy_constraint_weight * reference_constraint
                 )
+                if not bool(torch.isfinite(actor_loss)):
+                    raise FloatingPointError('RLT Stage 2 actor loss became non-finite before optimizer step')
                 actor_loss.backward()
             self._clip(self.actor, self.config.actor_gradient_clip_norm, "actor")
             self.actor_optimizer.step()
@@ -612,9 +646,9 @@ class RLTStage2Learner:
                 raise FloatingPointError("RLT Stage 2 metric became non-finite")
             return result
 
-        return RLTStage2Update(
-            critic_loss=float(critic_loss.detach().cpu().item()),
-            target_mean=float(target.detach().mean().cpu().item()),
+        result = RLTStage2Update(
+            critic_loss=critic_loss,
+            target_mean=target_mean,
             actor_updated=actor_due,
             actor_loss=scalar(actor_loss),
             actor_negative_q=scalar(negative_q),
@@ -622,6 +656,8 @@ class RLTStage2Learner:
             completed_critic_updates=self.completed_critic_updates,
             completed_actor_updates=self.completed_actor_updates,
         )
+        self._pending_update = None
+        return result
 
     def _contract(self) -> dict[str, Any]:
         return {
@@ -635,6 +671,8 @@ class RLTStage2Learner:
         }
 
     def state_dict(self) -> dict[str, Any]:
+        if self.update_pending:
+            raise RuntimeError("Finish the pending RLT update before saving")
         return _cpu_tree(
             {
                 "format": _LEARNER_STATE_FORMAT,
@@ -653,6 +691,8 @@ class RLTStage2Learner:
         )
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if self.update_pending:
+            raise RuntimeError("Finish the pending RLT update before restoring")
         required = {
             "format",
             "contract",

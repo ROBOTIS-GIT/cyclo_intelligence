@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 
@@ -134,6 +135,119 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.create_engine()
 
         self.assertIsInstance(engine, module.GR00TInference)
+
+    def test_policy_update_commands_check_bundle_and_leave_action_route_unchanged(self):
+        spec = importlib.util.spec_from_file_location('groot_policy_update_test', INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        engine = module.create_engine()
+        request = types.SimpleNamespace(command=8, rlt_bundle_path='/bundle')
+        self.assertFalse(engine.policy_update_command(request)['success'])
+        calls = []
+        updates = types.SimpleNamespace(
+            set_auto_apply=lambda enabled: calls.append(('auto', enabled)),
+            request_apply=lambda: calls.append(('apply',)),
+            status=lambda: {'auto_apply': False, 'can_apply': False},
+        )
+        engine.policy, engine.robot = object(), object()
+        engine._rlt_adapter = types.SimpleNamespace(
+            bundle=types.SimpleNamespace(root=Path('/bundle')), policy_updates=updates,
+            set_async_training=lambda enabled, max_updates=None: calls.append(('training', enabled, max_updates)),
+            async_training_status=lambda: {'async_enabled': False},
+            _async_checkpoint=types.SimpleNamespace(start=lambda: calls.append(('save',))),
+        )
+        for command in (8, 9, 10, 11, 12, 13, 15):
+            request.command = command
+            self.assertTrue(engine.policy_update_command(request)['success'])
+        self.assertEqual(calls, [('auto', True), ('auto', False), ('apply',),
+                                 ('training', True, None), ('training', False, None), ('save',)])
+        request.command, request.rlt_max_updates = 12, 750
+        self.assertTrue(engine.policy_update_command(request)['success'])
+        self.assertEqual(calls[-1], ('training', True, 750))
+        request.rlt_bundle_path = '/different_bundle'
+        self.assertFalse(engine.policy_update_command(request)['success'])
+
+    def test_base_and_rlt_requests_both_reserve_inference_slot(self):
+        spec = importlib.util.spec_from_file_location('groot_async_slot_test', INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        engine = module.create_engine()
+        events = []
+
+        @contextmanager
+        def slot():
+            events.append('enter')
+            try:
+                yield
+            finally:
+                events.append('exit')
+
+        engine._rlt_adapter = types.SimpleNamespace(inference_slot=slot)
+        engine._get_action_chunk = lambda request: events.append(request.action_policy_mode)
+        for mode in ('base', 'rlt'):
+            engine.get_action_chunk(types.SimpleNamespace(action_policy_mode=mode))
+        self.assertEqual(events, ['enter', 'base', 'exit', 'enter', 'rlt', 'exit'])
+
+    def test_standalone_trt_releases_model_only_after_export_before_build(self):
+        for release in (False, True):
+            for tt_rtc in (False, True):
+                with self.subTest(release=release, tt_rtc=tt_rtc), tempfile.TemporaryDirectory() as temporary:
+                    spec = importlib.util.spec_from_file_location('groot_trt_release_test', INFERENCE_ENGINE)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    events = []
+                    original_export = lambda *a, **kw: None
+                    module.torch.inference_mode = nullcontext
+                    module.torch.onnx = types.SimpleNamespace(export=original_export)
+                    module.torch.cuda = types.SimpleNamespace(
+                        synchronize=lambda: events.append('synchronize'),
+                        empty_cache=lambda: events.append('empty_cache'),
+                    )
+                    model = types.SimpleNamespace(action_head=types.SimpleNamespace(model=types.SimpleNamespace(
+                        register_forward_pre_hook=lambda *a, **kw: types.SimpleNamespace(
+                            remove=lambda: events.append('remove_hook'),
+                        ),
+                    )))
+                    policy = types.SimpleNamespace(
+                        model=model,
+                        get_action=lambda *_: events.append('capture'),
+                        get_action_tt_rtc=lambda *a, **kw: events.append('capture_tt_rtc'),
+                    )
+                    module.DiTInputCapture = lambda: types.SimpleNamespace(
+                        captured=True, vl_embs=np.zeros((1, 20, 8)), hook_fn=lambda *a: None,
+                    )
+
+                    def export(**kwargs):
+                        self.assertIs(kwargs['policy'].model, model)
+                        events.append('export')
+                        Path(kwargs['output_path']).touch()
+
+                    def build(**kwargs):
+                        self.assertIs(policy.model, None if release else model)
+                        self.assertIs(module.torch.onnx.export, original_export)
+                        self.assertEqual(kwargs['precision'], 'bf16')
+                        self.assertEqual(kwargs['workspace_mb'], 4096)
+                        self.assertEqual(kwargs['opt_shapes'], {'vl_embs': (1, 20, 8)})
+                        events.append('build')
+
+                    module.export_dit_to_onnx = export
+                    _install_stub('runtime.tt_rtc_trt', export_tt_rtc_dit=export)
+                    _install_stub('scripts.deployment.build_tensorrt_engine',
+                        build_engine=build,
+                        derive_shapes_with_hint=lambda *a, **kw: (
+                            {'vl_embs': (1, 1, 8)}, {'vl_embs': (1, 20, 8)}, {'vl_embs': (1, 40, 8)},
+                        ),
+                    )
+                    capability = types.SimpleNamespace(payload={'training_time_rtc': {
+                        'action_horizon': 32, 'action_dimension': 16,
+                    }}) if tt_rtc else None
+                    module.build_trt_engine(policy, {}, str(Path(temporary) / 'test.trt'),
+                        workspace_mb=4096, tt_rtc_capability=capability,
+                        release_model_after_export=release)
+                    self.assertEqual(events, [
+                        'capture_tt_rtc' if tt_rtc else 'capture', 'remove_hook', 'export',
+                        *(['synchronize', 'empty_cache'] if release else []), 'build',
+                    ])
 
     def test_fresh_and_cached_load_do_not_require_live_sensors(self):
         spec = importlib.util.spec_from_file_location("groot_load_sensor_test", INFERENCE_ENGINE)
@@ -556,6 +670,64 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertEqual(arrays['physical_prefix'].shape, (0, 19))
         self.assertFalse(metadata['execution_verified'])
         self.assertIsNone(adapter.recording_context)
+
+    def test_tt_rtc_rlt_recording_preserves_model_dimension_and_prefix(self):
+        from dataclasses import make_dataclass
+
+        spec = importlib.util.spec_from_file_location('groot_recording_test', INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for dimension, horizon in ((16, 32), (19, 16)):
+            for delay in (0, 3, 6):
+                with self.subTest(dimension=dimension, delay=delay), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    _write_tt_rtc_manifest(root)
+                    path = root / 'tt_rtc_manifest.json'
+                    payload = json.loads(path.read_text())
+                    payload['training_time_rtc'].update(action_horizon=horizon, action_dimension=dimension)
+                    path.write_text(json.dumps(payload))
+                    submitted = []
+                    engine = module.create_engine()
+                    engine._rlt_trace_initialized = True
+                    engine._rlt_trace = types.SimpleNamespace(
+                        recording_id='episode-a',
+                        submit=lambda metadata, arrays, **kw: submitted.append((metadata, arrays, kw)),
+                    )
+                    adapter = types.SimpleNamespace(
+                        recording_identity={'actor_sha256': 'a' * 64},
+                        spec=make_dataclass('TraceSpec', [('action_dim', int)])(dimension),
+                        bundle=types.SimpleNamespace(root=root),
+                        require_tt_rtc_capability=lambda: None,
+                    )
+                    prefix = np.arange(delay * dimension, dtype=np.float32).reshape(delay, dimension)
+                    action = np.full((1, 10, dimension), 123.0, dtype=np.float32)
+
+                    def infer(_observation, **kwargs):
+                        self.assertTrue(kwargs['capture_context'])
+                        np.testing.assert_array_equal(kwargs['committed_action_prefix'][0], prefix)
+                        adapter.recording_context = {'z_rl': np.ones((1, 4), dtype=np.float32)}
+                        return {'action': action}
+
+                    adapter.get_action_tt_rtc = infer
+                    engine._rlt_adapter = adapter
+                    engine.policy = object()
+                    engine.robot = _Robot()
+                    engine.policy_info['action'] = ['action']
+                    engine._loaded_model_path = str(root)
+                    engine.preprocess = lambda *_: {'observation': True}
+                    request = _tt_request(action_policy_mode='rlt')
+                    request.seq_id = 42
+                    request.rtc_action_dim = dimension
+                    request.rtc_delay_steps = delay
+                    request.rtc_prefix_action_list = prefix.reshape(-1).tolist()
+                    result = engine.get_action_chunk(request)
+                    self.assertTrue(result['success'], result.get('message'))
+                    metadata, arrays, kwargs = submitted[0]
+                    self.assertEqual((metadata['request_seq'], metadata['delay_steps']), (42, delay))
+                    self.assertEqual(kwargs['recording_id'], 'episode-a')
+                    np.testing.assert_array_equal(arrays['physical_prefix'], prefix)
+                    np.testing.assert_array_equal(arrays['physical_action_chunk'], action[0])
+                    self.assertIsNone(adapter.recording_context)
 
 
 if __name__ == "__main__":

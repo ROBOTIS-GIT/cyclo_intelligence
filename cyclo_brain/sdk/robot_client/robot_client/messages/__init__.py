@@ -68,6 +68,8 @@ string acceleration_mode
 string acceleration_engine_path
 bool rlt_enabled
 string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
 string action_policy_mode
 bool rlt_robot_override
 """
@@ -92,6 +94,8 @@ string acceleration_mode
 string acceleration_engine_path
 bool rlt_enabled
 string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
 string action_policy_mode
 string action_request_mode
 int32 rtc_delay_steps

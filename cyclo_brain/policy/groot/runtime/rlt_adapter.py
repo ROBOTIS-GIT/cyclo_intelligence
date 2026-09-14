@@ -16,9 +16,12 @@ same checkpoint processor used by normal GR00T inference.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +31,6 @@ from torch import Tensor
 from cyclo_brain.algorithm.common import file_sha256
 
 from cyclo_brain.model.common import (
-    GROOT_REFERENCE_ACTION_HORIZON,
     RLT_ACTION_DIM,
     RLT_ACTION_HORIZON,
 )
@@ -42,7 +44,6 @@ from .rlt_provenance import (
 
 EXPECTED_CHUNK_LENGTH = RLT_ACTION_HORIZON
 EXPECTED_ACTION_DIM = RLT_ACTION_DIM
-EXPECTED_REFERENCE_HORIZON = GROOT_REFERENCE_ACTION_HORIZON
 SIMULATION_ONLY_QUALIFICATION = "training_only_not_deployment_validated"
 DEPLOYMENT_QUALIFICATION = "deployment_qualified"
 
@@ -168,6 +169,15 @@ def _checkpoint_weight_fingerprint(checkpoint: Path) -> str:
     return build_groot_rlt_provenance(checkpoint).weight_fingerprint
 
 
+def _policy_request(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._policy_request_lock:
+            self.apply_pending_policy()
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class GR00TRLTInferenceAdapter:
     """Preloaded RLT policy that shares one frozen GR00T instance."""
 
@@ -178,20 +188,40 @@ class GR00TRLTInferenceAdapter:
         self.spec = shadow_policy.spec
         self.recording_context = None
         self.recording_identity = {}
-        if self.spec.reference_horizon != EXPECTED_REFERENCE_HORIZON:
+        self._groot_checkpoint_fingerprint = None
+        self._policy_updates = None
+        self._policy_request_lock = threading.RLock()
+        self._async_training = None
+        self._async_run = None
+        from .rlt_async_checkpoint import RLTAsyncCheckpoint
+        self._async_checkpoint = RLTAsyncCheckpoint(self)
+        self._async_prepare = None
+        self._async_cancel = threading.Event()
+        self._async_error = None
+        self._async_enabled = False
+        self._async_max_updates = 1000
+        self._async_replay = None
+        self._async_replay_builder = None
+        self._async_selected_paths = ()
+        self._async_selection_lock = threading.Lock()
+        if (self.spec.reference_horizon, self.spec.action_dim) not in {(16, 19), (32, 16)}:
             raise ValueError(
-                "RLT reference horizon must be "
-                f"{EXPECTED_REFERENCE_HORIZON}, got {self.spec.reference_horizon}"
+                "RLT reference must be 16x19 or 32x16"
             )
         if (
             self.spec.chunk_length != EXPECTED_CHUNK_LENGTH
-            or self.spec.action_dim != EXPECTED_ACTION_DIM
-            or self.spec.proprio_dim != EXPECTED_ACTION_DIM
+            or self.spec.proprio_dim != self.spec.action_dim
         ):
             raise ValueError(
-                "RLT runtime requires the showroom "
-                f"{EXPECTED_CHUNK_LENGTH}x{EXPECTED_ACTION_DIM} contract"
+                "RLT runtime requires 10 actions and matching proprio/action dimensions"
             )
+        contract_getter = getattr(policy, "get_tt_rtc_model_contract", None)
+        if callable(contract_getter):
+            contract = contract_getter()
+            if (contract["action_horizon"], contract["action_dimension"]) != (
+                self.spec.reference_horizon, self.spec.action_dim
+            ):
+                raise ValueError("RLT bundle reference shape disagrees with the loaded GR00T model")
 
     @classmethod
     def load(
@@ -203,13 +233,16 @@ class GR00TRLTInferenceAdapter:
         from cyclo_brain.algorithm.rl.rlt import load_groot_rlt_shadow_policy
 
         bundle = resolve_rlt_bundle(bundle_path)
+        contract_getter = getattr(policy, "get_tt_rtc_model_contract", None)
+        action_dim = (contract_getter()["action_dimension"]
+                      if callable(contract_getter) else EXPECTED_ACTION_DIM)
         shadow = load_groot_rlt_shadow_policy(
             bundle.encoder,
             bundle.actor,
             device=policy.model.device,
             dtype=torch.float32,
             expected_chunk_length=EXPECTED_CHUNK_LENGTH,
-            expected_action_dim=EXPECTED_ACTION_DIM,
+            expected_action_dim=action_dim,
         )
 
         provenance = build_groot_rlt_provenance(model_path)
@@ -228,6 +261,7 @@ class GR00TRLTInferenceAdapter:
             provenance=provenance,
         )
         adapter = cls(policy, shadow, bundle)
+        adapter._groot_checkpoint_fingerprint = provenance.checkpoint_fingerprint
         adapter.recording_identity = {
             'actor_sha256': file_sha256(bundle.actor),
             'groot_sha256': provenance.weight_fingerprint,
@@ -238,6 +272,172 @@ class GR00TRLTInferenceAdapter:
     @property
     def qualification(self) -> str:
         return str(self.shadow_policy.actor_qualification)
+
+    @property
+    def policy_updates(self):
+        if self._policy_updates is not None:
+            return self._policy_updates
+        with self._policy_request_lock:
+            if self._policy_updates is None:
+                from cyclo_brain.algorithm.rl.rlt.policy_update import RLTPolicyUpdate
+                self._policy_updates = RLTPolicyUpdate(self.shadow_policy.actor, self.spec)
+            return self._policy_updates
+
+    def apply_pending_policy(self):
+        if self._policy_updates is None:
+            return
+        actor, identity = self._policy_updates.apply_pending(self.shadow_policy.actor)
+        if identity is not None:
+            self.shadow_policy.actor = actor
+            self.shadow_policy.actor_qualification = 'training_only_not_deployment_validated'
+            # The original bundle's file hash no longer describes the live MLP.
+            original = self.recording_identity.pop('actor_sha256', None)
+            if original is not None:
+                self.recording_identity['base_actor_sha256'] = original
+            self.recording_identity.update(identity)
+
+    @contextmanager
+    def inference_slot(self, *, background=False):
+        # Also used for base VLA requests: training cannot overlap either route.
+        if self._async_training is None:
+            with self._policy_request_lock:
+                yield
+        else:
+            with self._async_training.inference(background=background):
+                with self._policy_request_lock:
+                    yield
+
+    def set_async_training(self, enabled, *, max_updates=None):
+        """Keep learner state; selected datasets, not bundled replay, supply batches."""
+        if max_updates is not None and (
+            isinstance(max_updates, bool) or not isinstance(max_updates, int)
+            or not 1 <= max_updates <= 4294967295
+        ):
+            raise ValueError('Async RL max_updates must be a positive uint32')
+        if enabled and self._async_training is None:
+            if not all((self.bundle.root / name).is_file() for name in (
+                'manifest.json', 'training_state/rlt_stage2.pt',
+            )):
+                raise ValueError('Async RL requires a completed Stage-2 bundle with feature replay and optimizer state')
+        if enabled and not self._async_enabled and max_updates is not None:
+            self._async_max_updates = max_updates
+        self._async_enabled = enabled
+        if self._async_training is not None:
+            self._async_replay.set_enabled(enabled)
+            self._async_training.set_enabled(enabled, max_updates=self._async_max_updates)
+            return
+        if not enabled or (self._async_prepare and self._async_prepare.is_alive()):
+            return
+        self._async_error = None
+        self._async_cancel.clear()
+
+        def prepare():
+            try:
+                from cyclo_brain.algorithm.rl.rlt import RLTAsyncLearner, RLTStage2Run
+                from .rlt_async_replay import RLTAsyncReplay, RLTAsyncReplayBuilder
+                with self._policy_request_lock:
+                    if self._async_cancel.is_set():
+                        return
+                    run = RLTStage2Run.resume(
+                        self.bundle.root, device=self.policy.model.device,
+                        expected_groot_checkpoint_fingerprint=self._groot_checkpoint_fingerprint,
+                    )
+                    if run.learner.spec != self.spec:
+                        raise ValueError('Async RL learner differs from the loaded RLT spec')
+                    self._async_run = run
+                    updates = self.policy_updates
+                    batch_size = run.training_round['optimization']['batch_size']
+                    def completed(update):
+                        if update.actor_updated and update.completed_actor_updates % 10 == 0:
+                            updates.publish(run.learner)
+                        if self._async_training.status()['limit_reached']:
+                            self._async_enabled = False
+                            self._async_replay.set_enabled(False)
+
+                    self._async_training = RLTAsyncLearner(
+                        run.learner, None, after_update=completed,
+                    )
+                    self._async_replay_builder = RLTAsyncReplayBuilder(self)
+                    self._async_replay = RLTAsyncReplay(
+                        self._async_training, self._async_replay_builder, batch_size,
+                        run.learner.random_seed + run.learner.completed_critic_updates,
+                    )
+                    if run.async_state is not None:
+                        from .rlt_stage2_dataset import RLTStage2FeatureReplay
+                        self._async_replay.generator.set_state(run.async_state['sampling_generator'])
+                        self._async_replay.seed = run.async_state['history'][-1]['sampling_seed']
+                        self._async_training.replay_history = list(run.async_state['history'])
+                        self._async_replay_builder.restored = RLTStage2FeatureReplay.load(
+                            run.replay_root, expected_spec=self.spec)
+                    with self._async_selection_lock:
+                        self._async_replay.select(self._async_selected_paths)
+                    self._async_replay.set_enabled(self._async_enabled)
+                    self._async_training.set_enabled(self._async_enabled, max_updates=self._async_max_updates)
+            except Exception as error:
+                self._async_error = f'{type(error).__name__}: {error}'
+                self._async_enabled = False
+
+        self._async_prepare = threading.Thread(target=prepare, name='rlt-async-prepare', daemon=True)
+        self._async_prepare.start()
+
+    def select_async_datasets(self, paths):
+        if not isinstance(paths, (list, tuple)) or any(
+            not isinstance(path, str) or not Path(path).is_absolute() for path in paths
+        ):
+            raise ValueError('Async RL requires absolute LeRobot dataset paths')
+        # No filesystem/model work on the command handler; preparation is background.
+        with self._async_selection_lock:
+            self._async_selected_paths = tuple(dict.fromkeys(paths))
+            if self._async_replay is not None:
+                self._async_replay.select(self._async_selected_paths)
+
+    def async_training_status(self):
+        worker = self._async_training.status() if self._async_training else None
+        replay = self._async_replay.status() if self._async_replay else {
+            'selected_paths': list(self._async_selected_paths), 'replay_error': None,
+        }
+        return {
+            **replay,
+            **self._async_checkpoint.status(),
+            'async_enabled': worker['enabled'] if worker else self._async_enabled,
+            'max_updates': self._async_max_updates,
+            'updates_this_run': worker['updates_this_run'] if worker else 0,
+            'limit_reached': worker['limit_reached'] if worker else False,
+            'total_critic_updates': self._async_run.learner.completed_critic_updates if self._async_run else None,
+            'total_actor_updates': self._async_run.learner.completed_actor_updates if self._async_run else None,
+            'preparing': bool(self._async_prepare and self._async_prepare.is_alive()) or replay.get('preparing', False),
+            'training_error': worker['error'] if worker else self._async_error,
+            'training_phase': worker['training_phase'] if worker else None,
+            'publish_interval': 10,
+            'last_update': worker['last_update'] if worker else None,
+            'replay_source': {
+                'kind': 'selected_datasets',
+                **(worker['replay'] if worker else {'paths': [], 'transitions': 0}),
+            },
+            'waiting_data': worker['waiting_data'] if worker else True,
+        }
+
+    def close_async_training(self, *, dispose=False):
+        # A save owns a CPU snapshot but still needs the model/encoder for its
+        # short verification slot. Finish it before disposing those resources.
+        self._async_checkpoint.close()
+        self._async_enabled = False
+        self._async_cancel.set()
+        if self._async_prepare is not None:
+            self._async_prepare.join()
+        if self._async_replay is not None:
+            if dispose:
+                self._async_replay.close()
+                self._async_replay_builder.close()
+            else:
+                self._async_replay.set_enabled(False)
+        if self._async_training is not None:
+            if dispose:
+                self._async_training.close()
+            elif not self._async_training.status()['closed']:
+                self._async_training.set_enabled(False)
+                with self._async_training.inference():
+                    pass
 
     @property
     def deployment_qualified(self) -> bool:
@@ -253,7 +453,13 @@ class GR00TRLTInferenceAdapter:
 
         from runtime.tt_rtc import load_tt_rtc_capability
 
-        return load_tt_rtc_capability(self.bundle.root, require_rlt=True)
+        capability = load_tt_rtc_capability(self.bundle.root, require_rlt=True)
+        rtc = capability.payload["training_time_rtc"]
+        if (rtc["action_horizon"], rtc["action_dimension"]) != (
+            self.spec.reference_horizon, self.spec.action_dim
+        ):
+            raise ValueError("TT-RTC manifest disagrees with RLT bundle reference shape")
+        return capability
 
     def _prepare(self, observation: Mapping[str, object]):
         if getattr(self.policy, "strict", False):
@@ -423,6 +629,7 @@ class GR00TRLTInferenceAdapter:
         )
 
     @torch.inference_mode()
+    @_policy_request
     def get_action(
         self,
         observation: Mapping[str, object],
@@ -499,6 +706,7 @@ class GR00TRLTInferenceAdapter:
         }
 
     @torch.inference_mode()
+    @_policy_request
     def get_action_tt_rtc(
         self,
         observation: Mapping[str, object],
@@ -519,14 +727,12 @@ class GR00TRLTInferenceAdapter:
 
         self.recording_context = None
         from runtime.tt_rtc import (
-            TT_RTC_ACTION_DIM,
-            TT_RTC_ACTION_HORIZON,
             TT_RTC_MAX_DELAY_STEPS,
         )
 
-        if action_horizon != TT_RTC_ACTION_HORIZON:
+        if action_horizon != self.spec.reference_horizon:
             raise RuntimeError(
-                f"TT-RTC RLT action_horizon must be {TT_RTC_ACTION_HORIZON}"
+                f"TT-RTC RLT action_horizon must be {self.spec.reference_horizon}"
             )
         if (
             isinstance(delay_steps, bool)
@@ -537,7 +743,7 @@ class GR00TRLTInferenceAdapter:
                 f"TT-RTC RLT delay_steps must be in 0..{TT_RTC_MAX_DELAY_STEPS}"
             )
         prefix = np.asarray(committed_action_prefix)
-        expected_prefix = (1, delay_steps, TT_RTC_ACTION_DIM)
+        expected_prefix = (1, delay_steps, self.spec.action_dim)
         if prefix.shape != expected_prefix or not np.isfinite(prefix).all():
             raise RuntimeError(
                 f"TT-RTC RLT committed_action_prefix must have shape {expected_prefix}"

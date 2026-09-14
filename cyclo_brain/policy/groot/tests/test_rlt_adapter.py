@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -151,23 +153,28 @@ class _Policy:
 
 
 class _TTRTCPolicy(_Policy):
-    def __init__(self, *, preserve_prefix=True):
+    def __init__(self, *, preserve_prefix=True, horizon=16, action_dim=19):
         super().__init__()
         self.preserve_prefix = preserve_prefix
         self.tt_kwargs = None
+        self.horizon = horizon
+        self.action_dim = action_dim
+
+    def get_tt_rtc_model_contract(self):
+        return {"action_horizon": self.horizon, "action_dimension": self.action_dim}
 
     def get_action_tt_rtc(self, _observation, **kwargs):
         self.tt_kwargs = kwargs
         delay_steps = kwargs["delay_steps"]
         normalized_prefix = torch.full(
-            (1, delay_steps, 19),
+            (1, delay_steps, self.action_dim),
             0.5,
             dtype=torch.float32,
         )
         reference = torch.arange(
-            16 * 19,
+            self.horizon * self.action_dim,
             dtype=torch.float32,
-        ).reshape(1, 16, 19)
+        ).reshape(1, self.horizon, self.action_dim)
         if self.preserve_prefix:
             reference[:, :delay_steps] = normalized_prefix
         return {}, {
@@ -177,11 +184,11 @@ class _TTRTCPolicy(_Policy):
                 "tokens": torch.arange(8, dtype=torch.float32).reshape(1, 2, 4),
                 "token_valid": torch.ones(1, 2, dtype=torch.bool),
                 "image_token": torch.tensor([[True, False]]),
-                "proprio": torch.zeros(1, 19),
+                "proprio": torch.zeros(1, self.action_dim),
                 "reference_actions": reference,
                 "normalized_committed_prefix": normalized_prefix,
                 "batched_states": {
-                    "state": np.zeros((1, 1, 19), dtype=np.float32)
+                    "state": np.zeros((1, 1, self.action_dim), dtype=np.float32)
                 },
             }
         }
@@ -219,12 +226,109 @@ class _Shadow:
         ].clone()
         batch = tokens.shape[0]
         return SimpleNamespace(
-            action_mean=torch.full((batch, 10, 19), 0.25),
+            action_mean=torch.full((batch, 10, self.spec.action_dim), 0.25),
             z_rl=tokens.mean(dim=1), reference_prefix=self.reference_slice,
         )
 
 
 class RLTInferenceAdapterTests(unittest.TestCase):
+    def test_async_training_requires_completed_bundle_before_enabling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = GR00TRLTInferenceAdapter(_Policy(), _Shadow(), SimpleNamespace(root=Path(directory)))
+            with self.assertRaisesRegex(ValueError, 'completed Stage-2 bundle'):
+                adapter.set_async_training(True)
+            self.assertFalse(adapter.async_training_status()['async_enabled'])
+            self.assertEqual(adapter.async_training_status()['replay_source'], {
+                'kind': 'selected_datasets', 'paths': [], 'transitions': 0,
+            })
+            self.assertIsNone(adapter._async_prepare)
+
+    def test_async_training_stages_mlp_and_manual_apply_preserves_frozen_models(self):
+        from cyclo_brain.algorithm.rl.tests.test_rlt_stage2_core import _run, _batch
+        from cyclo_brain.algorithm.rl.rlt import build_stage2_training_round, stage2_spec_fingerprint
+        from runtime.rlt_stage2_dataset import RLTStage2FeatureReplay
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = _run(root, action_dim=16)
+            batch = _batch(run)
+            metadata = json.loads((run.replay_root / 'manifest.json').read_text())['metadata']
+            replay = RLTStage2FeatureReplay(run.learner.spec, {
+                name: getattr(batch, name) for name in RLTStage2FeatureReplay._TENSOR_NAMES
+            }, metadata=metadata)
+            replay.save(run.replay_root)
+            run.bind_training_round(build_stage2_training_round(
+                run.replay_root, expected_spec_fingerprint=stage2_spec_fingerprint(run.learner.spec),
+                reference_seed=17, feature_batch_size=2, sampling_seed=23,
+                batch_size=3, steps=10, starting_critic_updates=0,
+            ), replay_root=run.replay_root)
+            bundle = run.save(root / 'bundle')
+            shutil.copytree(run.replay_root, bundle / 'replay_cache')
+            actor = deepcopy(run.learner.actor).eval().requires_grad_(False)
+            encoder = object()
+            shadow = SimpleNamespace(actor=actor, encoder=encoder, spec=run.learner.spec,
+                                     actor_qualification='training_only_not_deployment_validated')
+            policy = SimpleNamespace(model=SimpleNamespace(device=torch.device('cpu')))
+            adapter = GR00TRLTInferenceAdapter(policy, shadow, SimpleNamespace(root=bundle))
+            # Recording identifies weights; resume must identify the full checkpoint.
+            adapter.recording_identity = {'groot_sha256': 'c' * 64, 'actor_sha256': 'b' * 64}
+            adapter._groot_checkpoint_fingerprint = run.source.groot_checkpoint_fingerprint
+            try:
+                adapter.set_async_training(True)
+                adapter._async_prepare.join(5)
+                self.assertFalse(adapter._async_prepare.is_alive())
+                self.assertIsNone(adapter.async_training_status()['training_error'])
+                worker = adapter._async_training
+                self.assertIsNotNone(worker)
+                with worker.inference():
+                    self.assertTrue(worker.status()['waiting_data'])
+                    self.assertIsNone(worker.status()['last_update'])
+                # Existing bundle replay must not be sampled implicitly.
+                replay.metadata['usable_episode_count'] = 2
+                adapter._async_replay.build = mock.Mock(return_value=replay)
+                adapter.select_async_datasets(['/selected/lerobot'])
+                with worker._condition:
+                    self.assertTrue(worker._condition.wait_for(
+                        lambda: worker._error is not None or (
+                            worker._last_update and worker._last_update['completed_actor_updates'] >= 10
+                        ), timeout=5,
+                    ))
+                adapter.set_async_training(False)
+                with adapter.inference_slot():
+                    pass
+                self.assertEqual(adapter.async_training_status()['replay_source'], {
+                    'kind': 'selected_datasets', 'paths': ['/selected/lerobot'],
+                    'transitions': len(replay), 'episodes': 2, 'batch_size': 3,
+                })
+                self.assertIsNone(worker.status()['error'])
+                self.assertIs(shadow.actor, actor)
+                self.assertTrue(adapter.policy_updates.status()['can_apply'])
+                adapter.policy_updates.request_apply()
+                with adapter.inference_slot():
+                    adapter.apply_pending_policy()
+                self.assertIsNot(shadow.actor, actor)
+                self.assertIs(shadow.encoder, encoder)
+                self.assertIs(adapter.policy, policy)
+                self.assertEqual(adapter.recording_identity['base_actor_sha256'], 'b' * 64)
+                self.assertIn('actor_state_sha256', adapter.recording_identity)
+                self.assertNotIn('actor_sha256', adapter.recording_identity)
+                adapter.set_async_training(True, max_updates=2)
+                self.assertIs(adapter._async_training, worker)
+                with worker._condition:
+                    self.assertTrue(worker._condition.wait_for(
+                        lambda: worker._limit_reached and not worker._busy, timeout=5))
+                status = adapter.async_training_status()
+                self.assertFalse(status['async_enabled'])
+                self.assertFalse(adapter._async_enabled)
+                self.assertFalse(adapter._async_replay._enabled)
+                self.assertEqual(status['updates_this_run'], 2)
+                self.assertEqual(status['max_updates'], 2)
+                self.assertEqual(status['total_critic_updates'], worker.learner.completed_critic_updates)
+                self.assertFalse(worker.learner.update_pending)
+            finally:
+                adapter.close_async_training(dispose=True)
+            self.assertFalse(worker._thread.is_alive())
+
     def test_load_validates_stage1_and_stage2_runtime_provenance(self) -> None:
         policy = _Policy()
         policy.model.device = torch.device("cpu")
@@ -235,7 +339,7 @@ class RLTInferenceAdapterTests(unittest.TestCase):
             encoder=Path("/bundle/artifacts/rl_token_encoder.pt"),
             actor=Path("/bundle/artifacts/rlt_actor.pt"),
         )
-        provenance = SimpleNamespace(weight_fingerprint="a" * 64)
+        provenance = SimpleNamespace(weight_fingerprint="a" * 64, checkpoint_fingerprint="c" * 64)
 
         with mock.patch(
             "cyclo_brain.algorithm.rl.rlt.load_groot_rlt_shadow_policy",
@@ -264,6 +368,8 @@ class RLTInferenceAdapterTests(unittest.TestCase):
             )
 
         self.assertIs(adapter.shadow_policy, shadow)
+        self.assertEqual(adapter._groot_checkpoint_fingerprint, "c" * 64)
+        self.assertEqual(adapter.recording_identity['groot_sha256'], "a" * 64)
         self.assertEqual(adapter.recording_identity['actor_sha256'], 'b' * 64)
         validate_stage1.assert_called_once_with(
             shadow.encoder.representation_contract,
@@ -367,6 +473,53 @@ class RLTInferenceAdapterTests(unittest.TestCase):
             rtol=0.0,
             atol=0.0,
         )
+
+    def test_tt_rtc_32x16_selects_ten_contiguous_actions_after_each_prefix(self):
+        for delay in range(7):
+            with self.subTest(delay=delay):
+                policy = _TTRTCPolicy(horizon=32, action_dim=16)
+                shadow = _Shadow()
+                shadow.spec = SimpleNamespace(**{**vars(shadow.spec),
+                    "reference_horizon": 32, "action_dim": 16, "proprio_dim": 16})
+                adapter = GR00TRLTInferenceAdapter(policy, shadow,
+                    SimpleNamespace(root=Path("."), encoder=Path("e"), actor=Path("a")))
+                adapter.require_tt_rtc_capability = lambda: None
+                action = adapter.get_action_tt_rtc({},
+                    committed_action_prefix=np.zeros((1, delay, 16), dtype=np.float32),
+                    delay_steps=delay, action_horizon=32, capture_context=True)
+                self.assertEqual(action["action"].shape, (1, 10, 16))
+                torch.testing.assert_close(shadow.reference_slice,
+                                           shadow.reference[:, delay:delay+10])
+                self.assertEqual(adapter.recording_context["reference_actions"].shape, (1, 32, 16))
+                self.assertEqual(adapter.recording_context["mlp_reference"].shape, (1, 10, 16))
+
+    def test_legacy_bundle_cannot_be_used_with_32x16_policy(self):
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            GR00TRLTInferenceAdapter(_TTRTCPolicy(horizon=32, action_dim=16),
+                _Shadow(), SimpleNamespace(root=Path(".")))
+
+    def test_real_action_mlp_forward_accepts_32x16_reference(self):
+        from cyclo_brain.algorithm.rl.rlt.shadow import GR00TRLTShadowPolicy
+        from cyclo_brain.model.mlp import RLTGaussianChunkActor
+
+        class _Encoder(torch.nn.Module):
+            def forward(self, tokens, _valid, _image):
+                return tokens.mean(dim=1)
+
+        spec = SimpleNamespace(reference_horizon=32, chunk_length=10,
+                               action_dim=16, proprio_dim=16)
+        actor = RLTGaussianChunkActor(4, 16, 10, 16,
+                                     fixed_standard_deviation=0.1, hidden_dims=(16,))
+        shadow = GR00TRLTShadowPolicy(_Encoder(), actor, spec,
+                                     actor_qualification="test_only")
+        reference = torch.arange(512, dtype=torch.float32).reshape(1, 32, 16)
+        for delay in range(7):
+            result = shadow(torch.zeros(1, 2, 4), torch.ones(1, 2, dtype=torch.bool),
+                            torch.ones(1, 2, dtype=torch.bool), torch.zeros(1, 16),
+                            reference, reference_offset_steps=delay)
+            self.assertEqual(result.action_mean.shape, (1, 10, 16))
+            self.assertTrue(torch.isfinite(result.action_mean).all())
+            torch.testing.assert_close(result.reference_prefix, reference[:, delay:delay+10])
 
     def test_tt_rtc_mlp_rejects_a_reference_that_does_not_preserve_prefix(self) -> None:
         policy = _TTRTCPolicy(preserve_prefix=False)

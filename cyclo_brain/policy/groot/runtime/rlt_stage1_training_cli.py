@@ -260,13 +260,14 @@ def _extract_features(
     batch_size: int,
     device: str,
     weight_fingerprint: str,
+    action_dim: int = 19,
 ) -> _FeatureCache:
     if not torch.cuda.is_available() and str(device).startswith("cuda"):
         raise RuntimeError("GR00T RL Token Training requires a CUDA device")
     from gr00t.data.embodiment_tags import EmbodimentTag
     from gr00t.policy.gr00t_policy import Gr00tPolicy
 
-    sources = tuple(open_rlt_stage1_source(root) for root in dataset_roots)
+    sources = tuple(open_rlt_stage1_source(root, action_dim=action_dim) for root in dataset_roots)
     total_samples = sum(len(source) for source in sources)
     writer = _FeatureCacheWriter(cache_root)
     started = time.monotonic()
@@ -365,6 +366,7 @@ def run(args: argparse.Namespace) -> int:
         batch_size=extraction_batch_size,
         device=args.device,
         weight_fingerprint=weight_fingerprint,
+        action_dim=provenance.action_dim,
     )
 
     model_config = RLTokenConfig(

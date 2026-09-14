@@ -38,6 +38,35 @@ STATE_NAMES = [
 
 
 class RLTStage1DatasetTests(unittest.TestCase):
+    def test_dual_arm_observation_for_both_dataset_versions(self) -> None:
+        for version in ("v2.1", "v3.0"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "dataset"
+                if version == "v2.1":
+                    self._make_dataset(root)
+                    source = RLTStage1LeRobotV21Source(
+                        root, action_dim=16,
+                        parquet_reader=lambda _: {
+                            "observation.state": np.arange(44, dtype=np.float32).reshape(2, 22),
+                            "task_index": [0, 0],
+                        },
+                        video_reader=lambda _: iter(np.zeros((2, 4, 5, 3), dtype=np.uint8)),
+                    )
+                else:
+                    self._make_v30_dataset(root)
+                    source = RLTStage1LeRobotV30Source(
+                        root, action_dim=16,
+                        parquet_rows_reader=self._v30_rows,
+                        parquet_slice_reader=self._v30_slice,
+                        video_segment_reader=lambda _, start_frame, length, fps: iter(
+                            np.zeros((length, 4, 5, 3), dtype=np.uint8)
+                        ),
+                    )
+                observation = next(source.iter_batches(2))
+                self.assertEqual(tuple(observation["state"]), ("arm_left", "arm_right"))
+                self.assertEqual(observation["state"]["arm_right"].shape, (2, 1, 8))
+                self.assertEqual(len(observation["video"]), 3)
+
     def _make_dataset(self, root: Path, *, version: str = "v2.1") -> None:
         meta = root / "meta"
         meta.mkdir(parents=True)

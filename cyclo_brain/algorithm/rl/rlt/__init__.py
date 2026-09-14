@@ -24,6 +24,7 @@ from .stage2 import (
     RLTStage2Update,
     stage2_spec_fingerprint,
 )
+from .async_learner import RLTAsyncLearner
 from .stage2_bundle import (
     InitializationMode,
     RLTStage2Run,
@@ -48,6 +49,7 @@ __all__ = [
     "RLTokenStage1Metrics",
     "RLTokenStage1Trainer",
     "RLTShadowOutput",
+    "RLTAsyncLearner",
     "RLTStage2Batch",
     "RLTStage2Config",
     "RLTStage2FrozenSource",

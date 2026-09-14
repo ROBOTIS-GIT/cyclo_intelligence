@@ -117,6 +117,27 @@ def _write_checkpoint(
 
 
 class RLTProvenanceTests(unittest.TestCase):
+    def test_dual_arm_32x16_profile_has_distinct_codec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "model"
+            _write_checkpoint(root)
+            legacy = build_groot_rlt_provenance(root)
+            processor = _processor()
+            modalities = processor["processor_kwargs"]["modality_configs"]["new_embodiment"]
+            for domain in ("state", "action"):
+                modalities[domain]["modality_keys"] = ["arm_left", "arm_right"]
+            modalities["action"]["delta_indices"] = list(range(32))
+            modalities["action"]["action_configs"] = modalities["action"]["action_configs"][:2]
+            (root / "processor_config.json").write_text(json.dumps(processor))
+            current = build_groot_rlt_provenance(root)
+            self.assertEqual((current.reference_horizon, current.action_dim), (32, 16))
+            self.assertEqual(current.weight_fingerprint, legacy.weight_fingerprint)
+            self.assertNotEqual(current.action_codec_id, legacy.action_codec_id)
+            self.assertEqual(current.action_codec_id, rlt_action_codec_id(16))
+            mapping = rlt_action_codec_contract(16)["mapping"]
+            self.assertEqual(mapping["selected_source_indices"], list(range(16)))
+            self.assertEqual(mapping["dropped_source_indices"], list(range(16, 22)))
+
     def test_identity_is_path_and_json_format_independent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

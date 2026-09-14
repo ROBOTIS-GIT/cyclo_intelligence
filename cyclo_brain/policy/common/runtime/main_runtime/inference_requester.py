@@ -15,6 +15,7 @@ from engine_process.protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
+    POLICY_UPDATE_COMMANDS,
     EngineCommandRequest,
     EngineCommandResponse,
     response_from_message,
@@ -121,6 +122,15 @@ class InferenceRequester:
             request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
+
+    def policy_update(self, command: int, bundle_path: str, dataset_paths=None, *, max_updates=0) -> EngineCommandResponse:
+        if command not in POLICY_UPDATE_COMMANDS:
+            raise ValueError("Unknown policy update command")
+        return self._call(EngineCommandRequest(
+            command=command, seq_id=self._next_seq_id(), rlt_bundle_path=bundle_path,
+            rlt_dataset_paths=list(dataset_paths or []),
+            rlt_max_updates=max_updates,
+        ), self._get_action_timeout_s)
 
     def _next_seq_id(self) -> int:
         with self._lock:

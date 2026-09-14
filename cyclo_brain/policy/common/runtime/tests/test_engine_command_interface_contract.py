@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+import ast
 import os
 from pathlib import Path
 import sys
@@ -57,6 +58,17 @@ def _engine_command_service_path() -> Path | None:
 
 
 class EngineCommandInterfaceContractTests(unittest.TestCase):
+    def test_external_inference_interface_matches_sdk(self):
+        source = REPOSITORY_ROOT / 'interfaces/srv/InferenceCommand.srv'
+        sdk = REPOSITORY_ROOT / 'cyclo_brain/sdk/robot_client/robot_client/messages/__init__.py'
+        if not source.is_file() or not sdk.is_file():
+            self.skipTest('source interfaces are not mounted')
+        definition = next(ast.literal_eval(node.value) for node in ast.parse(sdk.read_text()).body
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                and target.id == 'INFERENCE_COMMAND_REQUEST_DEF' for target in node.targets))
+        self.assertEqual(_definition_fields(source.read_text().split('---', 1)[0]),
+                         _definition_fields(definition))
+
     def test_ros_interface_matches_embedded_zenoh_definitions(self) -> None:
         service_path = _engine_command_service_path()
         if service_path is None:

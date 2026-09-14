@@ -9,14 +9,14 @@
 
 The expensive GR00T forward pass is an extraction step, not part of the RL
 optimizer.  This module streams the three recorded cameras, asks one frozen
-GR00T instance for its token representation and 16-step reference action, and
+GR00T instance for its token representation and reference action, and
 immediately compresses those values with the frozen Stage-1 RL-token encoder.
 Only detached, normalized tensors are retained for Action-MLP/twin-Q training.
 
 The active showroom contract is intentionally narrow: 15 Hz, three cameras,
-left arm/gripper (8), right arm/gripper (8), and odometry (3).  Head and lift
-columns may be present in the recorder dataset but never enter the 19-D RLT
-action/state vectors.
+left arm/gripper (8), right arm/gripper (8), and optional odometry (3).
+The model processor selects 32x16 or legacy 16x19 references. Head and lift
+columns never enter RLT action/state vectors.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ from cyclo_brain.algorithm.rl.rlt import (
 )
 from cyclo_brain.model.common import (
     GROOT_REFERENCE_ACTION_HORIZON,
-    RLT_ACTION_DIM,
     RLT_ACTION_HORIZON,
 )
 
@@ -61,6 +60,7 @@ from .rlt_lerobot_v30 import (
     lerobot_codebase_version,
 )
 from .rlt_stage1_dataset import CAMERA_KEYS, LANGUAGE_KEY, STATE_GROUP_NAMES
+from .rlt_provenance import rlt_action_group_names
 
 
 ACTION_GROUP_NAMES = STATE_GROUP_NAMES
@@ -211,6 +211,7 @@ class RLTStage2LeRobotV21Source:
         expected_fps: float = 15.0,
         parquet_reader: ParquetReader | None = None,
         video_reader: VideoReader | None = None,
+        action_dim: int = 19,
     ) -> None:
         self.root = Path(root).expanduser().absolute()
         if self.root.is_symlink() or not self.root.is_dir():
@@ -249,9 +250,9 @@ class RLTStage2LeRobotV21Source:
                 "RLT Stage 2 requires a boolean episode_success feature"
             )
         self._state_indices = self._group_indices(
-            features.get("observation.state"), "observation.state"
+            features.get("observation.state"), "observation.state", action_dim
         )
-        self._action_indices = self._group_indices(features.get("action"), "action")
+        self._action_indices = self._group_indices(features.get("action"), "action", action_dim)
 
         self._camera_features: dict[str, str] = {}
         for camera in CAMERA_KEYS:
@@ -301,14 +302,14 @@ class RLTStage2LeRobotV21Source:
             raise RLTStage2DatasetError("LeRobot episode indices/lengths are invalid")
 
     @staticmethod
-    def _group_indices(feature: Any, label: str) -> dict[str, tuple[int, ...]]:
+    def _group_indices(feature: Any, label: str, action_dim: int = 19) -> dict[str, tuple[int, ...]]:
         names = feature.get("names") if isinstance(feature, Mapping) else None
         if not isinstance(names, list) or len(names) != len(set(names)):
             raise RLTStage2DatasetError(f"LeRobot {label} names are invalid")
         try:
             return {
                 group: tuple(names.index(name) for name in group_names)
-                for group, group_names in ACTION_GROUP_NAMES.items()
+                for group, group_names in rlt_action_group_names(action_dim).items()
             }
         except ValueError as error:
             raise RLTStage2DatasetError(
@@ -550,7 +551,7 @@ class RLTStage2LeRobotV21Source:
                 "state": {
                     group: np.stack([sample[2][group] for sample in samples])
                     .astype(np.float32, copy=False)[:, None, :]
-                    for group in STATE_GROUP_NAMES
+                    for group in samples[0][2]
                 },
                 "language": {
                     LANGUAGE_KEY: [[sample[3]] for sample in samples],
@@ -570,6 +571,7 @@ class RLTStage2LeRobotV30Source:
         parquet_rows_reader: ParquetRowsReader | None = None,
         parquet_slice_reader: ParquetSliceReader | None = None,
         video_segment_reader: VideoSegmentReader | None = None,
+        action_dim: int = 19,
     ) -> None:
         self.root = Path(root).expanduser().absolute()
         self._layout = RLTLeRobotV30Layout(
@@ -585,10 +587,12 @@ class RLTStage2LeRobotV30Source:
         self._state_indices = RLTStage2LeRobotV21Source._group_indices(
             self._layout.features.get("observation.state"),
             "observation.state",
+            action_dim,
         )
         self._action_indices = RLTStage2LeRobotV21Source._group_indices(
             self._layout.features.get("action"),
             "action",
+            action_dim,
         )
 
     def __len__(self) -> int:
@@ -781,13 +785,14 @@ def open_rlt_stage2_source(
     root: str | Path,
     *,
     expected_fps: float = 15.0,
+    action_dim: int = 19,
 ) -> RLTStage2Source:
     """Open a v2.1 or native v3 replay source without modifying it."""
 
     version = lerobot_codebase_version(root)
     if version == "v2.1":
-        return RLTStage2LeRobotV21Source(root, expected_fps=expected_fps)
-    return RLTStage2LeRobotV30Source(root, expected_fps=expected_fps)
+        return RLTStage2LeRobotV21Source(root, expected_fps=expected_fps, action_dim=action_dim)
+    return RLTStage2LeRobotV30Source(root, expected_fps=expected_fps, action_dim=action_dim)
 
 
 class RLTStage2Extractor(Protocol):
@@ -813,11 +818,18 @@ class GR00TRLTStage2Extractor:
             processor_eval()
         action_keys = tuple(self.policy.modality_configs["action"].modality_keys)
         state_keys = tuple(self.policy.modality_configs["state"].modality_keys)
-        expected = tuple(ACTION_GROUP_NAMES)
-        if action_keys != expected or state_keys != expected:
+        if state_keys != action_keys or action_keys not in (
+            tuple(ACTION_GROUP_NAMES), tuple(rlt_action_group_names(16))
+        ):
             raise ValueError(
                 "RLT Stage 2 requires GR00T arm_left/arm_right/odometry modality order"
             )
+        self.action_groups = action_keys
+        self.action_dim = sum(len(ACTION_GROUP_NAMES[key]) for key in action_keys)
+        self.reference_horizon = 32 if self.action_dim == 16 else 16
+        offsets = getattr(self.policy.modality_configs["action"], "delta_indices", None)
+        if offsets is not None and tuple(offsets) != tuple(range(self.reference_horizon)):
+            raise ValueError("RLT Stage 2 reference horizon disagrees with GR00T processor")
 
     def _prepare(self, observation: Mapping[str, object]) -> Mapping[str, Any]:
         if getattr(self.policy, "strict", False):
@@ -850,23 +862,23 @@ class GR00TRLTStage2Extractor:
         ).detach()
         image_token = backbone_output["image_mask"].to(dtype=torch.bool).detach()
         z_rl = self.encoder(tokens, token_valid, image_token).float().detach()
-        proprio = action_inputs["state"][:, -1, :RLT_ACTION_DIM].float().detach()
+        proprio = action_inputs["state"][:, -1, :self.action_dim].float().detach()
         prediction = self.policy.model.action_head.get_action(
             backbone_output,
             action_inputs,
             collated.get("options"),
         )
         reference = prediction["action_pred"][
-            :, :RLT_REFERENCE_HORIZON, :RLT_ACTION_DIM
+            :, :self.reference_horizon, :self.action_dim
         ].float().detach()
         batch_size = int(tokens.shape[0])
         expected = {
             "z_rl": (batch_size, int(self.encoder.config.embedding_dim)),
-            "proprio": (batch_size, RLT_ACTION_DIM),
+            "proprio": (batch_size, self.action_dim),
             "reference_actions": (
                 batch_size,
-                RLT_REFERENCE_HORIZON,
-                RLT_ACTION_DIM,
+                self.reference_horizon,
+                self.action_dim,
             ),
         }
         values = {
@@ -890,19 +902,19 @@ class GR00TRLTStage2Extractor:
     ) -> np.ndarray:
         tag = getattr(self.policy.embodiment_tag, "value", self.policy.embodiment_tag)
         normalized = self.policy.processor.state_action_processor.apply_action(
-            {key: np.asarray(action_groups[key], dtype=np.float32) for key in ACTION_GROUP_NAMES},
+            {key: np.asarray(action_groups[key], dtype=np.float32) for key in self.action_groups},
             str(tag),
             state={
                 key: np.asarray(state_groups[key], dtype=np.float32)
-                for key in STATE_GROUP_NAMES
+                for key in self.action_groups
             },
             clip_outliers=False,
         )
         result = np.concatenate(
-            [np.asarray(normalized[key], dtype=np.float32) for key in ACTION_GROUP_NAMES],
+            [np.asarray(normalized[key], dtype=np.float32) for key in self.action_groups],
             axis=-1,
         )
-        expected = (next(iter(action_groups.values())).shape[0], RLT_ACTION_DIM)
+        expected = (next(iter(action_groups.values())).shape[0], self.action_dim)
         if result.shape != expected or not np.isfinite(result).all():
             raise RuntimeError(
                 f"GR00T RLT normalized actions have shape {result.shape}; expected {expected}"
@@ -1116,6 +1128,8 @@ def materialize_rlt_stage2_replay(
     feature_batch_size: int = 1,
     reference_seed: int = 0,
     progress_callback: Callable[[int, int], None] | None = None,
+    seed_global_rng: bool = True,
+    require_both_outcomes: bool = True,
 ) -> RLTStage2FeatureReplay:
     """Extract frozen features and publish one verified compact replay."""
 
@@ -1125,12 +1139,11 @@ def materialize_rlt_stage2_replay(
         raise ValueError("RLT Stage 2 requires at least one dataset source")
     if (
         spec.chunk_length != RLT_ACTION_HORIZON
-        or spec.action_dim != RLT_ACTION_DIM
-        or spec.proprio_dim != RLT_ACTION_DIM
+        or (spec.reference_horizon, spec.action_dim) not in ((16, 19), (32, 16))
+        or spec.proprio_dim != spec.action_dim
     ):
         raise ValueError(
-            "RLT Stage 2 replay requires the "
-            f"{RLT_ACTION_HORIZON}x{RLT_ACTION_DIM} spec"
+            "RLT Stage 2 replay requires a 10-step chunk with a 16x19 or 32x16 reference"
         )
     if not math.isclose(spec.action_hz, config.expected_fps, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError("RLT Stage 2 replay fps disagrees with its spec")
@@ -1202,7 +1215,7 @@ def materialize_rlt_stage2_replay(
         episode.successful for _source, episode, _starts, _features in usable_episodes
     )
     failures = len(usable_episodes) - successes
-    if not successes or not failures:
+    if require_both_outcomes and (not successes or not failures):
         raise ValueError(
             "RLT Stage 2 replay requires both success and failure episodes "
             f"with complete {RLT_CHUNK_LENGTH}-step chunks"
@@ -1211,11 +1224,12 @@ def materialize_rlt_stage2_replay(
     rows: dict[str, list[Tensor]] = {
         name: [] for name in RLTStage2FeatureReplay._TENSOR_NAMES
     }
-    random.seed(reference_seed)
-    np.random.seed(reference_seed % (2**32))
-    torch.manual_seed(reference_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(reference_seed)
+    if seed_global_rng:
+        random.seed(reference_seed)
+        np.random.seed(reference_seed % (2**32))
+        torch.manual_seed(reference_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(reference_seed)
     provenance: list[dict[str, Any]] = []
     completed_features = 0
     for source, episode, starts, feature_indices in episode_starts:
@@ -1234,7 +1248,7 @@ def materialize_rlt_stage2_replay(
                 ("proprio", (spec.proprio_dim,)),
                 (
                     "reference_actions",
-                    (GROOT_REFERENCE_ACTION_HORIZON, spec.action_dim),
+                    (spec.reference_horizon, spec.action_dim),
                 ),
             ):
                 value = extracted[name]
@@ -1329,11 +1343,11 @@ def materialize_rlt_stage2_replay(
         "transition_count": len(provenance),
         "row_provenance": provenance,
         "reward_contract": "terminal_success_plus_one_discounted_within_chunk/v1",
-        "action_codec": "arm_left_8+arm_right_8+odometry_3/v1",
+        "action_codec": "arm_left_8+arm_right_8" + ("+odometry_3" if spec.action_dim == 19 else "") + "/v1",
         "dataset_snapshots": dataset_snapshots,
         "dataset_snapshot_fingerprint": dataset_snapshot_fingerprint,
         "reference_extraction": {
-            "seed": reference_seed,
+            "seed": reference_seed if seed_global_rng else None,
             "feature_batch_size": feature_batch_size,
         },
     }

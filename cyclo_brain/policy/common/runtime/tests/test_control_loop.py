@@ -246,23 +246,18 @@ class ControlLoopSafetyTests(unittest.TestCase):
         processor.buffer_size = 0
         self.assertTrue(loop._should_request_actions(processor))
 
-    def test_tt_rtc_reuses_latency_estimate_capped_at_six_source_steps(self) -> None:
-        processor = FakeProcessor(buffer_size=4)
+    def test_tt_rtc_refills_at_six_source_steps_independent_of_latency(self) -> None:
+        processor = FakeProcessor(buffer_size=6)
         loop = self._make_loop(processor, FakeRobot())
         loop._action_request_mode = "tt_rtc"
-        loop._refill_margin_s = 0.2
-        loop._request_latency_ema_s = 0.05
-        self.assertTrue(loop._should_request_actions(processor))
-        processor.buffer_size = 5
-        self.assertFalse(loop._should_request_actions(processor))
-        loop._request_latency_ema_s = 0.55
-        processor.buffer_size = 6
-        self.assertTrue(loop._should_request_actions(processor))
-        processor.buffer_size = 7
-        self.assertFalse(loop._should_request_actions(processor))
-        loop._latency_warmup_remaining = 0
-        loop._record_request_latency(2.5)
-        self.assertAlmostEqual(loop._request_latency_ema_s, 0.2 * 2.5 + 0.8 * 0.55)
+        for latency in (None, 0.01, 0.05, 0.4, 0.55, 2.5):
+            for margin in (0.0, 0.2):
+                with self.subTest(latency=latency, margin=margin):
+                    loop._request_latency_ema_s = latency
+                    loop._refill_margin_s = margin
+                    for remaining in (0, 1, 5, 6, 7, 10, 32):
+                        processor.buffer_size = remaining
+                        self.assertEqual(loop._should_request_actions(processor), remaining <= 6)
 
     def test_tt_rtc_drained_timeline_sends_idle_while_request_is_pending(self) -> None:
         processor = TTActionTimeline()
@@ -436,6 +431,75 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertEqual(requester.keyword_calls[-1]["rtc_prefix_action_list"], prefix.reshape(-1).tolist())
         np.testing.assert_array_equal(loop._processor.peek_actions(), np.concatenate((prefix, postfix)))
 
+    def test_tt_rtc_32x16_rlt_appends_ten_without_dropping_prefix_twice(self):
+        for delay in (0, 3, 6):
+            with self.subTest(delay=delay), patch(
+                "main_runtime.control_loop.RobotClient", return_value=FakeRobot()
+            ), patch("main_runtime.control_loop.create_rlt_trace_publisher"):
+                chunk = np.arange(160, dtype=np.float64).reshape(10, 16)
+                response = SimpleNamespace(success=True, message="ok", chunk_size=10,
+                    action_dim=16, action_list=chunk.reshape(-1).tolist())
+                requester = FakeRequester(response)
+                loop = ControlLoop(requester=requester, control_hz=200)
+                loop.configure("ffw_sg2_rev1", action_keys=["arm_left", "arm_right"],
+                    action_request_mode="tt_rtc", rlt_enabled=True,
+                    tt_rtc_horizon=32, tt_rtc_action_dim=16)
+                loop._running = True
+                prefix = np.full((delay, 16), -1.0)
+                if delay:
+                    loop._processor.push_actions(prefix)
+                loop._request_and_buffer("drill", loop._generation, "tt_rtc", "rlt", prefix)
+                self.assertEqual(requester.keyword_calls[-1]["rtc_delay_steps"], delay)
+                self.assertEqual(requester.keyword_calls[-1]["rtc_action_dim"], 16)
+                np.testing.assert_array_equal(loop._processor.peek_actions(),
+                                              np.concatenate((prefix, chunk)))
+                loop.deconfigure()
+
+    def test_tt_rtc_rlt_to_vla_request_uses_remaining_mlp_actions(self):
+        for control_hz in (100, 200):
+            with self.subTest(control_hz=control_hz), patch(
+                "main_runtime.control_loop.RobotClient", return_value=FakeRobot()
+            ), patch("main_runtime.control_loop.create_rlt_trace_publisher"):
+                mlp = 1000.0 + np.arange(160).reshape(10, 16)
+                response = SimpleNamespace(success=True, message="ok", chunk_size=10,
+                    action_dim=16, action_list=mlp.reshape(-1).tolist())
+                requester = FakeRequester(response)
+                loop = ControlLoop(requester=requester, control_hz=control_hz)
+                loop.configure("ffw_sg2_rev1", action_keys=["arm_left", "arm_right"],
+                    action_request_mode="tt_rtc", rlt_enabled=True,
+                    tt_rtc_horizon=32, tt_rtc_action_dim=16)
+                loop._running = True
+                try:
+                    loop._request_and_buffer("drill", loop._generation, "tt_rtc", "rlt")
+                    for _ in range(control_hz):
+                        if loop._processor.buffer_size <= 6:
+                            break
+                        loop._processor.pop_action()
+                    np.testing.assert_array_equal(loop._processor.peek_actions(), mlp[4:10])
+                    # Switch to VLA: prefix must come from the executing MLP,
+                    # not the tail of the previous 32-step VLA reference.
+                    new_vla_postfix = np.full((26, 16), -123.0)
+                    response.chunk_size = 32
+                    response.action_list = np.concatenate((mlp[4:10], new_vla_postfix)).reshape(-1).tolist()
+                    loop._active_action_policy_mode = "rlt"
+                    loop._pending_action_policy_mode = "base"
+                    loop._request_latency_ema_s = 0.01
+                    loop.tick()
+                    self.assertIsNotNone(loop._request_thread)
+                    loop._request_thread.join(timeout=2.0)
+                    self.assertFalse(loop._request_thread.is_alive())
+                    self.assertEqual(requester.calls[-1][1], "base")
+                    sent = requester.keyword_calls[-1]
+                    self.assertEqual(sent["rtc_delay_steps"], 6)
+                    np.testing.assert_array_equal(
+                        np.asarray(sent["rtc_prefix_action_list"]).reshape(6, 16), mlp[4:10],
+                    )
+                    np.testing.assert_array_equal(loop._processor.peek_actions(),
+                        np.concatenate((mlp[4:10], new_vla_postfix)))
+                    self.assertEqual(loop._active_action_policy_mode, "base")
+                finally:
+                    loop.deconfigure()
+
     def test_tt_rtc_dual_rate_refill_appends_only_new_postfix(self) -> None:
         source = np.repeat(
             np.arange(16, dtype=np.float64).reshape(16, 1),
@@ -605,8 +669,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
                         if request_index == 0:
                             self.assertEqual(delay, 0)
                         else:
-                            self.assertGreaterEqual(delay, 1)
-                            self.assertLessEqual(delay, 6)
+                            self.assertEqual(delay, 6)
                         fresh_count = 16 - delay if mode == "base" else 10
                         fresh = np.repeat(
                             np.arange(

@@ -111,8 +111,21 @@ class ExternalTrainingMetadataTests(unittest.TestCase):
             self.assertEqual(capability.source.name, "tt_rtc_training_manifest.json")
             validate_tt_rtc_model_contract(capability, _loaded_contract(action_horizon=32, action_dimension=16))
             self.assertEqual(before, {p: p.read_bytes() for p in root.rglob("*.json")})
-            with self.assertRaisesRegex(TTRTCContractError, "VLA-only"):
+            with self.assertRaisesRegex(TTRTCContractError, "manifest rlt"):
                 load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_32x16_rlt_manifest_requires_matching_reference_horizon(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = _manifest()
+            payload["training_time_rtc"].update(action_horizon=32, action_dimension=16)
+            path = root / "tt_rtc_manifest.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(TTRTCContractError, "rlt.reference_horizon"):
+                load_tt_rtc_capability(root, require_rlt=True)
+            payload["rlt"]["reference_horizon"] = 32
+            path.write_text(json.dumps(payload))
+            load_tt_rtc_capability(root, require_rlt=True)
 
     def test_disagreeing_training_config_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

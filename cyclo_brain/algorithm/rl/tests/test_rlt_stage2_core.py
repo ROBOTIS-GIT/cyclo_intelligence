@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -56,17 +58,17 @@ def _encoder_artifact(root: Path) -> tuple[Path, object]:
     return path, load_frozen_rl_token_encoder(path)
 
 
-def _spec(encoder) -> RLTStage2Spec:
+def _spec(encoder, action_dim=RLT_ACTION_DIM) -> RLTStage2Spec:
     return RLTStage2Spec(
         reference_contract_fingerprint=(
             encoder.representation_contract_fingerprint
         ),
         rl_token_artifact_fingerprint=encoder.artifact_fingerprint,
         rl_token_dim=8,
-        proprio_dim=RLT_ACTION_DIM,
-        reference_horizon=GROOT_REFERENCE_ACTION_HORIZON,
+        proprio_dim=action_dim,
+        reference_horizon=32 if action_dim == 16 else GROOT_REFERENCE_ACTION_HORIZON,
         chunk_length=RLT_ACTION_HORIZON,
-        action_dim=RLT_ACTION_DIM,
+        action_dim=action_dim,
         action_hz=15.0,
         action_normalization_id="showroom-normalized-19d/v1",
         action_codec_id="ffw_sg2_rev1-recorder-order/v1",
@@ -75,11 +77,11 @@ def _spec(encoder) -> RLTStage2Spec:
     )
 
 
-def _run(root: Path) -> RLTStage2Run:
+def _run(root: Path, action_dim=RLT_ACTION_DIM) -> RLTStage2Run:
     encoder_path, encoder = _encoder_artifact(root)
     run = RLTStage2Run.new(
         encoder_path,
-        spec=_spec(encoder),
+        spec=_spec(encoder, action_dim),
         groot_checkpoint="/workspace/model/showroom_groot",
         # Deliberately distinct from the representation-contract digest.
         groot_checkpoint_fingerprint="a" * 64,
@@ -163,30 +165,31 @@ def _run(root: Path) -> RLTStage2Run:
 def _batch(run: RLTStage2Run) -> RLTStage2Batch:
     generator = torch.Generator().manual_seed(31)
     batch_size = 3
+    action_dim = run.learner.spec.action_dim
     return RLTStage2Batch(
         spec_fingerprint=stage2_spec_fingerprint(run.learner.spec),
         z_rl=torch.randn(batch_size, 8, generator=generator),
-        proprio=torch.randn(batch_size, RLT_ACTION_DIM, generator=generator),
+        proprio=torch.randn(batch_size, action_dim, generator=generator),
         reference_actions=torch.randn(
             batch_size,
             RLT_ACTION_HORIZON,
-            RLT_ACTION_DIM,
+            action_dim,
             generator=generator,
         ),
         executed_actions=torch.randn(
             batch_size,
             RLT_ACTION_HORIZON,
-            RLT_ACTION_DIM,
+            action_dim,
             generator=generator,
         ),
         reward=torch.tensor([[1.0], [0.0], [0.2]]),
         bootstrap_discount=torch.tensor([[0.0], [0.9], [0.9]]),
         next_z_rl=torch.randn(batch_size, 8, generator=generator),
-        next_proprio=torch.randn(batch_size, RLT_ACTION_DIM, generator=generator),
+        next_proprio=torch.randn(batch_size, action_dim, generator=generator),
         next_reference_actions=torch.randn(
             batch_size,
             RLT_ACTION_HORIZON,
-            RLT_ACTION_DIM,
+            action_dim,
             generator=generator,
         ),
     )
@@ -249,6 +252,130 @@ def _training_round_with_snapshots(training_round, fingerprints):
 
 
 class RLTStage2CoreTest(unittest.TestCase):
+    def test_split_updates_match_synchronous_weights_optimizers_and_rng(self) -> None:
+        for action_dim in (16, 19):
+            for ratio in (1, 2):
+                with self.subTest(action_dim=action_dim, ratio=ratio), tempfile.TemporaryDirectory() as directory:
+                    run = _run(Path(directory), action_dim=action_dim)
+                    serial = run.learner
+                    serial.config = replace(serial.config, critic_updates_per_actor=ratio)
+                    split = deepcopy(serial)
+                    batch = _batch(run)
+                    for _ in range(4):
+                        expected = serial.update(batch)
+                        actor_before = deepcopy(split.actor.state_dict())
+                        target_before = deepcopy(split.critic_target.state_dict())
+                        split.update_critic(batch)
+                        self.assertTrue(split.update_pending)
+                        _assert_tree_equal(self, actor_before, split.actor.state_dict())
+                        _assert_tree_equal(self, target_before, split.critic_target.state_dict())
+                        self.assertTrue(all(p.grad is None for p in split.critic.parameters()))
+                        # Inference may run at this boundary without updating or
+                        # resampling the pending training batch.
+                        with torch.no_grad():
+                            action = split.actor(batch.z_rl, batch.proprio, batch.reference_actions)
+                        self.assertEqual(tuple(action.shape), (3, 10, action_dim))
+                        self.assertEqual(expected, split.finish_update())
+                        self.assertFalse(split.update_pending)
+                        _assert_tree_equal(self, serial.state_dict(), split.state_dict())
+
+    def test_infinite_critic_loss_does_not_update_weights_or_optimizer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = _run(Path(directory))
+            learner = run.learner
+            # A finite target can overflow the squared loss while gradients
+            # remain finite. Gradient-only validation is insufficient.
+            run_batch = _batch(run)
+            batch = replace(run_batch, reward=torch.full_like(run_batch.reward, 1e20))
+            before = deepcopy(learner.critic.state_dict())
+            optimizer = deepcopy(learner.critic_optimizer.state_dict())
+            with patch.object(learner.critic_optimizer, 'step', wraps=learner.critic_optimizer.step) as step:
+                with self.assertRaisesRegex(FloatingPointError, 'critic loss.*before optimizer'):
+                    learner.update_critic(batch)
+                step.assert_not_called()
+            _assert_tree_equal(self, before, learner.critic.state_dict())
+            _assert_tree_equal(self, optimizer, learner.critic_optimizer.state_dict())
+            self.assertEqual(learner.completed_critic_updates, 0)
+            self.assertFalse(learner.update_pending)
+
+    def test_infinite_actor_loss_does_not_update_actor_or_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = _run(Path(directory))
+            learner, batch = run.learner, _batch(run)
+            learner.update(batch)
+            learner.update_critic(batch)
+            actor = deepcopy(learner.actor.state_dict())
+            target = deepcopy(learner.critic_target.state_dict())
+            optimizer = deepcopy(learner.actor_optimizer.state_dict())
+            with patch.object(learner.critic.q1, 'forward', return_value=torch.full((batch.batch_size, 1), float('inf'))), \
+                    patch.object(learner.actor_optimizer, 'step', wraps=learner.actor_optimizer.step) as step:
+                with self.assertRaisesRegex(FloatingPointError, 'actor loss.*before optimizer'):
+                    learner.finish_update()
+                step.assert_not_called()
+            _assert_tree_equal(self, actor, learner.actor.state_dict())
+            _assert_tree_equal(self, target, learner.critic_target.state_dict())
+            _assert_tree_equal(self, optimizer, learner.actor_optimizer.state_dict())
+            self.assertEqual(learner.completed_actor_updates, 0)
+            self.assertTrue(learner.update_pending)
+
+    def test_split_update_guards_keep_pending_batch_and_checkpoint_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = _run(Path(directory))
+            learner = run.learner
+            batch = _batch(run)
+            initial_state = learner.state_dict()
+            with self.assertRaisesRegex(RuntimeError, "No pending"):
+                learner.finish_update()
+            learner.update(batch)
+            # The next critic step is followed by an actor step. A partial
+            # checkpoint must not claim that the actor update already happened.
+            learner.update_critic(batch)
+            critic_before = deepcopy(learner.critic.state_dict())
+            generator_before = learner.target_generator.get_state().clone()
+            for operation in (
+                lambda: learner.update_critic(batch),
+                lambda: learner.update(batch),
+                learner.state_dict,
+                lambda: learner.load_state_dict(initial_state),
+                lambda: run.save(Path(directory) / "partial_bundle"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "pending RLT update"):
+                    operation()
+            self.assertFalse((Path(directory) / "partial_bundle").exists())
+            _assert_tree_equal(self, critic_before, learner.critic.state_dict())
+            torch.testing.assert_close(generator_before, learner.target_generator.get_state())
+            self.assertTrue(learner.finish_update().actor_updated)
+            restored = deepcopy(learner)
+            restored.load_state_dict(learner.state_dict())
+            self.assertEqual(learner.update(batch), restored.update(batch))
+            _assert_tree_equal(self, learner.state_dict(), restored.state_dict())
+
+    def test_32x16_update_save_resume_and_prefix_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = _run(root, action_dim=16)
+            batch = _batch(run)
+            run.learner.update(batch)
+            result = run.learner.update(batch)
+            self.assertTrue(result.actor_updated)
+            bundle = run.save(root / "bundle16")
+            resumed = RLTStage2Run.resume(
+                bundle, expected_groot_checkpoint_fingerprint="a" * 64,
+                expected_replay_root=run.replay_root,
+            )
+            _assert_tree_equal(self, run.learner.state_dict(), resumed.learner.state_dict())
+            self.assertEqual(run.learner.update(batch), resumed.learner.update(batch))
+            policy = load_groot_rlt_shadow_policy(
+                bundle / "artifacts/rl_token_encoder.pt",
+                bundle / "artifacts/rlt_actor.pt", expected_action_dim=16,
+            )
+            output = policy(
+                torch.randn(2, 4, 8), torch.ones(2, 4, dtype=torch.bool),
+                torch.ones(2, 4, dtype=torch.bool), torch.randn(2, 16),
+                torch.randn(2, 32, 16), reference_offset_steps=6,
+            )
+            self.assertEqual(output.action_mean.shape, (2, 10, 16))
+
     def test_resume_replay_lineage_allows_same_replay_and_ordered_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = _run(Path(directory))
@@ -378,7 +505,7 @@ class RLTStage2CoreTest(unittest.TestCase):
             encoder_path, encoder = _encoder_artifact(root)
             wrong = deepcopy(_spec(encoder))
             object.__setattr__(wrong, "action_dim", 18)
-            with self.assertRaisesRegex(ValueError, "10x19"):
+            with self.assertRaisesRegex(ValueError, "16x19 or 32x16"):
                 RLTStage2Run.new(
                     encoder_path,
                     spec=wrong,

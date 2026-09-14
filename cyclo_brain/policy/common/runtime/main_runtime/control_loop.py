@@ -169,8 +169,6 @@ class ControlLoop:
                     raise ValueError("TT-RTC Control Hz must be finite and at least 15")
                 if (tt_rtc_horizon, tt_rtc_action_dim) not in {(16, 19), (32, 16)}:
                     raise ValueError("Unsupported TT-RTC model action shape")
-                if rlt_enabled and (tt_rtc_horizon, tt_rtc_action_dim) != (16, 19):
-                    raise ValueError("Current RLT requires the 16x19 reference contract")
             self._tt_rtc_horizon = tt_rtc_horizon
             self._tt_rtc_action_dim = tt_rtc_action_dim
             self._robot = RobotClient(

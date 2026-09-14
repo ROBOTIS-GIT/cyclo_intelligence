@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(REPO / 'cyclo_brain/policy/common/runtime'))
 sys.path.insert(0, str(REPO / 'cyclo_data'))
 from rlt_recording import RLTTracePublisher
-from cyclo_data.recorder.rlt_recorder import RLTRecorder
+from cyclo_data.recorder.rlt_recorder import RLTRecorder, copy_rlt_sidecar
 
 
 class RLTRecordingTests(unittest.TestCase):
@@ -73,6 +73,45 @@ class RLTRecordingTests(unittest.TestCase):
             self.assertFalse(summary['execution_verified'])
             recorder._receive(SimpleNamespace(data=b'late invalid data'))
             self.assertEqual(len(list((root / 'rlt').glob('*.npz'))), 2)
+
+    def test_16d_tt_rtc_trace_roundtrip_and_conversion_sidecar_copy(self):
+        # Synthetic tensors: exercise real archive/queue/disk code, not robot execution.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recorder, publisher = RLTRecorder(self.node), RLTTracePublisher()
+            self.addCleanup(recorder.close)
+            self.addCleanup(publisher.close)
+            recorder.start_episode(root)
+            reference = np.arange(512, dtype=np.float32).reshape(1, 32, 16)
+            arrays = {
+                'z_rl': np.ones((1, 2048), dtype=np.float32),
+                'proprio': np.ones((1, 16), dtype=np.float32),
+                'reference_actions': reference,
+                'mlp_reference': reference[:, 6:16].copy(),
+                'action_mean': np.full((1, 10, 16), 2.0, dtype=np.float32),
+                'physical_action_chunk': np.full((10, 16), 3.0, dtype=np.float32),
+                'physical_prefix': np.full((6, 16), 4.0, dtype=np.float32),
+            }
+            publisher.submit({
+                'event': 'inference', 'request_seq': 7, 'delay_steps': 6,
+                'action_request_mode': 'tt_rtc', 'action_policy_mode': 'rlt',
+                'execution_verified': False,
+            }, arrays)
+            publisher.submit({'event': 'buffer_accepted', 'request_seq': 7})
+            publisher.close()
+            recorder.stop_episode()
+            source = root / 'rlt'
+            target = root / 'converted/rlt/episode_000000'
+            self.assertTrue(copy_rlt_sidecar(source, target))
+            rows = [json.loads(row) for row in (target / 'events.jsonl').read_text().splitlines()]
+            self.assertEqual([row['request_seq'] for row in rows], [7, 7])
+            self.assertEqual(rows[0]['delay_steps'], 6)
+            self.assertFalse(rows[0]['execution_verified'])
+            with np.load(target / rows[0]['file'], allow_pickle=False) as archive:
+                for key, expected in arrays.items():
+                    np.testing.assert_array_equal(archive[key], expected)
+            self.assertEqual(self.errors, [])
+            self.assertEqual(recorder.recording_warnings(), [])
 
     def test_old_episode_packet_cannot_enter_new_episode(self):
         with tempfile.TemporaryDirectory() as temporary:

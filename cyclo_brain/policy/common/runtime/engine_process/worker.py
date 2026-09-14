@@ -28,6 +28,7 @@ from .protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
+    POLICY_UPDATE_COMMANDS,
     ENGINE_COMMAND_REQUEST_DEF,
     ENGINE_COMMAND_RESPONSE_DEF,
     EngineCommandRequest,
@@ -70,6 +71,15 @@ class EngineWorker:
             else request_from_message(request)
         )
         try:
+            if req.command in POLICY_UPDATE_COMMANDS:
+                handler = getattr(self._engine, "policy_update_command", None)
+                result = handler(req) if callable(handler) else {
+                    "success": False, "message": "RLT policy updates require GR00T",
+                }
+                return EngineCommandResponse(
+                    success=bool(result.get("success", False)),
+                    seq_id=req.seq_id, message=str(result.get("message", "")),
+                )
             if req.command == CMD_LOAD_POLICY:
                 return self._load_policy(req)
             if req.command == CMD_GET_ACTION:

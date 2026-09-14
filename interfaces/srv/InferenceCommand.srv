@@ -23,6 +23,11 @@ uint8 SET_ACTION_POLICY   = 7   # Queue base/RLT output switch at next buffer
                                # boundary. Requires LOAD + START.
 
 uint8 command
+# Additional GR00T MLP update commands (same wire fields):
+# 8=status, 9=auto apply on, 10=auto apply off, 11=queue manual apply,
+# 12=async RL on, 13=async RL off, 14=select Async RL datasets, 15=save bundle.
+# rlt_bundle_path identifies the already-loaded bundle. Replies contain JSON
+# status in message. Only 12 starts learning; none changes the action mode.
 
 # LOAD fields — required when command = LOAD, "" otherwise.
 string model_path
@@ -54,6 +59,10 @@ string acceleration_engine_path
 # backend resolves and validates its frozen RL-token encoder + Action MLP.
 bool rlt_enabled
 string rlt_bundle_path
+# Command 14: absolute LeRobot roots, empty means wait for data (not OFF).
+string[] rlt_dataset_paths
+# Command 12: critic updates per ON run; 0 preserves the server limit (default 1000).
+uint32 rlt_max_updates
 # SET_ACTION_POLICY target. "base" or "rlt"; ignored by other commands.
 string action_policy_mode
 # SET_ACTION_POLICY-only operator acknowledgement for an unqualified RLT

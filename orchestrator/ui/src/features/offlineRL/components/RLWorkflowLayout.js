@@ -19,6 +19,7 @@ import OfflineRLInferenceWorkspace from './OfflineRLInferenceWorkspace';
 import OfflineRLReplayBuffer from './OfflineRLReplayBuffer';
 import OfflineRLDatasetConversion from './OfflineRLDatasetConversion';
 import OfflineRLLeRobotDataset from './OfflineRLLeRobotDataset';
+import RltDatasetSelectionSync from '../../../components/RltDatasetSelectionSync';
 import OfflineRLTrainingSection from './OfflineRLTrainingSection';
 import OfflineRLDataConversionGuideModal from './OfflineRLDataConversionGuideModal';
 import OfflineRLTrainingGuideModal from './OfflineRLTrainingGuideModal';
@@ -785,6 +786,7 @@ export default function RLWorkflowLayout({ isActive = true }) {
 
                 <PipelineCard icon={MdOutlineDataset} step="03" title="LeRobot Dataset">
                   <OfflineRLLeRobotDataset isActive={isActive} />
+                  <RltDatasetSelectionSync />
                 </PipelineCard>
               </div>
             </ResizableWorkspacePanel>
