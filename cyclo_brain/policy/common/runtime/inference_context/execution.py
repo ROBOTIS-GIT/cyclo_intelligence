@@ -94,8 +94,10 @@ class PlanningRecord:
     command_count: int
     event_id: int
     recorded_s: float
+    command_start_id: int | None = None
 
     def __post_init__(self):
+        _index(self.command_start_id, "command_start_id", optional=True)
         for name in ("prediction_id", "source_count", "source_start", "command_count", "event_id"):
             _index(getattr(self, name), name)
         if self.source_start > self.source_count:
@@ -129,8 +131,11 @@ class ExecutionContext:
     resets: tuple[ResetRecord, ...] = ()
     after_event_id: int = 0
     latest_event_id: int = 0
+    feedback_schema: int = 1
 
     def __post_init__(self):
+        if type(self.feedback_schema) is not int or self.feedback_schema not in {1, 2}:
+            raise ValueError("unsupported feedback schema")
         if not isinstance(self.session_id, str) or not 1 <= len(self.session_id) <= 128:
             raise ValueError("execution context requires a bounded session ID")
         if any(type(v) is not int or v < 0 for v in (self.generation, self.revision)):
@@ -147,6 +152,8 @@ class ExecutionContext:
             if not isinstance(items, (tuple, list)) or any(not isinstance(item, kind) for item in items):
                 raise ValueError(f"invalid {name} records")
             object.__setattr__(self, name, tuple(items))
+        if self.feedback_schema == 2 and any(p.command_start_id is None for p in self.planning):
+            raise ValueError("feedback schema 2 requires planned command ranges")
         _index(self.after_event_id, "after_event_id")
         _index(self.latest_event_id, "latest_event_id")
         ids = [a.event_id for a in self.actions if a.event_id is not None]
@@ -160,7 +167,15 @@ class ExecutionContext:
             raise ValueError("execution event cursor moved backwards")
 
     def to_json(self) -> str:
-        result = json.dumps(self, default=_json_record, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        def record(value):
+            result = _json_record(value)
+            if self.feedback_schema == 1:
+                if isinstance(value, ExecutionContext):
+                    result.pop("feedback_schema")
+                if isinstance(value, PlanningRecord):
+                    result.pop("command_start_id")
+            return result
+        result = json.dumps(self, default=record, allow_nan=False, sort_keys=True, separators=(",", ":"))
         encoded = result.encode("utf-8")
         if len(encoded) > MAX_EXPANDED_CONTEXT_BYTES:
             raise ValueError("expanded execution context exceeds 8 MiB")

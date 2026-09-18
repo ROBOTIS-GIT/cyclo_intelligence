@@ -4,9 +4,11 @@
 # used external Torch bilinear resize to 224x224 with antialias enabled.
 # This is not a universal Multi-Task DiT training default. Match a different
 # checkpoint's training transforms explicitly; use identity if none are needed.
-backend: torch
-operations:
-  - type: resize
-    size: [224, 224]
-    interpolation: bilinear
-    antialias: true
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing:
+  images:
+    - resize:
+        size: [224, 224]
+        backend: torch
+        interpolation: bilinear
+        antialias: true

@@ -13,8 +13,21 @@ class ExecutionContract:
     initial_action_timeout_s: float | None = None
     observation_warmup_timeout_s: float | None = None
     pending_command_count: int | None = None
+    feedback_schema: int = 1
+    request_after: str = "prediction_success"
+    request_after_count: int = 1
 
     def __post_init__(self):
+        if self.feedback_schema not in {1, 2} or type(self.feedback_schema) is not int:
+            raise ValueError("unsupported feedback schema")
+        if self.request_after not in {"prediction_success", "plan_accepted", "first_publication", "published_count", "plan_terminal"}:
+            raise ValueError("unsupported request prerequisite")
+        if type(self.request_after_count) is not int or not 1 <= self.request_after_count <= 4096:
+            raise ValueError("request prerequisite count must be 1..4096")
+        if self.request_after != "published_count" and self.request_after_count != 1:
+            raise ValueError("request count is only meaningful for published_count")
+        if self.request_after != "prediction_success" and self.feedback_schema != 2:
+            raise ValueError("execution prerequisites require feedback schema 2")
         if self.pending_command_count is not None and (
             type(self.pending_command_count) is not int or not 0 <= self.pending_command_count <= 4096
         ):
@@ -42,7 +55,7 @@ class ExecutionContract:
     @property
     def requires_context(self):
         return (self.is_step or self.observation_warmup_timeout_s is not None
-                or self.pending_command_count is not None)
+                or self.pending_command_count is not None or self.feedback_schema == 2)
 
 
 @dataclass(frozen=True)
@@ -68,11 +81,16 @@ class LoadedExecution:
             or self.context.after_event_id or self.context.latest_event_id
         ):
             raise ValueError("LOAD execution session must be empty and ready")
+        if self.context is not None and self.context.feedback_schema != self.contract.feedback_schema:
+            raise ValueError("LOAD feedback schema mismatch")
 
     def to_json(self):
         if self.context is None and not self.contract.is_step:
             return ""
         contract = {"mode": self.contract.mode}
+        if self.contract.feedback_schema == 2:
+            contract.update(feedback_schema=2, request_after=self.contract.request_after,
+                            request_after_count=self.contract.request_after_count)
         if self.contract.initial_action_timeout_s is not None:
             contract["initial_action_timeout_s"] = self.contract.initial_action_timeout_s
         if self.contract.observation_warmup_timeout_s is not None:
@@ -99,7 +117,7 @@ class LoadedExecution:
             contract = data["execution_contract"]
             if (not isinstance(contract, dict) or "mode" not in contract
                     or set(contract) - {"mode", "initial_action_timeout_s", "observation_warmup_timeout_s",
-                                        "pending_command_count"}):
+                                        "pending_command_count", "feedback_schema", "request_after", "request_after_count"}):
                 raise ValueError("invalid LOAD execution contract fields")
             context = data["execution_context"]
             return cls(ExecutionContract(**contract),

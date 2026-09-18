@@ -1,0 +1,3 @@
+# Leave aspect ratio intact for SmolVLA's internal resize/padding.
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

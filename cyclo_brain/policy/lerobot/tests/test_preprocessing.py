@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import types
+import yaml
 import unittest
 from unittest import mock
 
@@ -45,6 +46,7 @@ preprocessing_spec.loader.exec_module(preprocessing)
 
 PreprocessingMixin = preprocessing.PreprocessingMixin
 STATE_KEY = constants.STATE_KEY
+from lerobot_engine.input_pipeline import InputPipelineConfig, CONFIG_DIR
 
 
 class FakeRobot:
@@ -65,11 +67,14 @@ class Preprocessor(PreprocessingMixin):
         self._robot = FakeRobot(positions)
         self._cameras = {}
         self._state_modalities = ["arm"]
-        self._image_preprocessing = None
         self._device = torch.device("cpu")
         feature = SimpleNamespace(shape=(expected,))
         config = SimpleNamespace(input_features={STATE_KEY: feature})
         self._policy = SimpleNamespace(config=config)
+        self._input_pipeline_config = InputPipelineConfig.from_user_config(
+            yaml.safe_load((CONFIG_DIR / "act.yaml").read_text()),
+            {"input_features": {STATE_KEY: {"shape": [expected]}}}, CONFIG_DIR / "act.yaml",
+        )
 
     def _fail(self, message):
         return {"error": message}
@@ -78,7 +83,7 @@ class Preprocessor(PreprocessingMixin):
 class PreprocessingTest(unittest.TestCase):
     def test_input_plan_is_compiled_once_for_repeated_predictions(self):
         preprocessor = Preprocessor([1., 2.], expected=2)
-        with mock.patch.object(preprocessing, "latest_input_plan", wraps=preprocessing.latest_input_plan) as compile_plan:
+        with mock.patch.object(preprocessor._input_pipeline_config, "compile", wraps=preprocessor._input_pipeline_config.compile) as compile_plan:
             for _ in range(10):
                 preprocessor._build_observation("task")
         self.assertEqual(compile_plan.call_count, 1)
@@ -114,10 +119,12 @@ class PreprocessingTest(unittest.TestCase):
         preprocessor._robot._config = {"cameras": {"head": {"rotation_deg": 270}}}
         image = np.arange(8 * 12 * 3, dtype=np.uint8).reshape(8, 12, 3)
         preprocessor._robot.get_images = lambda format: {"head": image}
-        preprocessor._image_preprocessing = image_preprocessing.ImagePreprocessing(
-            {"backend": "torch", "operations": operations},
-            {key: {"shape": [3, 4, 4]}},
-        )
+        images = "identity" if operations == [{"type": "identity"}] else [
+            {op["type"]: {"backend": "torch", **{k: v for k, v in op.items() if k != "type"}}}
+            for op in operations
+        ]
+        preprocessor._input_pipeline_config.config["nodes"]["prepared"]["options"]["images"] = images
+        preprocessor._input_pipeline_config.checkpoint["input_features"][key] = {"shape": [3, 4, 4]}
         return preprocessor, key, image
 
     def test_real_observation_path_preserves_native_rotated_size(self):
@@ -130,7 +137,7 @@ class PreprocessingTest(unittest.TestCase):
     def test_camera_transform_error_returns_failure_not_partial_batch(self):
         preprocessor, key, _ = self.camera_preprocessor([{"type": "center_crop", "size": [100, 100]}])
         result = preprocessor._build_observation("pick")
-        self.assertIn("Camera preprocessing failed for head", result["error"])
+        self.assertIn("center_crop", result["error"])
         self.assertNotIn(key, result)
 
     def test_diffusion_stack_validation_runs_on_processed_sizes(self):
@@ -203,7 +210,7 @@ class PreprocessingTest(unittest.TestCase):
         snapshots = iter([snapshot(9., 10.1), snapshot(10.1, 9.), snapshot(10.2, 10.2)])
         with mock.patch.object(preprocessing.time, "monotonic", return_value=10.3), \
                 mock.patch.object(preprocessing.time, "sleep") as sleep, \
-                mock.patch.object(preprocessor, "_transform_image", wraps=preprocessor._transform_image) as transform:
+                mock.patch.object(preprocessor, "_assemble_inputs", wraps=preprocessor._assemble_inputs) as transform:
             batch = preprocessor._build_observation("pick", require_received=True, observation_after_s=10.)
         self.assertIn(key, batch)
         self.assertEqual(sleep.call_count, 2)

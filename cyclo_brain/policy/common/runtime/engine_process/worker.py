@@ -180,7 +180,7 @@ class EngineWorker:
         if requires_context and "execution_contract" not in result:
             raise ValueError("contextual LOAD requires an explicit execution contract")
         if result.get("success") and (requires_context or contract.requires_context) and context is None:
-            context = ExecutionContext(uuid.uuid4().hex, 0, 0, "ready")
+            context = ExecutionContext(uuid.uuid4().hex, 0, 0, "ready", feedback_schema=contract.feedback_schema)
         # Explicit caller-supplied contexts predate LOAD negotiation. Preserve
         # that path unless the adapter opts into a resolved execution contract.
         loaded = (LoadedExecution(contract, context)

@@ -19,7 +19,6 @@ import numpy as np
 import torch
 
 from .constants import STATE_KEY as _STATE_KEY
-from .input_plan import latest_input_plan
 from .adapters import resolve_adapter
 from inference_context import LatestValues
 from inference_context.inputs import ReceivedValues, ResolvedInputs
@@ -47,7 +46,7 @@ class PreprocessingMixin:
                     plan.spec, task_instruction, observation_after_s,
                     session=session,
                 )
-                return plan.assemble(provider, anchor_s=anchor)
+                return self._assemble_inputs(plan, provider, anchor_s=anchor)
             except (ValueError, RuntimeError) as exc:
                 return self._fail(str(exc))
 
@@ -60,18 +59,21 @@ class PreprocessingMixin:
                     snapshot = self._robot.get_input_snapshot()
             except ValueError as exc:
                 return self._fail(str(exc))
-            images = snapshot["images"]
-            joint_dict = snapshot["joint_positions"]
-            sensors = snapshot["sensors"]
         else:
             # Compatibility with external RobotClient implementations.
-            images = self._robot.get_images(format="rgb")
-            joint_dict = self._robot.get_joint_positions()
-            sensors = {"odom": self._robot.get_odom()} if "mobile" in self._state_modalities else {}
+            snapshot = {
+                "images": self._robot.get_images(format="rgb"),
+                "joint_positions": self._robot.get_joint_positions(),
+                "sensors": {"odom": self._robot.get_odom()} if "mobile" in self._state_modalities else {},
+            }
 
-        sources = self._snapshot_values({"images": images, "joint_positions": joint_dict, "sensors": sensors})
+        sources = self._snapshot_values(snapshot)
         try:
-            return plan.assemble(session.bind(LatestValues(sources), task_instruction))
+            if snapshot_api is not None:
+                anchor = snapshot.get("captured_monotonic_s", time.monotonic())
+                provider = ReceivedValues(sources, snapshot.get("reception_monotonic_timestamps", {}))
+                return self._assemble_inputs(plan, session.bind(provider, task_instruction), anchor_s=anchor)
+            return self._assemble_inputs(plan, session.bind(LatestValues(sources), task_instruction))
         except ValueError as exc:
             return self._fail(str(exc))
 
@@ -80,14 +82,10 @@ class PreprocessingMixin:
         if plans is None:
             plans = self._input_plans = {}
         if require_received not in plans:
-            definition = getattr(self, "_adapter_definition", None)
-            compile_plan = definition.input_plan_factory if definition is not None else latest_input_plan
-            plans[require_received] = compile_plan(
-                self._cameras, self._state_modalities, self._transform_image, self._transform_state,
-                max_age_s=1.0 if require_received else None,
-                policy_config=self._policy.config,
-                model_path=getattr(self, "_loaded_model_path", None),
-            )
+            pipeline_config = getattr(self, "_input_pipeline_config", None)
+            if pipeline_config is None:
+                raise ValueError("LOAD must compile an explicit input pipeline")
+            plans[require_received] = pipeline_config.compile(self, max_age_s=1.0 if require_received else None)
         plan = plans[require_received]
         sessions = getattr(self, "_observation_sessions", None)
         if sessions is None:
@@ -95,8 +93,17 @@ class PreprocessingMixin:
         if require_received not in sessions:
             definition = getattr(self, "_adapter_definition", None)
             options = {"max_history_bytes": definition.history_max_bytes} if definition is not None else {}
+            budget = getattr(getattr(self, "_input_pipeline_config", None), "budget", None)
+            if budget is not None:
+                options["budget"] = budget
+            if getattr(plan, "providers", None):
+                options["providers"] = plan.providers
             sessions[require_received] = ObservationSession(self._robot, plan.spec, **options)
         return plan, sessions[require_received]
+
+    def _assemble_inputs(self, plan, provider, *, anchor_s=0.):
+        self._input_evaluation = plan.begin(provider, anchor_s=anchor_s)
+        return self._input_evaluation.run("before")
 
     @staticmethod
     def _snapshot_values(snapshot):
@@ -113,6 +120,8 @@ class PreprocessingMixin:
             raise ValueError("input plan requires timestamped RobotClient snapshots")
         started_s = time.monotonic()
         deadline = started_s + session.read_timeout_s
+        if getattr(getattr(self, "_input_pipeline_config", None), "startup", "wait") == "error":
+            deadline = started_s
         selected_snapshot = getattr(type(self._robot), "get_required_input_snapshot", None)
         ages = set(session.live_ages.values())
         options = {"after_s": after_s, "max_age_s": None}
@@ -154,15 +163,6 @@ class PreprocessingMixin:
                 if anchor >= deadline:
                     raise ValueError(f"Required observations are not ready: {exc}") from exc
                 time.sleep(min(0.01, deadline - anchor))
-
-    def _transform_image(self, camera, policy_key, image):
-        cfg = self._robot._config.get("cameras", {}).get(camera, {})
-        try:
-            return self._image_preprocessing.apply(
-                image, policy_key, rotation_deg=cfg.get("rotation_deg", 0)
-            ).to(self._device)
-        except Exception as exc:
-            raise ValueError(f"Camera preprocessing failed for {camera}: {exc}") from exc
 
     def _transform_state(self, values):
         state_parts: List[np.ndarray] = []

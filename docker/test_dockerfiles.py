@@ -60,16 +60,17 @@ def test_arm64_build_pip_ignores_inherited_index_configuration():
     assert "ENV PIP_CONFIG_FILE" not in contents
 
 
-def test_lerobot_image_preprocessing_defaults_and_editable_mount():
+def test_lerobot_inference_inputs_defaults_and_editable_mount():
     source = "cyclo_brain/policy/lerobot/configs/"
     for arch in ("amd64", "arm64"):
         contents = (REPO_ROOT / f"cyclo_brain/policy/lerobot/Dockerfile.{arch}").read_text()
         assert f"COPY {source} /app/configs/" in contents
+        assert "COPY cyclo_brain/policy/common/runtime/inference_inputs/ /policy_runtime/inference_inputs/" in contents
     compose = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())
-    mount = f"../{source}image_preprocessing:/app/configs/image_preprocessing:ro"
+    mount = f"../{source}inference_inputs:/app/configs/inference_inputs:ro"
     assert mount in compose["services"]["lerobot"]["volumes"]
     assert mount not in compose["services"]["groot"]["volumes"]
-    assert (REPO_ROOT / source / "image_preprocessing").is_dir()
+    assert (REPO_ROOT / source / "inference_inputs").is_dir()
 
 
 def test_policy_workers_retain_zenoh_shm_memlock_limit():

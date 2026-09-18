@@ -18,9 +18,9 @@ from test_initial_pose_sync import RobotClient, robot_client_impl
 
 from engine_process.protocol import CMD_GET_ACTION, CMD_LOAD_POLICY, CMD_UNLOAD_POLICY, CMD_UPDATE_CONTEXT, EngineCommandRequest
 from engine_process.worker import EngineWorker
-from inference_context import ExecutionQuery, InputAssembler, InputField, InputSpec, SampleQuery
 from inference_context.contract import LoadedExecution
 from inference_context.execution import ActionRecord, ResetRecord
+from lerobot_engine.input_pipeline import InputPipelineConfig
 
 
 @pytest.mark.parametrize("pause_generation", [0, 1])
@@ -28,13 +28,23 @@ def test_temporal_model_registration_load_capture_predict_reset_and_cached_reloa
     definition_class = engine_module.resolve_adapter("act").__class__
     plan_calls = []
 
-    def plan(cameras, modalities, image_transform, state_transform, *, policy_config, **kwargs):
-        plan_calls.append(policy_config)
-        offsets = tuple(i * policy_config.sample_period_s for i in range(1 - policy_config.n_obs_steps, 1))
-        return InputAssembler(InputSpec((
-            InputField("temporal", (SampleQuery("joint:follower_arm", offsets, .09),), "stack"),
-            InputField("image", (SampleQuery("camera:eye", max_age_s=.5),)),
-        )), {"stack": lambda values: torch.from_numpy(np.stack(values)).unsqueeze(0)})
+    def plan():
+        plan_calls.append(config)
+        # Explicit input recipe, independent of model config.
+        return InputPipelineConfig({
+            "sources": {
+                "history": {"source": "joint:follower_arm", "offsets_s": [-.1, 0.], "max_age_s": .09},
+                "image": {"source": "camera:eye", "max_age_s": .5},
+            },
+            "nodes": {
+                "stacked": {"op": "stack", "inputs": ["history"], "options": {"sequence": True}},
+                "batched": {"op": "unsqueeze", "inputs": ["stacked"], "options": {"axis": 0}},
+                "temporal": {"op": "to_tensor", "inputs": ["batched"],
+                             "options": {"dtype": "float32", "device": "cpu"}},
+            },
+            "outputs": {"before": {"temporal": "temporal", "image": "image"},
+                        "after": {"*": "processed"}},
+        }, {}, Path("temporal_test.yaml")).compile(engine)
 
     config = SimpleNamespace(type="temporal_test", n_obs_steps=2, sample_period_s=.1)
     calls, resets, robots = [], [], []
@@ -63,8 +73,8 @@ def test_temporal_model_registration_load_capture_predict_reset_and_cached_reloa
     engine._init_robot = init_robot
     worker = EngineWorker(engine)
     load = EngineCommandRequest(command=CMD_LOAD_POLICY, model_path="/synthetic", robot_type="test", seq_id=1)
-    with mock.patch.object(engine_module, "load_image_preprocessing", return_value=object()), \
-            mock.patch.object(engine_module, "resolve_adapter", return_value=definition_class(input_plan_factory=plan)), \
+    with mock.patch.object(engine_module, "load_input_pipeline", return_value=SimpleNamespace(compile=lambda engine, **kwargs: plan())), \
+            mock.patch.object(engine_module, "resolve_adapter", return_value=definition_class()), \
             mock.patch.object(torch.cuda, "is_available", return_value=False):
         try:
             response = worker.handle(load)
@@ -131,14 +141,18 @@ def test_contextual_chunk_uses_emitted_feedback_and_pending_prefix_without_robot
     definition_class = engine_module.resolve_adapter("act").__class__
 
     def plan(*args, **kwargs):
-        fields = (
-            InputField("state", (SampleQuery("joint:follower_arm"),)),
-            InputField("published", (ExecutionQuery("execution:published:command", count=2, min_count=0),)),
-            InputField("pending", (ExecutionQuery("execution:pending:command", count=1, min_count=0),)),
-        )
+        sources = {
+            "state": {"source": "joint:follower_arm"},
+            "published": {"source": "execution:published:command", "count": 2, "min_count": 0},
+            "pending": {"source": "execution:pending:command", "count": 1, "min_count": 0},
+        }
         if whole_context:
-            fields += (InputField("context", (ExecutionQuery("execution:context"),)),)
-        return InputAssembler(InputSpec(fields))
+            sources["context"] = {"source": "execution:context"}
+        return InputPipelineConfig({
+            "sources": sources,
+            "nodes": {},
+            "outputs": {"before": {key: key for key in sources}, "after": {"*": "processed"}},
+        }, {}, Path("feedback_test.yaml")).compile(engine)
 
     batches = []
 
@@ -169,8 +183,8 @@ def test_contextual_chunk_uses_emitted_feedback_and_pending_prefix_without_robot
     engine._init_robot = init_robot
     worker = EngineWorker(engine)
     load = EngineCommandRequest(command=CMD_LOAD_POLICY, model_path="/feedback", robot_type="test", seq_id=1)
-    with mock.patch.object(engine_module, "load_image_preprocessing", return_value=object()), \
-            mock.patch.object(engine_module, "resolve_adapter", return_value=definition_class(input_plan_factory=plan)), \
+    with mock.patch.object(engine_module, "load_input_pipeline", return_value=SimpleNamespace(compile=lambda engine, **kwargs: plan())), \
+            mock.patch.object(engine_module, "resolve_adapter", return_value=definition_class()), \
             mock.patch.object(torch.cuda, "is_available", return_value=False):
         try:
             loaded = worker.handle(load)
@@ -250,12 +264,16 @@ def test_two_second_history_can_warm_up_without_fabricating_samples():
     definition_class = engine_module.resolve_adapter("act").__class__
 
     def plan(*args, **kwargs):
-        return InputAssembler(InputSpec((InputField("history", (
-            SampleQuery("joint:follower_arm", (-2., 0.), .1),), "stack"),)), {"stack": np.stack})
+        return InputPipelineConfig({
+            "sources": {"samples": {"source": "joint:follower_arm", "offsets_s": [-2., 0.], "max_age_s": .1}},
+            "nodes": {"history": {"op": "stack", "inputs": ["samples"], "options": {"sequence": True}}},
+            "outputs": {"before": {"history": "history"}, "after": {"*": "processed"}},
+        }, {}, Path("history_test.yaml")).compile(engine)
 
     engine = engine_module.LeRobotEngine()
     engine._policy = SimpleNamespace(config=SimpleNamespace(type="temporal_test"))
-    engine._adapter_definition = definition_class(input_plan_factory=plan)
+    engine._adapter_definition = definition_class()
+    engine._input_pipeline_config = SimpleNamespace(compile=lambda engine, **kwargs: plan())
     with mock.patch.object(RobotClient, "_init_subscriptions"):
         robot = RobotClient("ffw_sg2_rev1")
     robot._config = {"cameras": {}, "joint_groups": {"follower_arm": {}}, "sensors": {}}

@@ -11,10 +11,15 @@ Multi-Task DiT is selectable in the Catalog for robot validation. LingBot-VA's
 candidate adapter remains excluded. RTC/TT-RTC are not implemented merely by adding context.
 Model-specific execution semantics still need a reviewed adapter and tests.
 
+Diffusion now uses the reviewed public step path for its model-owned observation
+and action queues. This replaces its invalid latest-only chunk call; other chunk
+adapters are unchanged. See the [input design decision](inference_input_design.md)
+for the implemented YAML pipeline, verification and the boundary of declarative config.
+
 ## Ownership
 
 ```text
-Robot topics -> Worker RobotClient -> ObservationSession -> InputAssembler
+Robot topics -> Worker RobotClient -> ObservationSession -> Input Graph
                                           |                    |
                                  requested history only    model processor
                                                                |
@@ -30,7 +35,8 @@ Cyclo ControlLoop <- Zenoh action response <--------------------+
 | Location | Responsibility |
 | --- | --- |
 | `policy/lerobot/lerobot_engine/adapters/` | Registry, model constraints, loaders, predictors and execution adapters |
-| `policy/lerobot/lerobot_engine/input_plan.py` | Default latest-observation input declaration |
+| `policy/lerobot/configs/inference_inputs/`, `lerobot_engine/input_pipeline.py` | Explicit YAML inputs and framework operators |
+| `policy/common/runtime/inference_inputs/` | Common graph, registered operators/providers and transactional memory |
 | `policy/common/runtime/inference_context/inputs.py` | Model-independent queries, provider routing and tensor assembly |
 | `inference_context/observation.py`, `history.py`, `reception.py` | Opt-in history, freshness, warmup and callback reset barriers |
 | `inference_context/execution.py`, `execution_inputs.py`, `contract.py` | Wire records, requested execution history and LOAD contract |
@@ -86,7 +92,8 @@ excluded from chunk alignment latency only when explicitly negotiated.
 
 ## Communication And Lifecycle
 
-Engine protocol 3.0 adds execution context and `UPDATE_CONTEXT`. Runtime and Worker
+Engine protocol 3.1 retains execution context and `UPDATE_CONTEXT`, adding opt-in
+feedback schema 2 for state commits and request prerequisites. Runtime and Worker
 must be updated together; incompatible protocol majors are rejected before LOAD.
 Context retries replay a successful result instead of advancing a stateful model
 twice. Failed inference requires a new generation before retry.

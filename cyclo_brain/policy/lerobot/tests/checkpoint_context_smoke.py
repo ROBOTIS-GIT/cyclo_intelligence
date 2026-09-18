@@ -24,7 +24,7 @@ from inference_context.contract import LoadedExecution
 from main_runtime.execution_feedback import ExecutionFeedback
 from main_runtime.inference_requester import InferenceRequester
 from lerobot_engine.engine import LeRobotEngine
-import lerobot_engine.image_preprocessing as images
+import lerobot_engine.input_pipeline as inputs
 
 
 class ReplayRobot:
@@ -69,7 +69,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--frames", type=Path, required=True)
-    parser.add_argument("--image-configs", type=Path, required=True)
+    parser.add_argument("--input-configs", type=Path, required=True)
     parser.add_argument("--instruction", required=True)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--report", type=Path, required=True)
@@ -79,7 +79,8 @@ def main():
     torch.set_num_threads(4)
     torch.set_num_interop_threads(2)
     torch.manual_seed(42)
-    torch.cuda.set_per_process_memory_fraction(.85)
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(.85)
     config = json.loads((args.model / "config.json").read_text())
     with np.load(args.frames, allow_pickle=False) as archive:
         frames = {key: archive[key] for key in archive.files}
@@ -124,7 +125,7 @@ def main():
         report["protocol_version"] = descriptor.protocol_version
         policy_identity = None
         for cycle in range(2):
-            with patch.object(images, "CONFIG_DIR", args.image_configs):
+            with patch.object(inputs, "CONFIG_DIR", args.input_configs):
                 loaded = requester.load_policy(SimpleNamespace(model_path=str(args.model), robot_type="test",
                                                                 task_instruction=args.instruction))
             assert loaded.success, loaded.message
@@ -181,7 +182,7 @@ def main():
         assert requester.unload_policy().success
         assert not engine.is_ready and engine._policy is None
         report.update(passed=True, elapsed_s=time.monotonic() - started,
-                      peak_cuda_gib=torch.cuda.max_memory_allocated() / 2**30)
+                      peak_cuda_gib=torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.)
     except BaseException as exc:
         report["error"] = repr(exc)
         raise

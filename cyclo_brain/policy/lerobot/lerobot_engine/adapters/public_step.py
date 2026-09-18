@@ -12,7 +12,7 @@ class PublicStepAdapter:
     """
 
     def __init__(self, policy, preprocessor, postprocessor, to_numpy,
-                 *, require_exact_publication=False):
+                 *, require_exact_publication=False, batch_validator=None):
         if not callable(getattr(policy, "select_action", None)) or not callable(getattr(policy, "reset", None)):
             raise ValueError("step policy must implement public select_action and reset")
         self.policy = policy
@@ -20,6 +20,7 @@ class PublicStepAdapter:
         self.postprocessor = postprocessor
         self.to_numpy = to_numpy
         self.require_exact_publication = require_exact_publication
+        self.batch_validator = batch_validator
         self._context = None
         self._pending_id = None
         self._expected = None
@@ -27,6 +28,10 @@ class PublicStepAdapter:
         self._failed = False
         self._last_prediction = -1
         self._observation_after_s = None
+        self.result_observer = None
+
+    def set_result_observer(self, observer):
+        self.result_observer = observer
 
     @property
     def observation_after_s(self):
@@ -94,11 +99,15 @@ class PublicStepAdapter:
             raise ValueError("step prediction IDs must increase")
         self._failed = True
         # Process the public (B,A) output before converting it to wire (1,A).
-        # Do not fabricate repeated observations to fill a temporal model queue.
-        action = self.policy.select_action(self.preprocessor(observation))
+        # Queue initialization/history belongs to the public policy API.
+        batch = self.preprocessor(observation)
+        if self.batch_validator is not None:
+            self.batch_validator(batch)
+        action = self.policy.select_action(batch)
         action_shape = getattr(action, "shape", ())
         if len(action_shape) != 2 or action_shape[0] != 1 or action_shape[1] == 0:
             raise ValueError("select_action must produce one finite action vector with shape (1,A)")
+        model_action = action.clone() if self.result_observer is not None else None
         action = self.postprocessor(action)
         action_shape = getattr(action, "shape", ())
         if len(action_shape) != 2 or action_shape[0] != 1 or action_shape[1] == 0:
@@ -107,6 +116,8 @@ class PublicStepAdapter:
         if (chunk.ndim != 2 or chunk.shape[0] != 1 or chunk.shape[1] == 0
                 or chunk.dtype.kind not in "iuf" or not np.isfinite(chunk).all()):
             raise ValueError("select_action must produce one finite action vector")
+        if self.result_observer is not None:
+            self.result_observer(model_action, action)
         self._expected = chunk[0].copy()
         self._pending_id = prediction_id
         self._last_prediction = prediction_id

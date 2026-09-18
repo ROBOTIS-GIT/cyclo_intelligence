@@ -127,7 +127,7 @@ def test_groot_engine_runs_saved_resize_before_camera_packing(tmp_path, resize_f
     engine._postprocessor = lambda value: value
     engine._policy = SimpleNamespace(config=SimpleNamespace(type="groot"))
     engine._robot = object()
-    engine._image_preprocessing = object()
+    engine._input_pipeline_config = object()
     engine._cameras = {"head": "observation.images.head", "wrist": "observation.images.wrist"}
     def observation(_instruction):
         raw = batch()

@@ -21,7 +21,12 @@ from inference_context.execution import ActionRecord, ExecutionContext, CONTEXT_
 
 
 def baseline(context):
-    raw = json.dumps(asdict(context), allow_nan=False, sort_keys=True, separators=(",", ":"))
+    data = asdict(context)
+    if context.feedback_schema == 1:
+        data.pop("feedback_schema")
+        for plan in data["planning"]:
+            plan.pop("command_start_id")
+    raw = json.dumps(data, allow_nan=False, sort_keys=True, separators=(",", ":"))
     encoded = raw.encode("utf-8")
     if len(encoded) > CONTEXT_COMPRESSION_THRESHOLD_BYTES:
         return json.dumps({"encoding": "zlib+base64", "payload": base64.b64encode(

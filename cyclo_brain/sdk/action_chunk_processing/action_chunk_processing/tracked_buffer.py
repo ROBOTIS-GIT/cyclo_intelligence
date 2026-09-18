@@ -33,6 +33,7 @@ class AlignmentDecision:
     source_count: int
     source_start: int
     command_count: int
+    command_start_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class TrackedActionBuffer:
         self._event_id = 0
         self._revision = 0
         self._failure = ""
+        self._plan_progress = None
         self._lock = threading.Lock()
 
     @property
@@ -149,10 +151,12 @@ class TrackedActionBuffer:
                     anchor.values if blending else None,
                 ))
             self._pending.extend(commands)
+            command_start_id = self._next_command_id
             self._next_command_id += len(commands)
             self._last_prediction_id = prediction_id
             self._revision += 1
-            decision = AlignmentDecision(prediction_id, len(values), result.source_start, len(commands))
+            decision = AlignmentDecision(prediction_id, len(values), result.source_start, len(commands), command_start_id)
+            self._plan_progress = [decision, 0, 0, False]
             self._event_id += 1
             self._events.append(PlanningEvent(self._event_id, decision, time.monotonic()))
             return decision
@@ -222,6 +226,7 @@ class TrackedActionBuffer:
             self._pending.clear()
             self._last_taken = None
             self._last_published = None
+            self._plan_progress = None
             self._failure = ""
             self._revision += 1
             self._event_id += 1
@@ -254,7 +259,30 @@ class TrackedActionBuffer:
             )
 
     def _record(self, command, status, emitted_values, reason):
+        progress = self._plan_progress
+        if progress is not None:
+            plan = progress[0]
+            if (command.prediction_id == plan.prediction_id
+                    and plan.command_start_id <= command.command_id < plan.command_start_id + plan.command_count):
+                progress[1] += int(status == "published")
+                progress[2] += 1
+                progress[3] |= status != "published"
         self._event_id += 1
         self._events.append(PublicationEvent(
             self._event_id, command, status, time.monotonic(), emitted_values, reason,
         ))
+
+    def request_ready(self, condition="prediction_success", count=1):
+        """Read only local facts; never wait for the Worker from the control tick."""
+        with self._lock:
+            if self._plan_progress is None or condition in {"prediction_success", "plan_accepted"}:
+                return True
+            plan, published, finished, failed = self._plan_progress
+            if plan.command_count == 0 or failed:
+                raise RuntimeError("execution prerequisite cannot be met: plan discarded or publication failed")
+            if condition == "plan_terminal":
+                return finished == plan.command_count
+            needed = 1 if condition == "first_publication" else count
+            if needed > plan.command_count:
+                raise RuntimeError("execution prerequisite exceeds the accepted plan length")
+            return published >= needed

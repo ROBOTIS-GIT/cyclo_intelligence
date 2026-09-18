@@ -4,6 +4,5 @@
 # Keep identity here; do not duplicate that internal operation in Cyclo.
 # With resize_imgs_with_padding=None, images must already have equal H/W in
 # BOTH training and inference. Reproduce any external training transform here.
-backend: torch
-operations:
-  - type: identity
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

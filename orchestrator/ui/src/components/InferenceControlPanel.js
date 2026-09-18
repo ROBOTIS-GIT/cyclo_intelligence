@@ -265,7 +265,12 @@ export default function InferenceControlPanel() {
           }
           toast.error(`Command failed: ${result.message || 'Unknown error'}`);
         } else if (result && result.success === true) {
-          toast.success(`${commandName} executed successfully`);
+          if (commandString === 'finish') {
+            // FINISH acknowledges a request; STOP/UNLOAD complete asynchronously.
+            toast('Clear requested. Waiting for model unload.');
+          } else {
+            toast.success(`${commandName} executed successfully`);
+          }
         } else {
           toast.error(`${commandName} completed with uncertain status`);
         }

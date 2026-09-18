@@ -13,7 +13,7 @@ import threading
 
 import numpy as np
 
-from .inputs import InputSpec, SampleQuery
+from .inputs import InputSpec, SampleQuery, InputSample
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class Sample:
 
 
 class HistoryStore:
-    def __init__(self, spec: InputSpec, *, max_bytes: int = 256 * 1024 * 1024):
+    def __init__(self, spec: InputSpec, *, max_bytes: int = 256 * 1024 * 1024, budget=None):
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("max_bytes must be a positive integer")
         self._retention = {}
@@ -39,6 +39,7 @@ class HistoryStore:
         self._max_bytes = max_bytes
         self._bytes = 0
         self._failure = ""
+        self._budget = budget
         self._lock = threading.Lock()
 
     @property
@@ -80,7 +81,18 @@ class HistoryStore:
             if self._bytes + data.nbytes > self._max_bytes or len(samples) >= 4096:
                 self._failure = "observation history memory budget exceeded; reset required"
                 raise MemoryError(self._failure)
-            data = data.copy()
+            if self._budget is not None:
+                try:
+                    self._budget.resize(id(self), self._bytes + data.nbytes)
+                except MemoryError as exc:
+                    self._failure = str(exc)
+                    raise
+            try:
+                data = data.copy()
+            except Exception:
+                if self._budget is not None:
+                    self._budget.resize(id(self), self._bytes)
+                raise
             data.setflags(write=False)
             samples.append(Sample(sequence, received_s, data))
             self._last_seen[source] = (sequence, received_s)
@@ -91,6 +103,10 @@ class HistoryStore:
         # Stored arrays are immutable and retained by these references. Neither
         # reception nor a reset needs to wait for the caller's image copies.
         return tuple(s.value.copy() for s in selected)
+
+    def resolve_samples(self, query, anchor_s, *, after_s=None):
+        return tuple(InputSample(s.value.copy(), query.source, s.sequence, s.received_s)
+                     for s in self._select(query, anchor_s, after_s=after_s))
 
     def check(self, query: SampleQuery, anchor_s: float, *, after_s=None) -> None:
         """Readiness only, without copying retained images or state arrays."""
@@ -130,5 +146,7 @@ class HistoryStore:
             for samples in self._samples.values():
                 samples.clear()
             self._bytes = 0
+            if self._budget is not None:
+                self._budget.resize(id(self), 0)
             self._failure = ""
             self._last_seen.clear()

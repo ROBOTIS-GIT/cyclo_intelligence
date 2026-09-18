@@ -8,6 +8,14 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 @dataclass(frozen=True)
+class InputSample:
+    value: Any
+    source: str
+    sequence: Any = None
+    received_s: float | None = None
+
+
+@dataclass(frozen=True)
 class SampleQuery:
     source: str
     offsets_s: tuple[float, ...] = (0.0,)
@@ -107,10 +115,17 @@ class ResolvedInputs:
     def __init__(self, spec, provider, anchor_s):
         self._anchor_s = anchor_s
         self._samples = {}
+        self._records = {}
         for field in spec.fields:
             for query in field.queries:
                 if query not in self._samples:
-                    samples = provider.resolve(query, anchor_s)
+                    resolve_samples = getattr(provider, "resolve_samples", None)
+                    if callable(resolve_samples):
+                        records = resolve_samples(query, anchor_s)
+                        self._records[query] = records
+                        samples = tuple(record.value for record in records)
+                    else:
+                        samples = provider.resolve(query, anchor_s)
                     if len(samples) != query.sample_count:
                         raise ValueError(f"{query.source}: provider returned the wrong sample count")
                     self._samples[query] = samples
@@ -119,6 +134,10 @@ class ResolvedInputs:
         if anchor_s != self._anchor_s or query not in self._samples:
             raise ValueError("input snapshot query/anchor differs from its resolved request")
         return self._samples[query]
+
+    def resolve_samples(self, query, anchor_s):
+        values = self.resolve(query, anchor_s)
+        return self._records.get(query, tuple(InputSample(v, query.source) for v in values))
 
 
 class RoutedInputs:
@@ -137,6 +156,13 @@ class RoutedInputs:
         if query.source not in self._providers:
             raise ValueError(f"Undeclared input source: {query.source}")
         return self._providers[query.source].resolve(query, anchor_s)
+
+    def resolve_samples(self, query, anchor_s):
+        provider = self._providers[query.source]
+        method = getattr(provider, "resolve_samples", None)
+        if callable(method):
+            return method(query, anchor_s)
+        return tuple(InputSample(v, query.source) for v in provider.resolve(query, anchor_s))
 
 
 class LatestValues:
@@ -186,6 +212,11 @@ class ReceivedValues:
         if query.source not in self._values or self._values[query.source] is None:
             raise ValueError(f"Missing input source: {query.source}")
         return (self._values[query.source],)
+
+    def resolve_samples(self, query, anchor_s):
+        values = self.resolve(query, anchor_s)
+        stamp = self._received_s[query.source]
+        return tuple(InputSample(value, query.source, stamp, stamp) for value in values)
 
 
 def _identity(values: tuple[Any, ...]) -> Any:

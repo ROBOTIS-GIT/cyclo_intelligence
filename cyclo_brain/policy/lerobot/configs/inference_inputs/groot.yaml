@@ -6,6 +6,5 @@
 # can align views BEFORE packing. Keep identity when that step was saved;
 # do not duplicate its resize here. Only reproduce external training transforms
 # in this YAML when they are absent from the saved processor pipeline.
-backend: torch
-operations:
-  - type: identity
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

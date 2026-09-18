@@ -3,6 +3,5 @@
 # bilinear (align_corners=False), using checkpoint height/width and layout.
 # Training _encode_training_clip applies the corresponding internal transform.
 # Do not resize again here unless the dataset had an additional spatial transform.
-backend: torch
-operations:
-  - type: identity
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

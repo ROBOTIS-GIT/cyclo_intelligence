@@ -166,17 +166,19 @@ def test_publication_without_timestamp_cannot_advance_step():
 
 
 @pytest.mark.parametrize("name,expected", [("act", "chunk"), ("groot", "chunk"),
+                                         ("diffusion", "step"),
                                          ("multi_task_dit", "step"), ("lingbot_va", "step")])
 def test_candidate_contract_is_resolved_at_adapter_boundary(name, expected):
     from lerobot_engine.adapters import resolve_adapter
     assert resolve_adapter(name).contract.mode == expected
 
 
-@pytest.mark.parametrize("name,strict", [("multi_task_dit", False), ("lingbot_va", True)])
+@pytest.mark.parametrize("name,strict", [("diffusion", False), ("multi_task_dit", False), ("lingbot_va", True)])
 def test_factory_sets_required_feedback_contract(name, strict):
     from lerobot_engine.adapters import resolve_adapter
     step = adapter()
     step.policy.config.type = name
+    step.preprocessor.steps = ()
     candidate = resolve_adapter(name).create_execution_adapter(
         step.policy, step.preprocessor, step.postprocessor, step.to_numpy,
     )
@@ -184,3 +186,16 @@ def test_factory_sets_required_feedback_contract(name, strict):
     step.policy.config.type = "act"
     assert resolve_adapter("act").create_execution_adapter(
         step.policy, step.preprocessor, step.postprocessor, step.to_numpy) is None
+
+
+def test_batch_validation_runs_after_processor_and_before_policy_queue_update():
+    step = adapter()
+    step.preprocessor.side_effect = lambda obs: {"aligned": True}
+    step.batch_validator = mock.Mock(side_effect=ValueError("invalid processed input"))
+    with pytest.raises(ValueError, match="invalid processed input"):
+        step.predict({"raw": True}, 1)
+    step.batch_validator.assert_called_once_with({"aligned": True})
+    step.policy.select_action.assert_not_called()
+    step.postprocessor.assert_not_called()
+    with pytest.raises(RuntimeError, match="reset"):
+        step.predict({}, 2)

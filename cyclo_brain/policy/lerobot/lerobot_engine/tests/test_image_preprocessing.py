@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import unittest
 
 import cv2
@@ -19,13 +20,30 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / "image_preprocessing.py"
 spec = importlib.util.spec_from_file_location("image_preprocessing", MODULE_PATH)
 image_preprocessing = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(image_preprocessing)
+CONFIG_DIR = MODULE_PATH.parents[1] / 'configs' / 'inference_inputs'
+sys.path.insert(0, str(MODULE_PATH.parents[1]))
+sys.path.insert(0, str(MODULE_PATH.parents[2] / 'common' / 'runtime'))
+from lerobot_engine.input_config import ImageOperations
+
+
+def configured_transform(config, features):
+    settings = config['preprocessing']
+    if settings == 'identity':
+        settings = {}
+    return ImageOperations(settings.get('images', 'identity'), settings.get('cameras', {}), features)
+
+
+def load_spatial(model_path):
+    checkpoint = json.loads((model_path / 'config.json').read_text())
+    config = yaml.safe_load((CONFIG_DIR / f"{checkpoint['type']}.yaml").read_text())
+    return configured_transform(config, checkpoint.get('input_features', {}))
 
 
 @pytest.mark.parametrize("policy_type", ["eo1", "evo1", "pi0_fast"])
 def test_removed_policy_has_no_default_preprocessing(tmp_path, policy_type):
     (tmp_path / "config.json").write_text(json.dumps({"type": policy_type}))
     with pytest.raises(FileNotFoundError, match=policy_type):
-        image_preprocessing.load_image_preprocessing(tmp_path)
+        load_spatial(tmp_path)
 
 
 class ImagePreprocessingTest(unittest.TestCase):
@@ -116,7 +134,7 @@ def test_multi_task_dit_test_preset_matches_training_for_mixed_cameras(tmp_path)
     (tmp_path / "config.json").write_text(
         json.dumps({"type": "multi_task_dit", "input_features": features})
     )
-    transform = image_preprocessing.load_image_preprocessing(tmp_path)
+    transform = load_spatial(tmp_path)
     rng = np.random.default_rng(42)
     for key, feature in features.items():
         _, height, width = feature["shape"]
@@ -239,25 +257,6 @@ def test_rejects_opencv_antialias_and_bad_inputs():
         pipeline().apply(IMAGE, KEY, 90.5)
 
 
-def test_file_reload_snapshot_and_missing_invalid_files(tmp_path):
-    (tmp_path / "config.json").write_text(
-        json.dumps({"type": "act", "input_features": FEATURES})
-    )
-    path = tmp_path / "act.yaml"
-    with pytest.raises(FileNotFoundError):
-        image_preprocessing.load_image_preprocessing(tmp_path, tmp_path)
-    path.write_text("backend: torch\noperations: [{type: identity}]\n")
-    first = image_preprocessing.load_image_preprocessing(tmp_path, tmp_path)
-    path.write_text(
-        "backend: torch\noperations: [{type: resize, size: [4, 6], interpolation: area}]\n"
-    )
-    second = image_preprocessing.load_image_preprocessing(tmp_path, tmp_path)
-    assert first.apply(IMAGE, KEY).shape != second.apply(IMAGE, KEY).shape
-    path.write_text("backend: torch\nbackend: opencv\n")
-    with pytest.raises(ValueError, match="duplicate"):
-        image_preprocessing.load_image_preprocessing(tmp_path, tmp_path)
-
-
 def test_all_catalog_policies_have_valid_defaults(monkeypatch):
     root = MODULE_PATH.parents[1]
     manifest = yaml.safe_load((root / "manifest.yaml").read_text())
@@ -266,7 +265,7 @@ def test_all_catalog_policies_have_valid_defaults(monkeypatch):
         for model in manifest["models"]
         for name in [model["id"], *model.get("aliases", [])]
     }
-    profiles = {p.stem for p in image_preprocessing.CONFIG_DIR.glob("*.yaml")}
+    profiles = {p.stem for p in CONFIG_DIR.glob("*.yaml")}
     assert names <= profiles, f"Catalog policies without preprocessing: {names - profiles}"
     # Unlisted profiles may be under validation, but must belong to a real
     # integration rather than silently collecting orphaned configuration files.
@@ -278,13 +277,13 @@ def test_all_catalog_policies_have_valid_defaults(monkeypatch):
         assert resolve_adapter(name) != AdapterDefinition(), f"Orphaned profile: {name}"
     for name in profiles:
         config = yaml.safe_load(
-            (image_preprocessing.CONFIG_DIR / f"{name}.yaml").read_text()
+            (CONFIG_DIR / f"{name}.yaml").read_text()
         )
-        transform = image_preprocessing.ImagePreprocessing(config, FEATURES)
+        transform = configured_transform(config, FEATURES)
         assert transform.apply(IMAGE, KEY).shape[0:2] == (1, 3)
 
 
 def test_vla_jepa_default_preserves_native_images_despite_checkpoint_size():
-    config = yaml.safe_load((image_preprocessing.CONFIG_DIR / "vla_jepa.yaml").read_text())
-    transform = image_preprocessing.ImagePreprocessing(config, FEATURES)
+    config = yaml.safe_load((CONFIG_DIR / "vla_jepa.yaml").read_text())
+    transform = configured_transform(config, FEATURES)
     torch.testing.assert_close(transform.apply(IMAGE, KEY), tensor(IMAGE), rtol=0, atol=0)

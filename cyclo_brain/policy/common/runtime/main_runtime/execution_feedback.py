@@ -35,6 +35,7 @@ class FeedbackCapture:
     phase: str
     after_event_id: int
     snapshot: ExecutionSnapshot
+    feedback_schema: int = 1
 
 
 class ExecutionFeedback:
@@ -45,6 +46,7 @@ class ExecutionFeedback:
         self.buffer = TrackedActionBuffer(**processing)
         self._pending_command_count = ExecutionContract(pending_command_count=pending_command_count).pending_command_count
         self.session_id = initial.session_id
+        self.feedback_schema = initial.feedback_schema
         self.generation = initial.generation
         self.revision = initial.revision
         self.phase = initial.phase
@@ -63,7 +65,7 @@ class ExecutionFeedback:
             raise RuntimeError("feedback snapshot must follow the publisher result")
         self.revision += 1
         return FeedbackCapture(self.session_id, self.generation, self.revision,
-                               self.phase, self._acknowledged_event, snapshot)
+                               self.phase, self._acknowledged_event, snapshot, self.feedback_schema)
 
     @staticmethod
     def project(capture):
@@ -77,8 +79,11 @@ class ExecutionFeedback:
                     event_id=event.event_id, recorded_s=event.recorded_s, reason=event.reason,
                 ))
             elif isinstance(event, PlanningEvent):
+                decision = asdict(event.decision)
+                if capture.feedback_schema == 1:
+                    decision.pop("command_start_id")
                 planning.append(PlanningRecord(
-                    **asdict(event.decision), event_id=event.event_id, recorded_s=event.recorded_s,
+                    **decision, event_id=event.event_id, recorded_s=event.recorded_s,
                 ))
             else:
                 resets.append(ResetRecord(event.event_id, event.reason, event.recorded_s))
@@ -86,6 +91,7 @@ class ExecutionFeedback:
         return ExecutionContext(
             capture.session_id, capture.generation, capture.revision, capture.phase, tuple(actions),
             tuple(planning), tuple(resets), capture.after_event_id, snapshot.latest_event_id,
+            capture.feedback_schema,
         )
 
     def acknowledge(self, context):

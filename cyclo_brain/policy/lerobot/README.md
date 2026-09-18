@@ -12,7 +12,7 @@ policy/lerobot/
 ├── manifest.yaml              # policies and runtime capabilities
 ├── lerobot/                   # ROBOTIS LeRobot fork submodule
 ├── lerobot_engine/            # InferenceEngine adapter
-├── configs/image_preprocessing/ # editable per-policy spatial transforms
+├── configs/inference_inputs/ # user settings for additional preprocessing only
 ├── Dockerfile.amd64
 ├── Dockerfile.arm64
 └── tests/
@@ -86,22 +86,35 @@ lerobot-train \
 Training output placed below `/workspace/model/lerobot` is immediately visible
 to the Cyclo model browser.
 
-## Camera Preprocessing
+## Inference Inputs And Camera Preprocessing
 
-Edit `cyclo_brain/policy/lerobot/configs/image_preprocessing/<policy_type>.yaml`.
+Edit `cyclo_brain/policy/lerobot/configs/inference_inputs/<policy_type>.yaml`.
 The type comes from the checkpoint's `config.json`, not the UI label. Compose
-mounts this directory read-only at `/app/configs/image_preprocessing`; standalone
+mounts this directory read-only at `/app/configs/inference_inputs`; standalone
 images contain the same defaults. No additional file is required in model folders.
 
-Processing order:
+The YAML declares only additional Cyclo preprocessing. With no extra transforms:
 
-```text
-RGB camera -> robot-config rotation -> Cyclo YAML spatial operations
--> saved LeRobot preprocessor -> original policy -> saved postprocessor
+```yaml
+preprocessing: identity
 ```
 
-`identity` skips ONLY the additional Cyclo spatial operations. Rotation and
-conversion to batched RGB float32 CHW still happen. Model-internal transforms
+Input keys, tensor packaging, processor stages and the internal graph are owned
+by Python, not user YAML. See the [configuration guide](configs/inference_inputs/README.md)
+for ordered transforms, camera overrides and registered custom handlers.
+The [developer guide](../../docs/inference_input_design.md) covers temporal inputs,
+execution feedback and memory contracts inside those handlers.
+
+Default processing order (adapter-owned):
+
+```text
+RGB camera -> rotation -> spatial/tensor conversion -> device placement
+-> saved LeRobot preprocessor -> after graph -> original policy
+-> saved postprocessor -> optional result graph
+```
+
+`identity` skips additional Cyclo preprocessing. Robot-config rotation and basic
+conversion to batched RGB float32 CHW remain part of the adapter. Model-internal transforms
 are never disabled or rewritten. Checkpoint dimensions alone do not describe
 the interpolation/crop used to create the training dataset.
 
@@ -116,32 +129,34 @@ the interpolation/crop used to create the training dataset.
 | VLA-JEPA | identity | Standard training has no external area resize. Saved processor/model transforms, including an explicitly configured inference resize_images_to, remain active. |
 
 Only if a VLA-JEPA checkpoint was trained with an additional Torch area
-resize to 224x224, replace `identity` in `vla_jepa.yaml` with
-`{type: resize, size: [224, 224], interpolation: area}` and keep `backend: torch`.
+resize to 224x224, declare a resize under `preprocessing.images` with
+`size: [224, 224]`, `interpolation: area`, and `backend: torch`.
 That is a checkpoint-specific training recipe, not the shipped default.
 
 To reproduce a training pipeline that used Torch bilinear antialiased resize:
 
 ```yaml
-backend: torch
-operations:
-  - type: resize
-    size: [224, 224] # [height, width], NOT OpenCV's (width, height)
-    interpolation: bilinear
-    antialias: true
+preprocessing:
+  images:
+    - resize:
+        size: [224, 224] # [height, width], NOT OpenCV's (width, height)
+        backend: torch
+        interpolation: bilinear
+        antialias: true
 ```
 
-Supported operations are `identity`, `resize`, `center_crop`, and `letterbox`.
+Use `images: identity` (or `[]`) for no spatial transforms. Supported list operations
+are `resize`, `center_crop`, and `letterbox`.
 Operations execute in list order. `size: checkpoint` explicitly selects each
 camera's input-feature height/width instead of a literal size. It does not infer
 an interpolation method. Resize/letterbox require `interpolation` (`nearest`,
 `bilinear`, `bicubic`, or `area`). Torch bilinear/bicubic use
 `align_corners=False`; `antialias` defaults to false and is a Torch-only option.
 
-`backend: opencv` operates on RGB uint8, then converts to float32 / 255.
-`backend: torch` converts to float32 / 255 BEFORE spatial operations and does
-not quantize back to uint8 or clamp bicubic overshoot. These are intentionally
-different numeric pipelines, not interchangeable names for the same resize.
+OpenCV operates on RGB uint8. Torch operates on float32 / 255. The adapter makes
+that conversion once, before the first Torch operation (or at the end of an
+OpenCV-only sequence). Torch followed by OpenCV is rejected, not silently
+quantized or reordered. No tensor or graph wiring needs to be edited in YAML.
 
 `center_crop` rejects targets larger than the input and rounds the half-offsets
 like torchvision CenterCrop. `letterbox` fits with `min(target_h/h, target_w/w)`, rounds the resized
@@ -154,19 +169,22 @@ Optional camera overrides use exact checkpoint keys and REPLACE the default
 operations for that camera:
 
 ```yaml
-cameras:
-  observation.images.rgb.cam_left_wrist:
-    - type: center_crop
-      size: [200, 200]
-    - type: resize
-      size: [224, 224]
-      interpolation: area
+preprocessing:
+  cameras:
+    observation.images.rgb.cam_left_wrist:
+      - center_crop:
+          size: [200, 200]
+          backend: torch
+      - resize:
+          size: [224, 224]
+          backend: torch
+          interpolation: area
 ```
 
 One file applies to all checkpoints of that policy type. If their training
 recipes differ, update the YAML before loading each checkpoint. Unknown keys,
 missing files, invalid sizes/options, and duplicate YAML keys fail LOAD rather
-than silently choosing a transform. Resolved operations are logged on LOAD.
+than silently choosing a transform. The selected configuration path is logged on LOAD.
 
 After initially building/recreating the LeRobot Worker with these changes,
 YAML-only edits require **Clear/UNLOAD then LOAD**, not an image rebuild. Edits
@@ -184,10 +202,38 @@ Compare the SAME decoded RGB frame through training and inference transforms,
 including rotation, dtype conversion, interpolation, antialias, padding/crop,
 and the saved processor/model. Equal shapes alone are not a parity test.
 External training hooks are not automatically serialized into saved processors.
-Diffusion temporal observation history remains outside this change: matching
-image sizes does not fix an `n_obs_steps` mismatch.
+Image sizing and temporal history are separate: matching image sizes does not
+fix an `n_obs_steps` mismatch. See the online Diffusion adapter below.
 
 ## Additional Policies
+
+### Diffusion Online Execution
+
+Diffusion uses the same publication-paced public-step infrastructure as
+Multi-Task DiT. Each request supplies one current observation to the saved
+processor and `select_action()`. LeRobot owns both its `n_obs_steps` observation
+queue and its `n_action_steps` action queue; it calls the neural model only when
+the latter is empty. Cyclo does not populate private model queues or duplicate
+them in a callback history buffer. Initial observation repetition is LeRobot's
+documented bootstrap, not fabricated robot reception by Cyclo.
+
+This replaces the broken latest-only `predict_action_chunk()` call, which lacked
+the temporal state axis. It does not alter ACT or other existing chunk adapters.
+Diffusion now bypasses Cyclo chunk interpolation/alignment and async prefetch.
+Use the training FPS for Dataset FPS; it sets a minimum step period, not a
+guarantee that network, camera and inference latency achieve that frequency.
+Only successfully published steps advance the model. Preview-only is unsupported;
+a simulator receiving real command topics is supported by the publication contract.
+Stop/reset and cached LOAD clear the policy queues without reloading weights.
+
+Saved processors still run before/after the public model API. Mixed camera sizes
+are checked after preprocessing and before the policy stacks images. Enabled
+LeRobot relative-action processors are rejected at LOAD: reanchoring cached
+actions against every new observation is not a valid chunk-relative execution
+contract. Do not remove a training transform to bypass that error.
+
+See [input design decision](../../docs/inference_input_design.md) for the choice
+between policy-owned queues, explicit temporal input plans and execution feedback.
 
 ### Multi-Task DiT
 

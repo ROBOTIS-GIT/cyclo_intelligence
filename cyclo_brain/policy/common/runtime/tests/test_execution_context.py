@@ -182,7 +182,11 @@ def test_shallow_record_encoding_keeps_exact_wire_bytes(count):
         for i in range(1, count + 1)
     ), planning=(PlanningRecord(1, 1, 0, 1, count + 1, 101.),),
        resets=(ResetRecord(count + 2, "stop", 102.),), latest_event_id=count + 2)
-    previous = json.dumps(asdict(ctx), allow_nan=False, sort_keys=True, separators=(",", ":"))
+    legacy = asdict(ctx)
+    legacy.pop("feedback_schema")
+    for plan in legacy["planning"]:
+        plan.pop("command_start_id")
+    previous = json.dumps(legacy, allow_nan=False, sort_keys=True, separators=(",", ":"))
     if len(previous.encode()) > 65536:
         previous = json.dumps({"encoding": "zlib+base64", "payload": base64.b64encode(
             zlib.compress(previous.encode())).decode("ascii")}, separators=(",", ":"))

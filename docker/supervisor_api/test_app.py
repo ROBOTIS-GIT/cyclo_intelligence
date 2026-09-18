@@ -373,7 +373,7 @@ def test_backend_config_mount_source_validation(
     expected = tmp_path / "repo" / "configs"
     expected.mkdir(parents=True)
     source = "../configs" if source_kind == "relative" else str(expected)
-    destination = "/app/configs/image_preprocessing"
+    destination = "/app/configs/inference_inputs"
     actual = tmp_path / "other_repo" / "configs" if wrong_checkout else expected
     monkeypatch.setattr(app, "_host_project_dir", lambda: str(project_dir))
     monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path / "repo"))
@@ -402,7 +402,7 @@ def test_backend_config_mount_accepts_symlink(monkeypatch, tmp_path):
     (container_repo / "configs").symlink_to(real_configs)
     monkeypatch.setattr(app, "_host_project_dir", lambda: str(host_repo / "docker"))
     monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(container_repo))
-    destination = "/app/configs/image_preprocessing"
+    destination = "/app/configs/inference_inputs"
     container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
     for mount in container.attrs["Mounts"]:
         if mount["Destination"] == destination:
@@ -413,7 +413,7 @@ def test_backend_config_mount_accepts_symlink(monkeypatch, tmp_path):
 
 def test_backend_config_mount_requires_known_host_project(monkeypatch):
     monkeypatch.setattr(app, "_host_project_dir", lambda: None)
-    destination = "/app/configs/image_preprocessing"
+    destination = "/app/configs/inference_inputs"
     container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
     spec = {"config_mounts": {destination: "../configs"}}
     assert _backend_container_stale_reason("lerobot", None, container, spec, None) == (
@@ -423,7 +423,7 @@ def test_backend_config_mount_requires_known_host_project(monkeypatch):
 
 def test_backend_config_mount_is_read_from_compose():
     assert _BACKENDS["lerobot"]["config_mounts"] == {
-        "/app/configs/image_preprocessing": "../cyclo_brain/policy/lerobot/configs/image_preprocessing"
+        "/app/configs/inference_inputs": "../cyclo_brain/policy/lerobot/configs/inference_inputs"
     }
     assert _BACKENDS["groot"]["config_mounts"] == {}
 

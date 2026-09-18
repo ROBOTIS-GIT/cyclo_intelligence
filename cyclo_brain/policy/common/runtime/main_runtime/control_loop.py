@@ -116,6 +116,7 @@ class ControlLoop:
             action_request_mode
         )
         self._action_request_mode = self._default_action_request_mode
+        self._input_execution_contract = ExecutionContract()
         self._fault_callback = fault_callback
 
         self._lock = threading.RLock()
@@ -173,8 +174,13 @@ class ControlLoop:
             raise ValueError("observation warmup requires a contextual Worker session")
         if contract.is_step and not publish_to_robot:
             raise ValueError("step execution requires command receipts; preview-only is unsupported")
+        if contract.feedback_schema == 2 and (execution_context is None or execution_context.feedback_schema != 2):
+            raise ValueError("input pipeline requires feedback schema 2")
+        if contract.request_after not in {"prediction_success", "plan_accepted"} and not publish_to_robot:
+            raise ValueError("execution prerequisite requires command receipts; preview-only is unsupported")
         with self._lock:
             self.deconfigure()
+            self._input_execution_contract = contract
             self._control_hz = positive_finite_or_default(
                 control_hz, self._default_control_hz
             )
@@ -258,6 +264,7 @@ class ControlLoop:
             self._action_keys = []
             self._publish_to_robot = False
             self._action_request_mode = self._default_action_request_mode
+            self._input_execution_contract = ExecutionContract()
             self._inference_hz = self._default_inference_hz
             self._control_hz = self._default_control_hz
             self._chunk_align_window_s = self._default_chunk_align_window_s
@@ -681,7 +688,11 @@ class ControlLoop:
                             self._running = False
                             fault = f"failed to publish idle robot action: {e}"
 
-            should_request = fault is None and self._should_request_actions(processor)
+            try:
+                should_request = fault is None and self._should_request_actions(processor)
+            except RuntimeError as exc:
+                should_request = False
+                fault = str(exc)
             if should_request:
                 self._request_reserved = True
                 request_thread = threading.Thread(
@@ -763,6 +774,9 @@ class ControlLoop:
                             response.seq_id, chunk, scheduled_start_delay_s,
                             align=self._step_schedule is None and action_request_mode != ACTION_REQUEST_MODE_SYNC,
                         ).command_count
+                        contract = self._input_execution_contract
+                        if contract.feedback_schema == 2:
+                            self._processor.request_ready(contract.request_after, contract.request_after_count)
                     except Exception as e:
                         self._running = False
                         fault = str(e)
@@ -898,6 +912,9 @@ class ControlLoop:
         if self._request_reserved:
             return False
         if self._request_thread is not None and self._request_thread.is_alive():
+            return False
+        contract = self._input_execution_contract
+        if contract.feedback_schema == 2 and not processor.request_ready(contract.request_after, contract.request_after_count):
             return False
         if self._step_schedule:
             return self._step_schedule.can_request(time.monotonic(), processor.buffer_size)

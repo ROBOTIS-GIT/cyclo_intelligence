@@ -454,6 +454,38 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
   });
 
+  test('does not report Clear completion before asynchronous cleanup succeeds', async () => {
+    const sendRecordCommand = jest.fn().mockResolvedValue({
+      success: true,
+      message: 'Inference cleanup requested',
+    });
+    const { store } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      sendRecordCommand,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith('Clear requested. Waiting for model unload.');
+    });
+    expect(sendRecordCommand).toHaveBeenCalledWith('finish', {});
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(store.getState().tasks.inferenceStatus.inferencePhase)
+      .toBe(InferencePhase.PAUSED);
+
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'error',
+        error: 'STOP rejected: current-pose hold failed; retry STOP',
+      }));
+    });
+    expect(screen.getByText(/STOP rejected: current-pose hold failed/)).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
+  });
+
   test('can switch the pending start to 3D Sim Deploy from the warning', async () => {
     const { store, sendRecordCommand } = renderPanel({ inferenceMode: 'robot' });
 

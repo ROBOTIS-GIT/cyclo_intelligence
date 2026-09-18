@@ -80,8 +80,8 @@ with mock.patch.dict(sys.modules, {
 
 class EngineModelLifecycleTest(unittest.TestCase):
     def setUp(self):
-        patcher = mock.patch.object(engine_module, "load_image_preprocessing", return_value=object())
-        self.image_loader = patcher.start()
+        patcher = mock.patch.object(engine_module, "load_input_pipeline", return_value=object())
+        self.input_loader = patcher.start()
         self.addCleanup(patcher.stop)
 
     def make_engine(self):
@@ -120,17 +120,17 @@ class EngineModelLifecycleTest(unittest.TestCase):
         engine._load_policy_assets = mock.Mock(side_effect=AssertionError("unexpected reload"))
         self.assertTrue(engine.load_policy(self.request("/same"))["success"])
         engine._load_policy_assets.assert_not_called()
-        self.image_loader.assert_called_once_with("/same")
-        self.assertIs(engine._image_preprocessing, self.image_loader.return_value)
+        self.input_loader.assert_called_once_with("/same")
+        self.assertIs(engine._input_pipeline_config, self.input_loader.return_value)
 
     def test_invalid_yaml_blocks_load_before_weights(self):
         engine = self.make_engine()
         engine._load_policy_assets = mock.Mock()
-        self.image_loader.side_effect = ValueError("Invalid image preprocessing config")
+        self.input_loader.side_effect = ValueError("Invalid input preprocessing config")
         result = engine.load_policy(self.request("/new"))
         self.assertFalse(result["success"])
         engine._load_policy_assets.assert_not_called()
-        self.assertIsNone(engine._image_preprocessing)
+        self.assertIsNone(engine._input_pipeline_config)
 
     def test_predictor_is_prepared_once_and_retained_on_cached_load(self):
         engine = self.make_engine()
@@ -196,15 +196,15 @@ class EngineModelLifecycleTest(unittest.TestCase):
         engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
         engine._loaded_model_path = "/same"
         first, second = object(), object()
-        self.image_loader.side_effect = [first, second]
+        self.input_loader.side_effect = [first, second]
         self.assertTrue(engine.load_policy(self.request("/same"))["success"])
-        self.assertIs(engine._image_preprocessing, first)
+        self.assertIs(engine._input_pipeline_config, first)
         engine._input_plans = {False: object(), True: object()}
         self.assertTrue(engine.load_policy(self.request("/same"))["success"])
-        self.assertIs(engine._image_preprocessing, second)
+        self.assertIs(engine._input_pipeline_config, second)
         self.assertEqual(engine._input_plans, {})
         engine.cleanup()
-        self.assertIsNone(engine._image_preprocessing)
+        self.assertIsNone(engine._input_pipeline_config)
 
     def test_missing_observations_cannot_report_successful_load(self):
         engine = self.make_engine()
@@ -222,7 +222,7 @@ class EngineModelLifecycleTest(unittest.TestCase):
         engine = self.make_engine()
         engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
         engine._robot = object()
-        engine._image_preprocessing = object()
+        engine._input_pipeline_config = object()
         raw, processed = {"raw": True}, {"processed": True}
         action = torch.zeros(1, 2, 3)
         engine._build_observation = mock.Mock(return_value=raw)
@@ -247,6 +247,13 @@ class EngineModelLifecycleTest(unittest.TestCase):
     def test_step_engine_negotiates_and_requires_receipt_before_next_public_call(self):
         from dataclasses import replace
         from inference_context.execution import ActionRecord, ExecutionContext
+        from lerobot_engine.input_pipeline import InputPipelineConfig
+
+        self.input_loader.return_value = InputPipelineConfig({
+            "sources": {"state": {"source": "joint:follower_arm", "max_age_s": 1.}},
+            "nodes": {},
+            "outputs": {"before": {"state": "state"}, "after": {"*": "processed"}},
+        }, {}, Path("step_test.yaml"))
 
         engine = self.make_engine()
         config = types.SimpleNamespace(type="multi_task_dit",

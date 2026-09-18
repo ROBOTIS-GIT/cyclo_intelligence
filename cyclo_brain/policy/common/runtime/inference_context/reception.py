@@ -14,8 +14,8 @@ class ReceptionHistory:
     Instructions and execution facts belong to different providers.
     """
 
-    def __init__(self, spec: InputSpec, *, max_bytes: int = 256 * 1024 * 1024):
-        self._store = HistoryStore(spec, max_bytes=max_bytes)
+    def __init__(self, spec: InputSpec, *, max_bytes: int = 256 * 1024 * 1024, budget=None):
+        self._store = HistoryStore(spec, max_bytes=max_bytes, budget=budget)
         self._failure = ""
         self._generation = 0
         self._lock = threading.Lock()
@@ -39,18 +39,22 @@ class ReceptionHistory:
                 # silently keep using the last successfully captured observation.
                 self._failure = f"Observation capture failed: {exc}; reset required"
 
-    def resolve(self, query: SampleQuery, anchor_s: float, *, after_s=None):
+    def resolve(self, query: SampleQuery, anchor_s: float, *, after_s=None, with_metadata=False):
         with self._lock:
             if self._failure:
                 raise RuntimeError(self._failure)
             generation = self._generation
-        values = self._store.resolve(query, anchor_s, after_s=after_s)
+        method = self._store.resolve_samples if with_metadata else self._store.resolve
+        values = method(query, anchor_s, after_s=after_s)
         with self._lock:
             if self._failure:
                 raise RuntimeError(self._failure)
             if generation != self._generation:
                 raise ValueError("observation history reset during snapshot; retry")
         return values
+
+    def resolve_samples(self, query, anchor_s, *, after_s=None):
+        return self.resolve(query, anchor_s, after_s=after_s, with_metadata=True)
 
     def reset(self) -> None:
         """Clear samples; use RobotClient.reset_observation_capture when attached.

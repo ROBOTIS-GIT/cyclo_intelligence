@@ -5,28 +5,34 @@ import sys
 
 import pytest
 
-from inference_context import InputAssembler, InputField, InputSpec, LatestValues, SampleQuery
+from inference_context import LatestValues
 from inference_context.contract import ExecutionContract
 from lerobot_engine.adapters import AdapterDefinition, AdapterRegistry, resolve_adapter
 
 
-def test_register_model_with_custom_input_plan_and_execution():
+def test_register_model_with_input_extensions_and_execution():
     registry = AdapterRegistry()
     sentinel = object()
 
-    def input_plan(*args, **kwargs):
-        return InputAssembler(InputSpec((InputField("custom_state", (SampleQuery("joint:new"),)),)))
+    def extensions(operators, sources, engine):
+        operators.register("custom", lambda options, context: lambda values: values[0])
 
     definition = AdapterDefinition(
         contract=ExecutionContract("step"),
         step_factory=lambda *args: sentinel,
-        input_plan_factory=input_plan,
+        input_extensions=extensions,
     )
     registry.register("new_policy", definition)
     resolved = registry.resolve("new_policy")
     assert resolved is definition
     assert resolved.create_execution_adapter(None, None, None, None) is sentinel
-    batch = resolved.input_plan_factory().assemble(LatestValues({"joint:new": [1., 2.]}))
+    from inference_inputs import Graph
+    from inference_inputs.operators import default_registry
+    operators = default_registry()
+    resolved.input_extensions(operators, {}, None)
+    batch = Graph({"sources": {"x": {"source": "joint:new"}},
+                   "nodes": {"y": {"op": "custom", "inputs": ["x"]}},
+                   "outputs": {"before": {"custom_state": "y"}}}, operators).assemble(LatestValues({"joint:new": [1., 2.]}))
     assert batch == {"custom_state": [1., 2.]}
     assert registry.resolve("act").contract.mode == "chunk"
 
@@ -39,7 +45,7 @@ def test_duplicate_registration_and_incomplete_contract_fail_early():
     with pytest.raises(ValueError, match="together"):
         AdapterDefinition(contract=ExecutionContract("step"))
     with pytest.raises(TypeError, match="callable"):
-        AdapterDefinition(input_plan_factory="not a function")
+        AdapterDefinition(input_extensions="not a function")
 
 
 def test_registered_models_keep_their_distinct_contracts():
@@ -48,9 +54,8 @@ def test_registered_models_keep_their_distinct_contracts():
     assert resolve_adapter("act").create_execution_adapter(None, None, None, None) is None
 
 
-def test_missing_input_plan_factory_fails_before_model_load():
-    with pytest.raises(TypeError, match="input_plan_factory must be callable"):
-        AdapterDefinition(input_plan_factory=None)
+def test_plain_models_do_not_need_custom_input_extensions():
+    assert AdapterDefinition().input_extensions is None
 
 
 def test_adapter_inspection_does_not_import_model_frameworks():

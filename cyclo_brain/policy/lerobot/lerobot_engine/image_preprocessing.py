@@ -6,19 +6,12 @@
 
 from __future__ import annotations
 
-import json
-import logging
-import re
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
 
 IMAGE_KEY_PREFIX = "observation.images."
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs" / "image_preprocessing"
-logger = logging.getLogger("lerobot_engine")
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -167,6 +160,11 @@ class ImagePreprocessing:
         if not image.shape[0] or not image.shape[1]:
             raise ValueError("Empty camera frame")
         value = _tensor(image) if self.backend == "torch" else image
+        value = self.apply_spatial(value, policy_key)
+        return value.contiguous() if self.backend == "torch" else _tensor(value)
+
+    def apply_spatial(self, value, policy_key):
+        """Spatial operations only; graph nodes own rotation and tensor conversion."""
         for step in self.operations[policy_key]:
             kind = step["type"]
             if kind == "identity":
@@ -211,7 +209,7 @@ class ImagePreprocessing:
                     )
                     canvas[top : top + size[0], left : left + size[1]] = value
                     value = canvas
-        return value.contiguous() if self.backend == "torch" else _tensor(value)
+        return value
 
     def _resize(self, value, size, step):
         if self.backend == "torch":
@@ -243,29 +241,6 @@ def _tensor(image):
         .unsqueeze(0)
         .contiguous()
     )
-
-
-def load_image_preprocessing(model_path, config_dir=None):
-    with (Path(model_path) / "config.json").open() as stream:
-        checkpoint = json.load(stream)
-    policy_type = checkpoint.get("type")
-    if not isinstance(policy_type, str) or not re.fullmatch(r"[a-z0-9_]+", policy_type):
-        raise ValueError(
-            "Checkpoint must declare a valid policy type for image preprocessing"
-        )
-    path = (
-        Path(config_dir) if config_dir is not None else CONFIG_DIR
-    ) / f"{policy_type}.yaml"
-    with path.open() as stream:
-        config = yaml.load(stream, Loader=_UniqueKeyLoader)
-    pipeline = ImagePreprocessing(config, checkpoint.get("input_features", {}))
-    logger.info(
-        "Cyclo image preprocessing: file=%s backend=%s cameras=%s; saved processor and model transforms remain active",
-        path,
-        pipeline.backend,
-        json.dumps(pipeline.operations, sort_keys=True),
-    )
-    return pipeline
 
 
 def apply_rotation(image, rotation_deg=0):
