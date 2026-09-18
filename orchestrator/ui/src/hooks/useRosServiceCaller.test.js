@@ -1,9 +1,86 @@
+import React from 'react';
+import { EventEmitter } from 'events';
+import { renderHook, waitFor } from '@testing-library/react';
+import { configureStore } from '@reduxjs/toolkit';
+import { Provider } from 'react-redux';
+import taskReducer from '../features/tasks/taskSlice';
+import rosConnectionManager from '../utils/rosConnectionManager';
 import {
   buildInitialPoseSyncTaskInfo,
   buildPolicySelectionTaskInfo,
   getRecordCommandServiceTimeoutMs,
   transformReplayDataResult,
+  useRosServiceCaller,
 } from './useRosServiceCaller';
+
+describe('pose command connection lifetime', () => {
+  let ros;
+  let current;
+
+  beforeEach(() => {
+    ros = Object.assign(new EventEmitter(), {
+      isConnected: true, idCounter: 0, callOnConnection: jest.fn(),
+    });
+    current = ros;
+    jest.spyOn(rosConnectionManager, 'getConnection').mockResolvedValue(ros);
+    jest.spyOn(rosConnectionManager, 'getCurrentConnection').mockImplementation(() => current);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  function setup() {
+    const store = configureStore({ reducer: {
+      tasks: taskReducer,
+      training: () => ({}), editDataset: () => ({}), ui: () => ({}),
+      ros: () => ({ rosbridgeUrl: 'ws://test' }),
+    } });
+    const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;
+    return renderHook(() => useRosServiceCaller(), { wrapper }).result;
+  }
+
+  test('accepts a response from the original live connection', async () => {
+    const hook = setup();
+    const request = hook.current.sendRobotPoseCommand(1, 'test_robot');
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const { id } = ros.callOnConnection.mock.calls[0][0];
+    ros.emit(id, { values: { success: true } });
+    await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+    expect(ros.listenerCount('close')).toBe(0);
+  });
+
+  test.each([2, 4])('sends duration for pose command %i', async (command) => {
+    const hook = setup();
+    const request = hook.current.sendRobotPoseCommand(command, 'test_robot', 8.5);
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const payload = ros.callOnConnection.mock.calls[0][0];
+    expect(payload.args).toEqual({ command, robot_type: 'test_robot', duration_s: 8.5 });
+    ros.emit(payload.id, { values: { success: true } });
+    await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+  });
+
+  test('cancels immediately on close and ignores a delayed response', async () => {
+    const hook = setup();
+    const request = hook.current.sendRobotPoseCommand(3, 'test_robot');
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const { id } = ros.callOnConnection.mock.calls[0][0];
+    current = null;
+    ros.emit('close');
+    await expect(request).resolves.toBeNull();
+    current = { isConnected: true };
+    ros.emit(id, { values: { success: true } });
+    expect(ros.listenerCount(id)).toBe(0);
+    expect(ros.listenerCount('close')).toBe(0);
+  });
+
+  test.each([true, false])('ignores a replaced connection response, success=%s', async (success) => {
+    const hook = setup();
+    const request = hook.current.sendRobotPoseCommand(3, 'test_robot');
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const { id } = ros.callOnConnection.mock.calls[0][0];
+    current = { isConnected: true };
+    ros.emit(id, { result: success, values: { success, message: 'old result' } });
+    await expect(request).resolves.toBeNull();
+  });
+});
 
 describe('buildPolicySelectionTaskInfo', () => {
   test('serializes policy id and stable parameter JSON for TaskInfo', () => {

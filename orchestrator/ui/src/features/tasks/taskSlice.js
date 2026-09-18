@@ -394,6 +394,8 @@ const initialState = {
     sequence: 0,
   },
 
+  robotPoseStatus: { returning: false },
+
   availableRobots: [],
   availableCameras: [],
   policyList: [],
@@ -453,6 +455,9 @@ const taskSlice = createSlice({
     },
     resetRecordStatus: (state) => {
       state.recordStatus = initialState.recordStatus;
+    },
+    setRobotPoseStatus: (state, action) => {
+      state.robotPoseStatus = { ...state.robotPoseStatus, ...action.payload };
     },
     setInferenceStatus: (state, action) => {
       const next = action.payload;
@@ -843,6 +848,7 @@ export const {
   setRecordStatus,
   resetRecordStatus,
   setInferenceStatus,
+  setRobotPoseStatus,
   resetInferenceStatus,
   selectRobotType,
   setTaskType,

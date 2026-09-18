@@ -24,6 +24,7 @@ import {
   receiveServerInferenceTaskInfo,
   setRecordStatus,
   setInferenceStatus,
+  setRobotPoseStatus,
   selectRobotType,
   setHeartbeatStatus,
   setLastHeartbeatTime,
@@ -69,6 +70,8 @@ import {
 export function useRosTopicSubscription() {
   const recordingStatusTopicRef = useRef(null);
   const inferenceStatusTopicRef = useRef(null);
+  const poseStatusTopicRef = useRef(null);
+  const poseStatusExpiryRef = useRef(null);
   const inferenceStatusExpiryRef = useRef(null);
   const dataStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
@@ -202,6 +205,9 @@ export function useRosTopicSubscription() {
     // Unsubscribe from all topics
     unsubscribeFromTopic(recordingStatusTopicRef, 'Recording status');
     unsubscribeFromTopic(inferenceStatusTopicRef, 'Inference status');
+    unsubscribeFromTopic(poseStatusTopicRef, 'Saved pose status');
+    clearTimeout(poseStatusExpiryRef.current);
+    dispatch(setRobotPoseStatus({ connected: false, available: false }));
     clearTimeout(inferenceStatusExpiryRef.current);
     dispatch(setInferenceStatus({ topicReceived: false, runtimeState: 'unknown' }));
     unsubscribeFromTopic(dataStatusTopicRef, 'Data operation status');
@@ -418,6 +424,26 @@ export function useRosTopicSubscription() {
     } catch (error) {
       console.error('Failed to subscribe to data status topic:', error);
     }
+  }, [dispatch, rosbridgeUrl]);
+
+  const subscribeToPoseStatus = useCallback(async () => {
+    const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
+    if (!ros || poseStatusTopicRef.current) return;
+    poseStatusTopicRef.current = new ROSLIB.Topic({
+      ros, name: '/policy/pose_status', messageType: 'std_msgs/msg/String',
+    });
+    poseStatusTopicRef.current.subscribe((msg) => {
+      try {
+        const status = JSON.parse(msg.data);
+        dispatch(setRobotPoseStatus({ ...status, available: true }));
+        clearTimeout(poseStatusExpiryRef.current);
+        poseStatusExpiryRef.current = setTimeout(() => {
+          dispatch(setRobotPoseStatus({ connected: false, available: false }));
+        }, 2000);
+      } catch (error) {
+        console.warn('Invalid saved-pose status', error);
+      }
+    });
   }, [dispatch, rosbridgeUrl]);
 
   const subscribeToInferenceStatus = useCallback(async () => {
@@ -816,6 +842,7 @@ export function useRosTopicSubscription() {
     try {
       await subscribeToRecordingStatus();
       await subscribeToInferenceStatus();
+      await subscribeToPoseStatus();
       await subscribeToDataStatus();
       await subscribeToHeartbeat();
       await subscribeToActionEvent();
@@ -832,6 +859,7 @@ export function useRosTopicSubscription() {
     cleanup,
     subscribeToRecordingStatus,
     subscribeToInferenceStatus,
+    subscribeToPoseStatus,
     subscribeToDataStatus,
     subscribeToHeartbeat,
     subscribeToActionEvent,
@@ -867,6 +895,7 @@ export function useRosTopicSubscription() {
     connected,
     subscribeToRecordingStatus,
     subscribeToInferenceStatus,
+    subscribeToPoseStatus,
     cleanup,
     getRecordPhaseName,
     getInferencePhaseName,

@@ -18,8 +18,9 @@ def runtime_module():
     spec = importlib.util.spec_from_file_location("main_runtime.preparation_health_main", path)
     module = importlib.util.module_from_spec(spec)
     with mock.patch.dict(sys.modules, {
-        "robot_client.messages": SimpleNamespace(INFERENCE_COMMAND_REQUEST_DEF="", INFERENCE_COMMAND_RESPONSE_DEF=""),
-        "zenoh_ros2_sdk": SimpleNamespace(ROS2ServiceServer=object, ROS2Subscriber=object, get_logger=logging.getLogger),
+        "robot_client.messages": SimpleNamespace(INFERENCE_COMMAND_REQUEST_DEF="", INFERENCE_COMMAND_RESPONSE_DEF="",
+                                                ROBOT_POSE_COMMAND_REQUEST_DEF="", ROBOT_POSE_COMMAND_RESPONSE_DEF=""),
+        "zenoh_ros2_sdk": SimpleNamespace(ROS2Publisher=object, ROS2ServiceServer=object, ROS2Subscriber=object, get_logger=logging.getLogger),
     }):
         spec.loader.exec_module(module)
     return module
@@ -51,6 +52,8 @@ def test_heartbeat_loss_is_not_ignored_during_preparation(runtime_module, phase)
     runtime._shutdown.wait.side_effect = [False, True]
     runtime._handler = mock.Mock()
     runtime._handler.runtime_snapshot.return_value = {"runtime_state": phase, "runtime_id": "lerobot"}
+    runtime._handler.pose_snapshot.return_value = {}
+    runtime._pose_status_publisher = mock.Mock()
     runtime._active_since = 0.
     runtime._orchestrator_last_seen = 10.
     runtime._workers = mock.Mock()
@@ -74,6 +77,8 @@ def test_shutdown_stops_preparation_before_closing_the_control_loop(runtime_modu
     runtime._control_loop = calls.control
     runtime._workers = mock.Mock()
     runtime._remove_ready_marker = mock.Mock()
+    runtime._saved_pose = mock.Mock()
+    runtime._pose_status_publisher = mock.Mock()
     runtime.shutdown()
     assert calls.mock_calls.index(mock.call.handler.fail_safe("policy runtime shutting down")) < calls.mock_calls.index(mock.call.control.shutdown())
 
@@ -90,6 +95,8 @@ def test_shutdown_keeps_robot_io_until_hold_succeeds(runtime_module):
     runtime._subscribers, runtime._services = [calls.subscriber], []
     runtime._control_loop = calls.control
     runtime._workers = calls.workers
+    runtime._saved_pose = calls.pose
+    runtime._pose_status_publisher = calls.pose_publisher
     runtime._remove_ready_marker = calls.remove_marker
     with mock.patch.object(runtime_module.time, "sleep"):
         runtime.shutdown()
@@ -109,6 +116,31 @@ def test_shutdown_refuses_worker_mutation(runtime_module):
     response = runtime._handle_control_request({"operation": "begin_worker_mutation", "runtime_id": "lerobot"})
     assert response["ok"] is False
     runtime._handler.begin_worker_mutation.assert_not_called()
+
+
+def test_pose_commands_do_not_refresh_orchestrator_heartbeat(runtime_module):
+    runtime = runtime_module.PolicyRuntime.__new__(runtime_module.PolicyRuntime)
+    runtime._orchestrator_last_seen = 1.
+    runtime._handler = mock.Mock()
+    request = SimpleNamespace(command=0, robot_type="test")
+    runtime._handle_pose_request(request)
+    assert runtime._orchestrator_last_seen == 1.
+    runtime._handler.handle_pose.assert_called_once_with(request)
+
+
+def test_pose_return_is_monitored_without_a_loaded_model(runtime_module):
+    runtime = runtime_module.PolicyRuntime.__new__(runtime_module.PolicyRuntime)
+    runtime._shutdown = mock.Mock()
+    runtime._shutdown.wait.side_effect = [False, True]
+    runtime._handler = mock.Mock()
+    runtime._handler.runtime_snapshot.return_value = {"runtime_state": "unloaded", "pose_returning": True}
+    runtime._handler.pose_snapshot.return_value = {"returning": True}
+    runtime._pose_status_publisher = mock.Mock()
+    runtime._orchestrator_last_seen = 0.
+    with mock.patch.object(runtime_module.time, "monotonic", return_value=10.):
+        runtime._monitor_health()
+    runtime._handler.fail_safe.assert_called_once_with("orchestrator heartbeat lost during pose return")
+    runtime._pose_status_publisher.publish.assert_called_once_with(data='{"returning": true}')
 
 
 def test_ready_marker_identifies_this_process(runtime_module, tmp_path, monkeypatch):

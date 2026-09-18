@@ -87,6 +87,16 @@ services:
       - PYTHONUNBUFFERED=1
 
     volumes:
+      # AI Worker-style source workspace. Build/install remain container-local.
+      - type: bind
+        source: ..
+        target: /root/ros2_ws/src/cyclo_intelligence
+        bind:
+          create_host_path: false
+      # Serve robot assets without traversing the private /root workspace.
+      - ../shared/shared/robot_configs/urdf:/usr/share/nginx/html/urdf/urdf:ro
+      - ../shared/shared/robot_configs/ffw_description:/usr/share/nginx/html/urdf/ffw_description:ro
+      - ../shared/shared/robot_configs/open_manipulator_description:/usr/share/nginx/html/urdf/open_manipulator_description:ro
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
@@ -163,7 +173,17 @@ services:
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
       # User-visible LeRobot models live under /workspace/model/lerobot.
-      # Editable spatial transforms only; Worker Python code stays image-owned.
+      # Cyclo-owned Python sources are live; upstream models and dependencies
+      # remain image-owned. Stop inference before editing shared code.
+      - ../cyclo_brain/policy/lerobot/lerobot_engine:/app/lerobot_engine:ro
+      - ../cyclo_brain/policy/lerobot/manifest.yaml:/app/policy_manifest.yaml:ro
+      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
+      # Catalog is a sibling of runtime, as in the source tree. Avoid nesting
+      # a mount into the read-only runtime directory.
+      - ../cyclo_brain/policy/common/catalog:/catalog:ro
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
       - ../cyclo_brain/policy/lerobot/configs/inference_inputs:/app/configs/inference_inputs:ro
       - ./huggingface:/root/.cache/huggingface
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
@@ -235,6 +255,13 @@ services:
       - ./workspace:/workspace
       - ./huggingface:/root/.cache/huggingface
       # User-visible GR00T models live under /workspace/model/groot.
+      - ../cyclo_brain/policy/groot/groot_engine:/app/groot_engine:ro
+      - ../cyclo_brain/policy/groot/manifest.yaml:/app/policy_manifest.yaml:ro
+      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
+      - ../cyclo_brain/policy/common/catalog:/catalog:ro
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
       # zenoh_ros2_sdk message-definition cache. Host-managed (see
       # docker/scripts/init_zenoh_cache.sh) so the in-container SDK
       # doesn't have to git-fetch the upstream `master` branch (gone)

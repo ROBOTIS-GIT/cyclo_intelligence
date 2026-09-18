@@ -47,8 +47,8 @@ done
 set -- "${NEW_ARGS[@]}"
 
 COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
-# Keep the canonical local override (for example, no-GPU main-container
-# settings) separate from opt-in source mounts.
+# Keep local overrides (for example, no-GPU main-container settings) on top
+# of the default source-mounted deployment.
 [ -f "${SCRIPT_DIR}/docker-compose.override.yml" ] \
     && COMPOSE="${COMPOSE} -f ${SCRIPT_DIR}/docker-compose.override.yml"
 

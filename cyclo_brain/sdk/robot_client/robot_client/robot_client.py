@@ -814,6 +814,21 @@ class RobotClient:
                 return arr.copy() if arr is not None else np.array([], dtype=np.float32)
             return {k: v.copy() for k, v in self._joint_positions.items()}
 
+    def get_named_joint_positions(self, joint_names: list[str], max_age_s: float = 1.0) -> dict[str, float]:
+        """Read a complete, finite, fresh snapshot by actual joint name."""
+        with self._lock:
+            now = time.monotonic()
+            missing = [name for name in joint_names
+                       if name not in self._joint_positions_by_name
+                       or name not in self._joint_position_timestamps_by_name
+                       or not 0.0 <= now - self._joint_position_timestamps_by_name[name] <= max_age_s]
+            if missing:
+                raise RuntimeError("Waiting for fresh joint state: " + ", ".join(missing))
+            positions = {name: float(self._joint_positions_by_name[name]) for name in joint_names}
+        if not all(math.isfinite(value) for value in positions.values()):
+            raise RuntimeError("Joint state contains non-finite positions.")
+        return positions
+
     def get_joint_velocities(
         self, group: Optional[str] = None
     ) -> Union[dict[str, np.ndarray], np.ndarray]:
@@ -975,8 +990,7 @@ class RobotClient:
                     )
         except Exception:
             try:
-                self._publish_position_segments(hold_segments, duration_s=0.1)
-                self.publish_idle_action(action_keys)
+                self.publish_current_pose_hold(action_keys, duration_s=0.1)
             except Exception as hold_error:
                 logger.error(
                     "failed to hold current pose after initial sync publish error: %s",
@@ -984,20 +998,74 @@ class RobotClient:
                 )
             raise
 
+    def publish_named_pose(self, positions: dict[str, float], duration_s: float = 5.0) -> None:
+        """Send one timed target per position controller; keep base velocity zero."""
+        duration_s = float(duration_s)
+        if not math.isfinite(duration_s) or not 0.1 <= duration_s <= 60.0:
+            raise ValueError("duration_s must be between 0.1 and 60 seconds")
+        keys = list(self._action_groups)
+        segments = self._build_current_position_segments(keys)
+        required = {name for _publisher, names, _values in segments for name in names}
+        if not required or set(positions) != required:
+            raise ValueError("Pose joints must match all configured position controllers.")
+        values = {name: float(positions[name]) for name in required}
+        if not all(math.isfinite(value) for value in values.values()):
+            raise ValueError("Pose contains non-finite positions.")
+        self.get_named_joint_positions(list(required))
+        self.publish_idle_action(keys)
+        for publisher, names, _current in segments:
+            self._publish_joint_trajectory(
+                publisher, names, np.asarray([values[name] for name in names]),
+                time_from_start_s=duration_s, zero_terminal_derivatives=True,
+            )
+
     def publish_current_pose_hold(
         self,
         action_keys: Optional[list[str]] = None,
         duration_s: float = 0.1,
     ) -> None:
-        """Replace active position trajectories with the latest joint pose."""
+        """Attempt every zero/hold independently, then report any failed groups."""
         duration_s = float(duration_s)
         if not math.isfinite(duration_s) or duration_s <= 0.0:
             raise ValueError("duration_s must be a positive finite value")
-        segments = self._build_current_position_segments(action_keys)
-        if not segments:
-            raise ValueError("current pose hold requires a position action group")
-        self.publish_idle_action(action_keys)
-        self._publish_position_segments(segments, duration_s)
+        failures = []
+        position_keys = []
+        seen = set()
+        for action_key in (action_keys or self._action_keys):
+            try:
+                key = self._resolve_action_key(action_key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cfg = self._action_groups.get(key)
+                if cfg is None:
+                    raise ValueError("unknown action key")
+                if cfg["msg_type"] != "geometry_msgs/msg/Twist":
+                    position_keys.append(key)
+                    continue
+                publisher = self._command_publishers.get(f"leader_{key}")
+                if publisher is None:
+                    raise RuntimeError("publisher unavailable")
+                self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
+            except Exception as exc:
+                failures.append(f"{action_key}: {exc}")
+
+        # Freshness and transport failures affect only their own controller.
+        for key in position_keys:
+            try:
+                segments = self._build_current_position_segments([key])
+                if not segments or not segments[0][1]:
+                    raise ValueError("position group has no joints")
+                for publisher, names, values in segments:
+                    self._publish_joint_trajectory(
+                        publisher, names, values, time_from_start_s=duration_s,
+                    )
+            except Exception as exc:
+                failures.append(f"{key}: {exc}")
+        if not position_keys:
+            failures.append("current pose hold requires a position action group")
+        if failures:
+            raise RuntimeError("current-pose hold failed: " + "; ".join(failures))
 
     def _build_action_segments(
         self,
@@ -1111,20 +1179,9 @@ class RobotClient:
                 "current joint state stale: "
                 f"{stale_details} (max {max_age_s:.3f}s)"
             )
+        if any(not np.all(np.isfinite(values)) for _publisher, _names, values in planned):
+            raise RuntimeError("current joint state contains non-finite positions")
         return planned
-
-    def _publish_position_segments(
-        self,
-        segments: list[tuple[ROS2Publisher, list[str], np.ndarray]],
-        duration_s: float,
-    ) -> None:
-        for publisher, joint_names, values in segments:
-            self._publish_joint_trajectory(
-                publisher,
-                joint_names,
-                values,
-                time_from_start_s=duration_s,
-            )
 
     def build_action_preview(
         self,
@@ -1201,6 +1258,7 @@ class RobotClient:
         joint_names: list[str],
         values: np.ndarray,
         time_from_start_s: float = 0.0,
+        zero_terminal_derivatives: bool = False,
     ) -> None:
         Header = get_message_class("std_msgs/msg/Header")
         Time = get_message_class("builtin_interfaces/msg/Time")
@@ -1218,8 +1276,8 @@ class RobotClient:
             duration_nanosec -= 1_000_000_000
         point = JointTrajectoryPoint(
             positions=np.asarray(values, dtype=np.float64),
-            velocities=np.zeros(0, dtype=np.float64),
-            accelerations=np.zeros(0, dtype=np.float64),
+            velocities=np.zeros(len(joint_names) if zero_terminal_derivatives else 0, dtype=np.float64),
+            accelerations=np.zeros(len(joint_names) if zero_terminal_derivatives else 0, dtype=np.float64),
             effort=np.zeros(0, dtype=np.float64),
             time_from_start=Duration(sec=duration_sec, nanosec=duration_nanosec),
         )

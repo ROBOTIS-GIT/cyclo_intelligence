@@ -167,7 +167,8 @@ export function useRosServiceCaller() {
   useEffect(() => { pageRef.current = page; }, [page]);
 
   const callService = useCallback(
-    async (serviceName, serviceType, request, timeoutMs = DEFAULT_SERVICE_TIMEOUT_MS) => {
+    async (serviceName, serviceType, request, timeoutMs = DEFAULT_SERVICE_TIMEOUT_MS,
+      cancelOnDisconnect = false) => {
       try {
         console.log(`Attempting to call service: ${serviceName}`);
         const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
@@ -187,8 +188,18 @@ export function useRosServiceCaller() {
             if (settled) return;
             settled = true;
             clearTimeout(serviceTimeout);
+            if (cancelOnDisconnect) {
+              ros.off('close', cancel);
+              ros.off(serviceCallId, onResponse);
+              if (rosConnectionManager.getCurrentConnection() !== ros) {
+                resolve(null);
+                return;
+              }
+            }
             handler();
           };
+          // A cancelled pose command must not trigger Clear on a new session.
+          const cancel = () => finish(() => resolve(null));
 
           // Set a local guard only for finite-timeout calls. Long recording
           // saves pass timeout=0 through rosbridge so the service response can
@@ -199,7 +210,7 @@ export function useRosServiceCaller() {
             }, timeoutMs + 5000);
           }
 
-          ros.once(serviceCallId, (message) => {
+          const onResponse = (message) => {
             if (message.result !== undefined && message.result === false) {
               finish(() => {
                 const error = message.values;
@@ -218,7 +229,9 @@ export function useRosServiceCaller() {
               console.log('Service call successful:', result);
               resolve(result);
             });
-          });
+          };
+          ros.once(serviceCallId, onResponse);
+          if (cancelOnDisconnect) ros.once('close', cancel);
 
           ros.callOnConnection({
             op: 'call_service',
@@ -457,6 +470,13 @@ export function useRosServiceCaller() {
       }
     },
     [callService]
+  );
+
+  const sendRobotPoseCommand = useCallback(
+    (command, robotType, durationS = 0) => callService(
+      '/policy/pose_command', 'interfaces/srv/RobotPoseCommand',
+      { command, robot_type: robotType, duration_s: durationS }, 5000, true
+    ), [callService]
   );
 
   const getInferenceStatus = useCallback(
@@ -1039,6 +1059,7 @@ export function useRosServiceCaller() {
   return {
     callService,
     sendRecordCommand,
+    sendRobotPoseCommand,
     getInferenceStatus,
     getImageTopicList,
     getRobotInfo,

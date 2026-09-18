@@ -3,8 +3,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
-import taskReducer, { setInferenceStatus } from '../features/tasks/taskSlice';
-import rosReducer from '../features/ros/rosSlice';
+import taskReducer, { setInferenceStatus, setRobotPoseStatus, selectRobotType } from '../features/tasks/taskSlice';
+import rosReducer, { setRosbridgeUrl } from '../features/ros/rosSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
@@ -47,6 +47,8 @@ const renderPanel = ({
   inferenceStatusKnown = true,
   catalog = testPolicyCatalog,
   runtimeStateOverride = null,
+  poseReturning = false,
+  poseCommand = jest.fn().mockResolvedValue({ success: true }),
 } = {}) => {
   const { taskInstruction, ...inferenceOverrides } = taskOverrides;
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
@@ -61,7 +63,7 @@ const renderPanel = ({
     [InferencePhase.SYNCING]: 'syncing',
   }[inferencePhase];
   const getInferenceStatus = jest.fn();
-  useRosServiceCaller.mockReturnValue({ sendRecordCommand, getInferenceStatus });
+  useRosServiceCaller.mockReturnValue({ sendRecordCommand, getInferenceStatus, sendRobotPoseCommand: poseCommand });
 
   const initialTasks = taskReducer(undefined, { type: '@@INIT' });
   const initialRos = rosReducer(undefined, { type: '@@INIT' });
@@ -75,6 +77,7 @@ const renderPanel = ({
     preloadedState: {
       tasks: {
         ...initialTasks,
+        robotPoseStatus: { returning: poseReturning, device_id: 'first-runtime' },
         sharedTaskInfo: {
           ...initialTasks.sharedTaskInfo,
           taskInstruction: sharedTaskInstruction,
@@ -112,11 +115,12 @@ const renderPanel = ({
       ros: {
         ...initialRos,
         rosHost: 'localhost',
+        connected: true,
       },
     },
   });
 
-  render(
+  const { unmount } = render(
     <PolicyCatalogProvider initialCatalog={catalog}>
       <Provider store={store}>
         <InferenceControlPanel />
@@ -124,8 +128,61 @@ const renderPanel = ({
     </PolicyCatalogProvider>
   );
 
-  return { store, sendRecordCommand, getInferenceStatus };
+  return { store, sendRecordCommand, getInferenceStatus, unmount };
 };
+
+describe('manual pose Stop and Clear', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('Stop response cannot clear the authoritative returning state', async () => {
+    let resolve;
+    const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+    const { store } = renderPanel({ poseReturning: true, poseCommand });
+    fireEvent.click(screen.getByRole('button', { name: /pause inference/i }));
+    await act(async () => { resolve({ success: true, returning: false }); });
+    expect(store.getState().tasks.robotPoseStatus.returning).toBe(true);
+  });
+
+  test('failed pose Stop prevents Clear from unloading the policy', async () => {
+    const poseCommand = jest.fn().mockResolvedValue({ success: false, message: 'hold failed' });
+    const { sendRecordCommand } = renderPanel({
+      poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('hold failed'));
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('a disconnected pose Stop cannot proceed to Clear', async () => {
+    let resolve;
+    const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+    const { sendRecordCommand } = renderPanel({
+      poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await act(async () => { resolve(null); });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test.each(['robot', 'runtime', 'target', 'unmount'])(
+    'Clear ignores a late successful Stop after %s changes', async (change) => {
+      let resolve;
+      const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+      const { store, sendRecordCommand, unmount } = renderPanel({
+        poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+      });
+      fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+      if (change === 'robot') act(() => store.dispatch(selectRobotType('other')));
+      if (change === 'runtime') act(() => store.dispatch(setRobotPoseStatus({ device_id: 'new-runtime' })));
+      if (change === 'target') act(() => store.dispatch(setRosbridgeUrl('ws://second')));
+      if (change === 'unmount') unmount();
+      await act(async () => { resolve({ success: true }); });
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    }
+  );
+});
 
 describe('InferenceControlPanel deploy safety', () => {
   beforeEach(() => {
@@ -189,7 +246,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
 
-    expect(await screen.findByText('Initial Pose Sync: 7.5 s')).toBeInTheDocument();
+    expect(await screen.findByText('Slow Start: 7.5 s')).toBeInTheDocument();
   });
 
   test('shows unusual Dataset FPS in the robot confirmation without blocking deploy', async () => {
@@ -269,6 +326,29 @@ describe('InferenceControlPanel deploy safety', () => {
       .not.toBeInTheDocument();
   });
 
+  test('resumes after a pose return without unloading or another deploy warning', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      poseReturning: true,
+    });
+    expect(screen.getByRole('button', { name: /resume inference/i })).toBeDisabled();
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+
+    act(() => {
+      store.dispatch(setRobotPoseStatus({ returning: false, device_id: 'first-runtime' }));
+    });
+    const resume = screen.getByRole('button', { name: /resume inference/i });
+    expect(resume).toBeEnabled();
+    fireEvent.click(resume);
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledTimes(1);
+      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', {
+        inferenceMode: 'robot',
+      });
+    });
+    expect(screen.queryByRole('dialog', { name: /real robot deploy/i })).not.toBeInTheDocument();
+  });
+
   test('resumes an interrupted sync without another deploy warning', async () => {
     const { store, sendRecordCommand } = renderPanel({
       inferenceMode: 'robot',
@@ -326,7 +406,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith(
-        'Initial Pose Sync duration must be between 1 and 60 seconds'
+        'Slow Start duration must be between 1 and 60 seconds'
       );
     });
     expect(screen.queryByRole('dialog', { name: /real robot deploy/i }))

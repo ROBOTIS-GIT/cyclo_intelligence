@@ -39,8 +39,11 @@ The compatibility commands remain available:
 ./docker/container.sh enter-lerobot
 ```
 
-The container executes files baked into the image. Use `--build` after Worker
-source or dependency changes.
+Compose mounts Cyclo's adapter, common runtime, SDK, and configuration sources
+from this checkout. After the initial container recreation, Python edits require
+a Worker process restart, not an image rebuild. Dependencies and the upstream
+LeRobot installation remain image-owned; use `--build` when those change.
+See [source-mounted containers](../../../docker/README.md) for application steps.
 
 ## Models And Data
 
@@ -190,13 +193,12 @@ After initially building/recreating the LeRobot Worker with these changes,
 YAML-only edits require **Clear/UNLOAD then LOAD**, not an image rebuild. Edits
 do not affect a running session; START/RESUME alone does not reload YAML. Even
 a cached-model LOAD reads a new snapshot. The original checkpoint files are
-never modified. Rebuilding only Cyclo does not update this Worker adapter.
-The new mount is also part of Cyclo's baked Supervisor Compose definition:
-update that Cyclo image before using UI-driven Worker recreate/update, otherwise
-an old Supervisor can recreate the Worker without the editable YAML mount.
-Supervisor checks the YAML mount source against Compose as well as its destination,
-so a Worker using another checkout's config directory is marked stale. Editing
-the contents of the correctly mounted YAML does not require container recreation.
+never modified. The Worker adapter is now source-mounted as well, but running
+Python processes still need a restart after code edits.
+Apply the source-mounted Cyclo image layout once so Supervisor reads this
+checkout's Compose definition. Supervisor checks source/config mount paths as
+well as their destinations, so a Worker using another checkout is marked stale.
+Editing files inside a correctly mounted directory does not require recreation.
 
 Compare the SAME decoded RGB frame through training and inference transforms,
 including rotation, dtype conversion, interpolation, antialias, padding/crop,

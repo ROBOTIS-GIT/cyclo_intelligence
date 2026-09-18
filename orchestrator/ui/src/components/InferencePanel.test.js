@@ -100,7 +100,7 @@ describe('InferencePanel initial pose sync settings', () => {
       expect(screen.getByRole('spinbutton', { name: 'Dataset FPS' })).toHaveValue(30);
       expect(screen.getByRole('spinbutton', { name: 'Control Hz' })).toHaveValue(80);
       expect(screen.getByPlaceholderText('Enter Task Instruction')).toHaveValue('Saved instruction');
-      expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' })).toHaveValue(7);
+      expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' })).toHaveValue(7);
       act(() => jest.advanceTimersByTime(1000));
       expect(sendRecordCommand).not.toHaveBeenCalled();
     } finally {
@@ -111,32 +111,32 @@ describe('InferencePanel initial pose sync settings', () => {
   test('preserves but disables initial pose sync in simulation mode', () => {
     renderPanel({ inferenceMode: 'simulation' });
 
-    expect(screen.getByRole('checkbox', { name: 'Initial Pose Sync' }))
+    expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeChecked();
-    expect(screen.getByRole('checkbox', { name: 'Initial Pose Sync' }))
+    expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeDisabled();
-    expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' }))
+    expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))
       .toBeDisabled();
   });
 
   test('allows initial pose sync editing for an idle real robot session', () => {
     renderPanel({ inferenceMode: 'robot' });
 
-    expect(screen.getByRole('checkbox', { name: 'Initial Pose Sync' }))
+    expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeEnabled();
-    expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' }))
+    expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))
       .toBeEnabled();
   });
 
   test('shows duration only after initial pose sync is enabled', () => {
     renderPanel({ inferenceMode: 'robot', initialPoseSync: false });
 
-    expect(screen.queryByRole('spinbutton', { name: 'Initial Pose Sync duration' }))
+    expect(screen.queryByRole('spinbutton', { name: 'Slow Start duration' }))
       .not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Initial Pose Sync' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Slow Start' }));
 
-    expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' }))
+    expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))
       .toBeEnabled();
   });
 
@@ -146,9 +146,9 @@ describe('InferencePanel initial pose sync settings', () => {
       inferencePhase: InferencePhase.SYNCING,
     });
 
-    expect(screen.getByRole('checkbox', { name: 'Initial Pose Sync' }))
+    expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeDisabled();
-    expect(screen.getByRole('spinbutton', { name: 'Initial Pose Sync duration' }))
+    expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))
       .toBeDisabled();
   });
 

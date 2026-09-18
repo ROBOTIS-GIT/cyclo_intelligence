@@ -12,6 +12,7 @@ Model frameworks remain isolated in Engine-only worker containers.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -19,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 _ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/opt/cyclo/sdk/zenoh_ros2_sdk")
@@ -45,14 +48,18 @@ from catalog import load_catalog  # noqa: E402
 from robot_client.messages import (  # noqa: E402
     INFERENCE_COMMAND_REQUEST_DEF,
     INFERENCE_COMMAND_RESPONSE_DEF,
+    ROBOT_POSE_COMMAND_REQUEST_DEF,
+    ROBOT_POSE_COMMAND_RESPONSE_DEF,
 )
-from zenoh_ros2_sdk import ROS2ServiceServer, ROS2Subscriber, get_logger  # noqa: E402
+from robot_client import RobotClient  # noqa: E402
+from zenoh_ros2_sdk import ROS2Publisher, ROS2ServiceServer, ROS2Subscriber, get_logger  # noqa: E402
 
 from .control_loop import ControlLoop  # noqa: E402
 from .runtime_control import RuntimeControlServer  # noqa: E402
 from .process_lock import runtime_process_lock  # noqa: E402
 from .service_handler import ServiceHandler  # noqa: E402
 from .session_state import SessionState  # noqa: E402
+from .saved_pose import SavedPoseManager  # noqa: E402
 from .worker_registry import (  # noqa: E402
     WorkerRegistry,
     runtime_health_failure_reason,
@@ -102,6 +109,12 @@ class PolicyRuntime:
             action_request_mode=os.environ.get("ACTION_REQUEST_MODE", "async"),
         )
         self._response_class: dict[str, Any] = {}
+        self._pose_response_class: dict[str, Any] = {}
+        self._saved_pose = SavedPoseManager(lambda robot_type: RobotClient(
+            robot_type, router_ip=self._router_ip, router_port=self._router_port,
+            domain_id=self._domain_id, enable_command_publishers=True,
+            subscribe_state=True, subscribe_images=False, subscribe_sensors=False,
+        ))
         self._handler = ServiceHandler(
             self._session,
             None,
@@ -109,10 +122,14 @@ class PolicyRuntime:
             lambda **kwargs: self._response_class["class"](**kwargs),
             catalog=self._catalog,
             worker_registry=self._workers,
+            pose_manager=self._saved_pose,
+            pose_response_factory=self._make_pose_response,
+            pose_motion_guard=self._check_pose_motion_health,
         )
         self._control_loop.set_fault_callback(self._handler.on_control_fault)
         self._services: list[Any] = []
         self._subscribers: list[Any] = []
+        self._pose_status_publisher = None
         self._control_server = RuntimeControlServer(
             self._handle_control_request,
             os.environ.get(
@@ -148,7 +165,7 @@ class PolicyRuntime:
         self._handler.begin_shutdown()
         self._remove_ready_marker()
         snapshot = self._handler.runtime_snapshot()
-        if snapshot.get("hold_pending") or snapshot["runtime_state"] in {"preparing", "running", "syncing", "error"}:
+        if snapshot.get("pose_returning") or snapshot.get("hold_pending") or snapshot["runtime_state"] in {"preparing", "running", "syncing", "error"}:
             # Retain joint subscriptions and command publishers until hold succeeds.
             # Launch's eventual SIGKILL cannot be made safe here; a controller
             # command watchdog is still required for forced termination.
@@ -171,6 +188,9 @@ class PolicyRuntime:
             except Exception:
                 pass
         self._services.clear()
+        if self._pose_status_publisher is not None:
+            self._pose_status_publisher.close()
+        self._saved_pose.close()
         self._control_loop.shutdown()
         self._workers.close()
         self._remove_ready_marker()
@@ -180,9 +200,27 @@ class PolicyRuntime:
         self._shutdown.set()
 
     def _start_services(self) -> None:
+        self._pose_status_publisher = ROS2Publisher(
+            topic="/policy/pose_status", msg_type="std_msgs/msg/String",
+            msg_definition="string data\n", router_ip=self._router_ip,
+            router_port=self._router_port, domain_id=self._domain_id,
+            namespace=self._namespace, node_name="cyclo_policy_pose_status",
+        )
         central = self._make_service("/policy/inference_command")
         self._response_class["class"] = central.response_msg_class
         self._services.append(central)
+        pose_service = ROS2ServiceServer(
+            service_name="/policy/pose_command",
+            srv_type="interfaces/srv/RobotPoseCommand",
+            callback=self._handle_pose_request,
+            request_definition=ROBOT_POSE_COMMAND_REQUEST_DEF,
+            response_definition=ROBOT_POSE_COMMAND_RESPONSE_DEF,
+            router_ip=self._router_ip, router_port=self._router_port,
+            domain_id=self._domain_id, namespace=self._namespace,
+            node_name="cyclo_policy_runtime_pose",
+        )
+        self._pose_response_class["class"] = pose_service.response_msg_class
+        self._services.append(pose_service)
         for runtime_id in self._workers.runtime_ids:
             self._services.append(
                 self._make_service(
@@ -194,6 +232,19 @@ class PolicyRuntime:
             "legacy inference aliases enabled for: %s",
             ", ".join(self._workers.runtime_ids),
         )
+
+    def _make_pose_response(self, **fields):
+        # ROSbags requires NumPy arrays for numeric sequences.
+        fields["positions"] = np.asarray(fields["positions"], dtype=np.float64)
+        return self._pose_response_class["class"](**fields)
+
+    def _handle_pose_request(self, request):
+        return self._handler.handle_pose(request)
+
+    def _check_pose_motion_health(self):
+        timeout = max(1.0, float(os.environ.get("ORCHESTRATOR_HEARTBEAT_TIMEOUT_S", "3.0")))
+        if time.monotonic() - self._orchestrator_last_seen > timeout:
+            raise RuntimeError("Orchestrator heartbeat is stale; pose return is unavailable.")
 
     def _make_service(
         self,
@@ -264,6 +315,14 @@ class PolicyRuntime:
         )
         while not self._shutdown.wait(0.25):
             snapshot = self._handler.runtime_snapshot()
+            try:
+                pose_status = self._handler.pose_snapshot()
+                self._pose_status_publisher.publish(data=json.dumps(pose_status))
+            except Exception:
+                logger.exception("Could not publish saved-pose status")
+            if snapshot.get("pose_returning"):
+                if time.monotonic() - self._orchestrator_last_seen > orchestrator_timeout:
+                    self._handler.fail_safe("orchestrator heartbeat lost during pose return")
             active = snapshot["runtime_state"] in {"preparing", "running", "syncing"}
             if not active:
                 self._active_since = None

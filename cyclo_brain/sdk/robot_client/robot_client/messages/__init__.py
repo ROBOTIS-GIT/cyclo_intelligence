@@ -94,6 +94,28 @@ float64 loaded_initial_pose_sync_duration_s
 string runtime_error
 """
 
+# --- RobotPoseCommand (interfaces/srv/RobotPoseCommand.srv) ---
+ROBOT_POSE_COMMAND_REQUEST_DEF = """\
+uint8 command
+string robot_type
+float64 duration_s
+"""
+
+ROBOT_POSE_COMMAND_RESPONSE_DEF = """\
+bool success
+string message
+string robot_type
+string device_id
+bool connected
+bool saved
+bool returning
+float64 duration_s
+string error
+string[] joint_names
+float64[] positions
+string[] units
+"""
+
 # --- StopTraining (interfaces/srv/StopTraining.srv) ---
 # Request has no fields (empty request). Comment-only string keeps
 # register_message_type from trying auto-load (interfaces

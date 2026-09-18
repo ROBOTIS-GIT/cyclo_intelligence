@@ -99,18 +99,61 @@ def test_main_dockerfiles_install_compose_v2():
         )
 
 
-def test_production_compose_does_not_bind_mount_runtime_sources():
-    production = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
-
-    source_mounts = (
-        "./s6-services/common/ros2_service_run.sh:",
-        "../cyclo_brain/policy/common:",
-        "../cyclo_brain/sdk/robot_client:",
-        "../shared/shared/robot_configs:/orchestrator_config:ro",
-    )
-    for mount in source_mounts:
-        assert mount not in production
+def test_compose_uses_a_source_workspace_and_readonly_worker_sources():
+    compose = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())
+    services = compose["services"]
+    main_mounts = services["cyclo_intelligence"]["volumes"]
+    assert {
+        "type": "bind", "source": "..",
+        "target": "/root/ros2_ws/src/cyclo_intelligence",
+        "bind": {"create_host_path": False},
+    } in main_mounts
+    for name in ("urdf", "ffw_description", "open_manipulator_description"):
+        assert (
+            f"../shared/shared/robot_configs/{name}:/usr/share/nginx/html/urdf/{name}:ro"
+        ) in main_mounts
+    for backend in ("lerobot", "groot"):
+        mounts = services[backend]["volumes"]
+        assert f"../cyclo_brain/policy/{backend}/{backend}_engine:/app/{backend}_engine:ro" in mounts
+        assert "../cyclo_brain/policy/common/runtime:/policy_runtime:ro" in mounts
+        assert "../cyclo_brain/policy/common/catalog:/catalog:ro" in mounts
+        assert "../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro" in mounts
+        source_targets = []
+        for mount in mounts:
+            if not mount.startswith("../"):
+                continue
+            source, target, mode = mount.split(":")
+            assert (REPO_ROOT / "docker" / source).exists(), source
+            assert mode == "ro"
+            assert target not in ("/lerobot", "/gr00t", "/app", "/etc/s6-overlay/s6-rc.d")
+            source_targets.append(Path(target))
+        # No nested mounts may require creating paths in a read-only source.
+        assert not any(a in b.parents for a in source_targets for b in source_targets)
     assert not (REPO_ROOT / "docker" / "docker-compose.dev.yml").exists()
+
+
+def test_main_images_link_runtime_sdk_and_supervisor_to_one_source_tree():
+    root = "${COLCON_WS}/src/cyclo_intelligence"
+    for arch in ("amd64", "arm64"):
+        contents = (REPO_ROOT / f"docker/Dockerfile.{arch}").read_text()
+        assert "--symlink-install" in contents
+        for source, target in (
+            ("cyclo_brain/policy", "/opt/cyclo/policy"),
+            ("cyclo_brain/sdk", "/opt/cyclo/sdk"),
+            ("shared/shared/robot_configs", "/orchestrator_config"),
+            ("docker/supervisor_api", "/opt/supervisor_api"),
+            ("docker", "/opt/cyclo/docker"),
+        ):
+            assert f"ln -s {root}/{source} {target}" in contents
+        assert f"COPY cyclo_brain/policy/common {root}/cyclo_brain/policy/common" in contents
+        assert f"COPY docker/supervisor_api {root}/docker/supervisor_api" in contents
+        assert "COPY cyclo_brain/policy/common /opt/cyclo" not in contents
+        # Standalone images retain assets; Compose overlays them directly so
+        # nginx does not need traversal permission on /root.
+        for name in ("urdf", "ffw_description", "open_manipulator_description"):
+            assert (
+                f"COPY shared/shared/robot_configs/{name}/ /usr/share/nginx/html/urdf/{name}/"
+            ) in contents
 
 
 def test_interactive_bashrc_includes_simple_ros_zenoh_block():

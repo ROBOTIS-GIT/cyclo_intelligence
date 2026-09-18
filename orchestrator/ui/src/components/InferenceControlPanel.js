@@ -85,6 +85,15 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
+  const robotType = useSelector((state) => state.tasks.robotType);
+  const poseDeviceId = useSelector((state) => state.tasks.robotPoseStatus?.device_id);
+  const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  const poseRequestGeneration = useRef(0);
+  useEffect(() => {
+    poseRequestGeneration.current += 1;
+    return () => { poseRequestGeneration.current += 1; };
+  }, [robotType, poseDeviceId, rosbridgeUrl]);
   const rosHost = useSelector((state) => state.ros.rosHost);
   const { catalog, status: catalogStatus, error: catalogError } = usePolicyCatalog();
   const selectedPolicy = findPolicy(
@@ -100,7 +109,7 @@ export default function InferenceControlPanel() {
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand, sendRobotPoseCommand } = useRosServiceCaller();
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -357,7 +366,7 @@ export default function InferenceControlPanel() {
     if (inferenceMode === 'robot' && willRunInitialPoseSync) {
       const durationS = Number(taskInfo.initialPoseSyncDurationS);
       if (!Number.isFinite(durationS) || durationS < 1 || durationS > 60) {
-        toast.error('Initial Pose Sync duration must be between 1 and 60 seconds');
+        toast.error('Slow Start duration must be between 1 and 60 seconds');
         return;
       }
     }
@@ -411,21 +420,38 @@ export default function InferenceControlPanel() {
     setPendingRobotDeployIntent(null);
   }, []);
 
+  const stopPoseReturn = useCallback(async () => {
+    const generation = poseRequestGeneration.current;
+    try {
+      const result = await sendRobotPoseCommand(3, robotType);
+      if (!result || generation !== poseRequestGeneration.current) return false;
+      if (!result.success) throw new Error(result.message);
+      return true;
+    } catch (error) {
+      if (generation === poseRequestGeneration.current) {
+        toast.error(error.message || 'Could not stop pose return');
+      }
+      return false;
+    }
+  }, [robotType, sendRobotPoseCommand]);
+
   const handleStop = useCallback(async () => {
+    if (poseReturning) { await stopPoseReturn(); return; }
     await executeCommand('Stop', 'stop_inference');
-  }, [executeCommand]);
+  }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const handleClear = useCallback(async () => {
+    if (poseReturning && !(await stopPoseReturn())) return;
     await executeCommand('Clear', 'finish');
-  }, [executeCommand]);
+  }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const catalogReady = catalogStatus === 'ready' && Boolean(selectedPolicy);
   const catalogBlockingMessage = catalogStatus === 'ready'
     ? 'Selected policy is not available in the policy catalog'
     : (catalogError || 'Policy catalog is unavailable');
   const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
-    backendReadiness.ready && !hasRuntimeError;
-  const stopEnabled = isInferencing || isSyncing || isPreparing;
+    backendReadiness.ready && !hasRuntimeError && !poseReturning;
+  const stopEnabled = isInferencing || isSyncing || isPreparing || poseReturning;
   const clearEnabled = isModelLoaded;
   const startDescription = !isStatusKnown
     ? 'Checking inference session status'
@@ -438,7 +464,8 @@ export default function InferenceControlPanel() {
     : canResume
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = !isStatusKnown
+  const guideMessage = poseReturning ? 'Returning to saved pose...'
+    : !isStatusKnown
     ? 'Checking inference session...'
     : !catalogReady
     ? catalogBlockingMessage
@@ -670,7 +697,7 @@ export default function InferenceControlPanel() {
               </p>
               {pendingRobotDeployIntent.willRunInitialPoseSync && (
                 <p className="font-semibold text-orange-800">
-                  Initial Pose Sync: {Number(taskInfo.initialPoseSyncDurationS || 5).toFixed(1)} s
+                  Slow Start: {Number(taskInfo.initialPoseSyncDurationS || 5).toFixed(1)} s
                 </p>
               )}
               {pendingRobotDeployIntent.timingWarnings?.length > 0 && (

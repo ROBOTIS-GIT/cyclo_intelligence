@@ -135,3 +135,13 @@ def test_runtime_services_are_registered_for_rosidl_generation() -> None:
 
     assert '"srv/InferenceCommand.srv"' in cmake
     assert '"srv/EngineCommand.srv"' in cmake
+    assert '"srv/RobotPoseCommand.srv"' in cmake
+
+
+def test_dynamic_pose_command_definition_matches_ros_service():
+    path = REPO_ROOT / "interfaces/srv/RobotPoseCommand.srv"
+    definitions = _load_definitions()
+    assert _field_lines(definitions.ROBOT_POSE_COMMAND_REQUEST_DEF) == _field_lines(
+        path.read_text(), stop_at_separator=True
+    )
+    assert _field_lines(definitions.ROBOT_POSE_COMMAND_RESPONSE_DEF) == _service_response_fields(path)

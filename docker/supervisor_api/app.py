@@ -274,8 +274,8 @@ class TrtEngineStatus(BaseModel):
 # -- Backend (policy container) wiring -----------------------------------------
 
 
-# Production reads the Compose and catalog copies baked into the Cyclo image.
-# The repository mount remains an optional development-only fallback.
+# Image paths link to the workspace, which Compose binds to the host checkout.
+# Without that mount, the image's source snapshot remains usable.
 _CYCLO_REPO_MOUNT = os.environ.get(
     "CYCLO_SUPERVISOR_API_REPO_MOUNT",
     "/root/ros2_ws/src/cyclo_intelligence",
@@ -429,7 +429,10 @@ def _load_backend_configuration():
                 for volume in service.get("volumes", []) or []
                 if isinstance(volume, dict)
                 and volume.get("type") == "bind"
-                and str(volume.get("target", "")).startswith("/app/configs/")
+                and (
+                    str(volume.get("target", "")).startswith("/app/configs/")
+                    or str(volume.get("source", "")).startswith("../")
+                )
                 and volume.get("source")
             },
         }

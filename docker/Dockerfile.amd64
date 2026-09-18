@@ -111,16 +111,18 @@ RUN pip install --no-cache-dir --break-system-packages \
         "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" \
         "GitPython>=3.1.18" "json5>=0.9.14" pyyaml
 
-# Central Policy Runtime. Model frameworks remain in their worker images.
-COPY cyclo_brain/policy/common /opt/cyclo/policy/common
-COPY cyclo_brain/policy/lerobot/manifest.yaml /opt/cyclo/policy/lerobot/manifest.yaml
-COPY cyclo_brain/policy/groot/manifest.yaml /opt/cyclo/policy/groot/manifest.yaml
-COPY cyclo_brain/sdk/zenoh_ros2_sdk /opt/cyclo/sdk/zenoh_ros2_sdk
-COPY cyclo_brain/sdk/robot_client /opt/cyclo/sdk/robot_client
-COPY cyclo_brain/sdk/action_chunk_processing /opt/cyclo/sdk/action_chunk_processing
-RUN mkdir -p /orchestrator_config /run/cyclo && \
-    cp ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs/*.yaml /orchestrator_config/ && \
-    cp ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs/schema.py /orchestrator_config/
+# Keep one source tree: Compose replaces it with the host checkout.
+# Model frameworks remain in their worker images.
+COPY cyclo_brain/policy/common ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/common
+COPY cyclo_brain/policy/lerobot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/lerobot/manifest.yaml
+COPY cyclo_brain/policy/groot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/groot/manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/zenoh_ros2_sdk
+COPY cyclo_brain/sdk/robot_client ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/robot_client
+COPY cyclo_brain/sdk/action_chunk_processing ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/action_chunk_processing
+RUN mkdir -p /opt/cyclo /run/cyclo && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy /opt/cyclo/policy && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk /opt/cyclo/sdk && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs /orchestrator_config
 
 # Same nested-package caveat as the rosdep step (see Dockerfile.arm64).
 # --symlink-install re-enabled (D17) — see Dockerfile.arm64 for the
@@ -189,8 +191,10 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
     chown -R nobody:nogroup /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node && \
     chmod -R 02755 /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligence /var/log/bt_node
 
-COPY docker/supervisor_api /opt/supervisor_api
-COPY docker/docker-compose.yml docker/docker-compose.override.yml /opt/cyclo/docker/
+COPY docker/supervisor_api ${COLCON_WS}/src/cyclo_intelligence/docker/supervisor_api
+COPY docker/docker-compose.yml docker/docker-compose.override.yml ${COLCON_WS}/src/cyclo_intelligence/docker/
+RUN ln -s ${COLCON_WS}/src/cyclo_intelligence/docker/supervisor_api /opt/supervisor_api && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/docker /opt/cyclo/docker
 RUN pip install --no-cache-dir --break-system-packages \
         -r /opt/supervisor_api/requirements.txt
 

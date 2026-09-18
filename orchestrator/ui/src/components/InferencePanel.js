@@ -30,6 +30,7 @@ import {
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
 import PolicyParameterFields from './PolicyParameterFields';
+import SavedPoseControlPanel from './SavedPoseControlPanel';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -559,6 +560,7 @@ const InferencePanel = () => {
         </div>
       </div>
 
+      <SavedPoseControlPanel />
       <PolicyParameterFields
         model={selectedPolicy}
         info={info}
@@ -625,7 +627,7 @@ const InferencePanel = () => {
           >
             <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
           </Tooltip>
-          <span>Initial Pose Sync</span>
+          <span>Slow Start</span>
         </div>
         <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
           <input
@@ -637,7 +639,7 @@ const InferencePanel = () => {
             checked={initialPoseSyncEnabled}
             onChange={(e) => handleChange('initialPoseSync', e.target.checked)}
             disabled={!isEditable || !isRobotMode}
-            aria-label="Initial Pose Sync"
+            aria-label="Slow Start"
           />
           <span className="text-gray-500">Enable</span>
         </label>
@@ -663,7 +665,7 @@ const InferencePanel = () => {
               );
             }}
             disabled={!isEditable || !isRobotMode}
-            aria-label="Initial Pose Sync duration"
+            aria-label="Slow Start duration"
           />
         </div>
       )}

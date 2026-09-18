@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("rclpy")
 interfaces = pytest.importorskip("interfaces")
-from interfaces.srv import EngineCommand, InferenceCommand
+from interfaces.srv import EngineCommand, InferenceCommand, RobotPoseCommand
 from rclpy.serialization import deserialize_message, serialize_message
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 
@@ -53,6 +53,8 @@ def _sample_value(field_type, name, index):
     (EngineCommand, "Response", ENGINE_COMMAND_RESPONSE_DEF),
     (InferenceCommand, "Request", messages.INFERENCE_COMMAND_REQUEST_DEF),
     (InferenceCommand, "Response", messages.INFERENCE_COMMAND_RESPONSE_DEF),
+    (RobotPoseCommand, "Request", messages.ROBOT_POSE_COMMAND_REQUEST_DEF),
+    (RobotPoseCommand, "Response", messages.ROBOT_POSE_COMMAND_RESPONSE_DEF),
 ])
 def test_generated_ros_and_worker_cdr_round_trip(service, part, definition):
     prefix = os.environ.get("CYCLO_TEST_INTERFACES_PREFIX")

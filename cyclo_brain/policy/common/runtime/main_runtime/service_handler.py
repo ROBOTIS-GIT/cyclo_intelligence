@@ -45,6 +45,9 @@ class ServiceHandler:
         catalog=None,
         backend="",
         worker_registry=None,
+        pose_manager=None,
+        pose_response_factory=None,
+        pose_motion_guard=None,
     ):
         self._session = session
         self._requester = requester
@@ -53,6 +56,9 @@ class ServiceHandler:
         self._catalog = catalog
         self._backend = str(backend or "")
         self._worker_registry = worker_registry
+        self._pose_manager = pose_manager
+        self._pose_response_factory = pose_response_factory
+        self._pose_motion_guard = pose_motion_guard
         self._active_requester = requester
         self._loading_runtime_id = ""
         self._worker_mutations: dict[str, str] = {}
@@ -68,6 +74,10 @@ class ServiceHandler:
                 return self._make_response(False, "Policy Runtime is shutting down")
             cmd = int(request.command)
             try:
+                if self._pose_manager is not None:
+                    self._pose_manager.poll()
+                    if self._pose_manager.returning and cmd in {CMD_LOAD, CMD_START, CMD_RESUME}:
+                        raise RuntimeError("Stop the active pose return before loading or starting inference.")
                 if cmd == CMD_LOAD:
                     return self._load(request, backend_override=backend_override)
                 if cmd == CMD_START:
@@ -87,6 +97,85 @@ class ServiceHandler:
                 return self._make_response(False, f"Unknown command: {cmd}")
             except Exception as e:
                 return self._make_response(False, str(e))
+
+    def handle_pose(self, request):
+        """Serialize manual robot commands with policy lifecycle commands."""
+        fields = dict(robot_type=str(request.robot_type), device_id="", connected=False,
+                      saved=False, returning=bool(self._pose_manager and self._pose_manager.returning),
+                      duration_s=5.0,
+                      error="", joint_names=[], positions=[], units=[])
+        if not self._lock.acquire(blocking=False):
+            return self._pose_response_factory(success=False, message="Policy Runtime is busy; retry shortly.", **fields)
+        success, message = False, ""
+        try:
+            if self._shutdown_requested.is_set():
+                raise RuntimeError("Policy Runtime is shutting down.")
+            manager = self._pose_manager
+            if manager is None:
+                raise RuntimeError("Saved pose control is unavailable.")
+            manager.poll()
+            command = int(request.command)
+            robot_type = str(request.robot_type)
+            if command == 3:
+                robot_type = manager.robot_type or robot_type
+                manager.stop()
+                message = "Pose return stopped."
+            else:
+                if self._session.loaded and robot_type != self._session.robot_type:
+                    raise RuntimeError("Robot type must match the loaded policy.")
+                manager.profile(robot_type)
+                if command == 1:
+                    if self._runtime_state() not in {"unloaded", "loaded", "paused"}:
+                        raise RuntimeError("Stop inference before saving the pose.")
+                    manager.save(robot_type)
+                    message = "Initial pose saved."
+                elif command == 2:
+                    manager.check_duration(robot_type, float(getattr(request, "duration_s", 0)))
+                    if self._runtime_state() not in {"unloaded", "loaded", "paused"}:
+                        raise RuntimeError("Stop inference before returning to the saved pose.")
+                    if self._control_loop.initial_pose_sync_hold_required():
+                        raise RuntimeError("Current-pose hold is pending; retry STOP first.")
+                    if self._worker_mutations:
+                        raise RuntimeError("Worker maintenance is in progress; retry after it finishes.")
+                    if self._pose_motion_guard is not None:
+                        self._pose_motion_guard()
+                    # PAUSE already invalidates the plan; Return must preserve the session.
+                    manager.restore(robot_type)
+                    message = "Returning to saved pose."
+                elif command == 4:
+                    if self._runtime_state() not in {"unloaded", "loaded", "paused"}:
+                        raise RuntimeError("Stop inference before changing return duration.")
+                    manager.set_duration(robot_type, request.duration_s)
+                    message = "Return duration updated."
+                elif command != 0:
+                    raise ValueError(f"Unknown pose command: {command}")
+            if robot_type:
+                fields = manager.status(robot_type)
+            else:
+                fields.update(device_id=manager.device_id, returning=manager.returning)
+            success = True
+        except Exception as exc:
+            message = str(exc)
+            if self._pose_manager is not None:
+                fields["returning"] = self._pose_manager.returning
+                fields["device_id"] = self._pose_manager.device_id
+                fields["error"] = self._pose_manager.error
+        finally:
+            self._lock.release()
+        return self._pose_response_factory(success=success, message=message, **fields)
+
+    def _stop_pose_return(self):
+        if self._pose_manager is not None:
+            self._pose_manager.stop()
+
+    def pose_snapshot(self):
+        """Read status without connecting or switching robot clients."""
+        with self._lock:
+            manager = self._pose_manager
+            if manager is None or not manager.robot_type:
+                return {"robot_type": "", "device_id": manager.device_id if manager else "",
+                        "returning": False, "connected": False, "saved": False, "duration_s": 5.0}
+            return manager.status(manager.robot_type, connect=False)
 
     def _load(self, request, *, backend_override: str = ""):
         if self._session.loaded:
@@ -295,6 +384,7 @@ class ServiceHandler:
         return self._make_response(True, message)
 
     def _pause(self):
+        self._stop_pose_return()
         if not self._session.running:
             raise RuntimeError("not running")
         hold_ok = self._control_loop.pause()
@@ -319,6 +409,7 @@ class ServiceHandler:
         return self._make_response(True, message)
 
     def _stop(self):
+        self._stop_pose_return()
         hold_ok = self._control_loop.stop()
         if not hold_ok:
             return self._make_response(False, "current-pose hold failed; retry STOP")
@@ -326,6 +417,7 @@ class ServiceHandler:
         return self._make_response(True, "stopped")
 
     def _unload(self):
+        self._stop_pose_return()
         if self._session.running and not self._session.paused:
             return self._make_response(
                 False,
@@ -389,6 +481,16 @@ class ServiceHandler:
     def fail_safe(self, reason: str) -> bool:
         """Stop command publication after a worker/orchestrator failure."""
         with self._lock:
+            pose_was_returning = bool(self._pose_manager and self._pose_manager.returning)
+            try:
+                self._stop_pose_return()
+            except Exception as exc:
+                if self._pose_manager is not None:
+                    self._pose_manager.error = f"{reason}; current-pose hold failed: {exc}"
+                logger.error("Manual pose hold failed: %s", exc)
+                return False
+            if pose_was_returning:
+                self._pose_manager.error = reason
             if not self._session.loaded:
                 return True
             hold_ok = self._control_loop.emergency_stop(reason)
@@ -407,7 +509,9 @@ class ServiceHandler:
                 "retry after it finishes"
             )
         try:
-            return {
+            if self._pose_manager is not None:
+                self._pose_manager.poll()
+            snapshot = {
                 "runtime_state": self._runtime_state(),
                 "runtime_id": self._session.runtime_id,
                 "policy_id": self._session.policy_id,
@@ -418,6 +522,9 @@ class ServiceHandler:
                 "mutating_runtime_ids": sorted(self._worker_mutations),
                 "error": self._session.error,
             }
+            if self._pose_manager is not None:
+                snapshot["pose_returning"] = self._pose_manager.returning
+            return snapshot
         finally:
             self._lock.release()
 
@@ -426,6 +533,8 @@ class ServiceHandler:
             snapshot = self.runtime_snapshot(blocking=False)
         except RuntimeError as exc:
             return False, str(exc)
+        if snapshot.get("pose_returning"):
+            return False, "saved-pose return or its safety hold is pending"
         if snapshot["loading_runtime_id"] == runtime_id:
             return False, "worker is loading a policy"
         if snapshot["runtime_id"] != runtime_id:

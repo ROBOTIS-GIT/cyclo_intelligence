@@ -366,14 +366,17 @@ def test_backend_container_stale_reason_accepts_repo_symlink_workspace_mount(
 
 @pytest.mark.parametrize("source_kind", ["relative", "absolute"])
 @pytest.mark.parametrize("wrong_checkout", [False, True])
+@pytest.mark.parametrize("destination", [
+    "/app/configs/inference_inputs", "/app/lerobot_engine",
+    "/policy_runtime", "/catalog", "/robot_client_sdk", "/orchestrator_config",
+])
 def test_backend_config_mount_source_validation(
-    monkeypatch, tmp_path, source_kind, wrong_checkout,
+    monkeypatch, tmp_path, source_kind, wrong_checkout, destination,
 ):
     project_dir = tmp_path / "repo" / "docker"
     expected = tmp_path / "repo" / "configs"
     expected.mkdir(parents=True)
     source = "../configs" if source_kind == "relative" else str(expected)
-    destination = "/app/configs/inference_inputs"
     actual = tmp_path / "other_repo" / "configs" if wrong_checkout else expected
     monkeypatch.setattr(app, "_host_project_dir", lambda: str(project_dir))
     monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path / "repo"))
@@ -422,10 +425,21 @@ def test_backend_config_mount_requires_known_host_project(monkeypatch):
 
 
 def test_backend_config_mount_is_read_from_compose():
-    assert _BACKENDS["lerobot"]["config_mounts"] == {
-        "/app/configs/inference_inputs": "../cyclo_brain/policy/lerobot/configs/inference_inputs"
-    }
-    assert _BACKENDS["groot"]["config_mounts"] == {}
+    for backend in ("lerobot", "groot"):
+        expected = {
+            f"/app/{backend}_engine": f"../cyclo_brain/policy/{backend}/{backend}_engine",
+            "/app/policy_manifest.yaml": f"../cyclo_brain/policy/{backend}/manifest.yaml",
+            "/policy_runtime": "../cyclo_brain/policy/common/runtime",
+            "/catalog": "../cyclo_brain/policy/common/catalog",
+            "/zenoh_sdk": "../cyclo_brain/sdk/zenoh_ros2_sdk",
+            "/robot_client_sdk": "../cyclo_brain/sdk/robot_client",
+            "/orchestrator_config": "../shared/shared/robot_configs",
+        }
+        if backend == "lerobot":
+            expected["/app/configs/inference_inputs"] = (
+                "../cyclo_brain/policy/lerobot/configs/inference_inputs"
+            )
+        assert _BACKENDS[backend]["config_mounts"] == expected
 
 
 def test_mount_source_for_destination_resolves_workspace_host_path():

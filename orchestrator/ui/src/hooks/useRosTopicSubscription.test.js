@@ -87,6 +87,27 @@ describe('central inference status subscription', () => {
     });
   });
 
+  test('pose status expires without clearing a pending return and recovers after restart', async () => {
+    const { store, result } = await subscribe();
+    await act(async () => { await result.current.subscribeToPoseStatus(); });
+    act(() => callback({ data: JSON.stringify({
+      robot_type: 'test', device_id: 'first', returning: true, connected: true, saved: true,
+    }) }));
+    expect(store.getState().tasks.robotPoseStatus.available).toBe(true);
+    act(() => jest.advanceTimersByTime(2100));
+    expect(store.getState().tasks.robotPoseStatus).toMatchObject({
+      available: false, connected: false, returning: true,
+    });
+    act(() => callback({ data: JSON.stringify({
+      robot_type: '', device_id: 'second', returning: false, connected: false, saved: false,
+    }) }));
+    expect(store.getState().tasks.robotPoseStatus).toMatchObject({
+      available: true, device_id: 'second', saved: false, returning: false,
+    });
+    act(() => result.current.cleanup());
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
   test('restores editable settings independently of the loaded model and page', async () => {
     const { store } = await subscribe();
     act(() => callback({

@@ -51,6 +51,39 @@ RobotClient = robot_client_impl.RobotClient
 
 
 class InitialPoseSyncCommandTest(unittest.TestCase):
+    def test_saved_pose_uses_named_targets_and_zero_terminal_derivatives(self):
+        for robot_type in ("ffw_sg2_rev1", "ffw_sh5_rev1", "omy_f3m"):
+            with self.subTest(robot_type=robot_type):
+                client = self._make_client(robot_type)
+                self._seed_joint_state(client)
+                target = {name: 0.123 for name in client._joint_positions_by_name}
+                client.publish_named_pose(target, duration_s=5.)
+                for key, group in client._action_groups.items():
+                    msg = client._command_publishers[f"leader_{key}"].messages[-1]
+                    if group["msg_type"] == "geometry_msgs/msg/Twist":
+                        self.assertEqual(msg["linear"].x, 0.)
+                        self.assertEqual(msg["angular"].z, 0.)
+                    else:
+                        point = msg["points"][0]
+                        np.testing.assert_allclose(point.positions, [target[n] for n in group["joint_names"]])
+                        np.testing.assert_array_equal(point.velocities, np.zeros(len(group["joint_names"])))
+                        self.assertEqual(point.time_from_start.sec, 5)
+
+    def test_saved_pose_rejects_stale_or_invalid_state_before_publication(self):
+        client = self._make_client("ffw_sg2_rev1")
+        self._seed_joint_state(client)
+        target = dict(client._joint_positions_by_name)
+        name = next(iter(target))
+        client._joint_position_timestamps_by_name[name] -= 10
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            client.publish_named_pose(target)
+        assert all(not publisher.messages for publisher in client._command_publishers.values())
+        self._seed_joint_state(client)
+        client._joint_positions_by_name[name] = float("nan")
+        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+            client.publish_named_pose(target)
+        assert all(not publisher.messages for publisher in client._command_publishers.values())
+
     def test_expired_step_stops_twist_and_preserves_position_target_and_receipt(self):
         client = self._make_client("ffw_sg2_rev1")
         keys = list(client._action_keys)
@@ -395,7 +428,7 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
             all(not publisher.messages for publisher in client._command_publishers.values())
         )
 
-    def test_one_stale_joint_prevents_hold_and_twist_commands(self):
+    def test_one_stale_joint_blocks_only_its_group_not_other_holds_or_twists(self):
         client = self._make_client("ffw_sg2_rev1")
         action_keys = list(client._action_keys)
         self._seed_joint_state(client)
@@ -405,9 +438,78 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, stale_name):
             client.publish_current_pose_hold(action_keys, duration_s=0.1)
 
-        self.assertTrue(
-            all(not publisher.messages for publisher in client._command_publishers.values())
-        )
+        for key, group in client._action_groups.items():
+            messages = client._command_publishers[f"leader_{key}"].messages
+            self.assertEqual(len(messages), 0 if stale_name in group.get("joint_names", []) else 1)
+
+    def test_twist_failure_does_not_skip_position_holds_or_later_twists(self):
+        client = self._make_client("ffw_sg2_rev1")
+        self._seed_joint_state(client)
+        mobile = next(k for k, group in client._action_groups.items()
+                      if group["msg_type"] == "geometry_msgs/msg/Twist")
+        client._action_groups["second_base"] = dict(client._action_groups[mobile])
+        client._command_publishers["leader_second_base"] = FakePublisher()
+        failing = client._command_publishers[f"leader_{mobile}"]
+        failing.publish = mock.Mock(side_effect=RuntimeError("transport failed"))
+        with self.assertRaisesRegex(RuntimeError, mobile):
+            client.publish_current_pose_hold(list(client._action_groups))
+        failing.publish.assert_called_once()
+        for key, publisher in client._command_publishers.items():
+            if key != f"leader_{mobile}":
+                self.assertEqual(len(publisher.messages), 1, key)
+
+    def test_missing_publishers_do_not_skip_other_groups(self):
+        for missing_key in ("arm_left", "mobile"):
+            with self.subTest(key=missing_key):
+                client = self._make_client("ffw_sg2_rev1")
+                self._seed_joint_state(client)
+                client._command_publishers.pop(f"leader_{missing_key}")
+                with self.assertRaisesRegex(RuntimeError, f"{missing_key}.*publisher unavailable"):
+                    client.publish_current_pose_hold()
+                self.assertTrue(all(len(p.messages) == 1 for p in client._command_publishers.values()))
+
+    def test_multiple_hold_failures_are_aggregated_and_retry_can_succeed(self):
+        client = self._make_client("ffw_sg2_rev1")
+        self._seed_joint_state(client)
+        failing = client._command_publishers["leader_arm_left"]
+        original_publish = failing.publish
+        failing.publish = mock.Mock(side_effect=RuntimeError("arm transport failed"))
+        bad_name = client._action_groups["arm_right"]["joint_names"][0]
+        client._joint_positions_by_name[bad_name] = float("nan")
+        with self.assertRaises(RuntimeError) as result:
+            client.publish_current_pose_hold()
+        self.assertIn("arm_left: arm transport failed", str(result.exception))
+        self.assertIn("arm_right: current joint state contains non-finite", str(result.exception))
+        for key in ("head", "lift", "mobile"):
+            self.assertEqual(len(client._command_publishers[f"leader_{key}"].messages), 1)
+        failing.publish = original_publish
+        self._seed_joint_state(client)
+        self.assertIsNone(client.publish_current_pose_hold())
+
+    def test_missing_joint_state_does_not_block_other_position_groups(self):
+        client = self._make_client("ffw_sg2_rev1")
+        self._seed_joint_state(client)
+        name = client._action_groups["arm_left"]["joint_names"][0]
+        del client._joint_positions_by_name[name]
+        with self.assertRaisesRegex(RuntimeError, name):
+            client.publish_current_pose_hold()
+        for key, publisher in client._command_publishers.items():
+            self.assertEqual(len(publisher.messages), 0 if key == "leader_arm_left" else 1)
+
+    def test_partial_initial_sync_failure_uses_independent_hold_recovery(self):
+        client = self._make_client("ffw_sg2_rev1")
+        self._seed_joint_state(client)
+        keys = list(client._action_keys)
+        failing = client._command_publishers["leader_arm_left"]
+        failing.publish = mock.Mock(side_effect=RuntimeError("arm transport failed"))
+        with self.assertRaisesRegex(RuntimeError, "arm transport failed"):
+            client.publish_initial_pose_sync(np.ones(self._action_dimension(client, keys)), keys)
+        self.assertEqual(failing.publish.call_count, 2)
+        for key in ("arm_right", "head", "lift"):
+            point = client._command_publishers[f"leader_{key}"].messages[-1]["points"][0]
+            self.assertEqual(point.time_from_start.nanosec, 100_000_000)
+        mobile = client._command_publishers["leader_mobile"].messages[-1]
+        self.assertEqual(mobile["linear"].x, 0.)
 
     def test_invalid_action_layout_is_rejected_before_publish(self):
         client = self._make_client("omy_f3m")
