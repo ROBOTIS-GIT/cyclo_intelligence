@@ -45,6 +45,10 @@ Environment overrides:
 from __future__ import annotations
 
 import asyncio
+import csv
+import hashlib
+import io
+from datetime import datetime, timezone
 import importlib.util
 import json
 import logging
@@ -62,7 +66,7 @@ from typing import Dict, List, Literal, Optional
 import docker
 from docker.errors import DockerException, ImageNotFound, NotFound
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Tests load this file directly under the synthetic module name
@@ -1296,6 +1300,162 @@ app = FastAPI(
 )
 
 _include_router_with_eager_routes(app, navigation_router)
+
+
+# Inference trial results share the existing API and persistent workspace.
+_TRIAL_RESULTS_DIR = Path("/workspace/inference_results")
+_TRIAL_RESULTS_LOCK = threading.Lock()
+_TRIAL_FIELDS = ["try", "result", "created_at", "updated_at", "model_path"]
+
+
+class TrialResultRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=4096)
+    result: Optional[Literal["success", "fail"]] = None
+    trial: Optional[int] = Field(default=None, alias="try", ge=1)
+    tries: Optional[List[int]] = Field(default=None, max_length=10000)
+    revision: Optional[str] = Field(default=None, max_length=64)
+
+
+def _trial_file(model: str, create: bool = False) -> Optional[Path]:
+    model = model.strip().rstrip("/")
+    if not model:
+        raise HTTPException(400, "Select a model first")
+    # Keep one filename per full model path, including after all rows are deleted.
+    with _TRIAL_RESULTS_LOCK:
+        index_path = _TRIAL_RESULTS_DIR / "files.json"
+        index = json.loads(index_path.read_text()) if index_path.exists() else {}
+        if model in index:
+            name = index[model]
+            if not isinstance(name, str) or Path(name).name != name or not name.endswith(".csv"):
+                raise HTTPException(500, "Invalid trial history index")
+            return _TRIAL_RESULTS_DIR / name
+        legacy_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:]
+        digest = hashlib.sha256(model.encode()).hexdigest()[:16]
+        legacy = _TRIAL_RESULTS_DIR / f"{legacy_name}_{digest}.csv"
+        if not create and not legacy.exists():
+            return None
+        when = datetime.now().astimezone()
+        if legacy.exists():
+            rows = _read_trials(legacy)
+            when = (datetime.fromisoformat(rows[0]["created_at"]).astimezone() if rows
+                    else datetime.fromtimestamp(legacy.stat().st_mtime).astimezone())
+        model_path = Path(model)
+        label = model_path.parent.parent.name if model_path.parent.name == "checkpoints" else model_path.name
+        label = re.sub(r"[^a-zA-Z0-9_.-]", "_", label)[:120].strip(".") or "model"
+        name = f"{label}_{when.strftime('%Y%m%d_%H%M%S')}.csv"
+        if name in index.values() or (_TRIAL_RESULTS_DIR / name).exists():
+            name = f"{label}_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S%f')}.csv"
+        _TRIAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = _TRIAL_RESULTS_DIR / name
+        if legacy.exists():
+            legacy.rename(path)
+        index[model] = name
+        temporary = index_path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(index, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(index_path)
+        return path
+
+
+def _read_trials(path: Optional[Path]) -> list:
+    if path is None or not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _write_trials(path: Path, rows: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_TRIAL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def _trial_revision(rows: list) -> str:
+    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+
+
+def _trial_response(path: Optional[Path], rows: list) -> dict:
+    return {"rows": rows, "file": str(path) if path else "", "revision": _trial_revision(rows)}
+
+
+def _check_trial_revision(body: TrialResultRequest, rows: list) -> None:
+    # Deletion renumbers trials, so edits must refer to the snapshot the UI saw.
+    if body.revision != _trial_revision(rows):
+        raise HTTPException(409, "Trial history changed. Refresh and try again.")
+
+
+@app.get("/try-results")
+def get_trial_results(response: Response, model: str, download: bool = False):
+    response.headers["Cache-Control"] = "no-store"
+    path = _trial_file(model)
+    with _TRIAL_RESULTS_LOCK:
+        rows = _read_trials(path)
+    if download:
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=_TRIAL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+        filename = path.name if path else "inference_results.csv"
+        return Response(output.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                 "Cache-Control": "no-store"})
+    return _trial_response(path, rows)
+
+
+@app.post("/try-results")
+def add_trial_result(body: TrialResultRequest):
+    if body.result is None:
+        raise HTTPException(400, "Select success or fail")
+    path = _trial_file(body.model, create=True)
+    now = datetime.now(timezone.utc).isoformat()
+    with _TRIAL_RESULTS_LOCK:
+        rows = _read_trials(path)
+        rows.append(dict(zip(_TRIAL_FIELDS, [str(len(rows) + 1), body.result, now, now,
+                                              body.model.strip().rstrip("/")])))
+        _write_trials(path, rows)
+    return _trial_response(path, rows)
+
+
+@app.patch("/try-results")
+def edit_trial_result(body: TrialResultRequest):
+    if body.trial is None or body.result is None:
+        raise HTTPException(400, "Select a trial and result")
+    path = _trial_file(body.model)
+    with _TRIAL_RESULTS_LOCK:
+        rows = _read_trials(path)
+        row = next((row for row in rows if row["try"] == str(body.trial)), None)
+        if row is None:
+            raise HTTPException(404, "Trial not found")
+        _check_trial_revision(body, rows)
+        row.update(result=body.result, updated_at=datetime.now(timezone.utc).isoformat())
+        _write_trials(path, rows)
+    return _trial_response(path, rows)
+
+
+@app.delete("/try-results")
+def delete_trial_results(body: TrialResultRequest):
+    if not body.tries or any(number < 1 for number in body.tries):
+        raise HTTPException(400, "Select trials to delete")
+    path = _trial_file(body.model)
+    if path is None:
+        raise HTTPException(404, "Model history not found")
+    targets = {str(number) for number in body.tries}
+    with _TRIAL_RESULTS_LOCK:
+        rows = _read_trials(path)
+        _check_trial_revision(body, rows)
+        rows = [row for row in rows if row["try"] not in targets]
+        for number, row in enumerate(rows, start=1):
+            row["try"] = str(number)
+        _write_trials(path, rows)
+    return _trial_response(path, rows)
 
 
 @app.get("/health", response_model=HealthResponse)

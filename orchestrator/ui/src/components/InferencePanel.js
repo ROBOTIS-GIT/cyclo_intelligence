@@ -29,6 +29,7 @@ import {
 } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
+import InferenceTryResults from './InferenceTryResults';
 import PolicyParameterFields from './PolicyParameterFields';
 import SavedPoseControlPanel from './SavedPoseControlPanel';
 import PolicyBackendControl from './PolicyBackendControl';
@@ -561,6 +562,7 @@ const InferencePanel = () => {
       </div>
 
       <SavedPoseControlPanel />
+      {isRobotMode && <InferenceTryResults />}
       <PolicyParameterFields
         model={selectedPolicy}
         info={info}

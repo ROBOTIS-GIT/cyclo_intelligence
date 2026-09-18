@@ -1,0 +1,10 @@
+.saved-pose-actions {
+  container-type: inline-size;
+  container-name: saved-pose-actions;
+}
+
+@container saved-pose-actions (max-width: 199px) {
+  .saved-pose-action-icon {
+    display: none;
+  }
+}

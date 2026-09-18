@@ -68,6 +68,131 @@ _GROOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["groot"]
 _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
 
 
+@pytest.fixture
+def trial_client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(app, "_TRIAL_RESULTS_DIR", tmp_path)
+    with TestClient(app.app) as client:
+        yield client
+
+
+def test_trial_results_crud_and_persistent_model_isolation(trial_client, tmp_path):
+    client = trial_client
+    model = "/models/run/checkpoints/100000"
+    empty = client.get("/try-results", params={"model": model})
+    assert empty.status_code == 200 and empty.json()["rows"] == []
+    assert empty.headers["cache-control"] == "no-store"
+    assert not list(tmp_path.iterdir())
+    for result in ["success", "fail", "success"]:
+        response = client.post("/try-results", json={"model": model, "result": result})
+        assert response.status_code == 200
+    original = response.json()
+    assert Path(original["file"]).name.startswith("run_")
+    edited = client.patch("/try-results", json={
+        "model": model, "try": 2, "result": "success", "revision": original["revision"],
+    })
+    assert edited.status_code == 200
+    assert edited.json()["rows"][1]["result"] == "success"
+    assert edited.json()["rows"][1]["created_at"] == original["rows"][1]["created_at"]
+    other = client.post("/try-results", json={"model": "/models/other", "result": "fail"}).json()
+    assert other["file"] != original["file"]
+    deleted = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1, 3], "revision": edited.json()["revision"],
+    })
+    assert deleted.status_code == 200
+    assert [row["try"] for row in deleted.json()["rows"]] == ["1"]
+    assert deleted.json()["rows"][0]["created_at"] == original["rows"][1]["created_at"]
+    added = client.post("/try-results", json={"model": model + "/", "result": "fail"}).json()
+    assert added["file"] == original["file"]
+    assert [row["try"] for row in added["rows"]] == ["1", "2"]
+    assert client.get("/try-results", params={"model": model}).json() == added
+    assert client.get("/try-results", params={"model": "/models/other"}).json() == other
+    exported = client.get("/try-results", params={"model": model, "download": True})
+    assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
+    assert "1,success" in exported.text and "2,fail" in exported.text
+    assert len(list(tmp_path.glob("*.csv"))) == 2
+    cleared = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1, 2], "revision": added["revision"],
+    }).json()
+    assert cleared["rows"] == [] and cleared["file"] == original["file"]
+    fresh = client.post("/try-results", json={"model": model, "result": "success"}).json()
+    assert fresh["rows"][0]["try"] == "1" and fresh["file"] == original["file"]
+    assert json.loads((tmp_path / "files.json").read_text())[model] == Path(original["file"]).name
+
+
+def test_trial_edits_and_deletes_reject_stale_or_missing_revision(trial_client):
+    client = trial_client
+    model = "/models/a"
+    stale = client.post("/try-results", json={"model": model, "result": "success"}).json()
+    current = client.post("/try-results", json={"model": model, "result": "fail"}).json()
+    for revision in [None, stale["revision"]]:
+        assert client.patch("/try-results", json={
+            "model": model, "try": 1, "result": "fail", "revision": revision,
+        }).status_code == 409
+        assert client.request("DELETE", "/try-results", json={
+            "model": model, "tries": [1], "revision": revision,
+        }).status_code == 409
+    deleted = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1], "revision": current["revision"],
+    }).json()
+    # Old try 1 now refers to a different row; never apply an old edit to it.
+    assert client.patch("/try-results", json={
+        "model": model, "try": 1, "result": "success", "revision": current["revision"],
+    }).status_code == 409
+    assert client.get("/try-results", params={"model": model}).json() == deleted
+
+
+def test_trial_results_invalid_requests_do_not_write(trial_client, tmp_path):
+    client = trial_client
+    assert client.get("/try-results", params={"model": " / "}).status_code == 400
+    assert client.post("/try-results", json={"model": "/models/a", "result": "invalid"}).status_code == 422
+    assert client.post("/try-results", json={"model": "/models/a"}).status_code == 400
+    assert client.patch("/try-results", json={"model": "/models/a", "try": 1, "result": "fail"}).status_code == 404
+    assert client.request("DELETE", "/try-results", json={"model": "/models/a"}).status_code == 400
+    assert client.request("DELETE", "/try-results", json={"model": "/models/a", "tries": [0]}).status_code == 400
+    assert not list(tmp_path.iterdir())
+
+
+def test_trial_concurrent_appends_do_not_lose_results(trial_client):
+    from concurrent.futures import ThreadPoolExecutor
+    def append(_):
+        return app.add_trial_result(app.TrialResultRequest(model="/models/a", result="success"))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(append, range(24)))
+    history = trial_client.get("/try-results", params={"model": "/models/a"}).json()
+    assert [row["try"] for row in history["rows"]] == [str(n) for n in range(1, 25)]
+    assert len({result["file"] for result in results}) == 1
+
+
+def test_trial_write_failure_preserves_existing_csv(trial_client, monkeypatch):
+    model = "/models/a"
+    original = trial_client.post("/try-results", json={"model": model, "result": "success"}).json()
+    def fail_write(_):
+        raise OSError("disk full")
+    with monkeypatch.context() as context:
+        context.setattr(app.os, "fsync", fail_write)
+        with pytest.raises(OSError, match="disk full"):
+            app.add_trial_result(app.TrialResultRequest(model=model, result="fail"))
+    assert trial_client.get("/try-results", params={"model": model}).json() == original
+
+
+def test_trial_files_and_legacy_records_remain_portable(trial_client, tmp_path):
+    import hashlib
+    import re
+    model = "/models/legacy-act"
+    legacy = tmp_path / (re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:] + "_" + hashlib.sha256(model.encode()).hexdigest()[:16] + ".csv")
+    row = {"try": "1", "result": "success", "created_at": "2026-09-18T01:02:03+00:00",
+           "updated_at": "2026-09-18T01:02:03+00:00", "model_path": model}
+    app._write_trials(legacy, [row])
+    migrated = trial_client.get("/try-results", params={"model": model}).json()
+    assert Path(migrated["file"]).name.startswith("legacy-act_")
+    assert migrated["rows"] == [row] and not legacy.exists()
+    assert trial_client.get("/try-results", params={"model": model}).json() == migrated
+    # Model text is an identity, never a path to write directly.
+    traversal = trial_client.post("/try-results", json={"model": "../../outside", "result": "fail"}).json()
+    assert Path(traversal["file"]).parent == tmp_path
+
+
 def test_navigation_parses_binary_pgm():
     data = b"P5\n# map\n2 2\n255\n" + bytes([0, 127, 254, 255])
 

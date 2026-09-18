@@ -21,6 +21,7 @@ jest.mock('../hooks/useRosServiceCaller', () => ({
 }));
 
 jest.mock('./InferenceModelSelector', () => () => <div />);
+jest.mock('./InferenceTryResults', () => () => <section aria-label="Try Results" />);
 jest.mock('./PolicyBackendControl', () => () => <div />);
 jest.mock('./TrtEngineControl', () => () => <div />);
 jest.mock('./FileBrowserModal', () => () => null);
@@ -111,6 +112,7 @@ describe('InferencePanel initial pose sync settings', () => {
   test('preserves but disables initial pose sync in simulation mode', () => {
     renderPanel({ inferenceMode: 'simulation' });
 
+    expect(screen.queryByRole('region', { name: 'Try Results' })).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
@@ -122,6 +124,7 @@ describe('InferencePanel initial pose sync settings', () => {
   test('allows initial pose sync editing for an idle real robot session', () => {
     renderPanel({ inferenceMode: 'robot' });
 
+    expect(screen.getByRole('region', { name: 'Try Results' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeEnabled();
     expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))

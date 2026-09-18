@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdHome, MdSave, MdStop } from 'react-icons/md';
+import { MdExpandLess, MdExpandMore, MdHome, MdSave, MdStop } from 'react-icons/md';
 import { InferencePhase } from '../constants/taskPhases';
 import { selectInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import './SavedPoseControlPanel.css';
 
 export default function SavedPoseControlPanel() {
   const robotType = useSelector((state) => state.tasks.robotType);
@@ -17,6 +18,7 @@ export default function SavedPoseControlPanel() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [durationDraft, setDurationDraft] = useState(null);
+  const [expanded, setExpanded] = useState(false);
   const editingDuration = useRef(false);
   const returnButton = useRef(null);
   const pendingRef = useRef(false);
@@ -37,6 +39,7 @@ export default function SavedPoseControlPanel() {
     setPending(false);
     setError('');
     setDurationDraft(null);
+    setExpanded(false);
     editingDuration.current = false;
     if (!enabled) return undefined;
     const load = async () => {
@@ -108,14 +111,14 @@ export default function SavedPoseControlPanel() {
   const unavailable = !validStatus || !status.connected || pending || returning;
   const inactive = [InferencePhase.READY, InferencePhase.PAUSED].includes(phase);
   const displayError = error || status?.error;
-  const buttonClass = 'flex h-8 items-center justify-center gap-1 rounded-md text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400';
+  const buttonClass = 'flex h-8 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-md text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400';
   return (
     <section aria-label="Saved Initial Pose" className="mb-2.5">
       <div className="flex items-center">
         <span className="w-28 flex-shrink-0 text-sm font-medium text-gray-600">Initial Pose</span>
-        <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_4.25rem_minmax(0,1fr)] gap-1">
+        <div className="saved-pose-actions grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_3rem_minmax(0,1.3fr)_2rem] gap-1">
           <button type="button" aria-label="Save Initial Pose" disabled={unavailable || !inactive}
-            onClick={() => send(1)} className={`${buttonClass} bg-emerald-600 hover:bg-emerald-700`}><MdSave size={16} /> Save</button>
+            onClick={() => send(1)} className={`${buttonClass} bg-emerald-600 hover:bg-emerald-700`}><MdSave size={16} className="saved-pose-action-icon shrink-0" /><span>Save</span></button>
           <label title="Return duration (seconds)" className="flex h-8 min-w-0 items-center gap-0.5 text-xs text-gray-500">
             <input type="number" aria-label="Return duration (seconds)" min="1" max="60" step="0.5"
               value={durationDraft ?? duration} disabled={!validStatus || pending || returning || !inactive}
@@ -126,15 +129,23 @@ export default function SavedPoseControlPanel() {
                 if (event.relatedTarget !== returnButton.current) commitDuration();
               }}
               onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
-              className="h-8 w-full min-w-0 rounded-md border border-gray-300 px-1 text-xs text-gray-700 disabled:bg-gray-100 disabled:text-gray-400" />
-            <span>s</span>
+              className="h-8 w-full min-w-0 appearance-none rounded-md border border-gray-300 px-1 text-xs text-gray-700 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none disabled:bg-gray-100 disabled:text-gray-400" />
+            <span className="shrink-0">s</span>
           </label>
           <button ref={returnButton} type="button"
             aria-label={returning ? 'Stop pose return' : 'Return to Saved Pose'}
             disabled={returning ? pending : unavailable || !status?.saved || !inactive || !validDuration}
             onClick={returning ? () => send(3) : returnToPose}
             className={`${buttonClass} ${returning ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-500 hover:bg-blue-600'}`}>
-            {returning ? <><MdStop size={16} /> Stop</> : <><MdHome size={16} /> Return</>}
+            {returning ? <><MdStop size={16} className="saved-pose-action-icon shrink-0" /><span>Stop</span></> : <><MdHome size={16} className="saved-pose-action-icon shrink-0" /><span>Return</span></>}
+          </button>
+          <button type="button" aria-label="Toggle saved joint values"
+            aria-expanded={expanded} aria-controls="saved-joint-values"
+            title={expanded ? 'Hide saved joint values' : 'Show saved joint values'}
+            disabled={!validStatus || !status?.saved}
+            onClick={() => setExpanded(value => !value)}
+            className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:text-gray-300">
+            {expanded ? <MdExpandLess size={20} /> : <MdExpandMore size={20} />}
           </button>
         </div>
       </div>
@@ -143,10 +154,8 @@ export default function SavedPoseControlPanel() {
           {displayError}
         </div>
       )}
-      {validStatus && status.saved && (
-        <details className="mt-2 text-xs text-gray-500">
-          <summary className="cursor-pointer select-none py-1 font-medium">Saved Joint Values</summary>
-          <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-gray-200">
+      {expanded && validStatus && status.saved && (
+          <div id="saved-joint-values" className="mt-2 max-h-48 overflow-auto rounded-md border border-gray-200 text-gray-500">
             <table className="w-full text-[10px]">
               <thead className="sticky top-0 bg-gray-50"><tr>
                 <th className="px-2 py-1 text-left font-medium">Joint</th>
@@ -160,7 +169,6 @@ export default function SavedPoseControlPanel() {
               ))}</tbody>
             </table>
           </div>
-        </details>
       )}
     </section>
   );

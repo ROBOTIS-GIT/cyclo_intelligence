@@ -56,6 +56,35 @@ test('still displays backend errors and keeps stop available', async () => {
   expect(screen.getByRole('button', { name: 'Stop pose return' })).toBeEnabled();
 });
 
+test('toggles saved joint values from the control row without sending a command', async () => {
+  const { command } = await setup();
+  const toggle = screen.getByRole('button', { name: 'Toggle saved joint values' });
+  expect(toggle.parentElement).toBe(screen.getByRole('button', { name: 'Return to Saved Pose' }).parentElement);
+  expect(screen.queryByText('Saved Joint Values')).not.toBeInTheDocument();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('table')).toBeInTheDocument();
+  expect(screen.getByText('0.1000 rad')).toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(command).toHaveBeenCalledTimes(1);
+});
+
+test('disables the joint values toggle without a saved pose and resets on robot change', async () => {
+  const { store } = await setup(InferencePhase.READY, { status: { saved: false } });
+  const toggle = screen.getByRole('button', { name: 'Toggle saved joint values' });
+  expect(toggle).toBeDisabled();
+  act(() => store.dispatch(setRobotPoseStatus({ saved: true })));
+  fireEvent.click(toggle);
+  expect(screen.getByRole('table')).toBeInTheDocument();
+  await act(async () => store.dispatch(selectRobotType('other')));
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(toggle).toBeDisabled();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+});
+
 test('queries once and uses backend status instead of browser polling', async () => {
   jest.useFakeTimers();
   const { store, command } = await setup();
@@ -172,7 +201,7 @@ test('uses the same button for return and stop, changing back only on backend st
   expect(screen.getByRole('button', { name: 'Stop pose return' })).toBe(button);
   expect(button.parentElement).toBe(row);
   expect(button).toHaveTextContent('Stop');
-  expect(screen.getAllByRole('button')).toHaveLength(2);
+  expect(screen.getAllByRole('button')).toHaveLength(3);
   fireEvent.click(button);
   await waitFor(() => expect(command).toHaveBeenCalledWith(3, 'test'));
   await waitFor(() => expect(button).toBeEnabled());
