@@ -27,7 +27,7 @@ def test_all_model_defaults_match_previous_numerics(path, rotation):
     image = np.random.default_rng(5).integers(0, 256, (12, 20, 3), dtype=np.uint8)
     engine._robot.get_images = lambda format: {"head": image}
     engine._input_pipeline_config = InputPipelineConfig.from_user_config(config, {"input_features": features}, path)
-    # Frozen pre-migration defaults, deliberately independent of the new YAML.
+    # Numerical references, including explicitly changed model presets.
     prior = {"backend": "torch", "operations": [{"type": "identity"}]}
     if path.stem == "diffusion":
         prior = {"backend": "opencv", "operations": [
@@ -35,12 +35,39 @@ def test_all_model_defaults_match_previous_numerics(path, rotation):
     elif path.stem == "multi_task_dit":
         prior = {"backend": "torch", "operations": [
             {"type": "resize", "size": [224, 224], "interpolation": "bilinear", "antialias": True}]}
+    elif path.stem == "groot":
+        prior = {"backend": "torch", "operations": [
+            {"type": "resize", "size": [256, 256], "interpolation": "bilinear", "antialias": True}]}
     previous = image_preprocessing.ImagePreprocessing(prior, features)
     batch = engine._build_observation("pick")
     torch.testing.assert_close(batch[key], previous.apply(image, key, rotation), rtol=0, atol=0)
     torch.testing.assert_close(batch["observation.state"], torch.tensor([[1., 2.]]))
     assert batch["task"] == ["pick"]
     assert engine._input_evaluation.run("after", batch) == batch
+
+
+def test_groot_preset_aligns_unequal_cameras_before_saved_processor():
+    from torchvision.transforms.v2 import Resize
+
+    from lerobot_engine.input_config import ImageOperations
+
+    settings = yaml.safe_load((CONFIG_DIR / "groot.yaml").read_text())["preprocessing"]
+    features = {
+        "observation.images.head": {"shape": [3, 376, 672]},
+        "observation.images.wrist": {"shape": [3, 640, 480]},
+    }
+    transform = ImageOperations(settings["images"], {}, features)
+    training_resize = Resize([256, 256], antialias=True)
+    views = []
+    for key, feature in features.items():
+        image = np.random.default_rng(7).integers(
+            0, 256, (*feature["shape"][1:], 3), dtype=np.uint8,
+        )
+        actual = transform.apply(image, key)
+        raw = torch.from_numpy(image.copy()).permute(2, 0, 1).float().div(255)
+        torch.testing.assert_close(actual[0], training_resize(raw), rtol=0, atol=0)
+        views.append(actual.permute(0, 2, 3, 1).numpy()[:, None])
+    assert np.stack(views, axis=2).shape == (1, 1, 2, 256, 256, 3)
 
 
 def test_yaml_edit_only_applies_to_new_load(tmp_path):
