@@ -353,7 +353,7 @@ export default function PolicyBackendControl({ serviceType, runtime = null }) {
   const pullBarWidth = `${pullPercent ?? layerPercent ?? (isPulling ? 8 : 0)}%`;
 
   return (
-    <div className="mb-3 border-t border-b border-gray-200 py-2">
+    <div className="mb-3">
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="text-sm font-semibold text-gray-700">{label}</div>
         <div className="flex items-center gap-1.5">

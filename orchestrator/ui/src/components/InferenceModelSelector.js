@@ -99,7 +99,7 @@ const InferenceModelSelector = ({ readonly = false }) => {
       <span className={classLabel}>Model</span>
       <select
         className={clsx(
-          'flex-1', 'h-8', 'px-2', 'border', 'border-gray-300', 'rounded-md',
+          'flex-1', 'min-w-0', 'h-8', 'px-2', 'border', 'border-gray-300', 'rounded-md',
           'focus:outline-none', 'focus:ring-2', 'focus:ring-blue-500',
           'focus:border-transparent',
           {

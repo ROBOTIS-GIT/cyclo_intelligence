@@ -354,6 +354,7 @@ const initialState = {
   // record-session state.
   recordStatus: {
     taskName: 'idle',
+    taskType: '',
     running: false,
     recordPhase: RecordPhase.READY,
     progress: 0,
@@ -383,6 +384,7 @@ const initialState = {
   // Inference-side snapshot from /task/inference_status (orchestrator
   // direct, refreshed by one backend monitor).
   inferenceStatus: {
+    recordingSessionId: '',
     inferencePhase: InferencePhase.READY,
     error: '',
     topicReceived: false,

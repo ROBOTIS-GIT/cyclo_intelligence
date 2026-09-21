@@ -32,6 +32,7 @@ import InferenceModelSelector from './InferenceModelSelector';
 import InferenceTryResults from './InferenceTryResults';
 import PolicyParameterFields from './PolicyParameterFields';
 import SavedPoseControlPanel from './SavedPoseControlPanel';
+import InferenceRecordingControls from './InferenceRecordingControls';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -64,6 +65,7 @@ const InferencePanel = () => {
   const taskInfoSync = useSelector((state) => state.tasks.inferenceTaskInfoSync);
   const robotType = useSelector((state) => state.tasks.robotType);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
   const { catalog, status: catalogStatus, error: catalogError, retry: retryCatalog } = usePolicyCatalog();
   const selectedPolicy = findPolicy(
     catalog,
@@ -502,6 +504,29 @@ const InferencePanel = () => {
         )}
       </div>
 
+      {/* Policy Path */}
+      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
+        <span className={clsx(classLabel, 'pt-2')}>Policy Path</span>
+        <div className="flex flex-row items-start gap-2 flex-1 min-w-0">
+          <textarea
+            className={classPolicyPathTextarea}
+            value={info.policyPath || ''}
+            onChange={(e) => handleChange('policyPath', e.target.value)}
+            disabled={!isEditable}
+            placeholder="Enter Policy Path or Repo ID"
+          />
+          <button
+            type="button"
+            onClick={() => setShowPolicyBrowser(true)}
+            disabled={!isEditable}
+            className="flex items-center justify-center w-9 h-9 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            aria-label="Browse for policy model folder"
+          >
+            <MdFolderOpen className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
       {/* Task Instruction is shown when the selected catalog model requires it. */}
       {showInstruction && (
         <>
@@ -538,31 +563,6 @@ const InferencePanel = () => {
         </>
       )}
 
-      {/* Policy Path */}
-      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
-        <span className={clsx(classLabel, 'pt-2')}>Policy Path</span>
-        <div className="flex flex-row items-start gap-2 flex-1 min-w-0">
-          <textarea
-            className={classPolicyPathTextarea}
-            value={info.policyPath || ''}
-            onChange={(e) => handleChange('policyPath', e.target.value)}
-            disabled={!isEditable}
-            placeholder="Enter Policy Path or Repo ID"
-          />
-          <button
-            type="button"
-            onClick={() => setShowPolicyBrowser(true)}
-            disabled={!isEditable}
-            className="flex items-center justify-center w-9 h-9 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-            aria-label="Browse for policy model folder"
-          >
-            <MdFolderOpen className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
-
-      <SavedPoseControlPanel />
-      {isRobotMode && <InferenceTryResults />}
       <PolicyParameterFields
         model={selectedPolicy}
         info={info}
@@ -586,7 +586,7 @@ const InferencePanel = () => {
         </>
       )}
 
-      <div className="w-full h-1 my-2 border-t border-gray-300"></div>
+      <hr className="my-2 border-gray-300" />
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -620,57 +620,6 @@ const InferencePanel = () => {
           </button>}
         </div>
       </div>
-
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-          <Tooltip
-            content="Move slowly to the first predicted robot pose before inference."
-            position="bottom"
-          >
-            <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
-          </Tooltip>
-          <span>Slow Start</span>
-        </div>
-        <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
-          <input
-            type="checkbox"
-            className={clsx('w-4 h-4', {
-              'cursor-not-allowed opacity-50': !isEditable || !isRobotMode,
-              'cursor-pointer': isEditable && isRobotMode,
-            })}
-            checked={initialPoseSyncEnabled}
-            onChange={(e) => handleChange('initialPoseSync', e.target.checked)}
-            disabled={!isEditable || !isRobotMode}
-            aria-label="Slow Start"
-          />
-          <span className="text-gray-500">Enable</span>
-        </label>
-      </div>
-
-      {initialPoseSyncEnabled && (
-        <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-          <span className={classLabel}>Duration (s)</span>
-          <input
-            className={clsx(classTextInput, {
-              'bg-gray-100 cursor-not-allowed': !isEditable || !isRobotMode,
-            })}
-            type="number"
-            step="0.5"
-            min="1"
-            max="60"
-            value={info.initialPoseSyncDurationS ?? 5.0}
-            onChange={(e) => {
-              const value = e.target.value;
-              handleChange(
-                'initialPoseSyncDurationS',
-                value === '' ? '' : Number(value)
-              );
-            }}
-            disabled={!isEditable || !isRobotMode}
-            aria-label="Slow Start duration"
-          />
-        </div>
-      )}
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -731,6 +680,68 @@ const InferencePanel = () => {
             </div>
           ))}
         </div>
+      )}
+
+      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+          <Tooltip
+            content="Move slowly to the first predicted robot pose before inference."
+            position="bottom"
+          >
+            <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
+          </Tooltip>
+          <span>Slow Start</span>
+        </div>
+        <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
+          <input
+            type="checkbox"
+            className={clsx('w-4 h-4', {
+              'cursor-not-allowed opacity-50': !isEditable || !isRobotMode,
+              'cursor-pointer': isEditable && isRobotMode,
+            })}
+            checked={initialPoseSyncEnabled}
+            onChange={(e) => handleChange('initialPoseSync', e.target.checked)}
+            disabled={!isEditable || !isRobotMode}
+            aria-label="Slow Start"
+          />
+          <span className="text-gray-500">Enable</span>
+        </label>
+      </div>
+
+      {initialPoseSyncEnabled && (
+        <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+          <span className={classLabel}>Duration (s)</span>
+          <input
+            className={clsx(classTextInput, {
+              'bg-gray-100 cursor-not-allowed': !isEditable || !isRobotMode,
+            })}
+            type="number"
+            step="0.5"
+            min="1"
+            max="60"
+            value={info.initialPoseSyncDurationS ?? 5.0}
+            onChange={(e) => {
+              const value = e.target.value;
+              handleChange(
+                'initialPoseSyncDurationS',
+                value === '' ? '' : Number(value)
+              );
+            }}
+            disabled={!isEditable || !isRobotMode}
+            aria-label="Slow Start duration"
+          />
+        </div>
+      )}
+
+      {(isRobotMode || poseReturning) && <hr className="my-2 border-gray-300" />}
+      <SavedPoseControlPanel />
+
+      {isRobotMode && (
+        <>
+          <hr className="my-2 border-gray-300" />
+          <InferenceRecordingControls />
+          <InferenceTryResults />
+        </>
       )}
 
       <FileBrowserModal

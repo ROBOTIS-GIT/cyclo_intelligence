@@ -47,6 +47,17 @@ describe('pose command connection lifetime', () => {
     expect(ros.listenerCount('close')).toBe(0);
   });
 
+  test('folder command uses the existing TaskInfo field with command 26', async () => {
+    const hook = setup();
+    const request = hook.current.sendRecordCommand('set_inference_record_folder', { recordingSessionId: 'existing' });
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const payload = ros.callOnConnection.mock.calls[0][0];
+    expect(payload.args.command).toBe(26);
+    expect(payload.args.task_info.task_num).toBe('existing');
+    ros.emit(payload.id, { values: { success: true } });
+    await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+  });
+
   test.each([2, 4])('sends duration for pose command %i', async (command) => {
     const hook = setup();
     const request = hook.current.sendRobotPoseCommand(command, 'test_robot', 8.5);

@@ -5,7 +5,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import taskReducer from '../features/tasks/taskSlice';
-import { InferencePhase } from '../constants/taskPhases';
+import { InferencePhase, RecordPhase } from '../constants/taskPhases';
 import { useRosTopicSubscription } from './useRosTopicSubscription';
 
 jest.mock('roslib', () => ({ __esModule: true, default: { Topic: jest.fn() } }));
@@ -16,7 +16,7 @@ jest.mock('./useRosServiceCaller', () => ({
   useRosServiceCaller: () => ({ getRobotInfo: jest.fn() }),
 }));
 jest.mock('../store/store', () => ({
-  __esModule: true, default: { getState: () => ({ tasks: {} }) },
+  __esModule: true, default: { getState: () => ({ tasks: { inferenceStatus: {} }, ui: {} }) },
 }));
 jest.mock('react-hot-toast', () => ({
   __esModule: true, default: { error: jest.fn() },
@@ -87,6 +87,23 @@ describe('central inference status subscription', () => {
     });
   });
 
+  test('recording status identifies its owner and disconnect invalidates it without clearing recording', async () => {
+    const { store, result } = await subscribe();
+    await act(async () => { await result.current.subscribeToRecordingStatus(); });
+    act(() => callback({
+      record_phase: RecordPhase.RECORDING, proceed_time: 10,
+      task_info: { task_type: 'inference', task_name: 'inference' },
+    }));
+    expect(store.getState().tasks.recordStatus).toMatchObject({
+      taskType: 'inference', recordPhase: RecordPhase.RECORDING,
+      running: true, topicReceived: true,
+    });
+    act(() => result.current.cleanup());
+    expect(store.getState().tasks.recordStatus).toMatchObject({
+      taskType: 'inference', running: true, topicReceived: false,
+    });
+  });
+
   test('pose status expires without clearing a pending return and recovers after restart', async () => {
     const { store, result } = await subscribe();
     await act(async () => { await result.current.subscribeToPoseStatus(); });
@@ -124,5 +141,19 @@ describe('central inference status subscription', () => {
     });
     expect(store.getState().tasks.inferenceStatus.loadedModelPath).toBe('/models/running');
     expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(false);
+  });
+
+  test('folder changes do not require an editable settings revision', async () => {
+    const { store } = await subscribe();
+    const status = { inference_phase: InferencePhase.PAUSED, status_known: true,
+      runtime_state: 'paused', source_id: 'backend', has_task_info: true, task_info_revision: 1 };
+    act(() => callback({ ...status, sequence: 1, task_info: { task_type: 'inference', task_num: 'first' } }));
+    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('first');
+    act(() => callback({ ...status, sequence: 2, task_info: { task_type: 'inference', task_num: 'second' } }));
+    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('second');
+    act(() => callback({ ...status, sequence: 1, task_info: { task_type: 'inference', task_num: 'stale' } }));
+    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('second');
+    act(() => callback({ ...status, source_id: 'restarted', sequence: 1, task_info: { task_type: 'inference', task_num: '' } }));
+    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('');
   });
 });

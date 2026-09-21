@@ -44,6 +44,7 @@ const TaskCommand = {
   SET_TASK_INFO: 23,
   CANCEL_SEGMENT: 24,
   GET_INFERENCE_STATUS: 25,
+  SET_INFERENCE_RECORD_FOLDER: 26,
 };
 
 export default TaskCommand;

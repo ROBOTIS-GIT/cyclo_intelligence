@@ -204,6 +204,7 @@ export function useRosTopicSubscription() {
 
     // Unsubscribe from all topics
     unsubscribeFromTopic(recordingStatusTopicRef, 'Recording status');
+    dispatch(setRecordStatus({ topicReceived: false }));
     unsubscribeFromTopic(inferenceStatusTopicRef, 'Inference status');
     unsubscribeFromTopic(poseStatusTopicRef, 'Saved pose status');
     clearTimeout(poseStatusExpiryRef.current);
@@ -309,6 +310,7 @@ export function useRosTopicSubscription() {
           dispatch(
             setRecordStatus({
               taskName: msg.task_info?.task_name || 'idle',
+              taskType: msg.task_info?.task_type || '',
               running: isRunning,
               recordPhase: currentPhase || 0,
               progress: Math.round(encodingProgress),
@@ -509,6 +511,7 @@ export function useRosTopicSubscription() {
             runtimeState: msg.runtime_state || 'unknown',
             loadedModelPath: msg.model_path || '',
             loadedPolicyId: msg.policy_id || '',
+            recordingSessionId: msg.task_info?.task_num || '',
             publishToRobot: Boolean(msg.publish_to_robot),
             sourceId: msg.source_id || '',
             sequence: Number(msg.sequence || 0),

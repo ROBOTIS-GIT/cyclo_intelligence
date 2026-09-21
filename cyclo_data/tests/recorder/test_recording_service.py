@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import RLock
+from unittest.mock import Mock
+import pytest
 from types import ModuleType, SimpleNamespace
 import sys
 
@@ -157,6 +159,91 @@ def _service_with_logger():
     service = RecordingService.__new__(RecordingService)
     service._node = SimpleNamespace(get_logger=lambda: logger)
     return service, logger
+
+
+def test_inference_save_failure_retains_ownership_and_retry_does_not_rewrite_metadata(tmp_path):
+    service, _ = _service_with_logger()
+    service._rosbag = SimpleNamespace(stop_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    service._last_video_stats = {}
+    service._last_camera_info_files = {}
+    service._last_camera_rotations = {}
+    service._last_image_topics = {}
+    service._last_camera_info_topics = {}
+    dm = SimpleNamespace(
+        save_robotis_metadata=Mock(),
+        finish_full_episode=Mock(side_effect=[OSError('disk full'), tmp_path]),
+        stop_recording=Mock(),
+    )
+    service._data_manager = dm
+    request = SimpleNamespace(urdf_path='')
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(OSError, match='disk full'):
+        service._save_inference_episode(request, response, 'save')
+    assert not response.success
+    dm.stop_recording.assert_not_called()
+    assert service._inference_archive_pending
+    service._save_inference_episode(request, response, 'save')
+    assert response.success
+    dm.save_robotis_metadata.assert_called_once()
+    service._rosbag.stop_rosbag.assert_called_once()
+    dm.stop_recording.assert_called_once_with(finish_full_episode=False)
+    assert not service._inference_archive_pending
+
+
+def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path, monkeypatch):
+    import shutil
+    service, _ = _service_with_logger()
+    episode = tmp_path / '4'
+    segment = episode / 'segments/0'
+    segment.mkdir(parents=True)
+    (segment / 'partial.mcap').write_bytes(b'data')
+    service._data_manager = SimpleNamespace(
+        _task_info=SimpleNamespace(task_type='inference'),
+        get_save_rosbag_path=lambda: str(segment),
+        get_current_full_episode_index=lambda: 4,
+        _full_episode_dir=lambda index: tmp_path / str(index),
+        discard_recording=Mock(),
+    )
+    service._rosbag = SimpleNamespace(stop_and_delete_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    original = shutil.rmtree
+    monkeypatch.setattr(shutil, 'rmtree', Mock(side_effect=PermissionError('denied')))
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(PermissionError):
+        service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
+    service._data_manager.discard_recording.assert_not_called()
+    monkeypatch.setattr(shutil, 'rmtree', original)
+    service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
+    assert response.success
+    assert not episode.exists()
+    service._rosbag.stop_and_delete_rosbag.assert_called_once()
+    service._stop_episode_writers.assert_called_once()
+
+
+def test_inference_metadata_failure_keeps_original_video_statistics(tmp_path):
+    service, _ = _service_with_logger()
+    service._rosbag = SimpleNamespace(stop_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    service._last_video_stats = {'cam': {'frames_written': 20}}
+    service._last_camera_info_files = {}
+    service._last_camera_rotations = {}
+    service._last_image_topics = {}
+    service._last_camera_info_topics = {}
+    service._data_manager = SimpleNamespace(
+        save_robotis_metadata=Mock(side_effect=[OSError('disk full'), None]),
+        finish_full_episode=Mock(return_value=tmp_path), stop_recording=Mock())
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(OSError):
+        service._save_inference_episode(SimpleNamespace(), response, 'save')
+    service._save_inference_episode(SimpleNamespace(), response, 'save')
+    service._stop_episode_writers.assert_called_once()
+    service._rosbag.stop_rosbag.assert_called_once()
+    assert response.success
+    assert service._data_manager.save_robotis_metadata.call_args.kwargs['video_stats']['cam']['frames_written'] == 20
 
 
 def test_ensure_data_manager_reuses_same_task_without_candidate_scan(

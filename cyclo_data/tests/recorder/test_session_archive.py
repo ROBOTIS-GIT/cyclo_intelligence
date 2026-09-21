@@ -5,6 +5,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
 import threading
+import pytest
 
 import yaml
 
@@ -88,6 +89,7 @@ def test_inference_save_repo_name_uses_timestamp_metadata(monkeypatch, tmp_path)
 
 
 def test_inference_save_repo_name_avoids_existing_timestamp(monkeypatch, tmp_path):
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
     monkeypatch.setattr(
         "cyclo_data.recorder.session_manager.time.strftime",
         lambda fmt, tm: "20260622_031455",
@@ -100,6 +102,102 @@ def test_inference_save_repo_name_avoids_existing_timestamp(monkeypatch, tmp_pat
     assert repo_name == "Task_20260622_031455_01_inference_MCAP"
     assert task_info.task_num == "20260622_031455_01"
     assert task_info.task_name == "inference"
+
+
+def test_inference_explicit_id_keeps_destination(tmp_path):
+    info = SimpleNamespace(task_type='inference', task_num='existing', task_name='ignored')
+    assert DataManager._make_save_repo_name(tmp_path, info) == 'Task_existing_inference_MCAP'
+    assert info.task_num == 'existing'
+
+
+@pytest.mark.parametrize('task_type', ['inference', 'record'])
+def test_only_record_sessions_search_for_resumable_subtasks(monkeypatch, tmp_path, task_type):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.CPUChecker', _Dummy)
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.DataConverter', _Dummy)
+    monkeypatch.setattr(DataManager, '_find_next_episode_number', lambda self: 9)
+    resume = Mock(return_value=(3, 0))
+    monkeypatch.setattr(DataManager, '_find_next_subtask_position', resume)
+    manager = DataManager(tmp_path, 'test_robot', SimpleNamespace(
+        task_type=task_type, task_num='existing', task_name='test',
+        task_instruction=['pick'], subtask_instruction=[],
+    ))
+
+    if task_type == 'inference':
+        resume.assert_not_called()
+        assert manager._current_full_episode_index == 9
+    else:
+        resume.assert_called_once_with()
+        assert manager._current_full_episode_index == 3
+    assert manager._current_subtask_index == 0
+
+
+def test_inference_skips_empty_and_incomplete_episode_slots(tmp_path):
+    manager = _make_manager(tmp_path, subtask_total=1)
+    manager._task_info.task_type = 'inference'
+    (tmp_path / '3').mkdir()
+    (tmp_path / '8').mkdir()
+    (tmp_path / '8/incomplete.mcap.tmp').write_bytes(b'partial')
+    assert manager._find_next_episode_number() == 9
+
+
+def test_failed_inference_archive_does_not_advance_episode_cursor(tmp_path):
+    manager = _make_manager(tmp_path, subtask_total=1)
+    manager._task_info.task_type = 'inference'
+    manager._current_full_episode_index = 4
+    with pytest.raises(RuntimeError, match='did not produce'):
+        manager.finish_full_episode()
+    assert manager._current_full_episode_index == 4
+
+
+def test_inference_archive_preserves_provenance_and_retries_cleanup(tmp_path, monkeypatch):
+    import shutil
+    manager = _make_manager(tmp_path, subtask_total=1)
+    manager._task_info.task_type = 'inference'
+    segment = _write_segment(tmp_path, full_idx=0, subtask_idx=0, subtask_total=1)
+    info = json.loads((segment / 'episode_info.json').read_text())
+    info['inference'] = {'policy_id': 'lerobot:act', 'policy_path': '/models/a', 'task_instruction': ['pick']}
+    (segment / 'episode_info.json').write_text(json.dumps(info))
+    original = shutil.rmtree
+    def fail_cleanup(path, **kwargs):
+        if Path(path).name == 'segments':
+            raise PermissionError('cleanup denied')
+        return original(path, **kwargs)
+    monkeypatch.setattr(shutil, 'rmtree', fail_cleanup)
+    with pytest.raises(PermissionError):
+        manager._archive_full_episode(0)
+    summary = json.loads((tmp_path / '0/episode_info.json').read_text())
+    assert summary['inference'] == info['inference']
+    monkeypatch.setattr(shutil, 'rmtree', original)
+    manager._archive_full_episode(0)
+    assert not (tmp_path / '0/segments').exists()
+    assert json.loads((tmp_path / '0/episode_info.json').read_text()) == summary
+
+
+def test_inference_archive_retries_partial_split_mcap_move(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path, subtask_total=1)
+    manager._task_info.task_type = 'inference'
+    segment = _write_segment(tmp_path, full_idx=0, subtask_idx=0, subtask_total=1, with_video=False)
+    meta = yaml.safe_load((segment / 'metadata.yaml').read_text())
+    bag = meta['rosbag2_bagfile_information']
+    bag['relative_file_paths'].append('second.mcap')
+    bag['files'].append({**bag['files'][0], 'path': 'second.mcap'})
+    (segment / 'second.mcap').write_bytes(b'second')
+    (segment / 'metadata.yaml').write_text(yaml.safe_dump(meta))
+    original = manager._move_file
+    def fail_second(src, dst):
+        if Path(src).name == 'second.mcap':
+            raise OSError('disk full')
+        return original(src, dst)
+    monkeypatch.setattr(manager, '_move_file', fail_second)
+    with pytest.raises(OSError, match='disk full'):
+        manager._archive_full_episode(0)
+    monkeypatch.setattr(manager, '_move_file', original)
+    out = manager._archive_full_episode(0)
+    assert (out / '0_0_0.mcap').read_bytes() == b'mcap-0'
+    assert (out / '0_0_1.mcap').read_bytes() == b'second'
 
 
 def _write_segment(

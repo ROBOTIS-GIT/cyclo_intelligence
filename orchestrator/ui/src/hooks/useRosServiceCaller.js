@@ -302,6 +302,9 @@ export function useRosServiceCaller() {
           case 'start_inference_record':
             command_enum = TaskCommand.START_INFERENCE_RECORD;
             break;
+          case 'set_inference_record_folder':
+            command_enum = TaskCommand.SET_INFERENCE_RECORD_FOLDER;
+            break;
           case 'stop_inference_record':
             command_enum = TaskCommand.STOP_INFERENCE_RECORD;
             break;
@@ -408,7 +411,9 @@ export function useRosServiceCaller() {
         );
         const request = {
           task_info: {
-            task_num: String(taskInfo.taskNum ?? ''),
+            task_num: command === 'set_inference_record_folder'
+              ? String(options.recordingSessionId ?? '')
+              : String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
             task_type: String(taskType),
             task_instruction: taskInstruction,

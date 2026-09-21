@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
-import taskReducer, { setInferenceStatus, setRobotPoseStatus, selectRobotType } from '../features/tasks/taskSlice';
+import taskReducer, { setInferenceStatus, setRobotPoseStatus, selectRobotType, setRecordStatus } from '../features/tasks/taskSlice';
 import rosReducer, { setRosbridgeUrl } from '../features/ros/rosSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -133,6 +133,16 @@ const renderPanel = ({
 
 describe('manual pose Stop and Clear', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  test('recording disables Clear without disabling inference Stop', async () => {
+    const { store, sendRecordCommand } = renderPanel({ inferencePhase: InferencePhase.INFERENCING });
+    act(() => store.dispatch(setRecordStatus({ running: true })));
+    expect(screen.getByRole('button', { name: /Save or Discard recording before Clear/i })).toBeDisabled();
+    const stop = screen.getByRole('button', { name: /pause inference/i });
+    expect(stop).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+  });
 
   test('Stop response cannot clear the authoritative returning state', async () => {
     let resolve;

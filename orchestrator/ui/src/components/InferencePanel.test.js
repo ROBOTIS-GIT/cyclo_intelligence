@@ -33,6 +33,7 @@ const renderPanel = ({
   initialPoseSync = true,
   inferenceHz = 15,
   controlHz = 100,
+  policyId = 'lerobot:act',
 } = {}) => {
   const sendRecordCommand = jest.fn().mockResolvedValue({ success: true });
   useRosServiceCaller.mockReturnValue({ sendRecordCommand });
@@ -49,7 +50,7 @@ const renderPanel = ({
           initialPoseSyncDurationS: 5.0,
           inferenceHz,
           controlHz,
-          policyId: 'lerobot:act',
+          policyId,
         },
         taskInfo: {
           ...initialTasks.taskInfo,
@@ -58,7 +59,7 @@ const renderPanel = ({
           initialPoseSyncDurationS: 5.0,
           inferenceHz,
           controlHz,
-          policyId: 'lerobot:act',
+          policyId,
         },
         inferenceStatus: {
           ...initialTasks.inferenceStatus,
@@ -81,6 +82,37 @@ const renderPanel = ({
 describe('InferencePanel initial pose sync settings', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('groups model settings, execution settings, saved pose, and recording tools in order', () => {
+    renderPanel({ inferenceMode: 'robot', policyId: 'lerobot:groot' });
+    const separators = screen.getAllByRole('separator');
+    expect(separators).toHaveLength(3);
+    const ordered = [
+      screen.getByPlaceholderText('Enter Policy Path or Repo ID'),
+      screen.getByPlaceholderText('Enter Task Instruction'),
+      separators[0],
+      screen.getByText('Action Request'),
+      screen.getByRole('spinbutton', { name: 'Dataset FPS' }),
+      screen.getByRole('spinbutton', { name: 'Control Hz' }),
+      screen.getByRole('checkbox', { name: 'Slow Start' }),
+      screen.getByRole('spinbutton', { name: 'Slow Start duration' }),
+      separators[1],
+      screen.getByRole('region', { name: 'Saved Initial Pose' }),
+      separators[2],
+      screen.getByRole('group', { name: 'Inference recording' }),
+      screen.getByRole('region', { name: 'Try Results' }),
+    ];
+    ordered.slice(1).forEach((element, index) => {
+      expect(ordered[index].compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+        .toBeTruthy();
+    });
+  });
+
+  test('does not leave separators for hidden robot-only tools in simulation', () => {
+    renderPanel({ inferenceMode: 'simulation' });
+    expect(screen.getAllByRole('separator')).toHaveLength(1);
+    expect(screen.queryByRole('region', { name: 'Saved Initial Pose' })).not.toBeInTheDocument();
   });
 
   test('restores a fresh panel from the backend without submitting its initial defaults', () => {
@@ -113,6 +145,7 @@ describe('InferencePanel initial pose sync settings', () => {
     renderPanel({ inferenceMode: 'simulation' });
 
     expect(screen.queryByRole('region', { name: 'Try Results' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Inference recording' })).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
@@ -125,6 +158,7 @@ describe('InferencePanel initial pose sync settings', () => {
     renderPanel({ inferenceMode: 'robot' });
 
     expect(screen.getByRole('region', { name: 'Try Results' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Inference recording' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeEnabled();
     expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))

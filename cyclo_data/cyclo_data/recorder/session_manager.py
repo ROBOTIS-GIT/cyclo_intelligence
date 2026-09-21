@@ -20,6 +20,7 @@ import json
 import errno
 import os
 from pathlib import Path
+from copy import deepcopy
 import queue
 import shutil
 import socket
@@ -31,6 +32,7 @@ from typing import Optional
 from huggingface_hub import HfApi
 import yaml
 from interfaces.msg import RecordingStatus
+from shared.inference_recording import RECORDING_ROOT, folder_name
 from cyclo_data.converter.orchestrator import DataConverter
 from cyclo_data.hub.progress_tracker import (
     HuggingFaceLogCapture,
@@ -180,8 +182,8 @@ class DataManager:
             task_info,
         )
         self._save_path = save_root_path / self._save_repo_name
-        self._save_rosbag_path = '/workspace/rosbag2/' + self._save_repo_name
-        self._task_info = task_info
+        self._save_rosbag_path = str(RECORDING_ROOT / self._save_repo_name)
+        self._task_info = deepcopy(task_info)
         self._main_task_instruction = self._get_main_task_instruction(task_info)
         self._subtask_instructions = self._get_subtask_instructions(task_info)
         self._subtask_mode = bool(self._subtask_instructions)
@@ -204,10 +206,15 @@ class DataManager:
             # In subtask mode this is a raw subtask counter used only for
             # metadata continuity; the on-disk path is full_episode/subtasks/N.
             self._record_episode_count = self._find_next_episode_number()
-            (
-                self._current_full_episode_index,
-                self._current_subtask_index,
-            ) = self._find_next_subtask_position()
+            if getattr(task_info, 'task_type', '') == 'inference':
+                # Never resume a partial episode after a process restart.
+                self._current_full_episode_index = self._record_episode_count
+                self._current_subtask_index = 0
+            else:
+                (
+                    self._current_full_episode_index,
+                    self._current_subtask_index,
+                ) = self._find_next_subtask_position()
         finally:
             self._episode_info_scan_cache = None
         self._start_time_s = 0
@@ -236,10 +243,13 @@ class DataManager:
         """Return the task folder name and normalise inference metadata."""
         task_type = getattr(task_info, 'task_type', '') or ''
         if task_type == 'inference':
-            record_id = cls._make_unique_inference_record_id(save_root_path)
+            record_id = str(getattr(task_info, 'task_num', '') or '').strip()
+            if not record_id:
+                record_id = cls._make_unique_inference_record_id(RECORDING_ROOT)
+            name = folder_name(record_id)
             task_info.task_num = record_id
             task_info.task_name = 'inference'
-            return f'Task_{record_id}_inference_MCAP'
+            return name
 
         task_num = getattr(task_info, 'task_num', '') or ''
         task_name = getattr(task_info, 'task_name', '') or ''
@@ -406,9 +416,10 @@ class DataManager:
                 item_path = os.path.join(rosbag_dir, item)
                 if not (os.path.isdir(item_path) and item.isdigit()):
                     continue
-                if self._segmented_storage_mode and not self._episode_dir_has_data(
+                if (getattr(self._task_info, 'task_type', '') != 'inference'
+                        and self._segmented_storage_mode and not self._episode_dir_has_data(
                     Path(item_path)
-                ):
+                )):
                     continue
                 existing_episodes.append(int(item))
             for _episode_dir, info in self._episode_info_entries():
@@ -417,6 +428,8 @@ class DataManager:
                 except (TypeError, ValueError):
                     pass
         except OSError as e:
+            if getattr(self._task_info, 'task_type', '') == 'inference':
+                raise
             print(f'[DataManager] Error scanning directory: {e}, starting from episode 0')
             return 0
 
@@ -704,6 +717,8 @@ class DataManager:
         with self._state_lock:
             current_full = self._current_full_episode_index
         archived_dir = self._archive_full_episode(current_full)
+        if archived_dir is None and getattr(self._task_info, 'task_type', '') == 'inference':
+            raise RuntimeError('Inference episode archive did not produce an episode')
         with self._state_lock:
             if self._current_full_episode_index != current_full:
                 return archived_dir
@@ -883,6 +898,19 @@ class DataManager:
         if not self._segmented_storage_mode:
             return None
 
+        inference_recording = getattr(self._task_info, 'task_type', '') == 'inference'
+        out_dir = self._full_episode_dir(full_idx)
+        # A committed summary can outlive failed segment cleanup. Retry only
+        # cleanup in that case, without rebuilding from partially removed data.
+        if inference_recording and (out_dir / 'episode_info.json').exists():
+            summary = self._read_episode_info(out_dir)
+            if summary.get('episode_index') != full_idx or 'inference' not in summary:
+                raise ValueError(f'Refusing to replace existing episode metadata: {out_dir}')
+            segments_root = out_dir / 'segments'
+            if segments_root.exists():
+                shutil.rmtree(segments_root)
+            return out_dir
+
         subtask_dirs = self._episode_dirs_for_full_subtask(full_idx)
         if not subtask_dirs:
             return None
@@ -905,7 +933,6 @@ class DataManager:
                 f'Cannot finish episode {full_idx}: missing subtask(s) {missing}'
             )
 
-        out_dir = self._full_episode_dir(full_idx)
         out_dir.mkdir(parents=True, exist_ok=True)
         ordered = [by_subtask[idx] for idx in range(self._physical_segment_total)]
 
@@ -940,6 +967,23 @@ class DataManager:
                 metadata = yaml.safe_load(f) or {}
             bag_info = metadata.get('rosbag2_bagfile_information', {}) or {}
             files_info = bag_info.get('files') or []
+            if inference_recording:
+                # The manifest keeps split-file ordering stable after a partial move.
+                names = bag_info.get('relative_file_paths') or [entry['path'] for entry in files_info]
+                if not names:
+                    raise ValueError(f'No MCAP file manifest in {meta_path}')
+                mcaps = []
+                for index, name in enumerate(names):
+                    if Path(name).name != name or not name.endswith('.mcap'):
+                        raise ValueError(f'Invalid MCAP path in {meta_path}: {name}')
+                    source = seg_dir / name
+                    suffix = f'_{index}' if len(names) > 1 else ''
+                    archived = out_dir / f'{dst_prefix}{suffix}.mcap'
+                    if source.exists() and archived.exists():
+                        raise FileExistsError(f'Refusing to overwrite MCAP: {archived}')
+                    mcaps.append(source if source.exists() else archived)
+                    if not mcaps[-1].is_file():
+                        raise FileNotFoundError(mcaps[-1])
             segment_duration_ns = 0
 
             for split_idx, src_mcap in enumerate(mcaps):
@@ -1055,7 +1099,7 @@ class DataManager:
 
         self._copy_episode_sidecars(ordered, out_dir)
         video_segments, video_warnings = self._archive_episode_videos(
-            ordered, out_dir, full_idx,
+            ordered, out_dir, full_idx, strict=inference_recording,
         )
         has_transcodable_videos = any(
             bool(segment.get('cameras')) for segment in video_segments
@@ -1084,14 +1128,18 @@ class DataManager:
         }
         if video_warnings:
             summary['video_warnings'] = video_warnings
+        if inference_recording:
+            summary['inference'] = self._read_episode_info(ordered[0]).get('inference', {})
         try:
             _atomic_write_json(out_dir / 'episode_info.json', summary)
         except Exception as e:
             print(f'[ROBOTIS] Failed to save full episode summary: {e}')
+            if inference_recording:
+                raise
 
         segments_root = out_dir / 'segments'
         if segments_root.exists():
-            shutil.rmtree(segments_root, ignore_errors=True)
+            shutil.rmtree(segments_root, ignore_errors=not inference_recording)
         print(
             f'[ROBOTIS] Archived full episode {full_idx}: '
             f'{len(ordered)} segment(s), {len(output_files)} mcap file(s)'
@@ -1225,6 +1273,7 @@ class DataManager:
         subtask_dirs: list[Path],
         out_dir: Path,
         full_idx: int,
+        *, strict: bool = False,
     ) -> tuple[list[dict], dict[str, dict[str, str]]]:
         dst_videos = out_dir / 'videos'
         dst_videos.mkdir(parents=True, exist_ok=True)
@@ -1276,6 +1325,17 @@ class DataManager:
                         if dst_raw_spool.exists():
                             segment_raw_cameras.append(camera)
                         continue
+                    if strict and (dst.exists() or dst_raw_spool.exists()) and sidecar.exists():
+                        DataManager._move_file(sidecar, dst_sidecar)
+                        for remaining, destination in ((stats, dst_stats), (diagnostics, dst_diagnostics)):
+                            if remaining.exists():
+                                DataManager._move_file(remaining, destination)
+                        segment_cameras.append(camera)
+                        if dst_raw_spool.exists():
+                            segment_raw_cameras.append(camera)
+                        continue
+                    if strict:
+                        raise FileNotFoundError(f'Missing video or timestamps for {camera}: {seg_dir}')
                     segment_warnings[camera] = 'missing video file'
                     continue
                 if DataManager._file_size_if_present(sidecar) <= 0:
@@ -1288,6 +1348,8 @@ class DataManager:
                             segment_raw_cameras.append(camera)
                         continue
                     segment_warnings[camera] = 'missing timestamp sidecar'
+                    if strict:
+                        raise FileNotFoundError(f'Missing timestamp sidecar: {sidecar}')
                     continue
                 try:
                     if has_mp4:
@@ -1302,6 +1364,8 @@ class DataManager:
                         DataManager._move_file(diagnostics, dst_diagnostics)
                     segment_cameras.append(camera)
                 except Exception as exc:
+                    if strict:
+                        raise
                     segment_warnings[camera] = repr(exc)
             video_segments.append({
                 'mcap': f'{prefix}.mcap',
@@ -1325,7 +1389,7 @@ class DataManager:
         """
         previous_subtask_mode = getattr(self, '_subtask_mode', False)
         previous_segment_total = getattr(self, '_physical_segment_total', 1)
-        self._task_info = task_info
+        self._task_info = deepcopy(task_info)
         self._main_task_instruction = self._get_main_task_instruction(task_info)
         self._subtask_instructions = self._get_subtask_instructions(task_info)
         self._subtask_mode = bool(self._subtask_instructions)
@@ -1518,6 +1582,12 @@ class DataManager:
         }
 
         meta_data_path = os.path.join(rosbag_path, 'episode_info.json')
+        if getattr(self._task_info, 'task_type', '') == 'inference':
+            meta_data['inference'] = {
+                'policy_id': self._task_info.policy_id,
+                'policy_path': self._task_info.policy_path,
+                'task_instruction': list(self._task_info.task_instruction),
+            }
         try:
             _atomic_write_json(meta_data_path, meta_data)
             print(f'[ROBOTIS] Metadata saved to: {meta_data_path}')
@@ -1530,6 +1600,8 @@ class DataManager:
                 self._saved_subtasks_cache = cache
         except Exception as e:
             print(f'[ROBOTIS] Failed to save metadata: {e}')
+            if getattr(self._task_info, 'task_type', '') == 'inference':
+                raise
 
     def should_record_rosbag2(self):
         """In simplified mode, always record rosbag2."""

@@ -85,6 +85,7 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const recordingActive = useSelector((state) => Boolean(state.tasks.recordStatus?.running));
   const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
   const robotType = useSelector((state) => state.tasks.robotType);
   const poseDeviceId = useSelector((state) => state.tasks.robotPoseStatus?.device_id);
@@ -441,9 +442,10 @@ export default function InferenceControlPanel() {
   }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const handleClear = useCallback(async () => {
+    if (recordingActive) return;
     if (poseReturning && !(await stopPoseReturn())) return;
     await executeCommand('Clear', 'finish');
-  }, [executeCommand, poseReturning, stopPoseReturn]);
+  }, [executeCommand, poseReturning, stopPoseReturn, recordingActive]);
 
   const catalogReady = catalogStatus === 'ready' && Boolean(selectedPolicy);
   const catalogBlockingMessage = catalogStatus === 'ready'
@@ -452,7 +454,7 @@ export default function InferenceControlPanel() {
   const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
     backendReadiness.ready && !hasRuntimeError && !poseReturning;
   const stopEnabled = isInferencing || isSyncing || isPreparing || poseReturning;
-  const clearEnabled = isModelLoaded;
+  const clearEnabled = isModelLoaded && !recordingActive;
   const startDescription = !isStatusKnown
     ? 'Checking inference session status'
     : !catalogReady
@@ -597,7 +599,7 @@ export default function InferenceControlPanel() {
       color: '#d32f2f',
       enabled: clearEnabled,
       handler: handleClear,
-      description: 'Stop inference and unload model',
+      description: recordingActive ? 'Save or Discard recording before Clear' : 'Stop inference and unload model',
       shortcut: 'Escape',
     },
   ];
