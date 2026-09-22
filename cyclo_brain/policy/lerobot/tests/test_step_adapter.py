@@ -88,6 +88,20 @@ def test_pending_plan_is_not_an_ack():
         step.predict({}, 2)
 
 
+def test_reordered_command_receipt_preserves_model_space_result_memory():
+    step = adapter(strict=True)
+    results = []
+    step.set_result_observer(lambda raw, processed: results.append((raw.clone(), processed.clone())))
+    step.set_action_mapping(lambda chunk: chunk[:, [1, 0]])
+    np.testing.assert_array_equal(step.predict({}, 1), [[20., 10.]])
+    np.testing.assert_array_equal(results[0][0], [[1., 2.]])
+    np.testing.assert_array_equal(results[0][1], [[10., 20.]])
+    with pytest.raises(RuntimeError, match="cannot change"):
+        step.set_action_mapping(lambda chunk: chunk)
+    step.update_execution_context(receipt(step, values=(20., 10.)))
+    np.testing.assert_array_equal(step.predict({}, 2), [[20., 10.]])
+
+
 @pytest.mark.parametrize("strict", [False, True])
 def test_model_cached_actions_require_exact_published_values(strict):
     step = adapter(strict=strict)

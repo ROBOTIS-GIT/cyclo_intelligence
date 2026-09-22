@@ -43,9 +43,9 @@ class ReplayRobot:
             stamp = time.monotonic()
             snapshot = {
                 "images": {name: self._frames[name][index] for name in self._cameras},
-                "joint_positions": {"follower_arm": self._frames["state"][index]}, "sensors": {},
+                "joint_positions": {"follower_cyclo_input_0": self._frames["state"][index]}, "sensors": {},
                 "reception_monotonic_timestamps": {
-                    **{f"camera:{name}": stamp for name in self._cameras}, "joint:follower_arm": stamp,
+                    **{f"camera:{name}": stamp for name in self._cameras}, "joint:follower_cyclo_input_0": stamp,
                 },
             }
             with self._lock:
@@ -92,10 +92,18 @@ def main():
     engine = LeRobotEngine()
 
     def init_robot(_robot_type):
+        from channel_fixtures import make_channel_mapping
+
         engine._robot = ReplayRobot(frames, cameras)
         engine._cameras = cameras
         engine._state_modalities = ["arm"]
         engine._action_keys = ["arm"]
+        engine._channel_mapping = make_channel_mapping(
+            config["input_features"]["observation.state"]["shape"][0],
+            config["output_features"]["action"]["shape"][0],
+        )
+        if engine._step_adapter is not None:
+            engine._step_adapter.set_action_mapping(engine._channel_mapping.action)
 
     engine._init_robot = init_robot
     worker = EngineWorker(engine)

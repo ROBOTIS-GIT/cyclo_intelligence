@@ -3,7 +3,7 @@
 from inference_context.contract import ExecutionContract
 from .definition import AdapterDefinition
 from .public_step import PublicStepAdapter
-from .validation import validate_equal_camera_sizes, validate_step_layout
+from .validation import validate_equal_camera_sizes
 
 
 def create_step(policy, preprocessor, postprocessor, to_numpy):
@@ -29,6 +29,5 @@ def create_step(policy, preprocessor, postprocessor, to_numpy):
 ADAPTER = AdapterDefinition(
     contract=ExecutionContract("step"),
     step_factory=create_step,
-    layout_validator=validate_step_layout,
     batch_validator=validate_equal_camera_sizes,
 )

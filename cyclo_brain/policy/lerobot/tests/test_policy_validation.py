@@ -3,8 +3,6 @@
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
@@ -13,26 +11,6 @@ spec = importlib.util.spec_from_file_location(
 )
 validation = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validation)
-
-
-@pytest.mark.parametrize("state,action", [(22, 22), (24, 22), (22, 16)])
-def test_step_layout_does_not_require_equal_state_and_action_dimensions(state, action):
-    config = SimpleNamespace(input_features={"observation.state": {"shape": [state]}},
-                             output_features={"action": {"shape": [action]}})
-    robot = Mock()
-    robot.get_joint_names.return_value = list(range(state - 3))
-    robot._action_groups = {
-        "arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": list(range(action - 3))},
-        "mobile": {"msg_type": "geometry_msgs/msg/Twist"},
-    }
-    from lerobot_engine.adapters import resolve_adapter
-    validate = resolve_adapter("multi_task_dit").layout_validator
-    validate(config, robot, ["arm", "mobile"], ["arm", "mobile"])
-    for field in (config.input_features["observation.state"], config.output_features["action"]):
-        field["shape"][0] += 1
-        with pytest.raises(ValueError, match="no padding/truncation"):
-            validate(config, robot, ["arm", "mobile"], ["arm", "mobile"])
-        field["shape"][0] -= 1
 
 
 @pytest.mark.parametrize("config", [{"model_type": "gr00t_n1_7"}, {"type": "act"}])
@@ -77,22 +55,6 @@ def test_wall_x_rejects_config_that_disagrees_with_fixed_core(key, value, tmp_pa
 def test_new_policy_history_is_not_silently_duplicated(policy, tmp_path):
     with pytest.raises(ValueError, match="history"):
         validation.validate_checkpoint({"type": policy, "n_obs_steps": 2}, tmp_path)
-
-
-@pytest.mark.parametrize("state,action,valid", [(16, 20, True), (20, 16, True), (22, 20, False), (20, 19, False)])
-def test_wall_x_robot_layout(state, action, valid):
-    config = SimpleNamespace(**wall_config(16 if state == 16 else 20, 16 if action == 16 else 20))
-    robot = Mock()
-    robot.get_joint_names.return_value = list(range(state))
-    robot._action_groups = {"arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": list(range(action))}}
-    from lerobot_engine.adapters import resolve_adapter
-    validate = resolve_adapter("wall_x").layout_validator
-    if valid:
-        validate(config, robot, ["arm"], ["arm"])
-    else:
-        with pytest.raises(ValueError, match="dimension"):
-            validate(config, robot, ["arm"], ["arm"])
-    robot.publish_action.assert_not_called()
 
 
 @pytest.fixture

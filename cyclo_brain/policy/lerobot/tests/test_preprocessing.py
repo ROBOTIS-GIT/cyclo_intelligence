@@ -47,6 +47,7 @@ preprocessing_spec.loader.exec_module(preprocessing)
 PreprocessingMixin = preprocessing.PreprocessingMixin
 STATE_KEY = constants.STATE_KEY
 from lerobot_engine.input_pipeline import InputPipelineConfig, CONFIG_DIR
+from channel_fixtures import make_channel_mapping
 
 
 class FakeRobot:
@@ -59,7 +60,7 @@ class FakeRobot:
         return {"unused": np.zeros((2, 2, 3), dtype=np.uint8)}
 
     def get_joint_positions(self):
-        return {"follower_arm": self._positions}
+        return {"follower_cyclo_input_0": self._positions}
 
 
 class Preprocessor(PreprocessingMixin):
@@ -67,6 +68,7 @@ class Preprocessor(PreprocessingMixin):
         self._robot = FakeRobot(positions)
         self._cameras = {}
         self._state_modalities = ["arm"]
+        self._channel_mapping = make_channel_mapping(expected)
         self._device = torch.device("cpu")
         feature = SimpleNamespace(shape=(expected,))
         config = SimpleNamespace(input_features={STATE_KEY: feature})
@@ -96,13 +98,13 @@ class PreprocessingTest(unittest.TestCase):
                 raise AssertionError("must not copy all inputs while waiting")
 
             def get_required_input_snapshot(self, sources, *, max_age_s, after_s):
-                assert sources == {"joint:follower_arm"}
+                assert sources == {"joint:follower_cyclo_input_0"}
                 assert max_age_s == 1. and after_s == 9.
                 self.calls += 1
                 if self.calls < 3:
-                    raise ValueError("joint:follower_arm: stale")
-                return {"images": {}, "joint_positions": {"follower_arm": np.ones(2)},
-                        "sensors": {}, "reception_monotonic_timestamps": {"joint:follower_arm": 10.}}
+                    raise ValueError("joint:follower_cyclo_input_0: stale")
+                return {"images": {}, "joint_positions": {"follower_cyclo_input_0": np.ones(2)},
+                        "sensors": {}, "reception_monotonic_timestamps": {"joint:follower_cyclo_input_0": 10.}}
 
         preprocessor._robot = SelectiveRobot([1., 2.])
         preprocessor._robot.calls = 0
@@ -171,25 +173,20 @@ class PreprocessingTest(unittest.TestCase):
         batch[wrist] = torch.zeros(1, 3, 8, 12)
         preprocessor._validate_camera_shapes(batch)
 
-    def test_pads_short_state_to_policy_shape(self):
-        preprocessor = Preprocessor([1.0, 2.0], expected=4)
+    def test_state_requires_mapping_instead_of_legacy_fallback(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
+        preprocessor._channel_mapping = None
+        with self.assertRaisesRegex(ValueError, "LOAD must compile a channel mapping"):
+            preprocessor._input_pipeline_config.compile(preprocessor)
+        with self.assertRaisesRegex(ValueError, "LOAD must compile a channel mapping"):
+            preprocessor._transform_state(([1., 2.],))
 
+    def test_state_uses_compiled_selection_and_checks_finite_values(self):
+        preprocessor = Preprocessor([1., 2.], expected=2)
         batch = preprocessor._build_observation("task")
-
-        np.testing.assert_allclose(
-            batch[STATE_KEY].numpy(),
-            np.asarray([[1.0, 2.0, 0.0, 0.0]], dtype=np.float32),
-        )
-
-    def test_truncates_long_state_to_policy_shape(self):
-        preprocessor = Preprocessor([1.0, 2.0, 3.0, 4.0], expected=2)
-
-        batch = preprocessor._build_observation("task")
-
-        np.testing.assert_allclose(
-            batch[STATE_KEY].numpy(),
-            np.asarray([[1.0, 2.0]], dtype=np.float32),
-        )
+        torch.testing.assert_close(batch[STATE_KEY], torch.tensor([[1., 2.]]))
+        preprocessor._robot._positions = [float("nan"), 2.]
+        self.assertIn("finite", preprocessor._build_observation("task")["error"])
 
     def test_step_waits_for_each_required_source_before_transforming(self):
         preprocessor, key, image = self.camera_preprocessor([{"type": "identity"}])
@@ -202,9 +199,9 @@ class PreprocessingTest(unittest.TestCase):
         preprocessor._robot._config = {"cameras": {"head": {"rotation_deg": 270}}}
 
         def snapshot(camera_stamp, joint_stamp):
-            return {"images": {"head": image}, "joint_positions": {"follower_arm": [1., 2.]},
+            return {"images": {"head": image}, "joint_positions": {"follower_cyclo_input_0": [1., 2.]},
                     "sensors": {}, "reception_monotonic_timestamps": {
-                        "camera:head": camera_stamp, "joint:follower_arm": joint_stamp}}
+                        "camera:head": camera_stamp, "joint:follower_cyclo_input_0": joint_stamp}}
 
         # A fresh joint alone is not enough. Unused cameras/sensors are not required.
         snapshots = iter([snapshot(9., 10.1), snapshot(10.1, 9.), snapshot(10.2, 10.2)])
@@ -229,15 +226,15 @@ class PreprocessingTest(unittest.TestCase):
 
         class SnapshotRobot(FakeRobot):
             def get_input_snapshot(self):
-                return {"images": {}, "joint_positions": {"follower_arm": [1., 2.]}, "sensors": {},
-                        "reception_monotonic_timestamps": {"joint:follower_arm": 5.}}
+                return {"images": {}, "joint_positions": {"follower_cyclo_input_0": [1., 2.]}, "sensors": {},
+                        "reception_monotonic_timestamps": {"joint:follower_cyclo_input_0": 5.}}
 
         preprocessor._robot = SnapshotRobot([1., 2.])
         with mock.patch.object(preprocessing.time, "monotonic", side_effect=[10., 10., 11.]), \
                 mock.patch.object(preprocessing.time, "sleep") as sleep, \
                 mock.patch.object(preprocessor, "_transform_state") as transform:
             result = preprocessor._build_observation("pick", require_received=True)
-        self.assertIn("joint:follower_arm: stale", result["error"])
+        self.assertIn("joint:follower_cyclo_input_0: stale", result["error"])
         self.assertEqual(sleep.call_count, 1)
         transform.assert_not_called()
 

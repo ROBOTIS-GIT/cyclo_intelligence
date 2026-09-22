@@ -88,10 +88,7 @@ def build_input_graph(config, checkpoint, handlers=None):
             "prepared": {"op": "image_prepare", "inputs": ["rotated"],
                          "options": {"images": images, "cameras": cameras}},
             "images_ready": {"op": "image_device", "inputs": ["prepared"]},
-            "state": {"op": "legacy_state", "inputs": ["joints"], "options": {
-                "layout": "robot_config", "size": "checkpoint",
-                "chunk_mismatch": "pad_or_truncate", "step_mismatch": "error",
-            }},
+            "state": {"op": "mapped_state", "inputs": ["joints"]},
             "task": {"op": "task_batch", "inputs": ["instruction"]},
         },
         "outputs": {"before": {"*": "images_ready", "observation.state": "state", "task": "task"},

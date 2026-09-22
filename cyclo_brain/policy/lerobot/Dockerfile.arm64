@@ -62,6 +62,8 @@ COPY cyclo_brain/policy/common/runtime/inference_context/ /policy_runtime/infere
 COPY cyclo_brain/policy/common/runtime/inference_inputs/ /policy_runtime/inference_inputs/
 COPY cyclo_brain/policy/common/catalog/ /policy_runtime/catalog/
 COPY cyclo_brain/policy/lerobot/lerobot_engine/ /app/lerobot_engine/
+COPY cyclo_brain/policy/lerobot/extensions/ /app/extensions/
+RUN pip install --no-deps --no-build-isolation -e /app/extensions
 COPY cyclo_brain/policy/lerobot/configs/ /app/configs/
 COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/

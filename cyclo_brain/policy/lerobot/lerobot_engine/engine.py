@@ -115,6 +115,7 @@ class LeRobotEngine(
         self._cameras: Dict[str, str] = {}
         self._state_modalities: List[str] = []
         self._action_keys: List[str] = []
+        self._channel_mapping = None
         self._has_mobile_state: bool = False
         # Cached robot_type for repeated LOAD requests before an explicit
         # UNLOAD. cleanup() must clear this together with the policy cache.
@@ -272,6 +273,7 @@ class LeRobotEngine(
                     chunk = self._to_numpy_chunk(action)
                     if model_action is not None:
                         self._record_prediction_inputs(model_action, action)
+                    chunk = self._channel_mapping.action(chunk)
 
             T, D = chunk.shape
             if T <= 0 or D <= 0 or not np.isfinite(chunk).all():

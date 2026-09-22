@@ -176,6 +176,7 @@ services:
       # Cyclo-owned Python sources are live; upstream models and dependencies
       # remain image-owned. Stop inference before editing shared code.
       - ../cyclo_brain/policy/lerobot/lerobot_engine:/app/lerobot_engine:ro
+      - ../cyclo_brain/policy/lerobot/extensions:/app/extensions:ro
       - ../cyclo_brain/policy/lerobot/manifest.yaml:/app/policy_manifest.yaml:ro
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # Catalog is a sibling of runtime, as in the source tree. Avoid nesting

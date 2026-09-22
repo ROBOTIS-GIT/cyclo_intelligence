@@ -11,21 +11,15 @@ Builds a policy-ready batch from RobotClient sensor/state reads.
 
 from __future__ import annotations
 
-import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-import numpy as np
 import torch
 
-from .constants import STATE_KEY as _STATE_KEY
 from .adapters import resolve_adapter
 from inference_context import LatestValues
 from inference_context.inputs import ReceivedValues, ResolvedInputs
 from inference_context.observation import ObservationSession
-
-
-logger = logging.getLogger("lerobot_engine")
 
 
 class PreprocessingMixin:
@@ -165,56 +159,9 @@ class PreprocessingMixin:
                 time.sleep(min(0.01, deadline - anchor))
 
     def _transform_state(self, values):
-        state_parts: List[np.ndarray] = []
-        for modality, value in zip(self._state_modalities, values):
-            if modality == "mobile":
-                odom = value
-                state_parts.append(
-                    np.array(
-                        [
-                            float(odom["linear_velocity"][0]),
-                            float(odom["linear_velocity"][1]),
-                            float(odom["angular_velocity"][2]),
-                        ],
-                        dtype=np.float32,
-                    )
-                )
-                continue
-            positions = value
-            if positions is None or len(positions) == 0:
-                raise ValueError(f"Missing joint group: {modality}")
-            state_parts.append(np.asarray(positions, dtype=np.float32))
-
-        flat_state = np.concatenate(state_parts)
-        # TODO(ROBOTIS): replace zero-padding with real values. Some training
-        # datasets carry extra state dimensions (e.g. EE pose) that the current
-        # robot_config joint topics do not surface.
-        try:
-            expected = int(
-                self._policy.config.input_features[_STATE_KEY].shape[0]
-            )
-        except Exception:
-            expected = flat_state.size
-        if getattr(self, "_step_adapter", None) is not None and flat_state.size != expected:
-            raise ValueError(f"step state dimension changed: {flat_state.size} != {expected}")
-        if flat_state.size < expected:
-            pad = np.zeros(expected - flat_state.size, dtype=np.float32)
-            logger.warning(
-                "state dim mismatch: got %d, policy expects %d - padding %d zeros",
-                flat_state.size,
-                expected,
-                expected - flat_state.size,
-            )
-            flat_state = np.concatenate([flat_state, pad])
-        elif flat_state.size > expected:
-            logger.warning(
-                "state dim mismatch: got %d, policy expects %d - truncating to %d",
-                flat_state.size,
-                expected,
-                expected,
-            )
-            flat_state = flat_state[:expected]
-        return torch.from_numpy(flat_state).unsqueeze(0).to(self._device)
+        if self._channel_mapping is None:
+            raise ValueError("LOAD must compile a channel mapping")
+        return torch.from_numpy(self._channel_mapping.state(values)).unsqueeze(0).to(self._device)
 
     def _validate_camera_shapes(self, batch):
         # Allow the saved processor to resize before checking the stack contract.

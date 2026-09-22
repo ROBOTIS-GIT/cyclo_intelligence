@@ -308,6 +308,23 @@ class RobotClient:
             self.close()
             raise
 
+    def configure_joint_views(self, views: dict) -> None:
+        """Register selected named slices before subscriptions/history are started."""
+        if self._closed or not self._defer_subscriptions or self._observation_capture is not None:
+            raise RuntimeError("Joint views require a fresh deferred observation client")
+        groups = self._config["joint_groups"]
+        additions = {}
+        for name, view in views.items():
+            parent = groups.get(view["parent"], {})
+            names = list(view["joint_names"])
+            if (name in groups or parent.get("parent") or parent.get("msg_type") != "sensor_msgs/msg/JointState"
+                    or not names or len(set(names)) != len(names)
+                    or not set(names) <= set(parent.get("joint_names", []))):
+                raise ValueError(f"Invalid named observation view: {name}")
+            additions[name] = {"parent": view["parent"], "role": "follower", "joint_names": names,
+                               "strict_named": True}
+        groups.update(additions)
+
     def _init_subscriptions(self):
         """Subscribe to configured topics, or the declared LOAD selection.
 
@@ -579,14 +596,24 @@ class RobotClient:
                 # Propagate to synthetic child views.
                 children = [child for group_name in group_names
                             for child in getattr(self, "_joint_children", {}).get(group_name, [])]
-                if children and msg_names:
+                if children:
                     name_to_idx = {n: i for i, n in enumerate(msg_names)}
                     for child in children:
                         child_cfg = self._config["joint_groups"].get(child, {})
                         wanted = child_cfg.get("joint_names", [])
+                        strict = child_cfg.get("strict_named", False)
+                        if not msg_names and not strict:
+                            continue
+                        if strict and (len(msg_names) != len(position) or len(set(msg_names)) != len(msg_names)):
+                            self._joint_positions.pop(child, None)
+                            self._joint_timestamps.pop(child, None)
+                            continue
                         try:
                             indices = [name_to_idx[n] for n in wanted]
                         except KeyError as missing:
+                            if strict:
+                                self._joint_positions.pop(child, None)
+                                self._joint_timestamps.pop(child, None)
                             # First few callbacks may race ahead of full
                             # name list — skip this child until the parent
                             # message carries every joint we expect.
@@ -594,6 +621,10 @@ class RobotClient:
                                 f"{child}: joint {missing} missing from "
                                 f"{group_names} message"
                             )
+                            continue
+                        if strict and not np.isfinite(position_array[indices]).all():
+                            self._joint_positions.pop(child, None)
+                            self._joint_timestamps.pop(child, None)
                             continue
                         if position:
                             self._joint_positions[child] = np.array(

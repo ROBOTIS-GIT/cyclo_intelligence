@@ -59,6 +59,7 @@ def test_temporal_model_registration_load_capture_predict_reset_and_cached_reloa
     engine._load_policy_assets = mock.Mock(return_value=(policy, lambda x: x, lambda x: x))
 
     def init_robot(robot_type):
+        engine._channel_mapping = SimpleNamespace(action=lambda chunk: chunk)
         with mock.patch.object(RobotClient, "_init_subscriptions"):
             robot = RobotClient("ffw_sg2_rev1")
         robot._config = {"cameras": {"eye": {}, "unused": {}},
@@ -168,6 +169,7 @@ def test_contextual_chunk_uses_emitted_feedback_and_pending_prefix_without_robot
     robots = []
 
     def init_robot(robot_type):
+        engine._channel_mapping = SimpleNamespace(action=lambda chunk: chunk)
         with mock.patch.object(RobotClient, "_init_subscriptions"):
             robot = RobotClient("ffw_sg2_rev1")
         robot._config = {"cameras": {}, "joint_groups": {"follower_arm": {}}, "sensors": {}}

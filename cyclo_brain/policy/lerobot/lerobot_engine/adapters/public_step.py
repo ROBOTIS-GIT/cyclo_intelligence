@@ -29,6 +29,12 @@ class PublicStepAdapter:
         self._last_prediction = -1
         self._observation_after_s = None
         self.result_observer = None
+        self._action_mapping = lambda chunk: chunk
+
+    def set_action_mapping(self, mapping):
+        if self._pending_id is not None:
+            raise RuntimeError("Action mapping cannot change during execution")
+        self._action_mapping = mapping
 
     def set_result_observer(self, observer):
         self.result_observer = observer
@@ -118,6 +124,7 @@ class PublicStepAdapter:
             raise ValueError("select_action must produce one finite action vector")
         if self.result_observer is not None:
             self.result_observer(model_action, action)
+        chunk = self._action_mapping(chunk)
         self._expected = chunk[0].copy()
         self._pending_id = prediction_id
         self._last_prediction = prediction_id

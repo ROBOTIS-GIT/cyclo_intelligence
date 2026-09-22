@@ -78,7 +78,7 @@ COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 # Install training/inference + VLA extras. Removed: dynamixel/gamepad/
 # hopejr/lekiwi/reachy2/kinematics (hardware), dev/test/video_benchmark
 # (development), aloha/pusht/phone/libero/metaworld/sarm (simulation).
-RUN uv pip install --no-cache ".[dataset,smolvla,xvla,molmoact2,vla_jepa,fastwam,multi_task_dit,wallx,pi,groot,hilserl,async,peft]"
+RUN uv pip install --no-cache ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,multi_task_dit,wallx,pi,groot,hilserl,async,peft]"
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
 RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
@@ -111,6 +111,8 @@ COPY cyclo_brain/policy/common/runtime/inference_context/ /policy_runtime/infere
 COPY cyclo_brain/policy/common/runtime/inference_inputs/ /policy_runtime/inference_inputs/
 COPY cyclo_brain/policy/common/catalog/ /policy_runtime/catalog/
 COPY cyclo_brain/policy/lerobot/lerobot_engine/ /app/lerobot_engine/
+COPY cyclo_brain/policy/lerobot/extensions/ /app/extensions/
+RUN uv pip install --no-deps --no-build-isolation -e /app/extensions
 COPY cyclo_brain/policy/lerobot/configs/ /app/configs/
 COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/

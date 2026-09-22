@@ -220,6 +220,7 @@ class EngineModelLifecycleTest(unittest.TestCase):
 
     def test_saved_processor_precedes_shape_validation_and_prediction(self):
         engine = self.make_engine()
+        engine._channel_mapping = types.SimpleNamespace(action=lambda chunk: chunk)
         engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
         engine._robot = object()
         engine._input_pipeline_config = object()

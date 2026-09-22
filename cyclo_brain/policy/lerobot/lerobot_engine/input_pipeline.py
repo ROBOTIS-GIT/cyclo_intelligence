@@ -102,8 +102,10 @@ class InputPipelineConfig:
             })
 
         def state(sampling):
-            return Binding(tuple(sample("sensor:odom" if name == "mobile" else f"joint:follower_{name}", sampling)
-                                 for name in engine._state_modalities), lambda values: tuple(values))
+            if engine._channel_mapping is None:
+                raise ValueError("LOAD must compile a channel mapping")
+            return Binding(tuple(sample(source, sampling) for source in engine._channel_mapping.state_sources),
+                           lambda values: tuple(values))
 
         registry = default_registry()
         register_memory(registry, self.memory)
@@ -178,11 +180,11 @@ class InputPipelineConfig:
             return lambda key, image: image.contiguous().to(engine._device)
         mapping_op("image_device", set(), device)
 
-        def state_compat(options, context):
-            if options != {"layout": "robot_config", "size": "checkpoint", "chunk_mismatch": "pad_or_truncate", "step_mismatch": "error"}:
-                raise ValueError("legacy_state requires explicit robot/checkpoint layout and compatibility behavior")
+        def mapped_state(options, context):
+            if options:
+                raise ValueError("mapped_state uses the channel layout compiled at LOAD")
             return lambda values: engine._transform_state(values[0].value)
-        registry.register("legacy_state", state_compat)
+        registry.register("mapped_state", mapped_state)
 
         def task(options, context):
             if options:
@@ -212,7 +214,8 @@ def load_input_pipeline(model_path, config_dir=None):
         # operators that bind model APIs are compiled once weights are available.
         cameras = {key.removeprefix("observation.images."): key for key in checkpoint.get("input_features", {})
                    if key.startswith("observation.images.")}
-        probe = SimpleNamespace(_cameras=cameras, _state_modalities=["state"], _device=torch.device("cpu"),
+        probe = SimpleNamespace(_cameras=cameras, _device=torch.device("cpu"),
+                                _channel_mapping=SimpleNamespace(state_sources=("joint:state",)),
                                 _robot=SimpleNamespace(_config={}), _transform_state=lambda values: values,
                                 _adapter_definition=definition)
         pipeline.compile(probe).close()

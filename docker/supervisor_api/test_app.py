@@ -561,6 +561,7 @@ def test_backend_config_mount_is_read_from_compose():
             "/orchestrator_config": "../shared/shared/robot_configs",
         }
         if backend == "lerobot":
+            expected["/app/extensions"] = "../cyclo_brain/policy/lerobot/extensions"
             expected["/app/configs/inference_inputs"] = (
                 "../cyclo_brain/policy/lerobot/configs/inference_inputs"
             )

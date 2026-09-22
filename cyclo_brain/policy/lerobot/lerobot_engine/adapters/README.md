@@ -20,7 +20,7 @@ Current hooks:
 | `step_factory` | Step prediction, processor reset and publication feedback |
 | `checkpoint_validator` | Check assets and config before weight allocation |
 | `requested_config_validator` | Check that the requested policy accepts the checkpoint format |
-| `layout_validator` | Check robot state/action mapping before waiting for topics |
+| `layout_validator` | Optional model-specific checks after common channel mapping validation, before waiting for topics |
 | `batch_validator` | Check processed inputs, after the saved processor |
 | `policy_loader` | Optional weight construction/device placement; saved processors still use the common loader |
 | `predictor_factory` | Optional batch predictor prepared once per weights load, without replacing policy methods |

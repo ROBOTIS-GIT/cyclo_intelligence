@@ -44,6 +44,19 @@ IoMappingMixin = io_mapping.IoMappingMixin
 
 
 class IoMappingCameraTest(unittest.TestCase):
+    def setUp(self):
+        # These tests isolate camera/readiness wiring; channel resolution has
+        # real-layout coverage in test_channel_mapping.py.
+        self.mapping = mock.Mock(action_keys=["arm"], state_names=("a",), joint_views={})
+        for patcher in (
+            mock.patch.object(io_mapping, "ChannelMapping", return_value=self.mapping),
+            mock.patch("cyclo_lerobot_io.mapping.read_mapping", return_value=None),
+            mock.patch.object(IoMappingMixin, "_loaded_model_path", "/test", create=True),
+            mock.patch.object(IoMappingMixin, "_preprocessor", None, create=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_load_checks_only_policy_cameras_and_consumed_state(self):
         for ready in (False, True):
             with self.subTest(ready=ready):
@@ -91,7 +104,7 @@ class IoMappingCameraTest(unittest.TestCase):
         with mock.patch.object(io_mapping, "RobotClient", return_value=robot):
             with self.assertRaisesRegex(ValueError, "custom model layout mismatch"):
                 engine._init_robot("some_robot")
-        validate.assert_called_once_with(config, robot, ["arm"], ["arm"])
+        validate.assert_called_once_with(config, robot, ["arm"], ["arm"], layout=self.mapping)
         robot.wait_for_ready.assert_not_called()
         robot.start_observation_subscriptions.assert_not_called()
 

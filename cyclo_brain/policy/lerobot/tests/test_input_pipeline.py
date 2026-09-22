@@ -142,6 +142,7 @@ def test_real_feature_encoder_worker_feedback_and_public_action_memory():
             pass
     robot = Robot()
     def init_robot(_):
+        engine._channel_mapping = SimpleNamespace(action=lambda chunk: chunk)
         engine._robot = robot
         engine._cameras = {"head": "image"}
         engine._state_modalities = []

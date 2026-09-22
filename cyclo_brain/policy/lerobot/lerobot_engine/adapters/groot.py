@@ -93,6 +93,53 @@ def _validate_groot_checkpoint(config, root):
 
 
 
+def validate_relative_channels(mapping, decode_step):
+    """Match the native decoder's named group references at the external boundary."""
+    from lerobot.policies.groot.utils import config_value, stat_dim_from_entry
+
+    if decode_step.pack_step is None:
+        raise ValueError("GR00T relative action decoder has no state pack step")
+    pack = decode_step.pack_step.get_config()
+    decode = decode_step.get_config()
+    if decode.get("action_decode_transform"):
+        raise ValueError("GR00T relative action transform requires a separate channel contract")
+
+    def split_channels(options, modality, names):
+        config = (options.get("modality_config") or {}).get(modality, {})
+        stats = (options.get("raw_stats") or {}).get(modality, {})
+        keys = config.get("modality_keys", [])
+        if not isinstance(keys, list) or not keys or any(not isinstance(key, str) for key in keys):
+            raise ValueError(f"GR00T {modality} group order is missing")
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"GR00T {modality} group order is ambiguous")
+        groups, offset = {}, 0
+        for key in keys:
+            width = stat_dim_from_entry(stats.get(key, {}))
+            if width <= 0 or offset + width > len(names):
+                raise ValueError(f"GR00T {modality} group {key} does not match external channels")
+            groups[key] = names[offset:offset + width]
+            offset += width
+        if offset != len(names):
+            raise ValueError(f"GR00T {modality} groups do not cover external channels")
+        return config, groups
+
+    _, states = split_channels(pack, "state", mapping.state_names)
+    config, actions = split_channels(decode, "action", mapping.action_names)
+    configs = config.get("action_configs", [])
+    if not isinstance(configs, list) or len(configs) != len(actions):
+        raise ValueError("GR00T relative action group configuration is incomplete")
+    for (key, names), spec in zip(actions.items(), configs, strict=True):
+        if not isinstance(spec, dict):
+            raise ValueError(f"GR00T action group configuration is invalid: {key}")
+        if config_value(spec.get("rep")) != "relative":
+            continue
+        if config_value(spec.get("type")) != "non_eef":
+            raise ValueError("GR00T relative EEF channels are not a joint/velocity mapping")
+        state_key = spec.get("state_key") or key
+        if states.get(state_key) != names:
+            raise ValueError(f"GR00T relative state/action channel mismatch: {key} -> {state_key}")
+
+
 ADAPTER = AdapterDefinition(
     checkpoint_validator=validate_checkpoint,
     requested_config_validator=validate_requested_config,

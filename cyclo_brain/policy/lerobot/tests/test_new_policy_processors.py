@@ -44,6 +44,34 @@ def batch():
     }
 
 
+@pytest.mark.parametrize("labels", [
+    ["joint_0", "joint_1"], ["joint_1", "joint_0"], ["joint_0"],
+    ["joint_0", "joint_1", "joint_2"],
+])
+def test_relative_processor_labels_match_external_mapping(labels):
+    from channel_fixtures import make_channel_mapping
+    from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
+    from lerobot.processor.relative_action_processor import (
+        RelativeActionsProcessorStep, AbsoluteActionsProcessorStep,
+    )
+
+    mapping = make_channel_mapping(2)
+    relative = RelativeActionsProcessorStep(enabled=True, action_names=labels, exclude_joints=["joint_1"])
+    pre = PolicyProcessorPipeline(steps=[relative])
+    post = PolicyProcessorPipeline(
+        steps=[AbsoluteActionsProcessorStep(enabled=True, relative_step=relative)],
+        to_transition=policy_action_to_transition, to_output=transition_to_policy_action,
+    )
+    if labels != list(mapping.action_names):
+        with pytest.raises(ValueError, match="action names differ"):
+            mapping.validate_processors(pre, post)
+        return
+    mapping.validate_processors(pre, post)
+    pre({"observation.state": torch.tensor([[2., 9.]])})
+    restored = post(torch.zeros(1, 2))
+    torch.testing.assert_close(restored, torch.tensor([[2., 0.]]))
+
+
 @pytest.mark.parametrize("name", MODELS)
 def test_real_policy_import_and_saved_config_roundtrip(name, tmp_path):
     cls = get_policy_class(name)
@@ -109,6 +137,44 @@ def test_groot_validation_accepts_real_serialized_pack_and_decode(tmp_path):
     assert torch.isfinite(result).all()
 
 
+def test_groot_native_relative_channel_contract():
+    from lerobot.policies.groot.processor_groot import GrootN17ActionDecodeStep, GrootN17PackInputsStep
+    from lerobot_engine.channel_mapping import ChannelMapping
+
+    bot = SimpleNamespace(
+        _config={"joint_groups": {"body": {"role": "follower", "msg_type": "sensor_msgs/msg/JointState",
+                                          "joint_names": ["a", "b", "head"]}}},
+        _action_groups={"arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": ["a", "b"]}},
+    )
+    cfg = SimpleNamespace(input_features={"observation.state": {"shape": [3]}},
+                          output_features={"action": {"shape": [2]}})
+    mapping = ChannelMapping(bot, cfg, {"version": 1, "state_names": ["a", "b", "head"],
+                                       "action_names": ["b", "a"]}, [])
+    stats = {"state": {key: {"mean": [0.]} for key in ("sa", "sb", "head")},
+             "action": {key: {"mean": [0.]} for key in ("ab", "aa")}}
+    modalities = {
+        "state": {"modality_keys": ["sa", "sb", "head"]},
+        "action": {"modality_keys": ["ab", "aa"], "action_configs": [
+            {"rep": "RELATIVE", "type": "NON_EEF", "state_key": "sb"},
+            {"rep": "RELATIVE", "type": "NON_EEF", "state_key": "sa"},
+        ]},
+    }
+    pack = GrootN17PackInputsStep(raw_stats=stats, modality_config=modalities)
+    decode = GrootN17ActionDecodeStep(raw_stats=stats, modality_config=modalities,
+                                      use_relative_action=True, pack_step=pack)
+    pre, post = SimpleNamespace(steps=[pack]), SimpleNamespace(steps=[decode])
+    mapping.validate_processors(pre, post)
+    modalities["action"]["action_configs"][0]["state_key"] = "sa"
+    with pytest.raises(ValueError, match="channel mismatch"):
+        mapping.validate_processors(pre, post)
+    modalities["action"]["action_configs"][0]["type"] = "EEF"
+    with pytest.raises(ValueError, match="relative EEF"):
+        mapping.validate_processors(pre, post)
+    decode.pack_step = None
+    with pytest.raises(ValueError, match="no state pack"):
+        mapping.validate_processors(pre, post)
+
+
 @pytest.mark.parametrize("resize_first", [True, False])
 def test_groot_engine_runs_saved_resize_before_camera_packing(tmp_path, resize_first):
     """Real serialized image/pack steps; model weights and robot I/O are excluded."""
@@ -128,6 +194,7 @@ def test_groot_engine_runs_saved_resize_before_camera_packing(tmp_path, resize_f
     engine._policy = SimpleNamespace(config=SimpleNamespace(type="groot"))
     engine._robot = object()
     engine._input_pipeline_config = object()
+    engine._channel_mapping = SimpleNamespace(action=lambda chunk: chunk)
     engine._cameras = {"head": "observation.images.head", "wrist": "observation.images.wrist"}
     def observation(_instruction):
         raw = batch()
@@ -157,6 +224,7 @@ def test_groot_engine_runs_saved_resize_before_camera_packing(tmp_path, resize_f
 def test_actual_act_checkpoint_load_predict_clear_reload(monkeypatch):
     """Real weights/processors and synthetic observations; no ROS or robot commands."""
     import numpy as np
+    from lerobot_engine.channel_mapping import ChannelMapping
     from lerobot_engine.engine import LeRobotEngine
 
     engine = LeRobotEngine()
@@ -167,11 +235,21 @@ def test_actual_act_checkpoint_load_predict_clear_reload(monkeypatch):
             key.removeprefix("observation.images."): np.zeros((*feature.shape[1:], 3), np.uint8)
             for key, feature in config.input_features.items() if key.startswith("observation.images.")
         }
+        state_names = [f"joint_{i}" for i in range(config.input_features["observation.state"].shape[0])]
+        action_names = [f"joint_{i}" for i in range(config.output_features["action"].shape[0])]
         engine._robot = SimpleNamespace(
-            _config={"cameras": {}}, close=lambda: None,
+            _config={"cameras": {}, "joint_groups": {"follower_arm": {
+                "role": "follower", "msg_type": "sensor_msgs/msg/JointState", "joint_names": state_names}}},
+            _action_groups={"arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": action_names}},
+            close=lambda: None,
             get_images=lambda **_: images,
-            get_joint_positions=lambda: {"follower_arm": np.zeros(config.input_features["observation.state"].shape[0])},
         )
+        engine._channel_mapping = ChannelMapping(engine._robot, config, {
+            "version": 1, "state_names": state_names, "action_names": action_names,
+        }, [])
+        engine._robot.get_joint_positions = lambda: {
+            key: np.zeros(len(view["joint_names"])) for key, view in engine._channel_mapping.joint_views.items()
+        }
         engine._cameras = {name: f"observation.images.{name}" for name in images}
         engine._state_modalities = ["arm"]
         engine._action_keys = ["arm"]

@@ -35,7 +35,7 @@ def main():
         images = engine._robot.get_images("rgb")
         joints = engine._robot.get_joint_positions()
         return {**{key: previous.apply(images[name], key).to(engine._device) for name, key in engine._cameras.items()},
-                "observation.state": engine._transform_state((joints["follower_arm"],)), "task": ["pick"]}
+                "observation.state": engine._transform_state((joints["follower_cyclo_input_0"],)), "task": ["pick"]}
 
     def current():
         result = engine._build_observation("pick")

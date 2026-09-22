@@ -86,6 +86,18 @@ def test_policy_workers_retain_zenoh_shm_memlock_limit():
         )
 
 
+def test_lerobot_external_training_adapter_is_installed_and_mounted():
+    source = "cyclo_brain/policy/lerobot/extensions"
+    for arch in ("amd64", "arm64"):
+        contents = (REPO_ROOT / f"cyclo_brain/policy/lerobot/Dockerfile.{arch}").read_text()
+        assert f"COPY {source}/ /app/extensions/" in contents
+        assert "pip install --no-deps --no-build-isolation -e /app/extensions" in contents
+        assert '".[training,' in contents
+    services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
+    assert f"../{source}:/app/extensions:ro" in services["lerobot"]["volumes"]
+    assert not any("/app/extensions" in mount for mount in services["groot"]["volumes"])
+
+
 def test_main_dockerfiles_install_compose_v2():
     for dockerfile in (
         REPO_ROOT / "docker" / "Dockerfile.arm64",

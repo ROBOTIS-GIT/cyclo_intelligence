@@ -24,6 +24,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 from inference_context.execution import ActionRecord, ExecutionContext
 from lerobot_engine.adapters import resolve_adapter
+from channel_fixtures import make_channel_mapping
 
 
 def config(n_obs=2, n_actions=3):
@@ -219,10 +220,10 @@ def test_worker_load_context_input_pipeline_retry_and_cached_reload(tmp_path, mo
             now = time.monotonic()
             return {
                 "images": {name: np.full((32, 32, 3), self.value, np.uint8) for name in ("head", "wrist")},
-                "joint_positions": {"follower_arm": np.full(6, self.value, np.float32)},
+                "joint_positions": {"follower_cyclo_input_0": np.full(6, self.value, np.float32)},
                 "sensors": {}, "captured_monotonic_s": now,
                 "reception_monotonic_timestamps": dict.fromkeys(
-                    ("camera:head", "camera:wrist", "joint:follower_arm"), now,
+                    ("camera:head", "camera:wrist", "joint:follower_cyclo_input_0"), now,
                 ),
             }
 
@@ -236,6 +237,8 @@ def test_worker_load_context_input_pipeline_retry_and_cached_reload(tmp_path, mo
         engine._robot = robot
         engine._cameras = {name: f"observation.images.{name}" for name in ("head", "wrist")}
         engine._state_modalities = ["arm"]
+        engine._channel_mapping = make_channel_mapping(6)
+        engine._step_adapter.set_action_mapping(engine._channel_mapping.action)
         engine._action_keys = ["arm"]
 
     monkeypatch.setattr(engine, "_init_robot", attach)
@@ -260,7 +263,7 @@ def test_worker_load_context_input_pipeline_retry_and_cached_reload(tmp_path, mo
         assert repeat.action_list == first.action_list
         assert len(robots[-1].sources) == calls
         assert len(engine._policy.diffusion.batches) == 1
-        assert robots[-1].sources[-1] == {"camera:head", "camera:wrist", "joint:follower_arm"}
+        assert robots[-1].sources[-1] == {"camera:head", "camera:wrist", "joint:follower_cyclo_input_0"}
         assert engine._policy.diffusion.batches[0]["observation.state"].shape == (1, 2, 6)
 
         cached = worker.handle(replace(load, seq_id=3))

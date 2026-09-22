@@ -28,6 +28,7 @@ from typing import Dict, Iterable
 
 from .constants import IMAGE_KEY_PREFIX as _IMAGE_KEY_PREFIX
 from .adapters import resolve_adapter
+from .channel_mapping import ChannelMapping
 
 from robot_client import RobotClient
 from robot_client.camera_mapping import resolve_camera_mappings
@@ -90,14 +91,25 @@ class IoMappingMixin:
         if self._has_mobile_state:
             modalities = sorted(set(modalities) | {"mobile"})
 
+        from cyclo_lerobot_io.mapping import read_mapping
+
+        self._channel_mapping = ChannelMapping(
+            self._robot, self._policy.config, read_mapping(self._loaded_model_path), modalities,
+        )
+        self._channel_mapping.validate_processors(self._preprocessor, getattr(self, "_postprocessor", None))
+        self._robot.configure_joint_views(self._channel_mapping.joint_views)
         self._state_modalities = modalities
-        self._action_keys = list(modalities)
+        self._action_keys = list(self._channel_mapping.action_keys)
+        step = getattr(self, "_step_adapter", None)
+        if step is not None:
+            step.set_action_mapping(self._channel_mapping.action)
 
         definition = getattr(self, "_adapter_definition", None)
         if definition is None:
             definition = resolve_adapter(getattr(self._policy.config, "type", None))
         if definition.layout_validator is not None:
-            definition.layout_validator(self._policy.config, self._robot, modalities, self._action_keys)
+            definition.layout_validator(self._policy.config, self._robot, modalities, self._action_keys,
+                                        layout=self._channel_mapping)
 
         # Compile the model's declared input plan before readiness checks. A
         # sensor present in robot config need not be an input of this model.
@@ -110,9 +122,10 @@ class IoMappingMixin:
                 "Required observations are not ready: " + ", ".join(missing)
             )
         logger.info(
-            "Robot ready: cameras=%s state_modalities=%s",
+            "Robot ready: cameras=%s state_channels=%s action_groups=%s",
             list(self._cameras.keys()),
-            self._state_modalities,
+            self._channel_mapping.state_names,
+            self._action_keys,
         )
 
     def _teardown_robot(self) -> None:
@@ -120,6 +133,7 @@ class IoMappingMixin:
             session.close()
         self._observation_sessions = {}
         self._input_context = None
+        self._channel_mapping = None
         if self._robot is not None:
             try:
                 self._robot.close()

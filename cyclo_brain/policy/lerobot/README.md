@@ -89,6 +89,77 @@ lerobot-train \
 Training output placed below `/workspace/model/lerobot` is immediately visible
 to the Cyclo model browser.
 
+## State And Action Channels
+
+The optional `cyclo_channels` training adapter selects actual dataset channels
+and exports `cyclo_io_mapping.json` beside each checkpoint's `config.json`,
+including intermediate checkpoints and Hub uploads. Without the adapter,
+training remains unchanged. The mapping records the ordered external channels:
+
+```json
+{
+  "version": 1,
+  "state_names": ["joint_a", "joint_b", "head_joint"],
+  "action_names": ["joint_b", "joint_a"],
+  "dataset": {"repo_id": "owner/dataset", "revision": null}
+}
+```
+
+Names must match the robot configuration's joint names (or velocity channels
+such as `linear_x`, `linear_y`, `angular_z`). Input and output lists are
+independent. Cyclo selects state before normalization, then rearranges actions
+after the saved postprocessor into command-group order. Camera and temporal
+preprocessing remain in the existing YAML; channel lists are not duplicated there.
+Name matching does not convert units, coordinate frames, or action representations.
+
+Complete omitted command groups receive no inference commands, including during
+Slow Start and inference Stop. Selecting only part of a command group is rejected
+at LOAD. Saved Pose remains a separate feature. Relative-action processors that
+require matching state/action prefixes retain that constraint. Native GR00T
+relative groups are checked against their saved state-group references; EEF or
+additional relative action transforms require a separate contract and are rejected.
+
+Training selection uses a separate YAML with `state_names` and `action_names`:
+each is an ordered list of dataset channel names or `all`. Both are required.
+
+```bash
+lerobot-train \
+  --training_adapter.name=cyclo_channels \
+  --training_adapter.config_path=/workspace/channels.yaml \
+  --policy.type=act --dataset.repo_id=owner/dataset \
+  --policy.push_to_hub=false
+```
+
+This selects the last tensor axis and corresponding features/statistics without
+rewriting the dataset. Names are mandatory; invalid or contradictory metadata
+fails before model construction. The resolved selection is saved for portable
+resume even without the original YAML. Changed selections cannot resume a run.
+The former `io_mapping_path` label-only option is not a selection option and is
+no longer supported. See [Training Extension](extensions/README.md) for installation,
+supported paths, resume commands and migration details.
+
+Existing or externally trained models do not require retraining. Generate a
+draft from the dataset actually used for training:
+
+```bash
+cyclo-io-mapping \
+  --checkpoint /workspace/model/lerobot/owner/model \
+  --dataset-info /workspace/lerobot/owner/dataset/meta/info.json
+```
+
+Check the actual training selection/order, then repeat with `--write` to add the
+file. Use `--mapping /path/to/verified.json` instead of `--dataset-info` when
+training changed the dataset layout. Existing files are never overwritten.
+The tool does not modify weights, processor statistics, or model configuration.
+
+Without this file, only exact state/action dimension matches are accepted using
+legacy robot order, with a warning; equal sizes alone do not prove semantic
+compatibility. There is no implicit truncation or zero-padding. Invalid mapping
+files never fall back to legacy mode. Clear and LOAD reload the mapping even
+when weights are cached. Install the updated LeRobot generic hooks and external
+`cyclo-lerobot-io` package together. Rebuild the LeRobot image once for these
+installation changes; subsequent extension edits use the read-only source mount.
+
 ## Inference Inputs And Camera Preprocessing
 
 Edit `cyclo_brain/policy/lerobot/configs/inference_inputs/<policy_type>.yaml`.
@@ -280,7 +351,9 @@ pipeline. Cyclo does not invent an automatic resize recipe.
 
 WALL-X's pinned core has a fixed 20-dimensional state/action limit. Cyclo checks
 each dimension independently and requires the effective robot layout to match
-the checkpoint. A 22-dimensional robot is rejected rather than truncated.
+the checkpoint. A 22-channel robot can run a mapped 16-channel checkpoint when
+the selected action groups are complete; an actual 22-channel WALL-X input or
+output is still rejected rather than truncated.
 Matching dimensions alone does not prove semantic joint ordering compatibility.
 
 EO1, Evo1 and Pi0-FAST are excluded from Cyclo's inference Catalog and its
