@@ -11,6 +11,11 @@ export const DOWNLOAD_MODEL_BACKENDS = [
     label: 'GR00T',
     path: DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH,
   },
+  {
+    value: 'rldx',
+    label: 'RLDX',
+    path: DEFAULT_PATHS.RLDX_CHECKPOINTS_PATH,
+  },
 ];
 
 const MANAGED_DOWNLOAD_PATHS = new Set([
