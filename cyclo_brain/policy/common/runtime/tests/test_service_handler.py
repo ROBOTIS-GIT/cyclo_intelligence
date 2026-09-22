@@ -418,7 +418,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(handler._requester.unload_count, 0)
 
     def test_load_canonicalizes_policy_selection_before_engine_request(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         handler, _session, _loop = self._handler(
             catalog=catalog,
             backend="lerobot",
@@ -440,7 +440,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertIs(handler._requester.loaded_with, request)
 
     def test_load_rejects_unknown_policy_before_engine_request(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         handler, _session, loop = self._handler(
             catalog=catalog,
             backend="lerobot",
@@ -460,7 +460,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(loop.configures, [])
 
     def test_load_rejects_invalid_parameters_before_engine_request(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         handler, _session, loop = self._handler(
             catalog=catalog,
             backend="lerobot",
@@ -480,7 +480,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(loop.configures, [])
 
     def test_load_rejects_action_mode_not_supported_by_runtime(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         catalog = deepcopy(catalog)
         lerobot_runtime = next(
             runtime for runtime in catalog["runtimes"] if runtime["id"] == "lerobot"
@@ -506,7 +506,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(loop.configures, [])
 
     def test_load_rejects_unknown_action_mode_before_engine_request(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         handler, _session, loop = self._handler(
             catalog=catalog,
             backend="lerobot",
@@ -527,7 +527,7 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertEqual(loop.configures, [])
 
     def test_empty_policy_id_uses_checkpoint_metadata_and_warns(self) -> None:
-        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot"})
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx"})
         handler, _session, _loop = self._handler(
             catalog=catalog,
             backend="lerobot",

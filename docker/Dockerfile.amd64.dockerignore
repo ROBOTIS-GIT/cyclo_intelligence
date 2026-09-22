@@ -22,6 +22,9 @@ cyclo_brain/policy/lerobot/*
 !cyclo_brain/policy/groot/
 cyclo_brain/policy/groot/*
 !cyclo_brain/policy/groot/manifest.yaml
+!cyclo_brain/policy/rldx/
+cyclo_brain/policy/rldx/*
+!cyclo_brain/policy/rldx/manifest.yaml
 !cyclo_brain/sdk/
 cyclo_brain/sdk/*
 !cyclo_brain/sdk/zenoh_ros2_sdk/

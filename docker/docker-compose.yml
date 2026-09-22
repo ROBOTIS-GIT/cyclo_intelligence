@@ -1,6 +1,6 @@
 # cyclo_intelligence — Docker Compose
 #
-# Three services:
+# Main service and independent policy Workers:
 #   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
 #                         cyclo_data + UI + nginx + Policy Runtime. Always
 #                         started first.
@@ -8,6 +8,7 @@
 #                         started on demand by the UI via
 #                         supervisor_api. May be brought up manually
 #                         for Step 4 verification.
+#   groot, rldx          independent policy environments, started on demand.
 #
 # Usage: prefer the container.sh wrapper — it auto-detects ARCH from
 # `uname -m` and sets the compose env:
@@ -34,6 +35,55 @@
 name: cyclo_intelligence
 
 services:
+  # RLDX is currently validated on NVIDIA AMD64 hosts only.
+  rldx:
+    container_name: rldx_server
+    image: robotis/rldx-zenoh:dev-${ARCH:-amd64}
+    build:
+      context: ..
+      dockerfile: cyclo_brain/policy/rldx/Dockerfile.${ARCH:-amd64}
+      network: host
+      args:
+        FLASH_ATTN_CUDA_ARCHS: ${RLDX_FLASH_ATTN_CUDA_ARCHS:-120}
+        MAX_JOBS: ${FLASH_ATTN_BUILD_JOBS:-2}
+    network_mode: host
+    ipc: host
+    ulimits:
+      memlock: 8428281856
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      - ../cyclo_brain/policy/rldx/rldx_engine:/app/rldx_engine:ro
+      - ../cyclo_brain/policy/rldx/configs:/app/configs:ro
+      - ../cyclo_brain/policy/rldx/manifest.yaml:/app/policy_manifest.yaml:ro
+      - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
+      - ../cyclo_brain/policy/common/catalog:/catalog:ro
+      - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
+      - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: "no"
+    runtime: nvidia
+    healthcheck:
+      test: ["CMD-SHELL", "/command/s6-svstat -o up /run/service/engine-process | grep -q true && test -s /run/cyclo/engine-process.ready"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
   # ============================================================
   # cyclo_intelligence main container (PLAN §4.5).
   # Multi-stage image (docker/Dockerfile.{arm64,amd64}) carries the

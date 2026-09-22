@@ -1,0 +1,38 @@
+# Build context: repository root. Keep RLDX's Python/Torch separate from LeRobot.
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG S6_OVERLAY_VERSION=3.2.0.2
+ARG FLASH_ATTN_CUDA_ARCHS=120
+ARG MAX_JOBS=2
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 curl ca-certificates git build-essential ffmpeg libegl1 libglib2.0-0 xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
+RUN curl -fsSL https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz -o /tmp/s6-noarch.tar.xz \
+    && curl -fsSL https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz -o /tmp/s6-arch.tar.xz \
+    && tar -C / -Jxf /tmp/s6-noarch.tar.xz && tar -C / -Jxf /tmp/s6-arch.tar.xz \
+    && rm /tmp/s6-*.tar.xz
+COPY cyclo_brain/policy/rldx/RLDX-1/ /rldx/
+COPY cyclo_brain/policy/rldx/scripts/install_environment.py /opt/install_environment.py
+RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
+    python3 /opt/install_environment.py /rldx /opt/rldx-env
+ENV PATH=/opt/rldx-env/bin:$PATH
+RUN uv pip install --python /opt/rldx-env/bin/python \
+    'eclipse-zenoh>=1.6.0,<1.7.0' 'rosbags>=0.11.0' 'GitPython>=3.1.18' json5 pyyaml
+COPY cyclo_brain/policy/rldx/rldx_engine/ /app/rldx_engine/
+COPY cyclo_brain/policy/rldx/configs/ /app/configs/
+COPY cyclo_brain/policy/rldx/manifest.yaml /app/policy_manifest.yaml
+COPY cyclo_brain/policy/common/runtime/ /policy_runtime/
+COPY cyclo_brain/policy/common/catalog/ /catalog/
+COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
+COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
+COPY shared/shared/robot_configs/ /orchestrator_config/
+COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
+ENV POLICY_BACKEND=rldx POLICY_ENGINE_MODULE=rldx_engine
+ENV ZENOH_SDK_PATH=/zenoh_sdk ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
+ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/rldx
+WORKDIR /app
+ENTRYPOINT ["/init"]

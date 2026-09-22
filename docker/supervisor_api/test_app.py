@@ -662,8 +662,8 @@ def test_compose_uses_repo_local_workspace_mounts():
 
     assert "CYCLO_WORKSPACE_DIR" not in compose
     assert "CYCLO_HUGGINGFACE_DIR" not in compose
-    assert compose.count("./workspace:/workspace") == 3
-    assert compose.count("./huggingface:/root/.cache/huggingface") == 3
+    assert compose.count("./workspace:/workspace") == 4
+    assert compose.count("./huggingface:/root/.cache/huggingface") == 4
 
 
 def test_container_helper_does_not_export_workspace_mount_overrides():
@@ -784,6 +784,7 @@ def test_policy_catalog_endpoint_exposes_validated_runtimes():
     assert {runtime["id"] for runtime in catalog["runtimes"]} == {
         "groot",
         "lerobot",
+        "rldx",
     }
     assert "lerobot:act" in {
         model["policy_id"]

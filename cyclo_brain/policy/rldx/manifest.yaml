@@ -1,0 +1,20 @@
+schema_version: 1
+runtime:
+  id: rldx
+  label: RLDX
+  compose_service: rldx
+  service_prefix: rldx
+  checkpoint_root: /workspace/model/rldx
+  source:
+    kind: submodule
+    location: RLDX-1
+  services: [engine-process]
+  capabilities:
+    action_request_modes: [async, sync]
+    requires_hf_token: false
+    operations: []
+models:
+  - id: rldx1
+    label: RLDX-1
+    aliases: [rldx1]
+    requires_instruction: true
