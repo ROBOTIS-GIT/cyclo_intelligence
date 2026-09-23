@@ -162,6 +162,7 @@ COPY cyclo_brain/policy/common ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/p
 COPY cyclo_brain/policy/lerobot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/lerobot/manifest.yaml
 COPY cyclo_brain/policy/groot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/groot/manifest.yaml
 COPY cyclo_brain/policy/rldx/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/rldx/manifest.yaml
+COPY cyclo_brain/policy/lingbot_vla/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/lingbot_vla/manifest.yaml
 COPY cyclo_brain/sdk/zenoh_ros2_sdk ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/zenoh_ros2_sdk
 COPY cyclo_brain/sdk/robot_client ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/robot_client
 COPY cyclo_brain/sdk/action_chunk_processing ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/action_chunk_processing

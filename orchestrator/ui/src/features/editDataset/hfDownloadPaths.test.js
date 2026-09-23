@@ -14,6 +14,8 @@ describe('hfDownloadPaths', () => {
       DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
     );
     expect(getDefaultDownloadPath('model', 'rldx')).toBe('/workspace/model/rldx');
+    expect(getDefaultDownloadPath('model', 'lingbot_vla')).toBe('/workspace/model/lingbot_vla');
+    expect(isManagedDownloadPath('/workspace/model/lingbot_vla/owner/checkpoint')).toBe(true);
   });
 
   test('keeps dataset downloads under the rosbag2 root', () => {

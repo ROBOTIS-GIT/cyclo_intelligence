@@ -1,0 +1,20 @@
+schema_version: 1
+runtime:
+  id: lingbot_vla
+  label: LingBot-VLA
+  compose_service: lingbot_vla
+  service_prefix: lingbot_vla
+  checkpoint_root: /workspace/model/lingbot_vla
+  source:
+    kind: submodule
+    location: lingbot-vla-v2
+  services: [engine-process]
+  capabilities:
+    action_request_modes: [async, sync]
+    requires_hf_token: false
+    operations: []
+models:
+  - id: v2
+    label: LingBot-VLA 2.0
+    aliases: [lingbot_vla_v2]
+    requires_instruction: true

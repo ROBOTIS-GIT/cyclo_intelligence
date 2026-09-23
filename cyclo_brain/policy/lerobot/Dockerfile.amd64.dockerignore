@@ -7,6 +7,7 @@ cyclo_data/
 interfaces/
 docs/
 cyclo_brain/docs/
+cyclo_brain/policy/lingbot_vla/
 cyclo_brain/policy/groot/
 shared/shared/robot_configs/urdf/
 shared/shared/robot_configs/ffw_description/

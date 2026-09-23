@@ -16,6 +16,11 @@ export const DOWNLOAD_MODEL_BACKENDS = [
     label: 'RLDX',
     path: DEFAULT_PATHS.RLDX_CHECKPOINTS_PATH,
   },
+  {
+    value: 'lingbot_vla',
+    label: 'LingBot-VLA',
+    path: DEFAULT_PATHS.LINGBOT_VLA_CHECKPOINTS_PATH,
+  },
 ];
 
 const MANAGED_DOWNLOAD_PATHS = new Set([

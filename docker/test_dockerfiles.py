@@ -492,7 +492,7 @@ def test_lerobot_images_install_new_policy_inference_extras():
 
 def test_policy_build_contexts_use_runtime_specific_ignore_files():
     compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text()
-    assert compose.count("context: ..") == 4
+    assert compose.count("context: ..") == 5
 
     main_ignores = []
     policy_root = REPO_ROOT / "cyclo_brain" / "policy"

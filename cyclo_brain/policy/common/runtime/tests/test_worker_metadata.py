@@ -14,7 +14,7 @@ from catalog import load_runtime_catalog, resolve_runtime
 from engine_process.worker import _worker_metadata
 
 
-@pytest.mark.parametrize("backend", ["lerobot", "groot", "rldx"])
+@pytest.mark.parametrize("backend", ["lerobot", "groot", "rldx", "lingbot_vla"])
 def test_worker_metadata_matches_validated_catalog(monkeypatch, backend):
     path = RUNTIME_ROOT.parents[1] / backend / "manifest.yaml"
     monkeypatch.setenv("POLICY_MANIFEST_PATH", str(path))

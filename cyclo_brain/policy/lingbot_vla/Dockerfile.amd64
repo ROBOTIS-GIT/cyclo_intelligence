@@ -1,0 +1,49 @@
+# Independent upstream environment; no changes to LeRobot or RLDX images.
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG S6_OVERLAY_VERSION=3.2.0.2
+ARG FLASH_ATTN_CUDA_ARCHS=120
+ARG MAX_JOBS=2
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-dev curl ca-certificates git build-essential ffmpeg libegl1 libglib2.0-0 xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
+RUN curl -fsSL https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz -o /tmp/s6-noarch.tar.xz \
+    && curl -fsSL https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz -o /tmp/s6-arch.tar.xz \
+    && tar -C / -Jxf /tmp/s6-noarch.tar.xz && tar -C / -Jxf /tmp/s6-arch.tar.xz \
+    && rm /tmp/s6-*.tar.xz
+COPY cyclo_brain/policy/lingbot_vla/lingbot-vla-v2/requirements.txt /tmp/lingbot-requirements.txt
+RUN uv venv --python /usr/bin/python3 /opt/lingbot-env
+ENV PATH=/opt/lingbot-env/bin:$PATH
+RUN uv pip install --python /opt/lingbot-env/bin/python \
+    -r /tmp/lingbot-requirements.txt setuptools wheel accelerate==1.7.0
+# Upstream installs this without dependencies to preserve its NumPy 1.26 pin.
+RUN uv pip install --python /opt/lingbot-env/bin/python --no-deps numpydantic==1.9.0
+RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
+    uv pip install --python /opt/lingbot-env/bin/python --no-build-isolation --no-deps flash-attn==2.8.3
+RUN uv pip install --python /opt/lingbot-env/bin/python --no-deps \
+    'lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz'
+RUN uv pip install --python /opt/lingbot-env/bin/python \
+    'eclipse-zenoh>=1.6.0,<1.7.0' 'rosbags>=0.11.0' 'GitPython>=3.1.18' json5
+COPY cyclo_brain/policy/lingbot_vla/lingbot-vla-v2/ /lingbot-vla-v2/
+RUN uv pip install --python /opt/lingbot-env/bin/python --no-deps -e /lingbot-vla-v2
+ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/lingbot-vla-v2
+# Upstream's MoE decorators query CUDA during import. Import smoke tests must
+# run with --gpus after the image is built, not in a GPU-less BuildKit step.
+RUN python -m compileall -q /lingbot-vla-v2/deploy/lingbot_vla_v2_policy.py
+COPY cyclo_brain/policy/lingbot_vla/lingbot_vla_engine/ /app/lingbot_vla_engine/
+COPY cyclo_brain/policy/lingbot_vla/configs/ /app/configs/
+COPY cyclo_brain/policy/lingbot_vla/manifest.yaml /app/policy_manifest.yaml
+COPY cyclo_brain/policy/common/runtime/ /policy_runtime/
+COPY cyclo_brain/policy/common/catalog/ /catalog/
+COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
+COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
+COPY shared/shared/robot_configs/ /orchestrator_config/
+COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
+ENV POLICY_BACKEND=lingbot_vla POLICY_ENGINE_MODULE=lingbot_vla_engine
+ENV ZENOH_SDK_PATH=/zenoh_sdk ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
+ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
+WORKDIR /app
+ENTRYPOINT ["/init"]
