@@ -93,6 +93,66 @@ a Hugging Face token for an approved account before first inference, or pre-cach
 the Cosmos files under the shared Hugging Face cache. Policy containers sync the
 Cyclo endpoint token store to the standard Hugging Face token file on startup.
 
+## LeRobot GPU startup across JetPack versions
+
+LeRobot keeps its CUDA/PyTorch image dependencies and selects the CUDA driver
+at process startup using `runtime/gpu_runtime.py`. The common s6 runners invoke
+it **after** the interactive shell reads `.bashrc` and **before** importing any
+policy libraries. No model is loaded and no robot commands are sent by the probe.
+
+On Jetson (`/etc/nv_tegra_release` exists), `auto` first tries the mounted host
+driver, excluding CUDA `compat` directories from `LD_LIBRARY_PATH`. It discovers
+`libcuda.so.1` under the host's `nvgpu`, `tegra` or `nvidia` library directories,
+while preserving other library paths. If that probe fails, it tries the image's
+compat driver from the original path or `/usr/local/cuda/compat`. Each attempt
+imports torch in a **fresh subprocess** and checks a matrix multiplication and
+CUDA synchronization; GPU enumeration alone is insufficient. Non-Jetson hosts
+retain the NVIDIA Container Toolkit environment in `auto` mode.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CYCLO_CUDA_DRIVER` | `auto` | `auto`, `host`, or `compat`; an explicit driver disables fallback |
+| `CYCLO_POLICY_DEVICE` | `cuda` | Require CUDA; set `cpu` explicitly for CPU execution |
+| `CYCLO_GPU_PROBE_TIMEOUT_S` | `30` | Positive timeout per driver probe, in seconds |
+
+These variables are passed to LeRobot by Compose. For example, from the repository
+root, recreate only that service using the same Compose project as the installer:
+
+```bash
+docker compose -p cyclo_intelligence \
+  -f docker/docker-compose.yml -f docker/docker-compose.override.yml \
+  up -d --no-deps --no-build --force-recreate lerobot
+docker logs --tail 100 lerobot_server
+```
+
+Remove any earlier board-specific `LD_LIBRARY_PATH` override when deploying the
+automatic selector. The checked-in development override does not set that path.
+The `[gpu-runtime] Selected` log includes the selected profile, loaded driver
+library, torch version, torch CUDA build version, and GPU name. A shell opened
+with `docker exec` does **not** inherit the selected service environment; inspect
+these logs rather than interpreting a bare shell's torch check as the service
+configuration.
+
+If all probes fail, the service does not start and Docker health remains failing.
+An explicit CPU setting runs a CPU probe and is reported as such. LeRobot also
+checks the requested device when loading weights, so directly launching the
+engine cannot silently fall back to CPU. FastWAM's existing selective CPU offload
+is preserved.
+
+Health combines the s6 process checks with successful probe records in
+`/run/cyclo-gpu/`. Records include PID and process start time so exited or restarted
+processes cannot leave a stale healthy result. This is a **startup** device check,
+not continuous GPU monitoring or a model-readiness/latency guarantee. Both service
+runners and the common runtime are bind-mounted, so existing LeRobot images can
+use the change without rebuilding. The image healthchecks are updated too for
+subsequent builds. GR00T uses separate runners and is not changed by this wiring.
+
+Before declaring another JetPack/image combination supported, validate on both
+the old and upgraded boards: selected driver, real model load, repeated inference
+latency, container restart/recreation, and any TensorRT or custom CUDA extensions.
+CPU-only unit tests cover selection and failure handling; they do not establish
+JetPack compatibility. Keep TensorRT engine caches specific to the tested runtime.
+
 ## Adding a new policy
 
 1. Create `cyclo_brain/policy/<policy>/<policy>_engine/` implementing the ABC.

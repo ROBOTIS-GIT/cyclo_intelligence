@@ -79,7 +79,8 @@ class LoadingMixin:
         # FastWAM's text encoder must stay on the CPU. Its default config can
         # auto-select CUDA inside ``from_pretrained`` and exhaust VRAM before
         # the offload hook runs, so pin only this policy's initial load to CPU.
-        if policy_type == "fastwam":
+        # Explicit CPU execution must not allocate CUDA weights during load.
+        if policy_type == "fastwam" or device.type == "cpu":
             policy_config = PreTrainedConfig.from_pretrained(model_path)
             policy_config.device = "cpu"
             policy = PolicyClass.from_pretrained(model_path, config=policy_config)

@@ -69,6 +69,7 @@ if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
 # Import order: engine ABC first (validates /policy_runtime is on PYTHONPATH),
 # then heavy ML deps.
 from engine import InferenceEngine  # noqa: E402
+from gpu_runtime import policy_device  # noqa: E402
 
 import torch  # noqa: E402
 
@@ -161,9 +162,7 @@ class LeRobotEngine(
                 self._teardown_robot()
             else:
                 logger.info("Loading LeRobot policy from: %s", model_path)
-                self._device = torch.device(
-                    "cuda" if torch.cuda.is_available() else "cpu"
-                )
+                self._device = policy_device(torch)
                 policy, preprocessor, postprocessor = self._load_policy_assets(
                     model_path, self._device
                 )

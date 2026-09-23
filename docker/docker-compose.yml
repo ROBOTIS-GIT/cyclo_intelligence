@@ -191,6 +191,10 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
+      # Probe drivers before loading policy libraries; never silently use CPU.
+      - CYCLO_CUDA_DRIVER=${CYCLO_CUDA_DRIVER:-auto}
+      - CYCLO_POLICY_DEVICE=${CYCLO_POLICY_DEVICE:-cuda}
+      - CYCLO_GPU_PROBE_TIMEOUT_S=${CYCLO_GPU_PROBE_TIMEOUT_S:-30}
 
     volumes:
       - /dev:/dev
@@ -242,11 +246,11 @@ services:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up ' && python3 /policy_runtime/gpu_runtime.py health",
         ]
       interval: 30s
       timeout: 10s
-      start_period: 30s
+      start_period: 90s
       retries: 3
     deploy:
       resources:
