@@ -21,7 +21,9 @@ def load_policy(bundle):
     config.framework.qwenvl.base_vlm = base
     config.trainer.pretrained_checkpoint = None
     policy = ABot_M0(config)
-    weights = torch.load(bundle.checkpoint, map_location="cpu", weights_only=True)
+    # Keep checkpoint storage file-backed instead of allocating a second full
+    # model in host RAM while copying weights into the initialized policy.
+    weights = torch.load(bundle.checkpoint, map_location="cpu", weights_only=True, mmap=True)
     policy.load_state_dict(weights, strict=True)
     del weights
     return policy.to(dtype=torch.bfloat16, device="cuda").eval()
