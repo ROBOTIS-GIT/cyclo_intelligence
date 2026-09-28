@@ -16,6 +16,8 @@ describe('hfDownloadPaths', () => {
     expect(getDefaultDownloadPath('model', 'rldx')).toBe('/workspace/model/rldx');
     expect(getDefaultDownloadPath('model', 'lingbot_vla')).toBe('/workspace/model/lingbot_vla');
     expect(isManagedDownloadPath('/workspace/model/lingbot_vla/owner/checkpoint')).toBe(true);
+    expect(getDefaultDownloadPath('model', 'abot')).toBe('/workspace/model/abot');
+    expect(isManagedDownloadPath('/workspace/model/abot/run')).toBe(true);
   });
 
   test('keeps dataset downloads under the rosbag2 root', () => {

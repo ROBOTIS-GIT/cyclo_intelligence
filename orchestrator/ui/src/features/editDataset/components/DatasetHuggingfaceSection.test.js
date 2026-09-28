@@ -99,6 +99,25 @@ test('selecting RLDX preserves a custom destination', async () => {
   expect(screen.getByDisplayValue('/workspace/custom_models')).toBeInTheDocument();
 });
 
+test.each(['upload', 'download'])('ABot %s uses its own model root', async (operation) => {
+  await showSection(operation);
+  fireEvent.click(screen.getByRole('radio', { name: 'ABot' }));
+  expect(screen.getByDisplayValue('/workspace/model/abot')).toBeInTheDocument();
+  if (operation === 'upload') {
+    fireEvent.change(screen.getByDisplayValue('/workspace/model/abot'), {
+      target: { value: '/workspace/model/abot/owner/checkpoint' },
+    });
+  }
+  fireEvent.click(screen.getByRole('button', {
+    name: operation === 'upload' ? 'Upload' : 'Download', exact: true,
+  }));
+  await waitFor(() => expect(mockControlHfServer).toHaveBeenCalledWith(
+    operation, 'owner/checkpoint', 'model',
+    operation === 'upload' ? '/workspace/model/abot/owner/checkpoint' : '/workspace/model/abot',
+    endpoint
+  ));
+});
+
 test.each(['upload', 'download'])('LingBot-VLA %s uses its own model root', async (operation) => {
   await showSection(operation);
   fireEvent.click(screen.getByRole('radio', { name: 'LingBot-VLA' }));

@@ -1,21 +1,19 @@
-# Build context is the repository root. Dockerfile COPY instructions remain
-# the image-content allowlist; these rules prune unrelated and mutable trees
-# before BuildKit walks the context.
 docker/
 orchestrator/
 cyclo_data/
 interfaces/
 docs/
 cyclo_brain/docs/
-cyclo_brain/policy/lingbot_vla/
-cyclo_brain/policy/abot/
 cyclo_brain/policy/lerobot/
+cyclo_brain/policy/groot/
+cyclo_brain/policy/rldx/
+cyclo_brain/policy/lingbot_vla/
+cyclo_brain/policy/abot/ABot-Manipulation/assets/
 shared/shared/robot_configs/urdf/
 shared/shared/robot_configs/ffw_description/
 shared/shared/robot_configs/open_manipulator_description/
-
 .git/
-**/.git/
+**/.git
 **/.venv/
 **/__pycache__/
 **/*.py[co]
@@ -23,7 +21,4 @@ shared/shared/robot_configs/open_manipulator_description/
 **/*.log
 **/build/
 **/install/
-**/coverage/
-**/dist/
 **/node_modules/
-**/*.egg-info/

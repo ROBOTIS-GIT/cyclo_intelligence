@@ -9,9 +9,9 @@ POLICY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_repository_catalog_matches_compose_services():
-    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla"})
+    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
 
-    assert [runtime["id"] for runtime in catalog["runtimes"]] == ["groot", "lerobot", "lingbot_vla", "rldx"]
+    assert [runtime["id"] for runtime in catalog["runtimes"]] == ["abot", "groot", "lerobot", "lingbot_vla", "rldx"]
     policy_ids = {
         model["policy_id"]
         for runtime in catalog["runtimes"]
@@ -25,13 +25,18 @@ def test_repository_catalog_matches_compose_services():
     assert model["requires_instruction"] is True
     assert runtime["checkpoint_root"] == "/workspace/model/lingbot_vla"
     assert runtime["compose_service"] == "lingbot_vla"
+    assert "abot:m0" in policy_ids
+    runtime, policy = resolve_policy(catalog, "abot_m0")
+    assert runtime["compose_service"] == runtime["service_prefix"] == "abot"
+    assert runtime["checkpoint_root"] == "/workspace/model/abot"
+    assert policy["requires_instruction"] is True
 
 
 @pytest.mark.parametrize("model", ["wall_x", "groot", "pi0", "pi05", "multi_task_dit"])
 def test_new_lerobot_policies_are_resolved_from_checkpoint(tmp_path, model):
     import json
 
-    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla"})
+    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
     (tmp_path / "config.json").write_text(json.dumps({"type": model}))
     policy_id = f"lerobot:{model}"
     assert resolve_policy_id(catalog, "lerobot", "", tmp_path) == policy_id

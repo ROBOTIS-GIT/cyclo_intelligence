@@ -1,11 +1,15 @@
 from copy import deepcopy
 import json
+from pathlib import Path
+import runpy
 
 import pytest
 import yaml
 
 from lingbot_vla_engine.bundle import CheckpointBundle, validate_assets
-from scripts.export_checkpoint import export_checkpoint
+export_checkpoint = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "scripts/export_checkpoint.py")
+)["export_checkpoint"]
 
 
 def test_bundle_requires_all_saved_assets(bundle):

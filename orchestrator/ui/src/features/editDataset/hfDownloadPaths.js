@@ -21,6 +21,11 @@ export const DOWNLOAD_MODEL_BACKENDS = [
     label: 'LingBot-VLA',
     path: DEFAULT_PATHS.LINGBOT_VLA_CHECKPOINTS_PATH,
   },
+  {
+    value: 'abot',
+    label: 'ABot',
+    path: DEFAULT_PATHS.ABOT_CHECKPOINTS_PATH,
+  },
 ];
 
 const MANAGED_DOWNLOAD_PATHS = new Set([

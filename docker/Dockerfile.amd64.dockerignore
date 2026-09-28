@@ -28,6 +28,9 @@ cyclo_brain/policy/rldx/*
 !cyclo_brain/policy/lingbot_vla/
 cyclo_brain/policy/lingbot_vla/*
 !cyclo_brain/policy/lingbot_vla/manifest.yaml
+!cyclo_brain/policy/abot/
+cyclo_brain/policy/abot/*
+!cyclo_brain/policy/abot/manifest.yaml
 !cyclo_brain/sdk/
 cyclo_brain/sdk/*
 !cyclo_brain/sdk/zenoh_ros2_sdk/

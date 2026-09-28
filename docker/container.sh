@@ -242,8 +242,8 @@ Policy containers:
                    Build + start a manifest-backed policy runtime.
   enter-policy <runtime>
                    Open an interactive bash in that runtime container.
-  start-lerobot, start-groot, start-rldx, start-lingbot-vla
-  enter-lerobot, enter-groot, enter-rldx, enter-lingbot-vla
+  start-lerobot, start-groot, start-rldx, start-lingbot-vla, start-abot
+  enter-lerobot, enter-groot, enter-rldx, enter-lingbot-vla, enter-abot
                    Backward-compatible aliases.
 
 Lifecycle:
@@ -498,12 +498,14 @@ case "${1:-help}" in
     start-groot)     start_policy groot ;;
     start-rldx)      start_policy rldx ;;
     start-lingbot-vla) start_policy lingbot_vla ;;
+    start-abot)      start_policy abot ;;
     enter)           enter_main ;;
     enter-policy)    [ -n "${2:-}" ] || { echo "Error: runtime is required" >&2; exit 1; }; enter_policy "$2" ;;
     enter-lerobot)   enter_policy lerobot ;;
     enter-groot)     enter_policy groot ;;
     enter-rldx)      enter_policy rldx ;;
     enter-lingbot-vla) enter_policy lingbot_vla ;;
+    enter-abot)      enter_policy abot ;;
     build-ui)        build_ui ;;
     test-ui)         shift; test_ui "$@" ;;
     logs)            show_logs ;;
