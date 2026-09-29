@@ -257,12 +257,13 @@ class EngineModelLifecycleTest(unittest.TestCase):
         }, {}, Path("step_test.yaml"))
 
         engine = self.make_engine()
-        config = types.SimpleNamespace(type="multi_task_dit",
+        config = types.SimpleNamespace(type="diffusion", image_features={},
             input_features={"observation.state": types.SimpleNamespace(shape=(2,))},
             output_features={"action": types.SimpleNamespace(shape=(2,))})
         policy = mock.Mock(config=config)
         policy.select_action.return_value = torch.tensor([[1., 2.]])
         pre, post = mock.Mock(side_effect=lambda x: x), mock.Mock(side_effect=lambda x: x)
+        pre.steps = ()
         engine._load_policy_assets = mock.Mock(return_value=(policy, pre, post))
         robot = mock.Mock()
         robot.get_joint_names.return_value = ["a", "b"]

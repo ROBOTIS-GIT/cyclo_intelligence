@@ -41,5 +41,17 @@ ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/abot
 RUN python -c 'from ABot.model.framework.ABot_M0 import ABot_M0; from abot_engine import create_engine'
+RUN { \
+    echo ""; \
+    echo "# Cyclo ROS/Zenoh runtime environment."; \
+    echo "# For a remote Zenoh router, comment the local line and uncomment the remote example."; \
+    echo "export ROS_DOMAIN_ID=30"; \
+    echo "export RMW_IMPLEMENTATION=rmw_zenoh_cpp"; \
+    echo "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'"; \
+    echo "# export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true;mode=\"client\";connect/endpoints=[\"tcp/192.168.60.139:7447\"]'"; \
+    } > /tmp/cyclo_bashrc && \
+    if [ -f /root/.bashrc ]; then cat /root/.bashrc >> /tmp/cyclo_bashrc; fi && \
+    mv /tmp/cyclo_bashrc /root/.bashrc
+
 WORKDIR /app
 ENTRYPOINT ["/init"]

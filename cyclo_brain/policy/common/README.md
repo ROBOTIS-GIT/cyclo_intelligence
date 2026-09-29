@@ -50,6 +50,25 @@ one `(T, D)` action chunk. It must not publish robot commands.
 
 ## Runtime Contracts
 
+### Action Steps Availability
+
+Manifests declare `runtime.capabilities.execution_mode: chunk` or `step`.
+A model may override it with `models[].execution_mode`. The catalog exposes the
+resolved mode per model without importing model frameworks. An absent declaration
+is unknown, not implicitly chunk-compatible.
+
+Only chunk policies allow a numeric Action Steps selection. Step policies own
+their action queue and use All (`0`). Orchestrator canonicalizes stale numeric
+settings for step policies to `0` and publishes the shared setting to all UIs.
+Runtime rejects unsupported numeric LOAD requests before loading weights and
+checks the actual Worker contract against the declaration after LOAD, rolling
+back on mismatch. Adapter regression tests must keep declarations and contracts
+in agreement; never enable numeric selection by adding UI model-name exceptions.
+
+After changing declarations, restart Supervisor API, Orchestrator and Policy
+Runtime so their process-local catalogs agree, and refresh the UI. No ROS field
+changes are required for this metadata.
+
 External callers use `interfaces/srv/InferenceCommand` at
 `/policy/inference_command`. The Runtime chooses a Worker from the namespaced
 `policy_id` and calls `interfaces/srv/EngineCommand` at
@@ -111,6 +130,13 @@ export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 After editing `/root/.bashrc`, use a new shell (or source it) and restart the
 **common launch**, not only `orchestrator_node`. The component-only
 `orchestrator` and `cyclo_data` launch commands do not start Policy Runtime.
+All policy Workers, including ABot, LingBot-VLA, and RLDX, also read
+`/root/.bashrc` when their engine service starts. Configure ROS/Zenoh there,
+not in a second Compose environment override. Restart the Worker after editing
+its configuration, once inference is stopped and cleared. A container restart
+preserves the edits; recreating the container restores the image defaults.
+Model asset paths such as `ABOT_BASE_VLM` and `QWEN3VL_PATH` remain separate
+from the ROS/Zenoh settings.
 Do not run the manual common launch while the s6 `cyclo_intelligence` unit is
 already running. A process lock rejects a second Runtime before it can replace
 the existing control socket or publish robot commands.

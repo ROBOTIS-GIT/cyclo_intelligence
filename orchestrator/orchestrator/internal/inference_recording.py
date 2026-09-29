@@ -24,5 +24,6 @@ class InferenceRecordingSession:
         if self.session_id:
             validate_folder(self.root, self.session_id, robot_type)
         else:
-            self.session_id = allocate_folder(self.root)
+            policy_path = self.identity[2] if self.identity else ''
+            self.session_id = allocate_folder(self.root, policy_path)
         return self.session_id

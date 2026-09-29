@@ -8,6 +8,37 @@ from catalog import CatalogError, load_catalog, normalize_policy_parameters, res
 POLICY_ROOT = Path(__file__).resolve().parents[3]
 
 
+def test_execution_modes_are_inherited_or_overridden_per_model():
+    catalog = load_catalog(POLICY_ROOT)
+    assert resolve_policy(catalog, 'lerobot:diffusion')[1]['execution_mode'] == 'step'
+    for policy in ('lerobot:act', 'groot:n17', 'abot:m0', 'rldx:rldx1', 'lingbot_vla:v2'):
+        assert resolve_policy(catalog, policy)[1]['execution_mode'] == 'chunk'
+
+
+@pytest.mark.parametrize('value', ['invalid', True, {}, []])
+def test_invalid_execution_declarations_are_rejected(tmp_path, value):
+    import yaml
+    from catalog import load_manifest
+    manifest = yaml.safe_load((POLICY_ROOT / 'lerobot' / 'manifest.yaml').read_text())
+    for target in (manifest['runtime']['capabilities'], manifest['models'][0]):
+        target['execution_mode'] = value
+        path = tmp_path / 'manifest.yaml'
+        path.write_text(yaml.safe_dump(manifest))
+        with pytest.raises(CatalogError, match='execution_mode'):
+            load_manifest(path)
+        target.pop('execution_mode')
+
+
+def test_legacy_manifests_do_not_assume_chunk_support(tmp_path):
+    import yaml
+    from catalog import load_manifest
+    manifest = yaml.safe_load((POLICY_ROOT / 'lerobot' / 'manifest.yaml').read_text())
+    manifest['runtime']['capabilities'].pop('execution_mode')
+    path = tmp_path / 'manifest.yaml'
+    path.write_text(yaml.safe_dump(manifest))
+    assert load_manifest(path)['models'][0]['execution_mode'] is None
+
+
 def test_repository_catalog_matches_compose_services():
     catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
 
@@ -32,7 +63,7 @@ def test_repository_catalog_matches_compose_services():
     assert policy["requires_instruction"] is True
 
 
-@pytest.mark.parametrize("model", ["wall_x", "groot", "pi0", "pi05", "multi_task_dit"])
+@pytest.mark.parametrize("model", ["wall_x", "groot", "pi0", "pi05"])
 def test_new_lerobot_policies_are_resolved_from_checkpoint(tmp_path, model):
     import json
 
@@ -55,7 +86,7 @@ def test_groot_and_pi0_legacy_routes_remain_unambiguous(tmp_path):
     assert resolve_policy_id(catalog, "lerobot", "lerobot:pi0", tmp_path) == "lerobot:pi0"
 
 
-@pytest.mark.parametrize("model", ["eo1", "evo1", "pi0_fast", "lingbot_va"])
+@pytest.mark.parametrize("model", ["eo1", "evo1", "pi0_fast", "lingbot_va", "multi_task_dit"])
 def test_removed_policies_cannot_resolve_from_id_alias_or_checkpoint(tmp_path, model):
     import json
 

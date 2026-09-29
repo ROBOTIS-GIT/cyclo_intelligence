@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from .action_chunk_processor import ActionChunkProcessor
+from .action_chunk_processor import ActionChunkProcessor, validate_action_steps
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,8 @@ class TrackedActionBuffer:
         return self._pipeline.output_hz
 
     def enqueue(self, prediction_id: int, actions: np.ndarray,
-                scheduled_start_delay_s=None, align=True) -> AlignmentDecision:
+                scheduled_start_delay_s=None, align=True, action_steps=0) -> AlignmentDecision:
+        validate_action_steps(action_steps)
         values = np.asarray(actions)
         if (values.ndim != 2 or values.shape[0] > self._max_commands
                 or not 0 < values.shape[1] <= self._max_dimensions
@@ -127,7 +128,7 @@ class TrackedActionBuffer:
                 raise ValueError("action dimensions changed; clear the previous plan first")
             anchor_values = None if anchor is None else np.asarray(anchor.values, dtype=anchor.dtype)
             # Bound resampling before allocating a potentially amplified output.
-            count = len(values)
+            count = min(len(values), action_steps) if action_steps else len(values)
             pipeline = self._pipeline
             if pipeline._postprocess and count:
                 count = pipeline._target_chunk_size or (
@@ -136,8 +137,11 @@ class TrackedActionBuffer:
                 )
             if len(self._pending) + count > self._max_commands:
                 raise ValueError("pending command budget exceeded")
-            result = pipeline.prepare_chunk(values, anchor_values, scheduled_start_delay_s, align)
-            positions = pipeline.source_positions(len(values) - result.source_start) + result.source_start
+            result = pipeline.prepare_chunk(values, anchor_values, scheduled_start_delay_s, align, action_steps)
+            selected_count = len(values) - result.source_start
+            if action_steps:
+                selected_count = min(selected_count, action_steps)
+            positions = pipeline.source_positions(selected_count) + result.source_start
             weights = pipeline.blend_weights(len(result.actions), anchor is not None)
             if not np.isfinite(result.actions).all():
                 raise ValueError("processed actions must be finite")

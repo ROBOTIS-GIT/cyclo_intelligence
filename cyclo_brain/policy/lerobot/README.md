@@ -282,8 +282,8 @@ fix an `n_obs_steps` mismatch. See the online Diffusion adapter below.
 
 ### Diffusion Online Execution
 
-Diffusion uses the same publication-paced public-step infrastructure as
-Multi-Task DiT. Each request supplies one current observation to the saved
+Diffusion uses the publication-paced public-step infrastructure.
+Each request supplies one current observation to the saved
 processor and `select_action()`. LeRobot owns both its `n_obs_steps` observation
 queue and its `n_action_steps` action queue; it calls the neural model only when
 the latter is empty. Cyclo does not populate private model queues or duplicate
@@ -307,27 +307,6 @@ contract. Do not remove a training transform to bypass that error.
 
 See [input design decision](../../docs/inference_input_design.md) for the choice
 between policy-owned queues, explicit temporal input plans and execution feedback.
-
-### Multi-Task DiT
-
-Select `Multi-Task DiT` (`lerobot:multi_task_dit`) in Inference or BT. It uses
-the existing LeRobot Worker and a publication-paced step adapter around the
-model's public `select_action` API. The model owns its observation/action queues;
-step execution bypasses chunk interpolation and asynchronous prefetch. Actual
-command publication is required; preview-only execution is unsupported.
-
-The current `multi_task_dit.yaml` is the test preset for the local 1,000-step
-checkpoint: external Torch bilinear resize to 224x224 with antialias enabled.
-It is not a universal model default. For that checkpoint, use Dataset FPS 30 and
-instruction `pick up the bottle and place it into basket`. Its state/action
-dimensions are both 22. Checkpoint path inside the standard workspace mount:
-
-```text
-/workspace/inference_context_campaign_20260910/models/multi_task_dit
-```
-
-Match preprocessing and state/action ordering before selecting another checkpoint.
-LingBot-VA remains excluded pending action-space integration.
 
 ### WALL-X And GR00T
 

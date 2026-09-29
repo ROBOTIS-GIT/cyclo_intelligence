@@ -2,6 +2,9 @@
 
 import subprocess
 import sys
+from pathlib import Path
+
+import yaml
 
 import pytest
 
@@ -50,8 +53,15 @@ def test_duplicate_registration_and_incomplete_contract_fail_early():
 
 def test_registered_models_keep_their_distinct_contracts():
     assert resolve_adapter("lingbot_va").contract.initial_action_timeout_s == 60.
-    assert resolve_adapter("multi_task_dit").contract.is_step
+    assert resolve_adapter("diffusion").contract.is_step
     assert resolve_adapter("act").create_execution_adapter(None, None, None, None) is None
+
+
+def test_catalog_execution_declarations_match_every_registered_model():
+    manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / 'manifest.yaml').read_text())
+    default = manifest['runtime']['capabilities']['execution_mode']
+    for model in manifest['models']:
+        assert resolve_adapter(model['id']).contract.mode == model.get('execution_mode', default), model['id']
 
 
 def test_plain_models_do_not_need_custom_input_extensions():

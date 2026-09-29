@@ -33,14 +33,14 @@ so a downstream BT node never starts running against a half-loaded or
 mid-transition policy.
 """
 
-import importlib.util
-import os
-import sys
 import threading
 import time
-from functools import lru_cache
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from orchestrator.internal.policy_catalog import (
+    _policy_root_candidates,
+    load_policy_catalog as _load_policy_catalog,
+)
 
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import NodeStatus
@@ -100,43 +100,6 @@ COMMAND_STAGES = {
 }
 
 SERVICE_CALL_TIMEOUT_SEC = 30.0
-
-def _policy_root_candidates() -> list[Path]:
-    candidates = []
-    configured = os.environ.get('CYCLO_POLICY_ROOT', '').strip()
-    if configured:
-        candidates.append(Path(configured))
-    candidates.append(Path('/opt/cyclo/policy'))
-    for parent in Path(__file__).resolve().parents:
-        candidates.append(parent / 'cyclo_brain' / 'policy')
-    candidates.append(
-        Path('/root/ros2_ws/src/cyclo_intelligence/cyclo_brain/policy')
-    )
-    return list(dict.fromkeys(candidates))
-
-
-@lru_cache(maxsize=1)
-def _load_policy_catalog():
-    for root in _policy_root_candidates():
-        module_path = root / 'common' / 'catalog' / 'catalog.py'
-        try:
-            available = module_path.is_file()
-        except OSError:
-            available = False
-        if not available:
-            continue
-        spec = importlib.util.spec_from_file_location(
-            'cyclo_policy_catalog_bt',
-            module_path,
-        )
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module, module.load_catalog(root)
-    raise RuntimeError('Cyclo policy catalog is unavailable')
-
 
 def _policy_selection_from_model(model: str) -> tuple[str, str]:
     """Resolve namespaced IDs and legacy bare aliases through manifests."""
@@ -213,6 +176,7 @@ class SendCommand(BaseAction):
             inference_hz=params.get('inference_hz', 15),
             control_hz=params.get('control_hz', 100),
             chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
+            action_steps=params.get('action_steps'),
             inference_mode=inference_mode,
             action_request_mode=action_request_mode,
             acceleration_mode=acceleration_mode,
@@ -241,6 +205,7 @@ class SendCommand(BaseAction):
         acceleration_mode: str = 'pytorch',
         acceleration_engine_path: str = '',
         service_name: str = '/task/command',
+        action_steps: int | None = None,
     ):
         super().__init__(node, name='SendCommand')
         self.command_str = (command or '').strip().upper()
@@ -249,6 +214,12 @@ class SendCommand(BaseAction):
         self.task_instruction = task_instruction
         self.inference_hz = int(inference_hz) if inference_hz else 0
         self.control_hz = int(control_hz) if control_hz else 0
+        self.action_steps = (
+            (0 if self.command_str == 'LOAD' else -1)
+            if action_steps is None else int(str(action_steps))
+        )
+        if not 0 <= self.action_steps <= 2147483647 and not (action_steps is None and self.action_steps == -1):
+            raise ValueError('action_steps must be a non-negative int32')
         self.chunk_align_window_s = (
             float(chunk_align_window_s) if chunk_align_window_s else 0.0
         )
@@ -462,6 +433,7 @@ class SendCommand(BaseAction):
     def _build_task_info(self) -> TaskInfo:
         ti = TaskInfo()
         ti.task_type = 'inference'
+        ti.action_steps = self.action_steps
         ti.policy_path = self.policy_path
         service_type, policy_id = _policy_selection_from_model(self.model)
         ti.service_type = service_type

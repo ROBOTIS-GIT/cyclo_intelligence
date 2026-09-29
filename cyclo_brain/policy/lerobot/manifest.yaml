@@ -10,6 +10,7 @@ runtime:
     location: lerobot
   services: [engine-process]
   capabilities:
+    execution_mode: chunk
     action_request_modes: [async, sync]
     requires_hf_token: false
     operations: []
@@ -19,13 +20,10 @@ models:
     aliases: [act]
     requires_instruction: false
   - id: diffusion
+    execution_mode: step
     label: Diffusion
     aliases: [diffusion]
     requires_instruction: false
-  - id: multi_task_dit
-    label: Multi-Task DiT
-    aliases: [multi_task_dit]
-    requires_instruction: true
   - id: smolvla
     label: SmolVLA
     aliases: [smolvla]

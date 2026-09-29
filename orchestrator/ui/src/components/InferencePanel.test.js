@@ -2,7 +2,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import InferencePanel from './InferencePanel';
-import taskReducer, { receiveServerInferenceTaskInfo } from '../features/tasks/taskSlice';
+import taskReducer, { receiveServerInferenceTaskInfo, setInferenceStatus, setInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
@@ -25,7 +25,7 @@ jest.mock('./InferenceTryResults', () => () => <section aria-label="Try Results"
 jest.mock('./PolicyBackendControl', () => () => <div />);
 jest.mock('./TrtEngineControl', () => () => <div />);
 jest.mock('./FileBrowserModal', () => () => null);
-jest.mock('./Tooltip', () => ({ children }) => <>{children}</>);
+jest.mock('./Tooltip', () => ({ children, content }) => <span title={content}>{children}</span>);
 
 const renderPanel = ({
   inferenceMode,
@@ -34,6 +34,7 @@ const renderPanel = ({
   inferenceHz = 15,
   controlHz = 100,
   policyId = 'lerobot:act',
+  catalog = testPolicyCatalog,
 } = {}) => {
   const sendRecordCommand = jest.fn().mockResolvedValue({ success: true });
   useRosServiceCaller.mockReturnValue({ sendRecordCommand });
@@ -70,7 +71,7 @@ const renderPanel = ({
   });
 
   render(
-    <PolicyCatalogProvider initialCatalog={testPolicyCatalog}>
+    <PolicyCatalogProvider initialCatalog={catalog}>
       <Provider store={store}>
         <InferencePanel />
       </Provider>
@@ -80,9 +81,123 @@ const renderPanel = ({
 };
 
 describe('InferencePanel initial pose sync settings', () => {
+  test('model-owned queues display All and reject count edits', () => {
+    const { store } = renderPanel({ policyId: 'lerobot:diffusion' });
+    const input = screen.getByRole('spinbutton', { name: 'Action Steps' });
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute('placeholder', 'All');
+    fireEvent.change(input, { target: { value: '5' } });
+    expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+    expect(screen.getByLabelText('About Action Steps').parentElement)
+      .toHaveAttribute('title', expect.stringContaining('manages its own action queue'));
+  });
+
+  test('an old catalog without execution metadata does not enable numeric selection', () => {
+    const catalog = JSON.parse(JSON.stringify(testPolicyCatalog));
+    catalog.runtimes.forEach(runtime => runtime.models.forEach(model => delete model.execution_mode));
+    renderPanel({ catalog });
+    const input = screen.getByRole('spinbutton', { name: 'Action Steps' });
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute('placeholder', 'Unknown');
+  });
   beforeEach(() => {
     jest.clearAllMocks();
   });
+
+  test('explains Action Steps beside its label without changing the input label', () => {
+    renderPanel();
+    const help = screen.getByLabelText('About Action Steps');
+    expect(help.parentElement).toHaveAttribute('title',
+      'Choose how many actions to use from each prediction after alignment. Leave empty for All. Max shows the latest model chunk length after Start, not the selected count. Changes apply on Start; alignment may leave fewer actions.');
+    expect(screen.getByRole('spinbutton', { name: 'Action Steps' })).toBeInTheDocument();
+  });
+
+  test('shows the latest chunk without changing All or the selected execution limit', () => {
+    const { store } = renderPanel({ inferencePhase: InferencePhase.PAUSED });
+    act(() => {
+      store.dispatch(setInferenceTaskInfo({ policyPath: '/models/act/', actionSteps: 0 }));
+      store.dispatch(setInferenceStatus({
+        topicReceived: true, loadedPolicyId: 'lerobot:act', loadedModelPath: '/models/act',
+        observedChunkSize: 15, sourceId: 'runtime', sequence: 1,
+      }));
+    });
+    const input = screen.getByRole('spinbutton', { name: 'Action Steps' });
+    expect(input).toHaveAttribute('placeholder', 'All');
+    expect(screen.getByText('Max 15')).toBeInTheDocument();
+    expect(input).toHaveValue(null);
+    expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+    fireEvent.change(input, { target: { value: '2' } });
+    expect(input).toHaveValue(2);
+    expect(screen.getByText('Max 15')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '5' } });
+    expect(screen.getByText('Max 15')).toBeInTheDocument();
+    act(() => store.dispatch(setInferenceStatus({ observedChunkSize: 10, sourceId: 'runtime', sequence: 2 })));
+    expect(input).toHaveValue(5);
+    expect(screen.getByText('Max 10')).toBeInTheDocument();
+    act(() => store.dispatch(setInferenceStatus({ observedChunkSize: 99, sourceId: 'runtime', sequence: 1 })));
+    expect(screen.getByText('Max 10')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '123213' } });
+    expect(input).toHaveValue(123213);
+    expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(123213);
+    expect(screen.getByText('Max 10')).toBeInTheDocument();
+    act(() => store.dispatch(setInferenceStatus({ observedChunkSize: 3, sourceId: 'runtime', sequence: 3 })));
+    expect(screen.getByText('Max 3')).toBeInTheDocument();
+    expect(input).toHaveValue(123213);
+    fireEvent.change(input, { target: { value: '' } });
+    expect(input).toHaveValue(null);
+    expect(screen.getByText('Max 3')).toBeInTheDocument();
+    expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+    act(() => store.dispatch(setInferenceStatus({ topicReceived: false })));
+    expect(screen.queryByText(/^Max /)).not.toBeInTheDocument();
+    expect(input).not.toHaveAttribute('aria-describedby');
+  });
+
+  test.each([
+    { topicReceived: false },
+    { loadedModelPath: '/models/other' },
+    { loadedPolicyId: 'lerobot/groot' },
+    { inferencePhase: InferencePhase.READY },
+    { inferencePhase: InferencePhase.LOADING },
+    { observedChunkSize: 0 },
+    { observedChunkSize: -1 },
+    { observedChunkSize: 1.5 },
+  ])('does not show stale or unrelated chunk metadata: %j', (override) => {
+    const { store } = renderPanel({ inferencePhase: InferencePhase.PAUSED });
+    act(() => {
+      store.dispatch(setInferenceTaskInfo({ policyPath: '/models/act', actionSteps: 0 }));
+      store.dispatch(setInferenceStatus({
+        topicReceived: true, loadedPolicyId: 'lerobot:act', loadedModelPath: '/models/act',
+        observedChunkSize: 15, ...override,
+      }));
+    });
+    expect(screen.getByRole('spinbutton', { name: 'Action Steps' })).toHaveAttribute('placeholder', 'All');
+    expect(screen.queryByText(/^Max /)).not.toBeInTheDocument();
+    expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+  });
+
+  test.each([InferencePhase.READY, InferencePhase.PAUSED])(
+    'edits Action Steps in phase %s and clearing restores All', (inferencePhase) => {
+      const { store } = renderPanel({ inferencePhase });
+      const input = screen.getByRole('spinbutton', { name: 'Action Steps' });
+      expect(input).toBeEnabled();
+      expect(input).toHaveAttribute('placeholder', 'All');
+      fireEvent.change(input, { target: { value: '10' } });
+      expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(10);
+      fireEvent.change(input, { target: { value: '-2' } });
+      expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(10);
+      fireEvent.change(input, { target: { value: '2.5' } });
+      expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(10);
+      fireEvent.change(input, { target: { value: '' } });
+      expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+    }
+  );
+
+  test.each([InferencePhase.LOADING, InferencePhase.INFERENCING, InferencePhase.SYNCING])(
+    'locks Action Steps in phase %s', (inferencePhase) => {
+      renderPanel({ inferencePhase });
+      expect(screen.getByRole('spinbutton', { name: 'Action Steps' })).toBeDisabled();
+    }
+  );
 
   test('groups model settings, execution settings, saved pose, and recording tools in order', () => {
     renderPanel({ inferenceMode: 'robot', policyId: 'lerobot:groot' });
@@ -125,6 +240,7 @@ describe('InferencePanel initial pose sync settings', () => {
           taskType: 'inference', policyPath: '/models/saved',
           policyId: 'lerobot:groot', serviceType: 'lerobot', policyType: 'groot',
           inferenceHz: 30, controlHz: 80, inferenceMode: 'robot',
+          actionSteps: 12,
           taskInstruction: ['Saved instruction'], initialPoseSync: true,
           initialPoseSyncDurationS: 7.0,
         },
@@ -132,6 +248,7 @@ describe('InferencePanel initial pose sync settings', () => {
       expect(screen.getByPlaceholderText('Enter Policy Path or Repo ID')).toHaveValue('/models/saved');
       expect(screen.getByRole('spinbutton', { name: 'Dataset FPS' })).toHaveValue(30);
       expect(screen.getByRole('spinbutton', { name: 'Control Hz' })).toHaveValue(80);
+      expect(screen.getByRole('spinbutton', { name: 'Action Steps' })).toHaveValue(12);
       expect(screen.getByPlaceholderText('Enter Task Instruction')).toHaveValue('Saved instruction');
       expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' })).toHaveValue(7);
       act(() => jest.advanceTimersByTime(1000));

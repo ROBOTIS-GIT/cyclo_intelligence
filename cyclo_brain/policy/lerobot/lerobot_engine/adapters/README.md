@@ -36,7 +36,7 @@ returns a callable accepting one processed batch. The Engine retains it with the
 cached weights and drops it on UNLOAD or replacement. It must handle instruction
 changes from subsequent batches; a cached LOAD does not reconstruct it.
 
-Diffusion and Multi-Task DiT use the public step adapter: one latest observation
+Diffusion uses the public step adapter: one latest observation
 per published model step; temporal and action queues belong to `select_action`.
 Do not also attach an observation history plan for those online APIs. Diffusion
 validates camera sizes after the saved processor, before advancing its queues,

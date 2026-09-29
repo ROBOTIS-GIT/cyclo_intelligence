@@ -68,6 +68,7 @@ string acceleration_engine_path
 uint16 control_hz
 uint16 inference_hz
 float64 chunk_align_window_s
+int32 action_steps -1
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
 string policy_id
@@ -89,6 +90,8 @@ string loaded_acceleration_engine_path
 uint16 loaded_control_hz
 uint16 loaded_inference_hz
 float64 loaded_chunk_align_window_s
+int32 loaded_action_steps
+int32 observed_chunk_size
 bool loaded_initial_pose_sync
 float64 loaded_initial_pose_sync_duration_s
 string runtime_error

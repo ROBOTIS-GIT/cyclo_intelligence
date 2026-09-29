@@ -18,6 +18,8 @@ string runtime_state
 string model_path
 string policy_id
 bool publish_to_robot
+# Latest raw chunk length, not a maximum. 0 means unknown or model-owned action queue.
+int32 observed_chunk_size
 string source_id
 uint64 sequence
 

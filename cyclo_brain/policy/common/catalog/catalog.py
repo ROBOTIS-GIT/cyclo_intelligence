@@ -27,9 +27,9 @@ _RUNTIME_FIELDS = {
 }
 _SOURCE_FIELDS = {"kind", "location"}
 _CAPABILITY_FIELDS = {
-    "action_request_modes", "requires_hf_token", "operations",
+    "action_request_modes", "requires_hf_token", "operations", "execution_mode",
 }
-_MODEL_FIELDS = {"id", "label", "aliases", "requires_instruction", "parameters"}
+_MODEL_FIELDS = {"id", "label", "aliases", "requires_instruction", "parameters", "execution_mode"}
 _PARAMETER_FIELDS = {
     "key", "label", "control", "binding", "default", "required",
     "min", "max", "step", "options", "visible_when",
@@ -232,6 +232,9 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
         f"{manifest_path}.runtime.capabilities",
     )
     runtime["capabilities"] = capabilities
+    execution_mode = capabilities.get("execution_mode")
+    if execution_mode is not None and execution_mode not in ("chunk", "step"):
+        raise CatalogError(f"{manifest_path}.runtime.capabilities.execution_mode must be chunk or step")
 
     services = runtime.get("services", ["engine-process"])
     if not isinstance(services, list) or not services or any(
@@ -259,6 +262,9 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
         seen_model_ids.add(model_id)
         model["id"] = model_id
         model["policy_id"] = f"{runtime_id}:{model_id}"
+        model["execution_mode"] = model.get("execution_mode", execution_mode)
+        if model["execution_mode"] is not None and model["execution_mode"] not in ("chunk", "step"):
+            raise CatalogError(f"{location}.execution_mode must be chunk or step")
         model["label"] = _require_string(model.get("label"), f"{location}.label")
         model["requires_instruction"] = _optional_bool(
             model,

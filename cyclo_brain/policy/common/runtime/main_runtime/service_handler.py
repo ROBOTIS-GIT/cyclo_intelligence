@@ -186,6 +186,7 @@ class ServiceHandler:
             return self._make_response(False, "robot_type is required")
 
         runtime_id = str(backend_override or self._backend)
+        declared_mode = None
         if self._catalog is not None:
             requested_policy_id = str(getattr(request, "policy_id", "") or "")
             if not runtime_id:
@@ -231,6 +232,10 @@ class ServiceHandler:
             request.action_request_mode = action_request_mode
             request.policy_id = policy_id
             request.policy_parameters_json = parameters_json
+            _, model = resolve_policy(self._catalog, policy_id)
+            declared_mode = model.get("execution_mode")
+            if getattr(request, "action_steps", -1) > 0 and declared_mode != "chunk":
+                raise ValueError("Action Steps requires a declared chunk execution contract; use All (0)")
 
         if not runtime_id and self._worker_registry is not None:
             raise RuntimeError("policy runtime could not be determined")
@@ -271,6 +276,8 @@ class ServiceHandler:
             acceleration_engine_path = ""
         try:
             execution = LoadedExecution.from_json(getattr(response, "capabilities_json", ""))
+            if declared_mode is not None and execution.contract.mode != declared_mode:
+                raise ValueError("Worker execution contract does not match the policy catalog; refresh the deployment")
             execution_options = {}
             if execution.context is not None:
                 execution_options = {
@@ -286,6 +293,7 @@ class ServiceHandler:
                 control_hz=getattr(request, "control_hz", 0),
                 inference_hz=getattr(request, "inference_hz", 0),
                 chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
+                action_steps=(0 if getattr(request, "action_steps", -1) == -1 else request.action_steps),
                 initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
                 initial_pose_sync_duration_s=(
                     float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
@@ -363,6 +371,7 @@ class ServiceHandler:
             control_hz=applied_config["control_hz"],
             inference_hz=applied_config["inference_hz"],
             chunk_align_window_s=applied_config["chunk_align_window_s"],
+            action_steps=applied_config.get("action_steps", 0),
             initial_pose_sync=applied_config["initial_pose_sync"],
             initial_pose_sync_duration_s=applied_config[
                 "initial_pose_sync_duration_s"
@@ -374,8 +383,10 @@ class ServiceHandler:
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
         syncing = self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
+            **self._action_steps_options(request),
         )
+        self._remember_action_steps(request)
         self._session.mark_running()
         self._session.set_publish_to_robot(
             bool(getattr(request, "publish_to_robot", False))
@@ -393,14 +404,25 @@ class ServiceHandler:
         self._session.mark_paused()
         return self._make_response(True, "paused")
 
+    @staticmethod
+    def _action_steps_options(request):
+        value = getattr(request, "action_steps", -1)
+        return {} if value == -1 else {"action_steps": value}
+
+    def _remember_action_steps(self, request):
+        if getattr(request, "action_steps", -1) != -1:
+            self._session.action_steps = request.action_steps
+
     def _resume(self, request):
         if not self._session.running:
             raise RuntimeError("not running")
         task_instruction = request.task_instruction or self._session.task_instruction
-        self._control_loop.set_task_instruction(task_instruction)
         syncing = self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
+            task_instruction=task_instruction,
+            **self._action_steps_options(request),
         )
+        self._remember_action_steps(request)
         self._session.mark_resumed(task_instruction)
         self._session.set_publish_to_robot(
             bool(getattr(request, "publish_to_robot", False))
@@ -629,6 +651,10 @@ class ServiceHandler:
             loaded_inference_hz=int(self._session.inference_hz),
             loaded_chunk_align_window_s=float(
                 self._session.chunk_align_window_s
+            ),
+            loaded_action_steps=self._session.action_steps,
+            observed_chunk_size=(
+                self._control_loop.observed_chunk_size() if self._session.loaded else 0
             ),
             loaded_initial_pose_sync=bool(self._session.initial_pose_sync),
             loaded_initial_pose_sync_duration_s=float(

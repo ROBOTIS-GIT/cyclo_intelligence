@@ -26,6 +26,7 @@ const SEND_COMMAND_PARAMS_BY_COMMAND = {
     'inference_hz',
     'control_hz',
     'chunk_align_window_s',
+    'action_steps',
     'acceleration_mode',
     'acceleration_engine_path',
   ]),

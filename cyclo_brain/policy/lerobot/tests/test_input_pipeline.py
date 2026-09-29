@@ -32,9 +32,6 @@ def test_all_model_defaults_match_previous_numerics(path, rotation):
     if path.stem == "diffusion":
         prior = {"backend": "opencv", "operations": [
             {"type": "resize", "size": "checkpoint", "interpolation": "bilinear"}]}
-    elif path.stem == "multi_task_dit":
-        prior = {"backend": "torch", "operations": [
-            {"type": "resize", "size": [224, 224], "interpolation": "bilinear", "antialias": True}]}
     elif path.stem == "groot":
         prior = {"backend": "torch", "operations": [
             {"type": "resize", "size": [256, 256], "interpolation": "bilinear", "antialias": True}]}

@@ -14,8 +14,18 @@ export const testPolicyCatalog = {
       },
       models: [
         {
+          id: 'diffusion',
+          policy_id: 'lerobot:diffusion',
+          execution_mode: 'step',
+          label: 'Diffusion',
+          aliases: ['diffusion'],
+          requires_instruction: false,
+          parameters: [],
+        },
+        {
           id: 'act',
           policy_id: 'lerobot:act',
+          execution_mode: 'chunk',
           label: 'ACT',
           aliases: ['act'],
           requires_instruction: false,
@@ -24,12 +34,12 @@ export const testPolicyCatalog = {
         ...[
           ['pi0', 'Pi0'],
           ['pi05', 'Pi0.5'],
-          ['multi_task_dit', 'Multi-Task DiT'],
           ['wall_x', 'WALL-X'],
           ['groot', 'GR00T N1.7 (LeRobot)'],
         ].map(([id, label]) => ({
           id,
           policy_id: `lerobot:${id}`,
+          execution_mode: 'chunk',
           label,
           aliases: id === 'groot' ? [] : [id],
           requires_instruction: true,
@@ -52,6 +62,7 @@ export const testPolicyCatalog = {
         {
           id: 'n17',
           policy_id: 'groot:n17',
+          execution_mode: 'chunk',
           label: 'N1.7',
           aliases: ['groot', 'n17', 'n1.7'],
           requires_instruction: true,

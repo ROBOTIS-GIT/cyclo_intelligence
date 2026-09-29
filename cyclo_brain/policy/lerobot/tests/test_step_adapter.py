@@ -181,13 +181,13 @@ def test_publication_without_timestamp_cannot_advance_step():
 
 @pytest.mark.parametrize("name,expected", [("act", "chunk"), ("groot", "chunk"),
                                          ("diffusion", "step"),
-                                         ("multi_task_dit", "step"), ("lingbot_va", "step")])
+                                         ("lingbot_va", "step")])
 def test_candidate_contract_is_resolved_at_adapter_boundary(name, expected):
     from lerobot_engine.adapters import resolve_adapter
     assert resolve_adapter(name).contract.mode == expected
 
 
-@pytest.mark.parametrize("name,strict", [("diffusion", False), ("multi_task_dit", False), ("lingbot_va", True)])
+@pytest.mark.parametrize("name,strict", [("diffusion", False), ("lingbot_va", True)])
 def test_factory_sets_required_feedback_contract(name, strict):
     from lerobot_engine.adapters import resolve_adapter
     step = adapter()

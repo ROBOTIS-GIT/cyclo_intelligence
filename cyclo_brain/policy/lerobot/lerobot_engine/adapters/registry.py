@@ -2,7 +2,6 @@
 
 from .definition import AdapterDefinition
 from .lingbot_va import ADAPTER as LINGBOT_VA
-from .multi_task_dit import ADAPTER as MULTI_TASK_DIT
 from .diffusion import ADAPTER as DIFFUSION
 from .xvla import ADAPTER as XVLA
 from .wall_x import ADAPTER as WALL_X
@@ -31,7 +30,6 @@ class AdapterRegistry:
 
 
 registry = AdapterRegistry()
-registry.register("multi_task_dit", MULTI_TASK_DIT)
 registry.register("lingbot_va", LINGBOT_VA)
 registry.register("diffusion", DIFFUSION)
 registry.register("xvla", XVLA)

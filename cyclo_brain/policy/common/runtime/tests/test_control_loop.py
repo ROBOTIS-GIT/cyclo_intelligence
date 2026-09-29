@@ -45,8 +45,9 @@ class FakeProcessor:
         self._actions.clear()
         self.buffer_size = 0
 
-    def push_actions(self, chunk, scheduled_start_delay_s=None, align=True):
+    def push_actions(self, chunk, scheduled_start_delay_s=None, align=True, action_steps=0):
         data = np.asarray(chunk, dtype=np.float64)
+        data = data[:action_steps or None]
         self.pushed_chunks.append(data.copy())
         self.scheduled_delays.append(scheduled_start_delay_s)
         self.align_flags.append(bool(align))
@@ -478,6 +479,70 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertIsNotNone(processor.scheduled_delays[-1])
         self.assertGreaterEqual(processor.scheduled_delays[-1], 0.5)
         self.assertEqual(processor.align_flags[-1], True)
+
+    def test_buffer_failure_stops_and_clears_partial_actions_in_both_modes(self):
+        for mode in ("sync", "async"):
+            for publish, hold_fails in ((False, False), (True, False), (True, True)):
+                with self.subTest(mode=mode, publish=publish, hold_fails=hold_fails):
+                    processor = FakeProcessor(actions=[[0.1]], buffer_size=1)
+                    robot = FakeRobot()
+                    robot.hold_failures_remaining = int(hold_fails)
+                    loop = self._make_loop(processor, robot)
+                    loop._publish_to_robot = publish
+                    loop._requester = FakeRequester(SimpleNamespace(
+                        success=True, chunk_size=2, action_dim=1, action_list=[0.2, 0.3],
+                    ))
+                    fault_callback = mock.Mock()
+                    loop.set_fault_callback(fault_callback)
+                    generation = loop._generation
+                    loop._request_reserved = True
+
+                    def fail_after_partial_write(*args, **kwargs):
+                        processor._actions.append(np.asarray([0.2]))
+                        processor.buffer_size += 1
+                        raise RuntimeError("buffer write failed")
+
+                    with mock.patch.object(processor, "push_actions", side_effect=fail_after_partial_write):
+                        loop._run_reserved_request("pick", generation, mode)
+
+                    self.assertFalse(loop._running)
+                    self.assertFalse(loop._request_reserved)
+                    self.assertGreater(loop._generation, generation)
+                    self.assertEqual(processor.buffer_size, 0)
+                    self.assertEqual(processor._actions, [])
+                    self.assertEqual(processor.clear_count, 1)
+                    fault_callback.assert_called_once_with("action buffering failed: buffer write failed", not hold_fails)
+                    self.assertEqual(loop.initial_pose_sync_hold_required(), hold_fails)
+                    self.assertEqual(len(robot.holds), int(publish and not hold_fails))
+                    loop.tick()
+                    self.assertEqual(robot.commands, [])
+                    self.assertEqual(robot.previews, [])
+                    if hold_fails:
+                        self.assertTrue(loop.stop())
+                        self.assertFalse(loop.initial_pose_sync_hold_required())
+                        self.assertEqual(len(robot.holds), 1)
+
+    def test_obsolete_response_does_not_reach_failing_buffer(self):
+        processor = FakeProcessor()
+        robot = FakeRobot()
+        loop = self._make_loop(processor, robot)
+        fault_callback = mock.Mock()
+        loop.set_fault_callback(fault_callback)
+        old_generation = loop._generation
+
+        def stale_result(*args, **kwargs):
+            loop._generation += 1
+            return SimpleNamespace(success=True, chunk_size=1, action_dim=1, action_list=[0.2])
+
+        with (
+            mock.patch.object(loop, "_get_action_with_feedback", side_effect=stale_result),
+            mock.patch.object(processor, "push_actions", side_effect=RuntimeError("must not run")) as push,
+        ):
+            loop._request_and_buffer("pick", old_generation)
+        push.assert_not_called()
+        fault_callback.assert_not_called()
+        self.assertTrue(loop._running)
+        self.assertEqual(robot.holds, [])
 
     def test_initial_pose_sync_discards_first_chunk_and_requests_fresh_chunk(self) -> None:
         first = SimpleNamespace(

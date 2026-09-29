@@ -30,6 +30,20 @@ from unittest.mock import Mock
 class TestContainerServiceClient(unittest.TestCase):
     """Test ContainerServiceClient for container communication (inference + training)."""
 
+    def test_action_steps_wire_preserves_omission_and_zero(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        from interfaces.srv import InferenceCommand
+        self.assertEqual(InferenceCommand.Request().action_steps, -1)
+        client = ContainerServiceClient(node=None)
+        client._call_service = Mock(return_value='ok')
+        for steps in (None, 0, 10):
+            client.inference_command(client.CMD_RESUME, action_steps=steps)
+            request = client._call_service.call_args.args[1]
+            self.assertEqual(request.action_steps, -1 if steps is None else steps)
+        for invalid in (True, -1, 1.5, '2'):
+            with self.assertRaises(ValueError):
+                client.inference_command(client.CMD_START, action_steps=invalid)
+
     def test_status_reader_only_creates_one_client(self):
         from orchestrator.internal.communication.container_service_client import ContainerServiceClient
         node = Mock()
@@ -379,6 +393,7 @@ class TestServiceResponse(unittest.TestCase):
             loaded_acceleration_mode = "pytorch"
             loaded_acceleration_engine_path = ""
             loaded_control_hz = 80
+            observed_chunk_size = 15
             loaded_inference_hz = 20
             loaded_chunk_align_window_s = 0.25
             loaded_initial_pose_sync = True
@@ -397,6 +412,7 @@ class TestServiceResponse(unittest.TestCase):
         self.assertTrue(response.data['publish_to_robot'])
         self.assertEqual(response.data['loaded_action_request_mode'], "sync")
         self.assertEqual(response.data['loaded_control_hz'], 80)
+        self.assertEqual(response.data['observed_chunk_size'], 15)
         self.assertEqual(response.data['loaded_inference_hz'], 20)
         self.assertEqual(response.data['loaded_chunk_align_window_s'], 0.25)
         self.assertTrue(response.data['loaded_initial_pose_sync'])

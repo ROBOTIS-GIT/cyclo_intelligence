@@ -7,7 +7,7 @@ import taskReducer from '../features/tasks/taskSlice';
 import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
 import { testPolicyCatalog } from '../testUtils/policyCatalog';
 
-const renderSelector = (inferenceOverrides = {}) => {
+const renderSelector = (inferenceOverrides = {}, catalog = testPolicyCatalog) => {
   const initial = taskReducer(undefined, { type: '@@INIT' });
   const store = configureStore({
     reducer: { tasks: taskReducer },
@@ -24,12 +24,42 @@ const renderSelector = (inferenceOverrides = {}) => {
     },
   });
   render(
-    <PolicyCatalogProvider initialCatalog={testPolicyCatalog}>
+    <PolicyCatalogProvider initialCatalog={catalog}>
       <Provider store={store}><InferenceModelSelector /></Provider>
     </PolicyCatalogProvider>
   );
   return store;
 };
+
+test.each([true, false])('prioritizes LeRobot when present (%s) without changing selection or catalog', (includeLeRobot) => {
+  const [lerobot, groot] = testPolicyCatalog.runtimes;
+  const standalone = (id, label) => ({
+    ...groot, id, label,
+    models: [{ ...groot.models[0], policy_id: `${id}:test`, id: 'test' }],
+  });
+  const runtimes = [
+    standalone('abot', 'ABot'), groot,
+    ...(includeLeRobot ? [lerobot] : []),
+    standalone('lingbot_vla', 'LingBot-VLA'), standalone('rldx', 'RLDX'),
+  ];
+  const originalOrder = runtimes.map((runtime) => runtime.id);
+  const store = renderSelector(
+    { policyId: 'groot:n17', serviceType: 'groot', policyType: 'n17' },
+    { ...testPolicyCatalog, runtimes },
+  );
+
+  const selector = screen.getByRole('combobox', { name: 'Policy model' });
+  expect(Array.from(selector.querySelectorAll('optgroup'), (group) => group.label)).toEqual([
+    ...(includeLeRobot ? ['LeRobot'] : []), 'ABot', 'GR00T', 'LingBot-VLA', 'RLDX',
+  ]);
+  expect(selector).toHaveValue('groot:n17');
+  expect(store.getState().tasks.inferenceTaskInfo.policyId).toBe('groot:n17');
+  expect(runtimes.map((runtime) => runtime.id)).toEqual(originalOrder);
+  if (includeLeRobot) {
+    expect(Array.from(selector.querySelector('optgroup').children, (option) => option.value))
+      .toEqual(lerobot.models.map((model) => model.policy_id));
+  }
+});
 
 test('model selection comes from catalog and resets model-specific values', () => {
   const store = renderSelector();
@@ -47,7 +77,23 @@ test('model selection comes from catalog and resets model-specific values', () =
   expect(info.accelerationEnginePath).toBe('');
 });
 
-test.each(['wall_x', 'groot', 'multi_task_dit'])(
+test('switching to a model-owned queue resets Action Steps to All', () => {
+  const store = renderSelector({ actionSteps: 5 });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Policy model' }), {
+    target: { value: 'lerobot:diffusion' },
+  });
+  expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(0);
+});
+
+test('switching between chunk policies preserves the selected count', () => {
+  const store = renderSelector({ actionSteps: 5 });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Policy model' }), {
+    target: { value: 'groot:n17' },
+  });
+  expect(store.getState().tasks.inferenceTaskInfo.actionSteps).toBe(5);
+});
+
+test.each(['wall_x', 'groot'])(
   'selects LeRobot %s without using the independent GR00T Worker', (model) => {
     const store = renderSelector({
       policyId: 'groot:n17', serviceType: 'groot', policyType: 'n17',
@@ -63,7 +109,7 @@ test.each(['wall_x', 'groot', 'multi_task_dit'])(
   }
 );
 
-test.each(['pi0', 'pi05', 'groot', 'multi_task_dit'])(
+test.each(['pi0', 'pi05', 'groot'])(
   'restores the saved LeRobot %s selection', async (model) => {
     const store = renderSelector({ policyId: '', serviceType: 'lerobot', policyType: model });
     await waitFor(() => {
@@ -105,7 +151,7 @@ test('a runtime with one model resolves legacy runtime-only selection', async ()
   });
 });
 
-test.each(['future:unknown', 'lerobot:eo1', 'lerobot:evo1', 'lerobot:pi0_fast'])(
+test.each(['future:unknown', 'lerobot:eo1', 'lerobot:evo1', 'lerobot:pi0_fast', 'lerobot:multi_task_dit'])(
   'unavailable policy %s is not silently replaced', (policyId) => {
   const [serviceType, policyType] = policyId.split(':');
   const store = renderSelector({

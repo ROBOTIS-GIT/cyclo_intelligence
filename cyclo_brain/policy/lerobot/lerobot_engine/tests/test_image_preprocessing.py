@@ -39,7 +39,7 @@ def load_spatial(model_path):
     return configured_transform(config, checkpoint.get('input_features', {}))
 
 
-@pytest.mark.parametrize("policy_type", ["eo1", "evo1", "pi0_fast"])
+@pytest.mark.parametrize("policy_type", ["eo1", "evo1", "pi0_fast", "multi_task_dit"])
 def test_removed_policy_has_no_default_preprocessing(tmp_path, policy_type):
     (tmp_path / "config.json").write_text(json.dumps({"type": policy_type}))
     with pytest.raises(FileNotFoundError, match=policy_type):
@@ -126,15 +126,14 @@ def test_torch_antialias_matches_training_transform():
     )
 
 
-def test_multi_task_dit_test_preset_matches_training_for_mixed_cameras(tmp_path):
+def test_explicit_resize_matches_training_for_mixed_cameras():
     features = {
         KEY: {"shape": [3, 376, 672]},
         WRIST: {"shape": [3, 424, 240]},
     }
-    (tmp_path / "config.json").write_text(
-        json.dumps({"type": "multi_task_dit", "input_features": features})
-    )
-    transform = load_spatial(tmp_path)
+    transform = configured_transform({"preprocessing": {"images": [{"resize": {
+        "size": [224, 224], "backend": "torch", "interpolation": "bilinear", "antialias": True,
+    }}]}}, features)
     rng = np.random.default_rng(42)
     for key, feature in features.items():
         _, height, width = feature["shape"]

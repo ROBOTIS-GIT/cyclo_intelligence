@@ -87,7 +87,6 @@ Each model type uses one YAML file; there is no per-checkpoint configuration sel
 Default behavior:
 - Spatial identity for ACT, the Pi family, SmolVLA, FastWAM, VLA-JEPA, and similar policies preserves model-internal behavior.
 - Diffusion's OpenCV bilinear/checkpoint-size settings are existing Cyclo compatibility defaults, not confirmation of the training data's resizing method.
-- Multi-Task DiT retains the existing 224x224 Torch bilinear/antialias test settings. These are not universal defaults for all training data.
 - XVLA does not automatically resolve different camera sizes when its internal padding setting is disabled.
 - State/action channels use checkpoint `cyclo_io_mapping.json`. Legacy checkpoints require exact dimensions without padding/truncation; robot command-group definitions remain unchanged.
 
@@ -128,7 +127,7 @@ Frame offsets use the explicitly specified FPS; they are not inferred from Contr
 - Missing or stale observations, and selecting the same sample for distinct time positions, are rejected.
 - `startup.missing` is `wait` or `error`. Waiting is limited to observation readiness; the Worker never waits for future execution feedback while holding its lock.
 - Source IDs, reception times, computation times, and axis, unit, coordinate-frame, and normalization semantics remain distinct.
-- Diffusion/Multi-Task DiT's public `select_action` uses model-internal history. Default YAML passes one latest observation without constructing duplicate history.
+- Diffusion's public `select_action` uses model-internal history. Default YAML passes one latest observation without constructing duplicate history.
 
 ## State and Execution Conditions
 

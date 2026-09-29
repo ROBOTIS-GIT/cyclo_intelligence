@@ -7,29 +7,9 @@ Public queue/reset logic is real. Neural generation, encoders and KV computation
 are mocked. This is not a checkpoint, performance or robot-execution test.
 """
 
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
-
-
-def check_multi_task_dit():
-    from lerobot.policies.multi_task_dit.modeling_multi_task_dit import MultiTaskDiTPolicy
-
-    policy = MultiTaskDiTPolicy.__new__(MultiTaskDiTPolicy)
-    torch.nn.Module.__init__(policy)
-    policy.config = SimpleNamespace(n_obs_steps=2, n_action_steps=3, image_features={})
-    policy.reset()
-    policy._generate_actions = Mock(return_value=torch.arange(6, dtype=torch.float32).reshape(1, 3, 2))
-    outputs = [policy.select_action({"observation.state": torch.full((1, 2), float(i))}) for i in range(4)]
-    assert policy._generate_actions.call_count == 2
-    histories = [call.args[0]["observation.state"][0, :, 0].tolist()
-                 for call in policy._generate_actions.call_args_list]
-    assert histories == [[0., 0.], [2., 3.]]
-    assert [a.tolist() for a in outputs] == [[[0., 1.]], [[2., 3.]], [[4., 5.]], [[0., 1.]]]
-    policy.reset()
-    assert all(len(q) == 0 for q in policy._queues.values())
-    print("Multi-Task DiT: public history/action queues and reset PASS")
 
 
 def check_lingbot_va():
@@ -64,5 +44,4 @@ def check_lingbot_va():
 
 
 if __name__ == "__main__":
-    check_multi_task_dit()
     check_lingbot_va()

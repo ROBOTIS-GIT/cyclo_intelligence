@@ -54,7 +54,7 @@ Additional isolated verification:
   ControlLoop fault handling with fake robot command sinks.
 - Cyclo/LeRobot candidate images on both architectures and standalone GR00T
   images: startup, packaged imports, DESCRIBE and lifecycle cleanup.
-- Actual ACT and Multi-Task DiT checkpoint predictions with replay observations;
+- Actual ACT and then-supported Multi-Task DiT checkpoint predictions with replay observations;
   standalone GR00T actual weights with synthetic observations on both architectures.
 - ARM64 GR00T repeated reloads: three fresh instances, six predictions each,
   without accumulation at the final CUDA-allocation measurement.

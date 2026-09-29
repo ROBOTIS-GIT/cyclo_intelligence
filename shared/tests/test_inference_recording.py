@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from shared.inference_recording import allocate_folder, folder_name, validate_folder
+from shared.inference_recording import allocate_folder, folder_name, model_name, validate_folder
 
 
 def episode(root, session='saved', robot='test'):
@@ -15,13 +15,34 @@ def episode(root, session='saved', robot='test'):
     return path
 
 
-def test_allocation_is_atomic_and_uses_utc(monkeypatch, tmp_path):
-    monkeypatch.setattr('shared.inference_recording.time.strftime', lambda fmt, tm: '20260921_010203')
+def test_allocation_is_atomic_and_uses_local_time_and_model(monkeypatch, tmp_path):
+    clock = object()
+    monkeypatch.setattr('shared.inference_recording.time.localtime', lambda: clock)
+
+    def format_time(fmt, tm):
+        assert fmt == '%y%m%d_%H%M' and tm is clock
+        return '260928_1630'
+
+    monkeypatch.setattr('shared.inference_recording.time.strftime', format_time)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        ids = list(pool.map(lambda _: allocate_folder(tmp_path), range(8)))
+        ids = list(pool.map(lambda _: allocate_folder(tmp_path, '/models/peanut'), range(8)))
     assert len(set(ids)) == 8
-    assert '20260921_010203' in ids
+    assert '260928_1630_peanut' in ids
+    assert '260928_1630_peanut_02' in ids
     assert all((tmp_path / folder_name(value)).is_dir() for value in ids)
+
+
+@pytest.mark.parametrize(('path', 'expected'), [
+    ('/models/peanut/', 'peanut'),
+    ('/models/peanut/checkpoints/010000/pretrained_model', 'peanut'),
+    ('/models/peanut model..v2', 'peanut_model_v2'),
+    ('', 'unknown_model'),
+    ('/models/..', 'unknown_model'),
+    ('/models/' + 'a' * 200, 'a' * 140),
+])
+def test_model_name_is_safe(path, expected):
+    assert model_name(path) == expected
+    assert folder_name(f'260928_1630_{expected}') == f'260928_1630_{expected}'
 
 
 @pytest.mark.parametrize('value', ['', '../escape', '/absolute', 'a/b', 'a..b'])
@@ -30,14 +51,15 @@ def test_rejects_bad_ids(value):
         folder_name(value)
 
 
-def test_folder_validation(tmp_path):
-    path = episode(tmp_path)
-    assert validate_folder(tmp_path, 'saved', 'test') == path.parent
+@pytest.mark.parametrize('session', ['saved', '260928_1630_peanut'])
+def test_folder_validation(tmp_path, session):
+    path = episode(tmp_path, session=session)
+    assert validate_folder(tmp_path, session, 'test') == path.parent
     with pytest.raises(ValueError, match='robot_type'):
-        validate_folder(tmp_path, 'saved', 'other')
+        validate_folder(tmp_path, session, 'other')
     (path / 'episode_info.json').write_text('{broken')
     with pytest.raises(ValueError, match='Cannot read'):
-        validate_folder(tmp_path, 'saved', 'test')
+        validate_folder(tmp_path, session, 'test')
 
 
 def test_rejects_symlinks_and_missing_metadata(tmp_path):

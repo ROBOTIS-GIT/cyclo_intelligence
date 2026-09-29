@@ -1,14 +1,58 @@
 # Inference Context
 
-## Scope
+## Action Steps
+
+`TaskInfo.action_steps` is a Runtime execution setting, not a checkpoint override.
+Zero (the UI's empty `All` input) preserves full-chunk execution. Positive values
+select at most N original waypoints after alignment and before interpolation and
+blending. A shorter chunk is not padded. Source positions retain their original
+indices; planning records retain the original source length and the actual
+accepted command count. Unselected predictions are not publication receipts.
+Interpolation and ZOH repetitions do not count as additional model waypoints.
+
+The same selection applies to Sync and Async. Scheduling and safety holds remain
+unchanged. Sync drains the selected plan before requesting again; Async retains
+its existing prefetch schedule. Stop or cancellation can prevent the whole plan
+from being published. Publication is not proof of physical motion completion.
+
+The backend owns the setting and includes it in central TaskInfo updates. Edit it
+only while Ready or Paused. START/RESUME applies it to new plans without reloading
+weights; cancelled in-flight results cannot enter the new generation. Slow Start
+and saved-pose Return are independent. `InferenceCommand.action_steps=-1` means
+preserve on START/RESUME and all on LOAD. Its status includes `loaded_action_steps`.
+
+The ControlLoop also records `observed_chunk_size` from valid current-generation
+responses before alignment, waypoint selection, or interpolation. The existing
+Runtime STATUS and central InferenceStatus topic carry this read-only measurement;
+no extra Worker RPC or per-browser polling is needed. After the first result the
+UI shows `Max T` beside the selected limit, independent of the requested value
+and without rewriting it. This is not a command receipt or proof that an
+edited setting has been applied; edits still take effect on Start. Subsequent raw
+chunk lengths may differ, so the measurement is not used as a guaranteed maximum.
+Pause/Stop preserve it; deconfiguration resets it. Model-owned step queues report
+zero rather than exposing their internal horizon. Unknown, stale, loading, or
+different-model status does not supply a displayed length.
+
+Model-owned `step` queues (including the current Diffusion public adapter) reject
+numeric limits: one API result is not an exposed prediction chunk. All remains
+supported. Supporting limits requires a reviewed public chunk/queue lifecycle
+adapter, not private queue access or rewriting `n_action_steps`. Fixed-length
+command resampling also cannot be combined with a waypoint limit.
+
+After updating, regenerate `interfaces`, rebuild dependent ROS packages and the
+UI, then restart Cyclo processes. Workers need matching rebuilt ROS definitions
+if they consume the changed interfaces. Model checkpoints are unchanged. Do not
+mix old and new ROS type hashes across running participants.
+
+## Context Scope
 
 The Runtime retains command execution ownership. Workers receive robot topics
 directly and assemble only the inputs requested by the loaded adapter. Images
 are not relayed through Cyclo. Existing chunk policies remain the compatibility
 baseline; history and execution feedback are opt-in.
 
-Multi-Task DiT is selectable in the Catalog for robot validation. LingBot-VA's
-candidate adapter remains excluded. RTC/TT-RTC are not implemented merely by adding context.
+Multi-Task DiT is no longer supported by Cyclo. LingBot-VA's candidate adapter
+remains excluded. RTC/TT-RTC are not implemented merely by adding context.
 Model-specific execution semantics still need a reviewed adapter and tests.
 
 Diffusion now uses the reviewed public step path for its model-owned observation

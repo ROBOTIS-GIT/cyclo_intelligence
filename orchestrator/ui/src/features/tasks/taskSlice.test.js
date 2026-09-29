@@ -25,6 +25,26 @@ import {
   getRecordTaskInfoKey,
 } from '../../utils/taskInfoSync';
 
+test.each([true, false])('canonical Action Steps topic wins when it arrives before acknowledgement: %s', (topicFirst) => {
+  let state = reducer(undefined, setInferenceTaskInfo({
+    policyId: 'lerobot:diffusion', actionSteps: 5,
+  }));
+  state = reducer(state, markLocalTaskInfoEdited({ source: 'inference' }));
+  const submitted = selectInferenceTaskInfo({ tasks: state });
+  const snapshot = receiveServerInferenceTaskInfo({
+    taskInfo: { ...submitted, actionSteps: 0 },
+    sourceId: 'server', revision: 2, hasTaskInfo: true,
+  });
+  if (topicFirst) state = reducer(state, snapshot);
+  state = reducer(state, markInferenceTaskInfoSyncSuccess({
+    taskInfo: submitted, taskKey: getInferenceTaskInfoKey(submitted),
+  }));
+  state = reducer(state, snapshot);
+  expect(state.inferenceTaskInfo.actionSteps).toBe(0);
+  // New browsers receive the same central setting, without browser-local state.
+  expect(reducer(undefined, snapshot).inferenceTaskInfo.actionSteps).toBe(0);
+});
+
 const makeStorage = (initial = {}) => {
   const values = { ...initial };
   return {

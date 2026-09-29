@@ -31,6 +31,7 @@ if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
     sys.path.insert(0, _ROBOT_CLIENT_PATH)
 
 from action_chunk_processing import ActionChunkProcessor  # noqa: E402
+from action_chunk_processing.action_chunk_processor import validate_action_steps  # noqa: E402
 from robot_client import RobotClient  # noqa: E402
 from inference_context.execution import ExecutionContext  # noqa: E402
 from .execution_feedback import ExecutionFeedback  # noqa: E402
@@ -117,6 +118,8 @@ class ControlLoop:
         )
         self._action_request_mode = self._default_action_request_mode
         self._input_execution_contract = ExecutionContract()
+        self._action_steps = 0
+        self._observed_chunk_size = 0
         self._fault_callback = fault_callback
 
         self._lock = threading.RLock()
@@ -161,6 +164,7 @@ class ControlLoop:
         initial_pose_sync_duration_s: float = 5.0,
         execution_context: ExecutionContext | None = None,
         execution_contract: ExecutionContract | None = None,
+        action_steps: int = 0,
     ) -> None:
         duration_s = float(initial_pose_sync_duration_s)
         if not math.isfinite(duration_s) or not 1.0 <= duration_s <= 60.0:
@@ -168,6 +172,7 @@ class ControlLoop:
                 "initial_pose_sync_duration_s must be between 1.0 and 60.0"
             )
         contract = execution_contract or ExecutionContract()
+        self._validate_action_steps(action_steps, contract)
         if contract.is_step and execution_context is None:
             raise ValueError("step execution requires a contextual Worker session")
         if contract.observation_warmup_timeout_s is not None and execution_context is None:
@@ -181,6 +186,7 @@ class ControlLoop:
         with self._lock:
             self.deconfigure()
             self._input_execution_contract = contract
+            self._action_steps = action_steps
             self._control_hz = positive_finite_or_default(
                 control_hz, self._default_control_hz
             )
@@ -265,6 +271,8 @@ class ControlLoop:
             self._publish_to_robot = False
             self._action_request_mode = self._default_action_request_mode
             self._input_execution_contract = ExecutionContract()
+            self._action_steps = 0
+            self._observed_chunk_size = 0
             self._inference_hz = self._default_inference_hz
             self._control_hz = self._default_control_hz
             self._chunk_align_window_s = self._default_chunk_align_window_s
@@ -288,16 +296,38 @@ class ControlLoop:
                 self._robot = None
             self._reset_request_latency_locked()
 
-    def start(self, publish_to_robot: Optional[bool] = None) -> bool:
+    def _validate_action_steps(self, value, contract):
+        validate_action_steps(value)
+        if value and contract.is_step:
+            raise ValueError("Action Steps requires a returned chunk; this policy owns its action queue. Use All (0).")
+        if value and self._target_chunk_size is not None:
+            raise ValueError("Action Steps cannot be combined with fixed-length command resampling")
+
+    def start(self, publish_to_robot: Optional[bool] = None, *, action_steps=None,
+              task_instruction: Optional[str] = None) -> bool:
         with self._lock:
+            if action_steps is not None:
+                self._validate_action_steps(action_steps, self._input_execution_contract)
+                if action_steps != self._action_steps and (
+                    self._running or self._initial_pose_sync_in_progress or self._preparation_active
+                ):
+                    raise ValueError("Pause or Stop before changing Action Steps")
             if self._initial_action_timeout_s is not None and self.prediction_pending():
                 raise RuntimeError("previous prediction is still finishing; retry START after it completes")
             if self._initial_pose_sync_hold_pending:
                 raise RuntimeError(
                     "initial pose sync hold is still pending - STOP again first"
                 )
+            if task_instruction is not None:
+                self._validate_task_instruction_locked(task_instruction)
             if publish_to_robot is not None:
                 self._set_publish_to_robot_locked(bool(publish_to_robot))
+            if task_instruction is not None:
+                self.set_task_instruction(task_instruction)
+            if action_steps is not None and action_steps != self._action_steps:
+                self._clear_plan_locked("action steps changed", "ready")
+                self._generation += 1
+                self._action_steps = action_steps
             should_sync = (
                 self._initial_pose_sync_enabled
                 and self._publish_to_robot
@@ -390,6 +420,8 @@ class ControlLoop:
                 or processor is not self._processor
             ):
                 raise RuntimeError("initial pose sync cancelled")
+            if not self._input_execution_contract.is_step:
+                self._observed_chunk_size = len(chunk)
             self._clear_plan_locked("initial pose sync target", "syncing")
             try:
                 robot.publish_initial_pose_sync(
@@ -483,6 +515,11 @@ class ControlLoop:
         with self._lock:
             self._fault_callback = callback
 
+    def observed_chunk_size(self) -> int:
+        """Latest valid raw chunk length, not a policy maximum or execution limit."""
+        with self._lock:
+            return self._observed_chunk_size
+
     def configuration_snapshot(self) -> dict:
         """Return the normalized LOAD-time settings currently in use."""
         with self._lock:
@@ -491,6 +528,7 @@ class ControlLoop:
                 "control_hz": int(self._control_hz),
                 "inference_hz": int(self._inference_hz),
                 "chunk_align_window_s": float(self._chunk_align_window_s),
+                "action_steps": self._action_steps,
                 "initial_pose_sync": self._initial_pose_sync_enabled,
                 "initial_pose_sync_duration_s": self._initial_pose_sync_duration_s,
             }
@@ -548,6 +586,9 @@ class ControlLoop:
     def _set_publish_to_robot_locked(self, publish_to_robot: bool) -> None:
         if self._step_schedule and not publish_to_robot:
             raise ValueError("step execution requires command receipts; preview-only is unsupported")
+        if (not publish_to_robot and self._input_execution_contract.request_after
+                not in {"prediction_success", "plan_accepted"}):
+            raise ValueError("execution prerequisite requires command receipts; preview-only is unsupported")
         if self._publish_to_robot == publish_to_robot:
             return
         if self._robot is not None:
@@ -562,12 +603,16 @@ class ControlLoop:
         self._clear_plan_locked("publish mode changed", "running" if self._running else "ready")
         self._generation += 1
 
+    def _validate_task_instruction_locked(self, task_instruction: str) -> None:
+        if (self._feedback and (task_instruction or "") != self._task_instruction
+                and (self._initial_pose_sync_in_progress or self._initial_pose_sync_hold_pending)):
+            raise RuntimeError("stop pose sync before changing a contextual instruction")
+
     def set_task_instruction(self, task_instruction: str) -> None:
         with self._lock:
             instruction = task_instruction or ""
+            self._validate_task_instruction_locked(instruction)
             if self._feedback and instruction != self._task_instruction:
-                if self._initial_pose_sync_in_progress or self._initial_pose_sync_hold_pending:
-                    raise RuntimeError("stop pose sync before changing a contextual instruction")
                 self._clear_plan_locked("instruction changed", self._feedback.phase)
                 self._generation += 1
             self._task_instruction = instruction
@@ -756,6 +801,8 @@ class ControlLoop:
                 and self._running
                 and self._processor is not None
             ):
+                if not self._input_execution_contract.is_step:
+                    self._observed_chunk_size = len(chunk)
                 buffer_delay_s = self._processor.buffer_size / max(
                     1.0,
                     self._processor.output_hz,
@@ -773,6 +820,7 @@ class ControlLoop:
                         produced = self._processor.enqueue(
                             response.seq_id, chunk, scheduled_start_delay_s,
                             align=self._step_schedule is None and action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                            action_steps=self._action_steps,
                         ).command_count
                         contract = self._input_execution_contract
                         if contract.feedback_schema == 2:
@@ -784,12 +832,18 @@ class ControlLoop:
                         fault = None
                         self._preparation_needed = False
                 else:
-                    fault = None
-                    produced = self._processor.push_actions(
-                        chunk,
-                        scheduled_start_delay_s=scheduled_start_delay_s,
-                        align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
-                    )
+                    try:
+                        produced = self._processor.push_actions(
+                            chunk,
+                            scheduled_start_delay_s=scheduled_start_delay_s,
+                            align=action_request_mode != ACTION_REQUEST_MODE_SYNC,
+                            action_steps=self._action_steps,
+                        )
+                    except Exception as e:
+                        self._running = False
+                        fault = str(e)
+                    else:
+                        fault = None
                 if fault is not None:
                     produced = 0
                 scheduled_start_text = (

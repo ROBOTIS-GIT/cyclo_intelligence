@@ -89,7 +89,6 @@ or generation changes. Processing already handled inside the model need not be r
 ## Defaults and Validation Scope
 
 - Diffusion: preserves the existing Cyclo OpenCV bilinear/checkpoint-size compatibility defaults. These do not guarantee a match with training preprocessing.
-- Multi-Task DiT: retains the Torch 224x224 bilinear/antialias settings of the existing test checkpoint.
 - Other current default files use `preprocessing: identity`.
 - Existing adapters continue to handle execution APIs and model-internal history.
 - `sources`, `nodes`, `outputs`, and `"*"` have been removed from user-facing YAML.

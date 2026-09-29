@@ -109,6 +109,20 @@ const InferencePanel = () => {
     InferencePhase.SYNCING,
   ].includes(inferenceStatus.inferencePhase);
   const disabled = isTaskRunning || catalogStatus !== 'ready' || !selectedPolicy;
+  const actionStepsSupported = selectedPolicy?.execution_mode === 'chunk';
+  const actionStepsHelp = selectedPolicy?.execution_mode === 'step'
+    ? 'This policy manages its own action queue. Only All is supported.'
+    : !actionStepsSupported
+      ? 'Action Steps support is unknown. Refresh the policy catalog before selecting a count.'
+      : 'Choose how many actions to use from each prediction after alignment. Leave empty for All. Max shows the latest model chunk length after Start, not the selected count. Changes apply on Start; alignment may leave fewer actions.';
+  const canEditActionSteps = catalogStatus === 'ready' && actionStepsSupported
+    && [InferencePhase.READY, InferencePhase.PAUSED].includes(inferenceStatus.inferencePhase);
+  const observedChunkSize = inferenceStatus.observedChunkSize;
+  const hasObservedChunk = actionStepsSupported && inferenceStatus.topicReceived && isModelActive
+    && selectedPolicy?.policy_id === inferenceStatus.loadedPolicyId
+    && Boolean(info.policyPath)
+    && info.policyPath.replace(/\/+$/, '') === (inferenceStatus.loadedModelPath || '').replace(/\/+$/, '')
+    && Number.isInteger(observedChunkSize) && observedChunkSize > 0;
   const [isEditable, setIsEditable] = useState(!disabled);
   const [isUpdatingInstruction, setIsUpdatingInstruction] = useState(false);
   const syncGenerationRef = useRef(0);
@@ -121,11 +135,13 @@ const InferencePanel = () => {
       // taskInstruction stays editable while inference is running so a
       // multi-task language-conditioned policy can be re-conditioned via
       // the "Update Task Instruction" button below.
-      if (field !== 'taskInstruction' && !isEditable) return;
+      if (field === 'actionSteps') {
+        if (!canEditActionSteps) return;
+      } else if (field !== 'taskInstruction' && !isEditable) return;
       dispatch(setInferenceTaskInfo({ [field]: value }));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
-    [isEditable, dispatch]
+    [isEditable, canEditActionSteps, dispatch]
   );
 
   const taskSyncKey = useMemo(
@@ -666,6 +682,52 @@ const InferencePanel = () => {
           disabled={!isEditable}
           aria-label="Control Hz"
         />
+      </div>
+
+      <div className="flex items-center mb-2.5">
+        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+          <Tooltip
+            content={actionStepsHelp}
+            position="bottom"
+          >
+            <MdInfoOutline aria-label="About Action Steps" className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
+          </Tooltip>
+          <label htmlFor="inference-action-steps">Action Steps</label>
+        </div>
+        <div className={clsx(
+          'flex items-center min-w-0 w-full h-8 border border-gray-300 rounded-md',
+          'focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent',
+          canEditActionSteps ? 'bg-white' : 'bg-gray-100'
+        )}>
+          <input
+            id="inference-action-steps"
+            className="min-w-0 flex-1 w-full h-full p-2 text-sm bg-transparent rounded-md focus:outline-none disabled:cursor-not-allowed"
+            type="number"
+            min="1"
+            max="2147483647"
+            step="1"
+            placeholder={selectedPolicy?.execution_mode ? 'All' : 'Unknown'}
+            aria-describedby={hasObservedChunk ? 'inference-action-steps-limit' : undefined}
+            value={actionStepsSupported ? (info.actionSteps || '') : ''}
+            onChange={(event) => {
+              const value = event.target.value === '' ? 0 : Number(event.target.value);
+              if (Number.isInteger(value) && value >= 0 && value <= 2147483647) {
+                handleChange('actionSteps', value);
+              }
+            }}
+            disabled={!canEditActionSteps}
+          />
+          {hasObservedChunk && (
+            <Tooltip
+              className="shrink-0 pr-2"
+              content={`Latest model chunk: ${observedChunkSize} steps, independent of the selected Action Steps. Future chunk lengths may differ.`}
+            >
+              <span id="inference-action-steps-limit" className="text-xs text-gray-500 whitespace-nowrap tabular-nums">
+                Max {observedChunkSize}
+              </span>
+            </Tooltip>
+          )}
+        </div>
       </div>
 
       {timingWarnings.length > 0 && (

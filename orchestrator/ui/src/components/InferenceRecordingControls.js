@@ -69,7 +69,7 @@ export default function InferenceRecordingControls() {
   const selectFolder = (item) => {
     const sessionId = getInferenceRecordingSessionId(item?.full_path);
     if (!sessionId) {
-      toast.error('Select a Task_*_inference_MCAP folder directly under the recording root');
+      toast.error('Select an inference recording folder directly under the recording root');
       return;
     }
     execute('set_inference_record_folder', { recordingSessionId: sessionId });

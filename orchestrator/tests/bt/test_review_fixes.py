@@ -180,6 +180,18 @@ def test_load_send_command_sets_acceleration_mode():
         assert task_info.policy_id == 'groot:n17'
 
 
+def test_action_steps_bt_load_and_resume_defaults():
+    context = types.SimpleNamespace(node=_DummyNode())
+    for params, expected in (
+        ({'command': 'LOAD'}, 0),
+        ({'command': 'LOAD', 'action_steps': '10'}, 10),
+        ({'command': 'RESUME'}, -1),
+        ({'command': 'RESUME', 'action_steps': '0'}, 0),
+    ):
+        action = SendCommand.from_xml_params(context, 'test', params)
+        assert action._build_task_info().action_steps == expected
+
+
 def test_load_send_command_resolves_legacy_bare_policy_alias():
     context = types.SimpleNamespace(node=_DummyNode())
 

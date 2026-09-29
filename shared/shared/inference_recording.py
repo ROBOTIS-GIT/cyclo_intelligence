@@ -13,7 +13,21 @@ def folder_name(session_id: str) -> str:
     if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', session_id)
             or '..' in session_id):
         raise ValueError('Invalid inference recording session ID')
+    if re.fullmatch(r'\d{6}_\d{4}_[A-Za-z0-9][A-Za-z0-9_.-]*', session_id):
+        return session_id
     return f'Task_{session_id}_inference_MCAP'
+
+
+def model_name(policy_path: str) -> str:
+    parts = Path(str(policy_path or '').strip().rstrip('/')).parts
+    if 'checkpoints' in parts:
+        index = len(parts) - 1 - parts[::-1].index('checkpoints')
+        name = parts[index - 1] if index else ''
+    else:
+        name = parts[-1] if parts else ''
+    name = re.sub(r'[^A-Za-z0-9_.-]+', '_', name)
+    name = re.sub(r'\.{2,}', '_', name).strip('._-')
+    return (name or 'unknown_model')[:140].rstrip('._-')
 
 
 def validate_folder(root: Path, session_id: str, robot_type: str) -> Path:
@@ -50,13 +64,14 @@ def validate_folder(root: Path, session_id: str, robot_type: str) -> Path:
     return folder
 
 
-def allocate_folder(root: Path) -> str:
+def allocate_folder(root: Path, policy_path: str = '') -> str:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
+    timestamp = time.strftime('%y%m%d_%H%M', time.localtime())
+    base_id = f'{timestamp}_{model_name(policy_path)}'
     suffix = 0
     while True:
-        session_id = timestamp if suffix == 0 else f'{timestamp}_{suffix:02d}'
+        session_id = base_id if suffix == 0 else f'{base_id}_{suffix + 1:02d}'
         try:
             (root / folder_name(session_id)).mkdir()
             return session_id

@@ -32,7 +32,7 @@ from typing import Optional
 from huggingface_hub import HfApi
 import yaml
 from interfaces.msg import RecordingStatus
-from shared.inference_recording import RECORDING_ROOT, folder_name
+from shared.inference_recording import RECORDING_ROOT, allocate_folder, folder_name
 from cyclo_data.converter.orchestrator import DataConverter
 from cyclo_data.hub.progress_tracker import (
     HuggingFaceLogCapture,
@@ -245,7 +245,7 @@ class DataManager:
         if task_type == 'inference':
             record_id = str(getattr(task_info, 'task_num', '') or '').strip()
             if not record_id:
-                record_id = cls._make_unique_inference_record_id(RECORDING_ROOT)
+                record_id = allocate_folder(RECORDING_ROOT, getattr(task_info, 'policy_path', ''))
             name = folder_name(record_id)
             task_info.task_num = record_id
             task_info.task_name = 'inference'
@@ -254,17 +254,6 @@ class DataManager:
         task_num = getattr(task_info, 'task_num', '') or ''
         task_name = getattr(task_info, 'task_name', '') or ''
         return f'Task_{task_num}_{task_name}_MCAP'
-
-    @staticmethod
-    def _make_unique_inference_record_id(save_root_path) -> str:
-        timestamp = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
-        root = Path(save_root_path)
-        record_id = timestamp
-        suffix = 1
-        while (root / f'Task_{record_id}_inference_MCAP').exists():
-            record_id = f'{timestamp}_{suffix:02d}'
-            suffix += 1
-        return record_id
 
     @staticmethod
     def _read_episode_info(episode_dir: Path) -> dict:

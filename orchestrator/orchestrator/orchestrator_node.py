@@ -60,6 +60,7 @@ from interfaces.srv import (
 from orchestrator.internal.communication.communicator import Communicator
 from orchestrator.internal.communication.cyclo_data_client import CycloDataClient
 from orchestrator.internal.inference_recording import InferenceRecordingSession
+from orchestrator.internal.policy_catalog import execution_mode
 # DataManager is imported only for its whoami_huggingface @staticmethod
 # used by set_hf_user / get_hf_user callbacks. Session-state ownership
 # lives in cyclo_data.RecordingService (Step 3 Part C2d).
@@ -371,6 +372,33 @@ class OrchestratorNode(Node):
             ),
         )
 
+    def _validate_action_steps_edit(self, task_info):
+        value = getattr(task_info, 'action_steps', 0)
+        if type(value) is not int or not 0 <= value <= 2147483647:
+            raise ValueError('Action Steps must be a non-negative integer (0 means all)')
+        if value:
+            policy_id = str(getattr(task_info, 'policy_id', '') or '')
+            if not policy_id:
+                service = str(getattr(task_info, 'service_type', '') or '')
+                policy = str(getattr(task_info, 'policy_type', '') or '')
+                policy_id = f'{service}:{policy}' if service and policy else ''
+            if not policy_id:
+                with self._state_lock:
+                    previous = getattr(self, '_inference_settings_task_info', None)
+                    policy_id = str(getattr(previous, 'policy_id', '') or '')
+            mode = execution_mode(policy_id)
+            if mode == 'step':
+                # Canonicalize centrally so old clients and other UIs see All too.
+                task_info.action_steps = value = 0
+            elif mode != 'chunk':
+                raise ValueError('Action Steps support is unknown; use All until execution metadata is available')
+        with self._state_lock:
+            previous = getattr(self, '_inference_settings_task_info', None)
+            phase = getattr(self, '_inference_status_snapshot', {}).get('phase', InferenceStatus.READY)
+            if (value != getattr(previous, 'action_steps', 0)
+                    and phase not in {InferenceStatus.READY, InferenceStatus.PAUSED}):
+                raise ValueError('Pause or Stop before changing Action Steps')
+
     def _cache_ui_task_info(self, task_info: TaskInfo, source: str) -> None:
         """Cache latest UI task_info for UI and joystick-triggered starts."""
         previous_record_signature = self._task_info_record_signature(
@@ -378,6 +406,7 @@ class OrchestratorNode(Node):
         )
         is_inference_task = getattr(task_info, 'task_type', '') == 'inference'
         if is_inference_task:
+            self._validate_action_steps_edit(task_info)
             session = getattr(self, '_inference_recording', None)
             if session is not None:
                 with self._recording_command_lock:
@@ -436,6 +465,7 @@ class OrchestratorNode(Node):
             'control_hz',
             'inference_hz',
             'chunk_align_window_s',
+            'action_steps',
             'include_robotis_license',
             'service_type',
             'inference_mode',
@@ -987,6 +1017,8 @@ class OrchestratorNode(Node):
         """Publish command progress; invalidate any earlier STATUS request."""
         with self._state_lock:
             self._inference_status_generation += 1
+            if phase in (InferenceStatus.READY, InferenceStatus.LOADING):
+                self._inference_status_snapshot['observed_chunk_size'] = 0
             self._inference_status_snapshot.update(
                 phase=phase, error=error, status_known=True,
                 runtime_state={
@@ -1015,6 +1047,7 @@ class OrchestratorNode(Node):
             phase=InferenceStatus.READY, error='', status_known=False,
             runtime_state='unknown', model_path='', policy_id='',
             publish_to_robot=False, source_id=str(uuid.uuid4()), sequence=0,
+            observed_chunk_size=0,
         )
 
     def _broadcast_inference_status(self) -> None:
@@ -1221,6 +1254,10 @@ class OrchestratorNode(Node):
             model_path=str(result.data.get('loaded_model_path', '') or ''),
             policy_id=str(result.data.get('loaded_policy_id', '') or ''),
             publish_to_robot=bool(result.data.get('publish_to_robot', False)),
+            observed_chunk_size=(
+                max(0, int(result.data.get('observed_chunk_size', 0) or 0))
+                if runtime_state not in ('unloaded', 'loading') else 0
+            ),
         )
 
     def _handle_get_inference_status(self, task_info, response):
@@ -1316,7 +1353,7 @@ class OrchestratorNode(Node):
 
     def _resume_inference_client(
         self, client, *, task_instruction, publish_to_robot,
-        initial_pose_sync_duration_s, restart_timer=False,
+        initial_pose_sync_duration_s, restart_timer=False, action_steps=None,
     ):
         # LOAD and cleanup run on background threads. Do not queue a stale
         # RESUME behind their long RPCs or hold the state lock during transport.
@@ -1334,10 +1371,19 @@ class OrchestratorNode(Node):
                 ContainerServiceClient.CMD_RESUME,
                 task_instruction=task_instruction,
                 publish_to_robot=publish_to_robot,
+                **({} if action_steps is None else {'action_steps': action_steps}),
             )
             with self._state_lock:
                 check_owner()
                 if result.success:
+                    if action_steps is not None:
+                        settings = getattr(self, '_inference_settings_task_info', None)
+                        if settings is not None and settings.action_steps != action_steps:
+                            for name in ('_inference_settings_task_info', '_prepared_inference_task_info'):
+                                info = getattr(self, name, None)
+                                if info is not None:
+                                    info.action_steps = action_steps
+                            self._inference_task_info_revision += 1
                     self._loaded_inference_publish_to_robot = publish_to_robot
                     if task_instruction:
                         self._loaded_inference_instruction = task_instruction
@@ -1965,6 +2011,7 @@ class OrchestratorNode(Node):
                             publish_to_robot=publish_to_robot,
                             initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
                             restart_timer=True,
+                            action_steps=getattr(task_info, 'action_steps', 0),
                         )
                         if resume_result.success:
                             needs_initial_pose_sync = (
@@ -2055,6 +2102,7 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     ),
                                     action_request_mode=requested_action_request_mode,
+                                    action_steps=getattr(task_info, 'action_steps', 0),
                                     control_hz=requested_control_hz,
                                     inference_hz=requested_inference_hz,
                                     chunk_align_window_s=(
@@ -2484,6 +2532,10 @@ class OrchestratorNode(Node):
                             response.message = 'No inference session active'
 
                     elif request.command == SendCommand.Request.RESUME_INFERENCE:
+                        resume_action_steps = getattr(request.task_info, 'action_steps', -1)
+                        if resume_action_steps != -1:
+                            self._validate_action_steps_edit(request.task_info)
+                            resume_action_steps = request.task_info.action_steps
                         with self._state_lock:
                             client = self.container_service_client
                             loaded_publish_to_robot = (
@@ -2503,6 +2555,7 @@ class OrchestratorNode(Node):
                                 task_instruction=task_instruction,
                                 publish_to_robot=loaded_publish_to_robot,
                                 initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
+                                action_steps=None if resume_action_steps == -1 else resume_action_steps,
                             )
                             response.success = result.success
                             response.message = result.message or 'Inference resumed'

@@ -54,12 +54,14 @@ describe('central inference status subscription', () => {
       inference_phase: InferencePhase.INFERENCING, status_known: true,
       runtime_state: 'running', model_path: '/models/act', policy_id: 'lerobot:act',
       publish_to_robot: true, source_id: 'backend', sequence: 1,
+      observed_chunk_size: 15,
     };
     act(() => callback(message));
     expect(store.getState().tasks.inferenceStatus).toMatchObject({
       inferencePhase: InferencePhase.INFERENCING, topicReceived: true,
       runtimeState: 'running', loadedModelPath: '/models/act',
       loadedPolicyId: 'lerobot:act', publishToRobot: true,
+      observedChunkSize: 15,
     });
     act(() => jest.advanceTimersByTime(8000));
     expect(store.getState().tasks.inferenceStatus).toMatchObject({

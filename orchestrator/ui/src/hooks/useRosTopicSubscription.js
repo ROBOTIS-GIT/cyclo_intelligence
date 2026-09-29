@@ -511,6 +511,7 @@ export function useRosTopicSubscription() {
             runtimeState: msg.runtime_state || 'unknown',
             loadedModelPath: msg.model_path || '',
             loadedPolicyId: msg.policy_id || '',
+            observedChunkSize: Number(msg.observed_chunk_size || 0),
             recordingSessionId: msg.task_info?.task_num || '',
             publishToRobot: Boolean(msg.publish_to_robot),
             sourceId: msg.source_id || '',

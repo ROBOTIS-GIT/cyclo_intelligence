@@ -10,6 +10,7 @@ runtime:
     location: ABot-Manipulation
   services: [engine-process]
   capabilities:
+    execution_mode: chunk
     action_request_modes: [async, sync]
     requires_hf_token: false
     operations: []

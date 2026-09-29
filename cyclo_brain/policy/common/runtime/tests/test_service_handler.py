@@ -58,6 +58,7 @@ class FakeControlLoop:
     def __init__(self) -> None:
         self.configures = []
         self.starts = []
+        self.action_step_updates = []
         self.task_instructions = []
         self.start_result = False
         self.start_error = None
@@ -68,16 +69,23 @@ class FakeControlLoop:
         self.emergency_stop_result = True
         self.emergency_stop_reasons = []
         self.deconfigure_count = 0
+        self.chunk_size = 0
+
+    def observed_chunk_size(self):
+        return self.chunk_size
 
     def configure(self, **kwargs) -> None:
         self.configures.append(kwargs)
         if self.configure_error is not None:
             raise self.configure_error
 
-    def start(self, publish_to_robot=None) -> bool:
+    def start(self, publish_to_robot=None, *, action_steps=None, task_instruction=None) -> bool:
         self.starts.append(publish_to_robot)
+        self.action_step_updates.append(action_steps)
         if self.start_error is not None:
             raise self.start_error
+        if task_instruction is not None:
+            self.set_task_instruction(task_instruction)
         return self.start_result
 
     def set_task_instruction(self, task_instruction: str) -> None:
@@ -95,6 +103,7 @@ class FakeControlLoop:
     def configuration_snapshot(self) -> dict:
         config = self.configures[-1]
         return {
+            "action_steps": config.get("action_steps", 0),
             "action_request_mode": config.get("action_request_mode") or "async",
             "control_hz": int(config.get("control_hz") or 100),
             "inference_hz": int(config.get("inference_hz") or 15),
@@ -131,6 +140,8 @@ def make_response(
     loaded_control_hz=0,
     loaded_inference_hz=0,
     loaded_chunk_align_window_s=0.0,
+    loaded_action_steps=0,
+    observed_chunk_size=0,
     loaded_initial_pose_sync=False,
     loaded_initial_pose_sync_duration_s=5.0,
     runtime_error="",
@@ -150,6 +161,8 @@ def make_response(
         loaded_control_hz=loaded_control_hz,
         loaded_inference_hz=loaded_inference_hz,
         loaded_chunk_align_window_s=loaded_chunk_align_window_s,
+        loaded_action_steps=loaded_action_steps,
+        observed_chunk_size=observed_chunk_size,
         loaded_initial_pose_sync=loaded_initial_pose_sync,
         loaded_initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
         runtime_error=runtime_error,
@@ -157,6 +170,42 @@ def make_response(
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_status_reports_observation_without_worker_rpc_or_setting_mutation(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        loaded = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                                robot_type="test", task_instruction="pick", action_steps=2))
+        self.assertTrue(loaded.success, loaded.message)
+        self.assertEqual(loaded.observed_chunk_size, 0)
+        loop.chunk_size = 15
+        status = handler.handle(SimpleNamespace(command=CMD_STATUS))
+        self.assertTrue(status.success, status.message)
+        self.assertEqual(status.observed_chunk_size, 15)
+        self.assertEqual(status.loaded_action_steps, 2)
+        session.mark_unloaded()
+        self.assertEqual(handler.handle(SimpleNamespace(command=CMD_STATUS)).observed_chunk_size, 0)
+
+    def test_action_steps_load_resume_preserve_and_status(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        loaded = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                                robot_type="test", task_instruction="pick", action_steps=10))
+        self.assertTrue(loaded.success, loaded.message)
+        self.assertEqual(loop.configures[-1]["action_steps"], 10)
+        self.assertEqual(loaded.loaded_action_steps, 10)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_START, action_steps=-1)).success)
+        self.assertIsNone(loop.action_step_updates[-1])
+        handler.handle(SimpleNamespace(command=CMD_PAUSE))
+        resumed = handler.handle(SimpleNamespace(command=CMD_RESUME, task_instruction="pick", action_steps=3))
+        self.assertTrue(resumed.success, resumed.message)
+        self.assertEqual(loop.action_step_updates[-1], 3)
+        self.assertEqual(resumed.loaded_action_steps, 3)
+        handler.handle(SimpleNamespace(command=CMD_PAUSE))
+        loop.start_error = ValueError("rejected limit")
+        failed = handler.handle(SimpleNamespace(command=CMD_RESUME, task_instruction="place", action_steps=4))
+        self.assertFalse(failed.success)
+        self.assertEqual(failed.loaded_action_steps, 3)
+        self.assertEqual(loop.task_instructions[-1], "pick")
+        self.assertEqual(session.task_instruction, "pick")
+
     def test_shutdown_rejects_lifecycle_requests_and_worker_mutations(self):
         handler, _, _ = self._handler(backend="lerobot")
         handler.begin_shutdown()
@@ -456,6 +505,65 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
 
         self.assertFalse(response.success)
         self.assertIn("belongs to runtime", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_step_count_is_rejected_before_loading_weights(self):
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            policy_id="lerobot:diffusion", policy_parameters_json="{}", action_steps=5,
+        ))
+        self.assertFalse(response.success)
+        self.assertIn("use All", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+        self.assertFalse(session.loaded)
+
+    def test_loaded_contract_must_match_declaration_and_rolls_back(self):
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        # The fake Worker returns legacy chunk metadata for a declared step policy.
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="pick", policy_id="lerobot:diffusion",
+            policy_parameters_json="{}", action_steps=0,
+        ))
+        self.assertFalse(response.success)
+        self.assertIn("does not match", response.message)
+        self.assertEqual(handler._requester.unload_count, 1)
+        self.assertEqual(loop.configures, [])
+        self.assertFalse(session.loaded)
+
+    def test_declared_step_load_with_all_accepts_matching_worker_contract(self):
+        from inference_context.contract import ExecutionContract, LoadedExecution
+        from inference_context.execution import ExecutionContext
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        handler._requester.load_policy = lambda request: SimpleNamespace(
+            success=True, message='loaded', action_keys=['arm'],
+            capabilities_json=LoadedExecution(
+                ExecutionContract('step'), ExecutionContext('test', 0, 0, 'ready'),
+            ).to_json(),
+        )
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path='/models/policy', robot_type='ffw',
+            task_instruction='pick', policy_id='lerobot:diffusion',
+            policy_parameters_json='{}', action_steps=0,
+        ))
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(session.loaded)
+        self.assertEqual(loop.configures[-1]['action_steps'], 0)
+
+    def test_undeclared_execution_rejects_numeric_load_without_loading_weights(self):
+        catalog = load_catalog(POLICY_ROOT)
+        for runtime in catalog['runtimes']:
+            for model in runtime['models']:
+                model.pop('execution_mode', None)
+        handler, _, loop = self._handler(catalog=catalog, backend='lerobot')
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path='/models/policy', robot_type='ffw',
+            policy_id='lerobot:act', policy_parameters_json='{}', action_steps=5,
+        ))
+        self.assertFalse(response.success)
         self.assertIsNone(handler._requester.loaded_with)
         self.assertEqual(loop.configures, [])
 

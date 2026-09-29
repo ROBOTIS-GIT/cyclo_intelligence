@@ -44,6 +44,7 @@ const selectionPatch = (option, currentInfo, allOptions) => {
     policyId: option.policy_id,
     policyParameters: parameterDefaults(option, 'policy_parameters.'),
     actionRequestMode,
+    ...(option.execution_mode !== 'chunk' ? { actionSteps: 0 } : {}),
     ...taskDefaults,
   };
 };
@@ -52,6 +53,11 @@ const InferenceModelSelector = ({ readonly = false }) => {
   const dispatch = useDispatch();
   const info = useSelector(selectInferenceTaskInfo, shallowEqual);
   const { catalog, status } = usePolicyCatalog();
+  const displayRuntimes = useMemo(() => (
+    [...(catalog?.runtimes || [])].sort((a, b) => (
+      Number(b.id === 'lerobot') - Number(a.id === 'lerobot')
+    ))
+  ), [catalog]);
   const options = useMemo(() => (
     (catalog?.runtimes || []).flatMap((runtime) => (
       runtime.models.map((model) => ({ ...model, runtime }))
@@ -117,7 +123,7 @@ const InferenceModelSelector = ({ readonly = false }) => {
             {status === 'ready' ? 'Selected policy is unavailable' : 'Loading policy catalog...'}
           </option>
         )}
-        {(catalog?.runtimes || []).map((runtime) => (
+        {displayRuntimes.map((runtime) => (
           <optgroup key={runtime.id} label={runtime.label}>
             {runtime.models.map((model) => (
               <option key={model.policy_id} value={model.policy_id}>

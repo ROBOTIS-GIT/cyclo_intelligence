@@ -31,6 +31,7 @@ class SessionState:
     control_hz: int = 0
     inference_hz: int = 0
     chunk_align_window_s: float = 0.0
+    action_steps: int = 0
     initial_pose_sync: bool = False
     initial_pose_sync_duration_s: float = 5.0
     error: str = ""
@@ -52,6 +53,7 @@ class SessionState:
         control_hz: int = 0,
         inference_hz: int = 0,
         chunk_align_window_s: float = 0.0,
+        action_steps: int = 0,
         initial_pose_sync: bool = False,
         initial_pose_sync_duration_s: float = 5.0,
     ) -> None:
@@ -72,6 +74,7 @@ class SessionState:
         self.control_hz = int(control_hz)
         self.inference_hz = int(inference_hz)
         self.chunk_align_window_s = float(chunk_align_window_s)
+        self.action_steps = action_steps
         self.initial_pose_sync = bool(initial_pose_sync)
         self.initial_pose_sync_duration_s = float(initial_pose_sync_duration_s)
         self.error = ""
@@ -126,6 +129,7 @@ class SessionState:
         self.control_hz = 0
         self.inference_hz = 0
         self.chunk_align_window_s = 0.0
+        self.action_steps = 0
         self.initial_pose_sync = False
         self.initial_pose_sync_duration_s = 5.0
         self.error = ""

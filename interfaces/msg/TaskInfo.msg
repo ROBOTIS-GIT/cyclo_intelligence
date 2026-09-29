@@ -9,6 +9,9 @@ bool record_inference_mode
 uint16 control_hz
 uint16 inference_hz
 float64 chunk_align_window_s
+# Maximum original waypoints after alignment, before interpolation. 0 = all.
+# RESUME_INFERENCE alone also accepts -1 to preserve the configured selection.
+int32 action_steps
 
 # Opt-in: when true, the recorder writes a README.md with the ROBOTIS
 # Apache 2.0 license header into the task folder. Default (false) writes

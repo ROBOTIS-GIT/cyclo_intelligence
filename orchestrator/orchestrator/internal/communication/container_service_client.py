@@ -120,6 +120,8 @@ class ServiceResponse:
             'loaded_action_request_mode', 'loaded_acceleration_mode',
             'loaded_acceleration_engine_path', 'loaded_control_hz',
             'loaded_inference_hz', 'loaded_chunk_align_window_s',
+            'loaded_action_steps',
+            'observed_chunk_size',
             'loaded_initial_pose_sync', 'loaded_initial_pose_sync_duration_s',
             'runtime_error',
         ]:
@@ -403,6 +405,7 @@ class ContainerServiceClient:
         policy_id: str = "",
         policy_parameters_json: str = "",
         timeout_sec: Optional[float] = None,
+        action_steps: Optional[int] = None,
     ) -> ServiceResponse:
         """Call /policy/inference_command (InferenceCommand.srv).
 
@@ -445,6 +448,12 @@ class ContainerServiceClient:
             request.chunk_align_window_s = _positive_float_or_zero(
                 chunk_align_window_s
             )
+        if action_steps is not None and (type(action_steps) is not int or not 0 <= action_steps <= 2147483647):
+            raise ValueError("action_steps must be a non-negative int32")
+        if hasattr(request, "action_steps"):
+            request.action_steps = -1 if action_steps is None else action_steps
+        elif action_steps:
+            raise RuntimeError("Rebuild interfaces before using Action Steps")
         if hasattr(request, "initial_pose_sync"):
             request.initial_pose_sync = bool(initial_pose_sync)
         if hasattr(request, "initial_pose_sync_duration_s"):

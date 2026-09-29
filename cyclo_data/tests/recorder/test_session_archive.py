@@ -74,17 +74,20 @@ def _make_manager(root: Path, *, subtask_total: int = 2) -> DataManager:
     return manager
 
 
-def test_inference_save_repo_name_uses_timestamp_metadata(monkeypatch, tmp_path):
+def test_inference_save_repo_name_uses_model_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
     monkeypatch.setattr(
         "cyclo_data.recorder.session_manager.time.strftime",
-        lambda fmt, tm: "20260622_031455",
+        lambda fmt, tm: "260622_1214",
     )
-    task_info = SimpleNamespace(task_num="", task_name="", task_type="inference")
+    task_info = SimpleNamespace(task_num="", task_name="", task_type="inference",
+                                policy_path="/models/Peanut_Model")
 
     repo_name = DataManager._make_save_repo_name(tmp_path, task_info)
 
-    assert repo_name == "Task_20260622_031455_inference_MCAP"
-    assert task_info.task_num == "20260622_031455"
+    assert repo_name == "260622_1214_Peanut_Model"
+    assert task_info.task_num == repo_name
+    assert (tmp_path / repo_name).is_dir()
     assert task_info.task_name == "inference"
 
 
@@ -92,22 +95,32 @@ def test_inference_save_repo_name_avoids_existing_timestamp(monkeypatch, tmp_pat
     monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
     monkeypatch.setattr(
         "cyclo_data.recorder.session_manager.time.strftime",
-        lambda fmt, tm: "20260622_031455",
+        lambda fmt, tm: "260622_1214",
     )
-    (tmp_path / "Task_20260622_031455_inference_MCAP").mkdir()
-    task_info = SimpleNamespace(task_num="", task_name="", task_type="inference")
+    (tmp_path / "260622_1214_Peanut_Model").mkdir()
+    task_info = SimpleNamespace(task_num="", task_name="", task_type="inference",
+                                policy_path="/models/Peanut_Model")
 
     repo_name = DataManager._make_save_repo_name(tmp_path, task_info)
 
-    assert repo_name == "Task_20260622_031455_01_inference_MCAP"
-    assert task_info.task_num == "20260622_031455_01"
+    assert repo_name == "260622_1214_Peanut_Model_02"
+    assert task_info.task_num == repo_name
     assert task_info.task_name == "inference"
 
 
-def test_inference_explicit_id_keeps_destination(tmp_path):
-    info = SimpleNamespace(task_type='inference', task_num='existing', task_name='ignored')
-    assert DataManager._make_save_repo_name(tmp_path, info) == 'Task_existing_inference_MCAP'
-    assert info.task_num == 'existing'
+@pytest.mark.parametrize(('session', 'folder'), [
+    ('existing', 'Task_existing_inference_MCAP'),
+    ('260622_1214_Peanut_Model', '260622_1214_Peanut_Model'),
+])
+def test_inference_explicit_id_keeps_destination(tmp_path, session, folder):
+    info = SimpleNamespace(task_type='inference', task_num=session, task_name='ignored')
+    assert DataManager._make_save_repo_name(tmp_path, info) == folder
+    assert info.task_num == session
+
+
+def test_record_folder_naming_is_unchanged(tmp_path):
+    info = SimpleNamespace(task_type='record', task_num='123', task_name='peanut')
+    assert DataManager._make_save_repo_name(tmp_path, info) == 'Task_123_peanut_MCAP'
 
 
 @pytest.mark.parametrize('task_type', ['inference', 'record'])

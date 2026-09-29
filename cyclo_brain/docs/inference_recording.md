@@ -12,8 +12,12 @@ Try Results and does not add evaluation labels, preview videos, or shortcuts.
   Save, or Discard is in progress, use the existing file browser to select a folder,
   or choose Use new to allocate a folder on the next Record. Inference can remain
   running; changing the recording destination does not stop or clear the model.
-- The first Record allocates `/workspace/rosbag2/Task_<UTC timestamp>_inference_MCAP`.
-  Name collisions receive a numeric suffix. Later episodes reuse that folder.
+- The first Record allocates `/workspace/rosbag2/<YYMMDD_HHMM_model>` using
+  backend local time and the selected policy path's final component (the parent
+  of `checkpoints` for a checkpoint path). Unsafe name characters are sanitized;
+  an unavailable model name becomes `unknown_model`. Name collisions receive
+  `_02`, `_03`, etc. Later episodes reuse that folder. Existing
+  `Task_*_inference_MCAP` folders remain selectable and are not renamed.
 - Pause, Clear, navigation, refresh, and other browser clients retain the
   backend selection. Policy ID/path or robot changes reset it. Backend restart
   also resets selection, without deleting data. Explicitly selecting a folder

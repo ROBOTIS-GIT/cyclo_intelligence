@@ -74,6 +74,24 @@ def flush(loop):
         assert not thread.is_alive()
 
 
+def test_action_steps_limits_contextual_plan_without_claiming_discarded_tail_was_published(rig):
+    loop, robot, engine, _ = rig
+    assert loop.pause()
+    loop.start(action_steps=2)
+    fill(loop)
+    snapshot = loop._processor.snapshot()
+    plan = snapshot.events[-1].decision
+    assert plan.source_count == 3
+    assert plan.command_count == 2
+    assert [command.source_position for command in snapshot.pending] == [0., 1.]
+    tick_without_refill(loop)
+    tick_without_refill(loop)
+    fill(loop)
+    publications = [action for action in engine.contexts[-1].actions if action.status == 'published']
+    assert len(publications) == 2
+    assert [action.source_position for action in publications] == [0., 1.]
+
+
 def test_actual_receipt_and_remaining_plan_reach_next_worker_prediction(rig):
     loop, robot, engine, _ = rig
     fill(loop)

@@ -69,6 +69,7 @@ export const FALLBACK_CATALOG = [
       { name: 'inference_hz', type: 'number', default: '15' },
       { name: 'control_hz', type: 'number', default: '100' },
       { name: 'chunk_align_window_s', type: 'number', default: '0.3' },
+      { name: 'action_steps', type: 'number', default: '0' },
       { name: 'acceleration_mode', type: 'string', default: 'pytorch' },
       { name: 'acceleration_engine_path', type: 'string', default: '' },
     ],

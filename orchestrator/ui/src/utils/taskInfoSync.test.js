@@ -9,6 +9,13 @@ import {
 } from './taskInfoSync';
 
 describe('taskInfoSync echo routing', () => {
+  test('Action Steps participates in central settings keys and topic hydration', () => {
+    expect(normalizeInferenceTaskInfo({}).actionSteps).toBe(0);
+    expect(rosTaskInfoToUiTaskInfo({ action_steps: 10 }).actionSteps).toBe(10);
+    expect(rosTaskInfoToUiTaskInfo({ action_steps: 0 }).actionSteps).toBe(0);
+    expect(getInferenceTaskInfoKey({ actionSteps: 10 }))
+      .not.toBe(getInferenceTaskInfoKey({ actionSteps: 0 }));
+  });
   test('detects inference task info even without record identity fields', () => {
     expect(hasRosTaskInfoPayload({
       task_type: 'inference',

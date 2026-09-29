@@ -26,6 +26,13 @@ from typing import Dict, List, Optional
 import numpy as np
 
 
+def validate_action_steps(value):
+    """Zero means all; this is a waypoint limit, not a resampling length."""
+    if type(value) is not int or not 0 <= value <= 2147483647:
+        raise ValueError("action_steps must be a non-negative int32 (0 means all)")
+    return value
+
+
 @dataclass(frozen=True)
 class PreparedChunk:
     actions: np.ndarray
@@ -85,20 +92,16 @@ class ActionChunkProcessor:
         chunk: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        action_steps: int = 0,
     ) -> int:
         if chunk.ndim != 2:
             raise ValueError(f"chunk must be 2D (T, D); got shape {chunk.shape}")
 
         with self._lock:
             anchor = self._alignment_anchor()
-            if not self._postprocess:
-                for action in chunk:
-                    self._buffer.append(np.asarray(action).copy())
-                if len(chunk) > 0:
-                    self._last_action = np.asarray(chunk[-1]).copy()
-                return len(chunk)
-
-            blended = self.prepare_chunk(chunk, anchor, scheduled_start_delay_s, align).actions
+            blended = self.prepare_chunk(
+                chunk, anchor, scheduled_start_delay_s, align, action_steps,
+            ).actions
 
             for action in blended:
                 self._buffer.append(action)
@@ -113,6 +116,7 @@ class ActionChunkProcessor:
         anchor: Optional[np.ndarray] = None,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        action_steps: int = 0,
     ) -> PreparedChunk:
         """Pure numerical pipeline shared by legacy and traced execution buffers.
 
@@ -121,10 +125,11 @@ class ActionChunkProcessor:
         """
         if chunk.ndim != 2:
             raise ValueError(f"chunk must be 2D (T, D); got shape {chunk.shape}")
+        validate_action_steps(action_steps)
         if not self._postprocess:
-            return PreparedChunk(chunk.copy(), 0)
+            return PreparedChunk(chunk[:action_steps or None].copy(), 0)
         start = self._alignment_start(chunk, anchor, scheduled_start_delay_s) if align else 0
-        aligned = chunk[start:]
+        aligned = chunk[start:start + action_steps] if action_steps else chunk[start:]
         if len(aligned) == 0:
             return PreparedChunk(aligned.copy(), start)
         return PreparedChunk(self._blend(self._interpolate(aligned), anchor), start)
@@ -149,8 +154,9 @@ class ActionChunkProcessor:
         actions: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        action_steps: int = 0,
     ) -> int:
-        return self.push_chunk(actions, scheduled_start_delay_s, align=align)
+        return self.push_chunk(actions, scheduled_start_delay_s, align=align, action_steps=action_steps)
 
     def pop_action(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -238,7 +244,7 @@ class ActionChunkProcessor:
         if self._target_chunk_size is not None:
             target = int(self._target_chunk_size)
             if T == target:
-                return chunk
+                return chunk.copy()
             if T == 1:
                 return np.repeat(chunk, target, axis=0)
             t_original = np.linspace(0.0, 1.0, T)
@@ -248,7 +254,7 @@ class ActionChunkProcessor:
                 out[:, d] = np.interp(t_interp, t_original, chunk[:, d])
             return out
         if T < 2:
-            return chunk
+            return chunk.copy()
         t_original = np.arange(T) / self._inference_hz
         duration = (T - 1) / self._inference_hz
         # Publish one command per control tick over the source trajectory

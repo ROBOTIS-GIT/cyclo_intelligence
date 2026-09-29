@@ -61,6 +61,7 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
   controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
   inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+  actionSteps: numberOrDefault(taskInfo.actionSteps, 0),
   chunkAlignWindowS: editableNumberOrDefault(
     taskInfo.chunkAlignWindowS ?? 0.3,
     0.3
@@ -109,6 +110,7 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   userId: taskInfo.user_id || '',
   controlHz: taskInfo.control_hz || 100,
   inferenceHz: taskInfo.inference_hz || 15,
+  actionSteps: taskInfo.action_steps ?? 0,
   chunkAlignWindowS: taskInfo.chunk_align_window_s || 0.3,
   includeRobotisLicense: Boolean(taskInfo.include_robotis_license),
   warmupTime: taskInfo.warmup_time_s || 0,

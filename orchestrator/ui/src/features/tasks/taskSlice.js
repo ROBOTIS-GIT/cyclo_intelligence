@@ -116,6 +116,7 @@ const inferenceTaskInfoInitialState = {
   controlHz: 100,
   inferenceHz: 15,
   chunkAlignWindowS: 0.3,
+  actionSteps: 0,
   serviceType: 'lerobot',
   policyType: 'act',
   policyId: '',
@@ -304,6 +305,7 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
+    actionSteps: taskInfo.actionSteps ?? state.inferenceTaskInfo.actionSteps ?? 0,
     serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
     policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
     policyId: String(taskInfo.policyId ?? state.inferenceTaskInfo.policyId ?? ''),
@@ -390,6 +392,7 @@ const initialState = {
     topicReceived: false,
     runtimeState: 'unknown',
     loadedModelPath: '',
+    observedChunkSize: 0,
     loadedPolicyId: '',
     publishToRobot: false,
     sourceId: '',

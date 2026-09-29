@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MESSAGES_PATH = (
@@ -75,6 +77,8 @@ def test_dynamic_inference_command_definition_matches_ros_service() -> None:
     dynamic_fields = _field_lines(_load_definitions().INFERENCE_COMMAND_REQUEST_DEF)
 
     assert dynamic_fields == service_fields
+    assert "int32 action_steps" in dynamic_fields
+    assert "int32 action_steps -1" in _load_definitions().INFERENCE_COMMAND_REQUEST_DEF
     assert dynamic_fields[-4:] == [
         "bool initial_pose_sync",
         "float64 initial_pose_sync_duration_s",
@@ -85,7 +89,7 @@ def test_dynamic_inference_command_definition_matches_ros_service() -> None:
         _load_definitions().INFERENCE_COMMAND_RESPONSE_DEF
     )
     assert dynamic_response_fields == _service_response_fields(SERVICE_PATH)
-    assert dynamic_response_fields[-14:] == [
+    assert dynamic_response_fields[-16:] == [
         "string runtime_state",
         "string loaded_model_path",
         "string loaded_policy_id",
@@ -97,10 +101,37 @@ def test_dynamic_inference_command_definition_matches_ros_service() -> None:
         "uint16 loaded_control_hz",
         "uint16 loaded_inference_hz",
         "float64 loaded_chunk_align_window_s",
+        "int32 loaded_action_steps",
+        "int32 observed_chunk_size",
         "bool loaded_initial_pose_sync",
         "float64 loaded_initial_pose_sync_duration_s",
         "string runtime_error",
     ]
+
+
+def test_action_steps_native_ros_and_worker_cdr_roundtrip():
+    serialization = pytest.importorskip('rclpy.serialization')
+    service = pytest.importorskip('interfaces.srv').InferenceCommand
+    typesys = pytest.importorskip('rosbags.typesys')
+    definitions = _load_definitions()
+    store = typesys.get_typestore(typesys.Stores.EMPTY)
+    for native_type, name, definition, field in (
+        (service.Request, 'interfaces/srv/InferenceCommand_Request',
+         definitions.INFERENCE_COMMAND_REQUEST_DEF, 'action_steps'),
+        (service.Response, 'interfaces/srv/InferenceCommand_Response',
+         definitions.INFERENCE_COMMAND_RESPONSE_DEF, 'loaded_action_steps'),
+        (service.Response, 'interfaces/srv/InferenceCommand_Response',
+         definitions.INFERENCE_COMMAND_RESPONSE_DEF, 'observed_chunk_size'),
+    ):
+        parsed = typesys.get_types_from_msg(definition, name)
+        store.register(parsed)
+        typename = next(iter(parsed))
+        for steps in (0, 10, 2147483647):
+            native = native_type(**{field: steps})
+            worker = store.deserialize_cdr(serialization.serialize_message(native), typename)
+            assert getattr(worker, field) == steps
+            restored = serialization.deserialize_message(bytes(store.serialize_cdr(worker, typename)), native_type)
+            assert getattr(restored, field) == steps
 
 
 def test_dynamic_engine_command_definition_matches_ros_service() -> None:

@@ -49,6 +49,9 @@ string acceleration_engine_path
 uint16 control_hz
 uint16 inference_hz
 float64 chunk_align_window_s
+# LOAD/START/RESUME: maximum aligned source waypoints; 0 = all.
+# -1 preserves the current limit on START/RESUME and means all on LOAD.
+int32 action_steps -1
 # LOAD-time initial-pose synchronization settings. Ignored unless
 # publish_to_robot is true.
 bool initial_pose_sync
@@ -78,6 +81,10 @@ string loaded_acceleration_engine_path
 uint16 loaded_control_hz
 uint16 loaded_inference_hz
 float64 loaded_chunk_align_window_s
+int32 loaded_action_steps
+# Latest valid chunk length before alignment/truncation; 0 means unknown or step execution.
+# This is an observation, not a guaranteed maximum horizon.
+int32 observed_chunk_size
 bool loaded_initial_pose_sync
 float64 loaded_initial_pose_sync_duration_s
 string runtime_error

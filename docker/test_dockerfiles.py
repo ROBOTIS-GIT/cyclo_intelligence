@@ -176,6 +176,9 @@ def test_interactive_bashrc_includes_simple_ros_zenoh_block():
         REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.amd64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.arm64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "abot" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "lingbot_vla" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "rldx" / "Dockerfile.amd64",
     )
     required = (
         "export ROS_DOMAIN_ID=30",
@@ -207,6 +210,9 @@ def test_dockerfiles_prepend_ros_zenoh_block_before_existing_bashrc():
         REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.amd64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.arm64",
         REPO_ROOT / "cyclo_brain" / "policy" / "groot" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "abot" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "lingbot_vla" / "Dockerfile.amd64",
+        REPO_ROOT / "cyclo_brain" / "policy" / "rldx" / "Dockerfile.amd64",
     )
 
     for dockerfile in dockerfiles:
@@ -216,6 +222,38 @@ def test_dockerfiles_prepend_ros_zenoh_block_before_existing_bashrc():
         assert write_block_index < existing_bashrc_index, (
             f"{dockerfile} must write Cyclo env before appending the base bashrc"
         )
+
+
+def test_new_worker_bashrc_defaults_and_remote_override(tmp_path):
+    for backend in ("abot", "lingbot_vla", "rldx"):
+        contents = (REPO_ROOT / f"cyclo_brain/policy/{backend}/Dockerfile.amd64").read_text()
+        start = contents.index("RUN {")
+        end = contents.index("mv /tmp/cyclo_bashrc /root/.bashrc", start)
+        block = contents[start + 4:end + len("mv /tmp/cyclo_bashrc /root/.bashrc")]
+        bashrc = tmp_path / f"{backend}.bashrc"
+        staging = tmp_path / f"{backend}.staging"
+        bashrc.write_text('[ -z "$PS1" ] && return\n')
+        block = block.replace("/tmp/cyclo_bashrc", str(staging)).replace("/root/.bashrc", str(bashrc))
+        subprocess.run(["sh", "-c", block], check=True, capture_output=True)
+        command = 'printf "%s\\n" "$ROS_DOMAIN_ID" "$RMW_IMPLEMENTATION" "$ZENOH_CONFIG_OVERRIDE"'
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("ROS_", "RMW_", "ZENOH_"))}
+
+        def read_environment():
+            return subprocess.run(
+                ["bash", "--noprofile", "--rcfile", str(bashrc), "-ic", command],
+                env=env, check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+
+        assert read_environment() == [
+            "30", "rmw_zenoh_cpp", "transport/shared_memory/enabled=true",
+        ]
+        remote = 'transport/shared_memory/enabled=true;mode="client";connect/endpoints=["tcp/192.0.2.1:7447"]'
+        bashrc.write_text(bashrc.read_text().replace(
+            "export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'",
+            f"export ZENOH_CONFIG_OVERRIDE='{remote}'",
+        ))
+        assert read_environment() == ["30", "rmw_zenoh_cpp", remote]
 
 
 def test_ros_zenoh_runtime_env_file_is_not_referenced_by_images_or_s6():
@@ -484,10 +522,10 @@ def test_lerobot_images_install_new_policy_inference_extras():
         ]
         assert len(install_lines) == 1, f"Could not identify LeRobot extras in {dockerfile}"
         install_line = install_lines[0]
-        for extra in ("molmoact2", "vla_jepa", "fastwam", "multi_task_dit", "wallx", "pi", "groot"):
+        for extra in ("molmoact2", "vla_jepa", "fastwam", "wallx", "pi", "groot"):
             assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
         extras = install_line.split('".[', 1)[1].split(']', 1)[0].split(',')
-        assert not {"eo1", "evo1"}.intersection(extras)
+        assert not {"eo1", "evo1", "multi_task_dit"}.intersection(extras)
 
 
 def test_policy_build_contexts_use_runtime_specific_ignore_files():

@@ -113,9 +113,9 @@ class EngineWorkerTests(unittest.TestCase):
                               supported_policy_ids=policy_ids, capabilities=capabilities)
         response = worker.handle(EngineCommandRequest(command=CMD_DESCRIBE))
         self.assertTrue(response.success)
-        for name in ("wall_x", "groot", "pi0", "pi05", "multi_task_dit"):
+        for name in ("wall_x", "groot", "pi0", "pi05"):
             self.assertIn(f"lerobot:{name}", response.supported_policy_ids)
-        for name in ("eo1", "evo1", "pi0_fast", "lingbot_va"):
+        for name in ("eo1", "evo1", "pi0_fast", "lingbot_va", "multi_task_dit"):
             self.assertNotIn(f"lerobot:{name}", response.supported_policy_ids)
         self.assertNotIn("groot:n17", response.supported_policy_ids)
 

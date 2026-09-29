@@ -147,6 +147,80 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._stop_inference_status_monitor()
         self.node._cancel_initial_pose_sync_status()
 
+    def test_action_steps_setting_is_central_and_locked_while_active(self):
+        info = TaskInfo(task_type='inference', policy_id='lerobot:act',
+                        policy_path='/models/policy', action_steps=10)
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.assertEqual(self.node.communicator.messages[-1].task_info.action_steps, 10)
+        info.action_steps = 3
+        for phase in (InferenceStatus.LOADING, InferenceStatus.SYNCING, InferenceStatus.INFERENCING):
+            self.node._inference_status_snapshot['phase'] = phase
+            with self.assertRaisesRegex(ValueError, 'Pause or Stop'):
+                self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+            self.assertEqual(self.node._inference_settings_task_info.action_steps, 10)
+        self.node._inference_status_snapshot['phase'] = InferenceStatus.PAUSED
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.assertEqual(self.node.communicator.messages[-1].task_info.action_steps, 3)
+
+    def test_model_owned_queue_canonicalizes_stale_count_in_central_settings(self):
+        info = TaskInfo(task_type='inference', policy_id='lerobot:act',
+                        policy_path='/models/act', action_steps=5)
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        info.policy_id = 'lerobot:diffusion'
+        info.policy_path = '/models/diffusion'
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.assertEqual(info.action_steps, 0)
+        self.assertEqual(self.node._prepared_inference_task_info.action_steps, 0)
+        self.assertEqual(self.node._inference_settings_task_info.action_steps, 0)
+        self.assertEqual(self.node.communicator.messages[-1].task_info.action_steps, 0)
+        # A second, stale UI cannot restore a numeric limit for the step policy.
+        info.action_steps = 5
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.assertEqual(self.node.communicator.messages[-1].task_info.action_steps, 0)
+
+    def test_step_resume_normalizes_explicit_count_to_all(self):
+        self.node._cache_ui_task_info(TaskInfo(task_type='inference',
+            policy_id='lerobot:diffusion', policy_path='/models/policy'), 'SET_TASK_INFO')
+        self.node._inference_status_snapshot['phase'] = InferenceStatus.PAUSED
+        request = SimpleNamespace(command=SendCommand.Request.RESUME_INFERENCE,
+                                  task_info=TaskInfo(task_type='inference', action_steps=5))
+        with patch.object(self.node, '_resume_inference_client', return_value=SimpleNamespace(success=True, message='ok')) as resume:
+            result = self.node.user_interaction_callback(request, SendCommand.Response())
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(resume.call_args.kwargs['action_steps'], 0)
+
+    def test_resume_changes_only_action_steps_without_reloading_model(self):
+        info = TaskInfo(task_type='inference', policy_id='lerobot:act',
+                        policy_path='/models/policy', action_steps=10)
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.node._inference_status_snapshot['phase'] = InferenceStatus.PAUSED
+        with patch.object(self.client, 'inference_command', return_value=SimpleNamespace(success=True, message='running')) as call:
+            result = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.RESUME_INFERENCE,
+                                    task_info=TaskInfo(task_type='inference', action_steps=3)),
+                SendCommand.Response())
+        self.assertTrue(result.success, result.message)
+        call.assert_called_once()
+        self.assertEqual(call.call_args.args[0], ContainerServiceClient.CMD_RESUME)
+        self.assertEqual(call.call_args.kwargs['action_steps'], 3)
+        self.assertEqual(self.node._inference_settings_task_info.action_steps, 3)
+        self.assertEqual(self.node._inference_settings_task_info.policy_path, '/models/policy')
+        self.assertEqual(self.node.communicator.messages[-1].task_info.action_steps, 3)
+
+    def test_bt_resume_can_preserve_action_steps(self):
+        info = TaskInfo(task_type='inference', policy_id='lerobot:act',
+                        policy_path='/models/policy', action_steps=10)
+        self.node._cache_ui_task_info(info, 'SET_TASK_INFO')
+        self.node._inference_status_snapshot['phase'] = InferenceStatus.PAUSED
+        with patch.object(self.client, 'inference_command', return_value=SimpleNamespace(success=True, message='running')) as call:
+            result = self.node.user_interaction_callback(
+                SendCommand.Request(command=SendCommand.Request.RESUME_INFERENCE,
+                                    task_info=TaskInfo(task_type='inference', action_steps=-1)),
+                SendCommand.Response())
+        self.assertTrue(result.success, result.message)
+        self.assertNotIn('action_steps', call.call_args.kwargs)
+        self.assertEqual(self.node._inference_settings_task_info.action_steps, 10)
+
     def test_recording_snapshot_reuse_and_failed_save(self):
         import tempfile
         from pathlib import Path
@@ -778,7 +852,8 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
     def test_many_ui_reads_only_use_one_cached_runtime_result(self) -> None:
         self.client.status_results = [SimpleNamespace(
             success=True, data={'runtime_state': 'running',
-                                'loaded_policy_id': 'groot:n17'},
+                                'loaded_policy_id': 'groot:n17',
+                                'observed_chunk_size': 15},
         )]
         self.node._poll_inference_status_once()
         task = TaskInfo()
@@ -790,13 +865,25 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.assertEqual(self.client.calls, [self.client.CMD_STATUS])
         snapshot = self.node.communicator.snapshots[-1]
         self.assertEqual(snapshot['policy_id'], 'groot:n17')
+        self.assertEqual(snapshot['observed_chunk_size'], 15)
         self.assertTrue(snapshot['source_id'])
         self.assertEqual(snapshot['sequence'], 1)
+
+    def test_chunk_observation_is_reset_during_load_clear_and_unloaded_status(self):
+        for phase in (InferenceStatus.LOADING, InferenceStatus.READY):
+            self.node._inference_status_snapshot['observed_chunk_size'] = 15
+            self.node._publish_inference_phase(phase)
+            self.assertEqual(self.node.communicator.snapshots[-1]['observed_chunk_size'], 0)
+        self.node._apply_inference_runtime_status(SimpleNamespace(data={
+            'runtime_state': 'unloaded', 'observed_chunk_size': 15,
+        }))
+        self.assertEqual(self.node._inference_status_snapshot['observed_chunk_size'], 0)
 
     def test_publishes_without_robot_communicator_and_serializes_full_snapshot(self) -> None:
         from rclpy.serialization import serialize_message, deserialize_message
         publisher = self.node._inference_status_publisher
         self.node.communicator = None
+        self.node._inference_status_snapshot['observed_chunk_size'] = 15
         self.node._publish_inference_phase(InferenceStatus.INFERENCING)
         message = deserialize_message(serialize_message(publisher.messages[-1]), InferenceStatus)
         self.assertTrue(message.status_known)
@@ -804,6 +891,7 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.assertEqual(message.policy_id, 'lerobot:act')
         self.assertEqual(message.sequence, 1)
         self.assertTrue(message.publish_to_robot)
+        self.assertEqual(message.observed_chunk_size, 15)
 
     def test_unreachable_keeps_phase_model_and_hold_until_recovery(self) -> None:
         self.node._begin_initial_pose_sync_status(self.client, 5.0)

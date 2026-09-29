@@ -423,6 +423,7 @@ export function useRosServiceCaller() {
             tags: [`inference_mode:${inferenceMode}`],
             control_hz: Number(taskInfo.controlHz || 100),
             inference_hz: Number(taskInfo.inferenceHz || 15),
+            action_steps: Number(taskInfo.actionSteps ?? 0),
             chunk_align_window_s: Number(
               taskInfo.chunkAlignWindowS !== '' && taskInfo.chunkAlignWindowS != null
                 ? taskInfo.chunkAlignWindowS
