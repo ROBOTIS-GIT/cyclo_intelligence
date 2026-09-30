@@ -93,12 +93,13 @@ a Hugging Face token for an approved account before first inference, or pre-cach
 the Cosmos files under the shared Hugging Face cache. Policy containers sync the
 Cyclo endpoint token store to the standard Hugging Face token file on startup.
 
-## LeRobot GPU startup across JetPack versions
+## Policy GPU startup across JetPack versions
 
-LeRobot keeps its CUDA/PyTorch image dependencies and selects the CUDA driver
-at process startup using `runtime/gpu_runtime.py`. The common s6 runners invoke
-it **after** the interactive shell reads `.bashrc` and **before** importing any
-policy libraries. No model is loaded and no robot commands are sent by the probe.
+LeRobot and GR00T keep their own CUDA/PyTorch image dependencies and select the
+CUDA driver at process startup using `runtime/gpu_runtime.py`. Both the common
+and GR00T-specific s6 runners invoke it **after** the interactive shell reads
+`.bashrc` and **before** importing any policy libraries. No model is loaded and
+no robot commands are sent by the probe.
 
 On Jetson (`/etc/nv_tegra_release` exists), `auto` first tries the mounted host
 driver, excluding CUDA `compat` directories from `LD_LIBRARY_PATH`. It discovers
@@ -112,11 +113,17 @@ retain the NVIDIA Container Toolkit environment in `auto` mode.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CYCLO_CUDA_DRIVER` | `auto` | `auto`, `host`, or `compat`; an explicit driver disables fallback |
-| `CYCLO_POLICY_DEVICE` | `cuda` | Require CUDA; set `cpu` explicitly for CPU execution |
+| `CYCLO_POLICY_DEVICE` | `cuda` | LeRobot also accepts explicit `cpu`; GR00T requires `cuda` |
 | `CYCLO_GPU_PROBE_TIMEOUT_S` | `30` | Positive timeout per driver probe, in seconds |
 
-These variables are passed to LeRobot by Compose. For example, from the repository
-root, recreate only that service using the same Compose project as the installer:
+Compose passes the driver selection and probe timeout to both backends. GR00T's
+device is fixed to `cuda` in Compose, and its runners reject non-CUDA settings
+before starting either service. A global LeRobot CPU override does not enable
+unsupported GR00T CPU execution.
+
+For example, from the repository root, recreate only LeRobot using the same
+Compose project as the installer (replace `lerobot` with `groot`, and the log
+container name with `groot_server`, for GR00T):
 
 ```bash
 docker compose -p cyclo_intelligence \
@@ -134,7 +141,7 @@ these logs rather than interpreting a bare shell's torch check as the service
 configuration.
 
 If all probes fail, the service does not start and Docker health remains failing.
-An explicit CPU setting runs a CPU probe and is reported as such. LeRobot also
+For LeRobot, an explicit CPU setting runs a CPU probe and is reported as such. It also
 checks the requested device when loading weights, so directly launching the
 engine cannot silently fall back to CPU. FastWAM's existing selective CPU offload
 is preserved.
@@ -143,9 +150,23 @@ Health combines the s6 process checks with successful probe records in
 `/run/cyclo-gpu/`. Records include PID and process start time so exited or restarted
 processes cannot leave a stale healthy result. This is a **startup** device check,
 not continuous GPU monitoring or a model-readiness/latency guarantee. Both service
-runners and the common runtime are bind-mounted, so existing LeRobot images can
+runners and the common runtime are bind-mounted, so existing policy images can
 use the change without rebuilding. The image healthchecks are updated too for
-subsequent builds. GR00T uses separate runners and is not changed by this wiring.
+subsequent builds. Each probe uses the backend image's own Python and PyTorch;
+LeRobot's package versions and CUDA library directories are not copied to GR00T.
+
+This selection does not install missing libraries or repair incompatible
+PyTorch/CUDA extension binaries. A successful torch probe is not proof that
+FlashAttention, TensorRT, video decoders, or a particular model will load.
+Validate those with the actual backend image and model. If neither driver works,
+use a supported image/package combination or update the host stack as required
+by that backend. Do not treat a probe failure as proof that the model can never
+run on the hardware.
+
+These service hooks cover inference startup. Separately launched training
+commands (including `docker exec`) must also select the environment before
+importing torch; they do not inherit an already running service's environment.
+GR00T training is not wired through these s6 hooks.
 
 Before declaring another JetPack/image combination supported, validate on both
 the old and upgraded boards: selected driver, real model load, repeated inference
@@ -161,7 +182,10 @@ JetPack compatibility. Keep TensorRT engine caches specific to the tested runtim
    Copy `common/s6-services/` into `/etc/s6-overlay/s6-rc.d/`.
 3. Add a service to `docker/docker-compose.yml` mounting `common/runtime/`
    at `/policy_runtime` and `<policy>_engine/` at `/app/`. Set
-   `POLICY_BACKEND` env.
+   `POLICY_BACKEND` env. Include `gpu_runtime.py health` after the s6 checks
+   in both Compose and image healthchecks, and pass the driver/probe settings.
+   If using custom runners, invoke `gpu_runtime.py launch <service>` before
+   importing policy libraries, and enforce the backend's supported devices.
 4. The same orchestrator yaml (`shared/shared/robot_configs/<robot>_config.yaml`)
    is reused for any backend — no per-policy yaml required.
 

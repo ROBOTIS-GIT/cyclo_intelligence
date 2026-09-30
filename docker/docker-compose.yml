@@ -294,6 +294,10 @@ services:
     ipc: host
 
     environment:
+      - CYCLO_CUDA_DRIVER=${CYCLO_CUDA_DRIVER:-auto}
+      # GR00T currently requires CUDA; LeRobot-only CPU overrides do not apply.
+      - CYCLO_POLICY_DEVICE=cuda
+      - CYCLO_GPU_PROBE_TIMEOUT_S=${CYCLO_GPU_PROBE_TIMEOUT_S:-30}
       # Main-runtime waits on the local engine process while weights and
       # first-time gated backbones download/load.
       - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
@@ -348,11 +352,11 @@ services:
       test:
         [
           "CMD-SHELL",
-          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up ' && python3 /policy_runtime/gpu_runtime.py health",
         ]
       interval: 30s
       timeout: 10s
-      start_period: 30s
+      start_period: 90s
       retries: 3
     deploy:
       resources:
