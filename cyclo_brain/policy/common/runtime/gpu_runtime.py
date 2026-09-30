@@ -38,8 +38,8 @@ def policy_device(torch):
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is unavailable; refusing to run inference on CPU. "
-            "Check the [gpu-runtime] startup diagnostics, or explicitly set "
-            "CYCLO_POLICY_DEVICE=cpu for CPU execution."
+            "Check the [gpu-runtime] startup diagnostics. CPU execution requires "
+            "explicit CYCLO_POLICY_DEVICE=cpu and support from the selected backend."
         )
     return torch.device(device)
 
