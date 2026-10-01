@@ -45,6 +45,25 @@ a Worker process restart, not an image rebuild. Dependencies and the upstream
 LeRobot installation remain image-owned; use `--build` when those change.
 See [source-mounted containers](../../../docker/README.md) for application steps.
 
+The supported LeRobot model extras are collected in the fork's
+`lerobot/pyproject.toml` as `cyclo-policies`. The inference images install
+`cyclo-inference`, which adds their fixed training, HIL-SERL, async and PEFT
+dependencies. When adding a model, update the fork's policy extra and lockfile
+alongside this Worker's `manifest.yaml`; neither inference Dockerfile needs a
+model-specific edit. The amd64 image checks `uv.lock` during installation.
+The Jetson arm64 image uses the same extra through pip, because its base
+image provides platform-specific CUDA PyTorch wheels that the shared uv lock
+does not select.
+
+An external training image can use the same model set with:
+
+```bash
+uv sync --locked --no-dev --extra training --extra cyclo-policies --extra peft
+```
+
+This replaces a training Dockerfile's per-model extra list. It does not add
+the deprecated Multi-Task DiT policy or inference-only HIL-SERL/async extras.
+
 ## Models And Data
 
 The shared host directory `docker/workspace` is mounted at `/workspace`.

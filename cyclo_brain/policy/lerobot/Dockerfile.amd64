@@ -72,13 +72,12 @@ ENV VIRTUAL_ENV=/lerobot/.venv
 ENV PATH="/lerobot/.venv/bin:$PATH"
 
 # Copy the repository-pinned LeRobot source.
-COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
+COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/uv.lock cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
 COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 
-# Install training/inference + VLA extras. Removed: dynamixel/gamepad/
-# hopejr/lekiwi/reachy2/kinematics (hardware), dev/test/video_benchmark
-# (development), aloha/pusht/phone/libero/metaworld/sarm (simulation).
-RUN uv pip install --no-cache ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,wallx,pi,groot,hilserl,async,peft]"
+# The Cyclo policy set and inference-only features are defined in LeRobot.
+# Reject a stale lockfile rather than silently resolving a different graph.
+RUN uv sync --locked --no-dev --extra cyclo-inference --no-cache
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
 RUN if [ "$GPU_ARCH" = "blackwell" ]; then \

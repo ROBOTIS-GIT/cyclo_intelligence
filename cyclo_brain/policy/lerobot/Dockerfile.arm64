@@ -44,9 +44,9 @@ RUN pip uninstall -y lerobot || true \
 COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
 COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
 
-# Install training/inference + VLA extras. The base image's CUDA PyTorch
-# already satisfies LeRobot's torch constraints.
-RUN pip install --no-cache-dir ".[training,smolvla,xvla,molmoact2,vla_jepa,fastwam,wallx,pi,groot,hilserl,async,peft]"
+# Reuse the same Cyclo model set without replacing the Jetson base image's
+# CUDA PyTorch with the public cu128 wheels selected by uv.lock.
+RUN pip install --no-cache-dir ".[cyclo-inference]"
 
 COPY cyclo_brain/policy/lerobot/lerobot/ ./
 
