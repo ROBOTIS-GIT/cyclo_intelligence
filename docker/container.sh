@@ -132,6 +132,28 @@ prepare_host_mounts() {
     echo "[container.sh]   huggingface: ${huggingface_dir} -> ${huggingface_real}"
 }
 
+prepare_lerobot_build_metadata() {
+    local repo="${SCRIPT_DIR}/.."
+    local lerobot="${POLICY_ROOT}/lerobot/lerobot"
+    local profile="${POLICY_ROOT}/lerobot/dependency_profile/dependencies.toml"
+    local recorded_lerobot_commit
+
+    export CYCLO_SOURCE_COMMIT="$(git -C "$repo" rev-parse HEAD)"
+    export LEROBOT_SOURCE_COMMIT="$(git -C "$lerobot" rev-parse HEAD)"
+    recorded_lerobot_commit="$(git -C "$repo" rev-parse HEAD:cyclo_brain/policy/lerobot/lerobot)"
+    if [ "$LEROBOT_SOURCE_COMMIT" != "$recorded_lerobot_commit" ]; then
+        echo "[container.sh] Error: LeRobot checkout differs from the Cyclo submodule commit" >&2
+        exit 1
+    fi
+    export CYCLO_PROFILE_SHA256="$(sha256sum "$profile" | cut -d ' ' -f 1)"
+    export LEROBOT_LOCK_SHA256="$(sha256sum "$lerobot/uv.lock" | cut -d ' ' -f 1)"
+    CYCLO_SOURCE_STATE=clean
+    LEROBOT_SOURCE_STATE=clean
+    [ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ] || CYCLO_SOURCE_STATE=dirty
+    [ -z "$(git -C "$lerobot" status --porcelain --untracked-files=all)" ] || LEROBOT_SOURCE_STATE=dirty
+    export CYCLO_SOURCE_STATE LEROBOT_SOURCE_STATE
+}
+
 CYCLO_AGENT_SOCKETS_DIR="${CYCLO_AGENT_SOCKETS_DIR:-/var/run/robotis/agent_sockets/cyclo_intelligence}"
 export CYCLO_AGENT_SOCKETS_DIR
 mkdir -p "$CYCLO_AGENT_SOCKETS_DIR" 2>/dev/null \
@@ -382,6 +404,9 @@ start_policy() {
     prepare_host_mounts
     setup_x11
     if [ -n "$BUILD_FLAG" ]; then
+        if [ "$runtime" = lerobot ]; then
+            prepare_lerobot_build_metadata
+        fi
         echo "[container.sh] Building $runtime from local Dockerfile; skipping pre-built image pull."
     else
         echo "[container.sh] Pulling pre-built images..."

@@ -12,6 +12,7 @@ policy/lerobot/
 ├── manifest.yaml              # policies and runtime capabilities
 ├── lerobot/                   # ROBOTIS LeRobot fork submodule
 ├── lerobot_engine/            # InferenceEngine adapter
+├── dependency_profile/        # Cyclo-owned image dependency selection
 ├── configs/inference_inputs/ # user settings for additional preprocessing only
 ├── Dockerfile.amd64
 ├── Dockerfile.arm64
@@ -45,24 +46,36 @@ a Worker process restart, not an image rebuild. Dependencies and the upstream
 LeRobot installation remain image-owned; use `--build` when those change.
 See [source-mounted containers](../../../docker/README.md) for application steps.
 
-The supported LeRobot model extras are collected in the fork's
-`lerobot/pyproject.toml` as `cyclo-policies`. The inference images install
-`cyclo-inference`, which adds their fixed training, HIL-SERL, async and PEFT
-dependencies. When adding a model, update the fork's policy extra and lockfile
-alongside this Worker's `manifest.yaml`; neither inference Dockerfile needs a
-model-specific edit. The amd64 image checks `uv.lock` during installation.
-The Jetson arm64 image uses the same extra through pip, because its base
-image provides platform-specific CUDA PyTorch wheels that the shared uv lock
-does not select.
+`dependency_profile/dependencies.toml` is Cyclo's source of truth for the model-to-extra
+mapping and installation profiles. LeRobot's `pyproject.toml` still owns the
+dependencies of each extra. `dependency_profile/install.py` checks that every selected
+extra exists in the pinned LeRobot checkout before installing anything. It
+prints the profile, `pyproject.toml`, and `uv.lock` SHA-256 hashes for build
+provenance. The amd64 image uses `uv sync --locked`; the Jetson arm64 image
+uses pip to retain the base image's platform-specific CUDA PyTorch build.
+`container.sh start-lerobot --build` passes the selected profile and lockfile
+hashes to Docker, where the copied files are checked before installation. The
+image labels record both source commits, clean/dirty flags, and those hashes.
+Direct `docker build` without these arguments leaves the provenance labels
+unrecorded; it does not establish a reproducible build. The arm64 pip install
+checks lockfile identity but does not install locked package versions.
 
-An external training image can use the same model set with:
+For an external training build, assemble `lerobot/` from the submodule commit
+of a pinned Cyclo checkout and copy this `dependency_profile/` directory into the context.
+Then replace the training Dockerfile's per-model extra list with:
 
 ```bash
-uv sync --locked --no-dev --extra training --extra cyclo-policies --extra peft
+python3 /opt/cyclo-lerobot-profile/install.py \
+  --profile training-image --project /lerobot --manager uv
 ```
 
-This replaces a training Dockerfile's per-model extra list. It does not add
-the deprecated Multi-Task DiT policy or inference-only HIL-SERL/async extras.
+The `training-image` profile selects packages only. It does not assert that
+`cyclo_bench` has a working training adapter or tested training path for every
+listed model. Run creation must check those capabilities separately. Before a
+run, record the Cyclo and LeRobot commits, these file hashes, and the final
+image ID (plus registry digest if published). Reject an uncommitted source
+checkout or record its diff hash. Multi-Task DiT is not selected by either
+profile.
 
 ## Models And Data
 

@@ -299,6 +299,12 @@ services:
       network: host
       args:
         GPU_ARCH: ${GPU_ARCH:-default}
+        CYCLO_SOURCE_COMMIT: ${CYCLO_SOURCE_COMMIT:-unrecorded}
+        LEROBOT_SOURCE_COMMIT: ${LEROBOT_SOURCE_COMMIT:-unrecorded}
+        CYCLO_SOURCE_STATE: ${CYCLO_SOURCE_STATE:-unknown}
+        LEROBOT_SOURCE_STATE: ${LEROBOT_SOURCE_STATE:-unknown}
+        CYCLO_PROFILE_SHA256: ${CYCLO_PROFILE_SHA256:-}
+        LEROBOT_LOCK_SHA256: ${LEROBOT_LOCK_SHA256:-}
 
     # Share host network + IPC so rmw_zenoh can reach the central Runtime and
     # robot topics on the same host. /dev/shm enables Zenoh shared memory.

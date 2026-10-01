@@ -41,12 +41,16 @@ RUN pip uninstall -y lerobot || true \
     && rm -rf /opt/lerobot
 
 # Copy the repository-pinned LeRobot source.
-COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
+COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/uv.lock cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
 COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
+COPY cyclo_brain/policy/lerobot/dependency_profile/ /opt/cyclo-lerobot-profile/
 
-# Reuse the same Cyclo model set without replacing the Jetson base image's
-# CUDA PyTorch with the public cu128 wheels selected by uv.lock.
-RUN pip install --no-cache-dir ".[cyclo-inference]"
+# Keep the Jetson base image's CUDA PyTorch instead of syncing the public
+# cu128 wheel from the shared lockfile.
+ARG CYCLO_PROFILE_SHA256=
+ARG LEROBOT_LOCK_SHA256=
+RUN python3 /opt/cyclo-lerobot-profile/install.py --profile inference --project /lerobot --manager pip \
+    --expected-profile-sha256 "$CYCLO_PROFILE_SHA256" --expected-lock-sha256 "$LEROBOT_LOCK_SHA256"
 
 COPY cyclo_brain/policy/lerobot/lerobot/ ./
 
@@ -105,6 +109,17 @@ RUN { \
     mv /tmp/cyclo_bashrc /root/.bashrc
 
 WORKDIR /lerobot
+
+ARG CYCLO_SOURCE_COMMIT=unrecorded
+ARG LEROBOT_SOURCE_COMMIT=unrecorded
+ARG CYCLO_SOURCE_STATE=unknown
+ARG LEROBOT_SOURCE_STATE=unknown
+LABEL org.robotis.cyclo.source-commit="$CYCLO_SOURCE_COMMIT" \
+      org.robotis.cyclo.source-state="$CYCLO_SOURCE_STATE" \
+      org.robotis.lerobot.source-commit="$LEROBOT_SOURCE_COMMIT" \
+      org.robotis.lerobot.source-state="$LEROBOT_SOURCE_STATE" \
+      org.robotis.cyclo.profile-sha256="$CYCLO_PROFILE_SHA256" \
+      org.robotis.lerobot.lock-sha256="$LEROBOT_LOCK_SHA256"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \

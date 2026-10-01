@@ -74,10 +74,13 @@ ENV PATH="/lerobot/.venv/bin:$PATH"
 # Copy the repository-pinned LeRobot source.
 COPY cyclo_brain/policy/lerobot/lerobot/setup.py cyclo_brain/policy/lerobot/lerobot/pyproject.toml cyclo_brain/policy/lerobot/lerobot/uv.lock cyclo_brain/policy/lerobot/lerobot/README.md cyclo_brain/policy/lerobot/lerobot/MANIFEST.in ./
 COPY cyclo_brain/policy/lerobot/lerobot/src/ ./src/
+COPY cyclo_brain/policy/lerobot/dependency_profile/ /opt/cyclo-lerobot-profile/
 
-# The Cyclo policy set and inference-only features are defined in LeRobot.
-# Reject a stale lockfile rather than silently resolving a different graph.
-RUN uv sync --locked --no-dev --extra cyclo-inference --no-cache
+# Cyclo selects policies; LeRobot defines each policy's dependencies.
+ARG CYCLO_PROFILE_SHA256=
+ARG LEROBOT_LOCK_SHA256=
+RUN python3 /opt/cyclo-lerobot-profile/install.py --profile inference --project /lerobot --manager uv \
+    --expected-profile-sha256 "$CYCLO_PROFILE_SHA256" --expected-lock-sha256 "$LEROBOT_LOCK_SHA256"
 
 # Blackwell (sm_120) support: override PyTorch with nightly cu128 build
 RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
@@ -154,6 +157,17 @@ RUN { \
     mv /tmp/cyclo_bashrc /root/.bashrc
 
 WORKDIR /lerobot
+
+ARG CYCLO_SOURCE_COMMIT=unrecorded
+ARG LEROBOT_SOURCE_COMMIT=unrecorded
+ARG CYCLO_SOURCE_STATE=unknown
+ARG LEROBOT_SOURCE_STATE=unknown
+LABEL org.robotis.cyclo.source-commit="$CYCLO_SOURCE_COMMIT" \
+      org.robotis.cyclo.source-state="$CYCLO_SOURCE_STATE" \
+      org.robotis.lerobot.source-commit="$LEROBOT_SOURCE_COMMIT" \
+      org.robotis.lerobot.source-state="$LEROBOT_SOURCE_STATE" \
+      org.robotis.cyclo.profile-sha256="$CYCLO_PROFILE_SHA256" \
+      org.robotis.lerobot.lock-sha256="$LEROBOT_LOCK_SHA256"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD S6_SVSTAT="$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1)" \
