@@ -59,7 +59,8 @@ def test_v21_preparation_preserves_source_and_channel_order(tmp_path):
         "episode_index": 0, "length": 2, "tasks": ["pick"],
     }) + "\n")
     pd.DataFrame({
-        "episode_index": [0, 0], "frame_index": [0, 1], "task_index": [0, 0],
+        "episode_index": [0, 0], "index": [550, 551], "task_index": [0, 0],
+        "timestamp": [0.0, 0.1],
         "observation.state": [[1.0, 2.0], [3.0, 4.0]],
         "action": [[5.0, 6.0], [7.0, 8.0]],
     }).to_parquet(source / "data/chunk-000/episode_000000.parquet", index=False)

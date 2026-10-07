@@ -190,10 +190,23 @@ def prepare_v21(source, destination, info):
         if not data_path.resolve().is_relative_to(source) or not data_path.is_file():
             raise ValueError(f"Episode {eid}: Parquet path is invalid")
         frame = pd.read_parquet(data_path)
-        if len(frame) != length or "frame_index" not in frame or not np.array_equal(
-            frame["frame_index"].to_numpy(), np.arange(length)
+        if len(frame) != length or "episode_index" not in frame or not np.all(
+            frame["episode_index"].to_numpy() == eid
         ):
-            raise ValueError(f"Episode {eid}: frame count/order mismatch")
+            raise ValueError(f"Episode {eid}: frame count/episode mismatch")
+        if "frame_index" in frame:
+            ordered = np.array_equal(frame["frame_index"].to_numpy(), np.arange(length))
+        elif "index" in frame:
+            # Standard LeRobot v2.1 uses one global index across episodes.
+            indices = frame["index"].to_numpy()
+            ordered = (np.issubdtype(indices.dtype, np.integer)
+                       and np.array_equal(indices, np.arange(int(indices[0]), int(indices[0]) + length)))
+        else:
+            ordered = False
+        if not ordered or "timestamp" not in frame or not np.allclose(
+            frame["timestamp"].to_numpy(), np.arange(length) / fps, atol=1e-4,
+        ):
+            raise ValueError(f"Episode {eid}: frame order or timestamps mismatch")
         if "task_index" not in frame or set(map(int, frame["task_index"])) - task_text.keys():
             raise ValueError(f"Episode {eid}: unknown task index")
         for key, channels in names.items():
