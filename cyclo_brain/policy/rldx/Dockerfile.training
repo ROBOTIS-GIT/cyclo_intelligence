@@ -13,10 +13,9 @@ COPY upstream/ /rldx/
 COPY policy/scripts/install_environment.py /opt/cyclo-training/install_environment.py
 RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
     python3 /opt/cyclo-training/install_environment.py /rldx /opt/rldx-env
-# Cyclo's per-episode v3→v2.1 converter reads and writes Parquet.
+# RLDX's native episode loader reads Parquet.
 RUN uv pip install --python /opt/rldx-env/bin/python pyarrow==19.0.1
 ENV PATH=/opt/rldx-env/bin:$PATH PYTHONPATH=/rldx:/opt/cyclo-training
-COPY policy/scripts/prepare_dataset.py /opt/cyclo-training/prepare_dataset.py
 COPY policy/scripts/modality_config.py /opt/cyclo-training/modality_config.py
 COPY policy/scripts/checkpoint_smoke.py /opt/cyclo-training/checkpoint_smoke.py
 COPY policy/scripts/train.sh /opt/cyclo-training/train.sh

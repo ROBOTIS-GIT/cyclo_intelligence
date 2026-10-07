@@ -1,4 +1,4 @@
-"""Run-scoped RLDX v3→v2.1 preparation, training and checkpoint verification.
+"""Run-scoped RLDX training and checkpoint verification on a prepared Dataset.
 
 The caller supplies a pinned JSON configuration.  This script never chooses a
 robot layout from its name, and it never mutates the source Dataset.
@@ -12,13 +12,11 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 
 from huggingface_hub import snapshot_download
 
-from prepare_dataset import prepare
 
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -63,17 +61,16 @@ def validate_config(value: dict) -> dict:
 
 
 def _prepared(value: dict) -> Path:
-    root = Path(value["run_root"])
-    target = root / "dataset-rldx-v21"
-    if (target / "INCOMPLETE").exists():
-        # Only a path under this Run is eligible for replacement after failure.
-        if target.is_symlink():
-            raise ValueError("RLDX prepared Dataset cannot be a symlink")
-        shutil.rmtree(target)
-    if not target.exists():
-        prepare(value["dataset_path"], target)
+    target = Path(value["dataset_path"])
+    if target.is_symlink() or (target / "INCOMPLETE").exists():
+        raise ValueError("RLDX prepared Dataset is unsafe or incomplete")
     metadata = _load(target / "cyclo_input_metadata.json")
-    info = _load(Path(value["dataset_path"]) / "meta/info.json")
+    info = _load(target / "meta/info.json")
+    if str(info.get("codebase_version") or "").lstrip("v") != "2.1":
+        raise ValueError("RLDX requires a Bench-prepared LeRobot v2.1 Dataset")
+    for name in ("modality.json", "stats.json", "tasks.jsonl", "episodes.jsonl"):
+        if not (target / "meta" / name).is_file():
+            raise ValueError(f"RLDX prepared Dataset has no meta/{name}")
     for key, feature in (("state_names", "observation.state"),
                          ("action_names", "action")):
         if metadata.get(key) != info["features"][feature].get("names"):

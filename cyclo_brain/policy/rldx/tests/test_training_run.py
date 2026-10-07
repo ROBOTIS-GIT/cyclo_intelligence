@@ -44,3 +44,29 @@ def test_checkpoint_selection_uses_numeric_step_and_exact_layout(tmp_path):
         (tmp_path / "rldx" / "rldx" / f"checkpoint-{step}").mkdir(parents=True)
     (tmp_path / "checkpoint-999").mkdir()
     assert module._selected_checkpoint(tmp_path).name == "checkpoint-10"
+
+
+def test_trainer_requires_bench_prepared_v21_metadata(tmp_path):
+    import json
+
+    value = config(tmp_path)
+    root = Path(value["dataset_path"])
+    (root / "meta").mkdir()
+    names = ["joint_a", "joint_b"]
+    (root / "meta/info.json").write_text(json.dumps({
+        "codebase_version": "v3.0",
+        "features": {"observation.state": {"names": names}, "action": {"names": names}},
+    }))
+    (root / "cyclo_input_metadata.json").write_text(json.dumps({
+        "state_names": names, "action_names": names,
+        "cameras": {"front": "observation.images.front"},
+    }))
+    for name in ("modality.json", "stats.json", "tasks.jsonl", "episodes.jsonl"):
+        (root / "meta" / name).write_text("{}\n")
+    with pytest.raises(ValueError, match="Bench-prepared"):
+        module._prepared(value)
+    info = json.loads((root / "meta/info.json").read_text())
+    info["codebase_version"] = "v2.1"
+    (root / "meta/info.json").write_text(json.dumps(info))
+    assert module._prepared(value) == root
+    assert not (tmp_path / "run/dataset-rldx-v21").exists()
