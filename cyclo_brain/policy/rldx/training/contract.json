@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "model_id": "rldx-rldx1",
+  "policy_id": "rldx:rldx1",
+  "runner": "rldx",
+  "profile_id": "dataset-derived",
+  "dataset_versions": ["2.1", "3.0"],
+  "base_model": {
+    "repo_id": "RLWRLD/RLDX-1-PT-IMG",
+    "revision": "d67fc642a7e768049ba41ff8cf0dfe0ff17f556b"
+  },
+  "required_gpu_count": 1,
+  "minimum_vram_gb": 80,
+  "checkpoint_pattern": "outputs/rldx/rldx/checkpoint-*"
+}
