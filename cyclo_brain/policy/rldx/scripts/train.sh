@@ -7,6 +7,11 @@ set -euo pipefail
 : "${RLDX_DATASET_PATH:?Set RLDX_DATASET_PATH to the prepared v2.1 dataset}"
 : "${RLDX_OUTPUT:?Set RLDX_OUTPUT to a new output directory}"
 STEPS=${STEPS:-10}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1}
+if [[ ! "$SAVE_TOTAL_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SAVE_TOTAL_LIMIT must be a positive integer." >&2
+    exit 1
+fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -e "$RLDX_DATASET_PATH/INCOMPLETE" || -e "$RLDX_OUTPUT" ]]; then
     echo "Dataset is incomplete or output already exists; refusing to overwrite." >&2
@@ -24,7 +29,7 @@ torchrun --standalone --nproc_per_node=1 rldx/experiment/launch_train.py \
     --video-length 1 --video-stride 2 --action-horizon 16 \
     --global-batch-size "${BATCH_SIZE:-16}" --gradient-accumulation-steps "${GRAD_ACCUM:-4}" \
     --dataloader-num-workers 2 --learning-rate 0.0001 \
-    --max-steps "$STEPS" --save-steps "${SAVE_STEPS:-$STEPS}" --save-total-limit "${SAVE_TOTAL_LIMIT:-1}" \
+    --max-steps "$STEPS" --save-steps "${SAVE_STEPS:-$STEPS}" --save-total-limit "$SAVE_TOTAL_LIMIT" \
     --output-dir "$RLDX_OUTPUT" --experiment-name "$(basename "$RLDX_OUTPUT")"
 for checkpoint in "$RLDX_OUTPUT/$(basename "$RLDX_OUTPUT")"/checkpoint-*; do
     [[ -d "$checkpoint" ]] || continue

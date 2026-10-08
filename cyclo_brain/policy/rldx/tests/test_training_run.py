@@ -39,6 +39,58 @@ def test_run_requires_pinned_base_and_verified_dataset_path(tmp_path):
         module.validate_config(value)
 
 
+def test_checkpoint_retention_is_independent_of_save_interval(tmp_path):
+    value = config(tmp_path)
+    value["save_steps"] = 2
+    value["save_total_limit"] = 3
+    assert module.validate_config(value) is value
+    value["save_total_limit"] = 0
+    with pytest.raises(ValueError, match="save_total_limit"):
+        module.validate_config(value)
+
+
+def test_run_passes_retention_limit_to_trainer_and_records_it(tmp_path, monkeypatch):
+    import json
+
+    value = config(tmp_path)
+    value["save_steps"] = 2
+    value["save_total_limit"] = 3
+    config_path = tmp_path / "run.json"
+    config_path.write_text(json.dumps(value))
+    checkpoint = tmp_path / "run/outputs/rldx/rldx/checkpoint-10"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "cyclo_input_metadata.json").write_text(json.dumps({
+        "state_names": ["joint"], "action_names": ["joint"],
+        "cameras": {"front": "observation.images.front"},
+    }))
+    receipt = tmp_path / "training_environment.json"
+    receipt.write_text('{"pixi_lock_sha256": "pinned"}\n')
+    monkeypatch.setattr(module, "_environment_receipt", lambda: receipt)
+    monkeypatch.setattr(module, "_prepared", lambda _: Path(value["dataset_path"]))
+    monkeypatch.setattr(module, "snapshot_download", lambda **_: None)
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: calls.append(kwargs))
+    result = module.run(config_path, "train")
+    assert result["step"] == 10
+    assert calls[0]["env"]["SAVE_STEPS"] == "2"
+    assert calls[0]["env"]["SAVE_TOTAL_LIMIT"] == "3"
+    assert json.loads((checkpoint / "train_config.json").read_text())["save_total_limit"] == 3
+    assert (checkpoint / "training_environment.json").read_text() == receipt.read_text()
+
+
+def test_missing_environment_receipt_rejects_before_training(tmp_path, monkeypatch):
+    import json
+
+    value = config(tmp_path)
+    config_path = tmp_path / "run.json"
+    config_path.write_text(json.dumps(value))
+    monkeypatch.setattr(module, "_prepared", lambda _: Path(value["dataset_path"]))
+    monkeypatch.setattr(module, "_environment_receipt", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(module, "snapshot_download", lambda **_: pytest.fail("download started"))
+    with pytest.raises(ValueError, match="receipt is missing"):
+        module.run(config_path, "train")
+
+
 def test_checkpoint_selection_uses_numeric_step_and_exact_layout(tmp_path):
     for step in (2, 10):
         (tmp_path / "rldx" / "rldx" / f"checkpoint-{step}").mkdir(parents=True)

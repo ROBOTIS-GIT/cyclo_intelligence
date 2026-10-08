@@ -40,18 +40,19 @@ No existing Cyclo or LeRobot service is restarted by the training commands.
 
 ## Training
 
-Use a separate environment and a new dataset/output directory. Upstream code
-and the original dataset are not patched. `install_environment.py` reads the
-upstream Blackwell dependency versions; use Python 3.11+ to run this installer.
-Set `UV_CACHE_DIR` and `TMPDIR` to a sufficiently large filesystem first.
-Source compilation of FlashAttention needs a matching CUDA 12.8 toolkit.
+Use the dedicated training image or a separate locked Pixi environment and a
+new dataset/output directory. Upstream code and the original dataset are not
+patched. Keep Pixi's cache and `TMPDIR` on a sufficiently large filesystem.
+Source compilation of FlashAttention needs the locked CUDA 12.8 toolkit.
+The prepared LeRobot v2.1 dataset is supplied by Bench; this training path
+does not detect or convert dataset versions.
+The installer requires Pixi 0.65.0, matching the pinned v6 lockfile.
 
 ```bash
-python3 scripts/install_environment.py /path/to/RLDX-1 /path/to/new-rldx-env
-source /path/to/new-rldx-env/bin/activate
-python scripts/prepare_dataset.py /path/to/lerobot-v3 /path/to/new-rldx-v21
+python3 scripts/install_training_environment.py /path/to/RLDX-1
+export PATH=/path/to/RLDX-1/.pixi/envs/rldx/bin:$PATH
 export RLDX_REPO=/path/to/RLDX-1
-export RLDX_DATASET_PATH=/path/to/new-rldx-v21
+export RLDX_DATASET_PATH=/path/to/bench-prepared-v21
 export RLDX_OUTPUT=/path/to/new-smoke-run
 STEPS=10 bash scripts/train.sh
 ```
@@ -69,9 +70,20 @@ and cameras. It is required to validate Cyclo's robot mapping at LOAD, rather
 than assuming 22 channels always mean the same robot. For an intermediate
 checkpoint in an ongoing run, copy this file from the prepared dataset before
 exporting the checkpoint. Preserve the entire checkpoint and `processor/`.
-`SAVE_TOTAL_LIMIT` defaults to 1. Allow space for both the old and new checkpoint
+The Run config's `save_total_limit` controls checkpoint retention independently
+of `save_steps`. The shell wrapper uses `SAVE_TOTAL_LIMIT` for the same value;
+both default to 1. Allow space for both the old and new checkpoint
 during rotation, plus the launcher's final model export. Filesystem free space
 does not account for a separate user/project quota.
+
+The separate training image uses upstream `pixi.toml` and `pixi.lock` with
+Cyclo's pinned policy in `training/environment.toml`. It fails on hash or
+lock mismatch. Its Python is `/rldx/.pixi/envs/rldx/bin/python`; the image
+writes `training_environment.json` there and copies it to the selected
+checkpoint. FlashAttention is built from the pinned Git commit for the
+selected `FLASH_ATTN_CUDA_ARCHS` (default `120`). The lock supplies
+`pyarrow==24.0.0`, including the common Pixi dependencies. Inference keeps
+its existing separate installer and environment.
 
 With one GPU the upstream launcher treats `BATCH_SIZE` (default 16) as the
 microbatch size. `GRAD_ACCUM=4` gives an effective batch of 64, not 16.

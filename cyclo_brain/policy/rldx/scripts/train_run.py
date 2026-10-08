@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -31,11 +32,14 @@ def _load(path: Path) -> dict:
 
 
 def validate_config(value: dict) -> dict:
-    if set(value) != {
+    required = {
         "version", "model_id", "policy_id", "dataset_path", "run_root",
         "base_model", "steps", "batch_size", "gradient_accumulation_steps",
         "save_steps", "dataset_identity",
-    } or (value["version"], value["model_id"], value["policy_id"]) != (
+    }
+    if set(value) - {"save_total_limit"} != required or (
+        value["version"], value["model_id"], value["policy_id"]
+    ) != (
         1, "rldx-rldx1", "rldx:rldx1",
     ):
         raise ValueError("RLDX Run configuration identity is invalid")
@@ -57,6 +61,8 @@ def validate_config(value: dict) -> dict:
             raise ValueError(f"RLDX {name} must be a positive integer")
     if value["save_steps"] > value["steps"]:
         raise ValueError("RLDX save_steps cannot exceed steps")
+    if type(value.get("save_total_limit", 1)) is not int or value.get("save_total_limit", 1) < 1:
+        raise ValueError("RLDX save_total_limit must be a positive integer")
     return value
 
 
@@ -91,12 +97,19 @@ def _selected_checkpoint(root: Path) -> Path:
     return max(candidates)[1]
 
 
+def _environment_receipt() -> Path:
+    return Path(sys.executable).resolve().parents[1] / "training_environment.json"
+
+
 def run(config_path: Path, phase: str) -> dict:
     value = validate_config(_load(config_path))
     root = Path(value["run_root"])
     prepared = _prepared(value)
     if phase not in {"validate", "train"}:
         raise ValueError("RLDX phase must be validate or train")
+    receipt = _environment_receipt()
+    if not receipt.is_file():
+        raise ValueError(f"RLDX training environment receipt is missing: {receipt}")
     base = value["base_model"]
     local_base = root / "base-model" / base["revision"]
     local_base.mkdir(parents=True, exist_ok=True)
@@ -116,6 +129,7 @@ def run(config_path: Path, phase: str) -> dict:
         "STEPS": str(steps), "BATCH_SIZE": str(batch_size),
         "GRAD_ACCUM": str(accumulation),
         "SAVE_STEPS": str(save_steps),
+        "SAVE_TOTAL_LIMIT": str(value.get("save_total_limit", 1)),
     }
     subprocess.run(["bash", "/opt/cyclo-training/train.sh"],
                    env=environment, check=True)
@@ -131,6 +145,7 @@ def run(config_path: Path, phase: str) -> dict:
     }
     config = {
         **value, "base_model": source,
+        "save_total_limit": value.get("save_total_limit", 1),
         "resolved": {"state_names": mapping["state_names"],
                      "action_names": mapping["action_names"],
                      "state_dim": mapping["state_dim"],
@@ -142,6 +157,7 @@ def run(config_path: Path, phase: str) -> dict:
     for name, content in (("train_config.json", config),
                           ("cyclo_io_mapping.json", mapping)):
         (checkpoint / name).write_text(json.dumps(content, sort_keys=True, indent=2) + "\n")
+    shutil.copyfile(receipt, checkpoint / receipt.name)
     subprocess.run([sys.executable, "/opt/cyclo-training/checkpoint_smoke.py",
                     str(checkpoint), str(prepared)], check=True)
     return {"status": "validated" if phase == "validate" else "succeeded",

@@ -1,0 +1,9 @@
+schema_version = 1
+upstream_revision = "cf67c31f7f168ebbca6d06e8c3c23914cb94435c"
+pixi_version = "0.65.0"
+pixi_toml_sha256 = "18706b676f87e50ae342431a96396a45607b78f4de553e01e57c8320dba7cf48"
+pixi_lock_sha256 = "2deef5c942ce42e23b139b52bedabbdac3e487917cbe30f652be59089b846b11"
+flash_attention_repository = "https://github.com/Dao-AILab/flash-attention.git"
+flash_attention_commit = "060c9188beec3a8b62b33a3bfa6d5d2d44975fab"
+flash_attention_version = "2.8.3"
+pyarrow_version = "24.0.0"
