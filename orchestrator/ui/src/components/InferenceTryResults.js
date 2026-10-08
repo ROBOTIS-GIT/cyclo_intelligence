@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { MdDeleteOutline, MdExpandLess, MdExpandMore } from 'react-icons/md';
 import { selectInferenceTaskInfo } from '../features/tasks/taskSlice';
+import { InferencePhase } from '../constants/taskPhases';
 
 const emptyHistory = () => ({ rows: [], file: '', revision: '' });
 
@@ -15,16 +16,26 @@ async function readResponse(response) {
 
 export default function InferenceTryResults() {
   const info = useSelector(selectInferenceTaskInfo);
-  const loaded = useSelector(state => state.tasks.inferenceStatus.loadedModelPath);
-  const model = (loaded || info.policyPath || '').trim().replace(/\/+$/, '');
+  const inferenceStatus = useSelector(state => state.tasks.inferenceStatus);
+  const robotType = useSelector(state => state.tasks.robotType);
+  const selectedPath = (info.policyPath || '').trim().replace(/\/+$/, '');
+  const loaded = (inferenceStatus.loadedModelPath || '').trim().replace(/\/+$/, '');
+  const isActive = [InferencePhase.LOADING, InferencePhase.INFERENCING,
+    InferencePhase.PAUSED, InferencePhase.SYNCING].includes(inferenceStatus.inferencePhase);
+  const model = isActive
+    ? (loaded && (!selectedPath || selectedPath === loaded) ? loaded : '')
+    : selectedPath;
+  const historyKey = JSON.stringify([model, robotType || '']);
   const [data, setData] = useState(emptyHistory);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
+  const [readyKey, setReadyKey] = useState('');
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState([]);
   const generation = useRef(0);
   const pending = useRef(false);
+  const historyReady = ready && readyKey === historyKey;
 
   useEffect(() => { setExpanded(false); }, [model]);
   useEffect(() => {
@@ -33,23 +44,24 @@ export default function InferenceTryResults() {
     pending.current = false;
     setBusy(false);
     setReady(false);
+    setReadyKey('');
     setData(emptyHistory());
     setSelected([]);
     setError('');
     if (model) {
-      fetch(`/api/try-results?model=${encodeURIComponent(model)}`, {
+      fetch(`/api/try-results?model=${encodeURIComponent(model)}&robot_type=${encodeURIComponent(robotType || '')}`, {
         signal: controller.signal, cache: 'no-store',
       }).then(readResponse).then(history => {
-        if (generation.current === id) { setData(history); setReady(true); }
+        if (generation.current === id) { setData(history); setReadyKey(historyKey); setReady(true); }
       }).catch(failure => {
         if (failure.name !== 'AbortError' && generation.current === id) setError(failure.message);
       });
     }
     return () => { generation.current += 1; controller.abort(); };
-  }, [model]);
+  }, [model, robotType, historyKey]);
 
   async function save(result, attempt, remove = false) {
-    if (pending.current || !ready) return;
+    if (pending.current || !historyReady) return;
     if (remove && (!selected.length || !window.confirm(
       `Delete ${selected.length} selected trials?\n${model}\nThis cannot be undone.`
     ))) return;
@@ -58,8 +70,8 @@ export default function InferenceTryResults() {
     setBusy(true);
     setError('');
     const body = remove
-      ? { model, tries: selected, revision: data.revision }
-      : { model, result, ...(attempt ? { try: attempt, revision: data.revision } : {}) };
+      ? { model, robot_type: robotType || '', tries: selected, revision: data.revision }
+      : { model, robot_type: robotType || '', result, ...(attempt ? { try: attempt, revision: data.revision } : {}) };
     try {
       const history = await fetch('/api/try-results', {
         method: remove ? 'DELETE' : attempt ? 'PATCH' : 'POST',
@@ -84,10 +96,10 @@ export default function InferenceTryResults() {
       <div className="flex items-center">
         <span className="w-28 shrink-0 font-medium text-gray-600">Try Results</span>
         <div className="flex min-w-0 flex-1 items-center gap-1">
-        <button type="button" disabled={!ready || busy}
+        <button type="button" disabled={!historyReady || busy}
           className={`${resultButton} bg-green-100 text-green-700 hover:bg-green-200`}
           onClick={() => save('success')}>Success</button>
-        <button type="button" disabled={!ready || busy}
+        <button type="button" disabled={!historyReady || busy}
           className={`${resultButton} bg-red-100 text-red-700 hover:bg-red-200`}
           onClick={() => save('fail')}>Fail</button>
         <button type="button" aria-label="Toggle try results" aria-expanded={expanded}
@@ -100,32 +112,32 @@ export default function InferenceTryResults() {
       {error && <p role="alert" className="mt-1 break-words text-xs text-red-600">{error}</p>}
       {expanded && (
         <div id="try-results-history">
-          {ready && (
+          {historyReady && (
             <div className="my-2 flex items-center justify-between gap-2 text-xs text-gray-600">
               <span>{data.rows.length} trials · {successes} success / {data.rows.length - successes} fail · {data.rows.length ? Math.round(successes / data.rows.length * 100) : 0}%</span>
               <button type="button" aria-label="Delete selected trials" title="Delete selected trials"
-                disabled={busy || !selected.length} className={iconButton}
+                disabled={!historyReady || busy || !selected.length} className={iconButton}
                 onClick={() => save(undefined, undefined, true)}><MdDeleteOutline size={18} /></button>
             </div>
           )}
-          {!!data.rows.length && (
+          {historyReady && !!data.rows.length && (
             <div className="max-h-36 overflow-auto rounded-md border border-gray-200">
               <table className="w-full text-xs">
                 <thead className="bg-gray-50 text-gray-500"><tr>
                   <th className="w-6 p-1"><input type="checkbox" aria-label="Select all trials"
-                    disabled={busy || !ready} checked={selected.length === data.rows.length}
+                    disabled={busy || !historyReady} checked={selected.length === data.rows.length}
                     onChange={event => setSelected(event.target.checked ? data.rows.map(row => row.try) : [])} /></th>
                   <th className="p-1 text-left">Try</th><th className="p-1 text-left">Time</th><th className="p-1 text-left">Result</th>
                 </tr></thead>
                 <tbody>{[...data.rows].reverse().map(row => (
                   <tr key={row.try} className="border-t border-gray-100">
                     <td className="p-1"><input type="checkbox" aria-label={`Select try ${row.try}`}
-                      disabled={busy || !ready} checked={selected.includes(row.try)}
+                      disabled={busy || !historyReady} checked={selected.includes(row.try)}
                       onChange={event => setSelected(values => event.target.checked
                         ? [...values, row.try] : values.filter(value => value !== row.try))} /></td>
                     <td className="p-1">#{row.try}</td>
                     <td className="p-1" title={row.created_at}>{new Date(row.created_at).toLocaleString()}</td>
-                    <td className="p-1"><select aria-label={`Try ${row.try} result`} disabled={busy || !ready}
+                    <td className="p-1"><select aria-label={`Try ${row.try} result`} disabled={busy || !historyReady}
                       value={row.result} onChange={event => save(event.target.value, row.try)}
                       className={`rounded border border-gray-200 p-1 ${row.result === 'success' ? 'text-green-700' : 'text-red-600'}`}>
                       <option value="success">Success</option><option value="fail">Fail</option>

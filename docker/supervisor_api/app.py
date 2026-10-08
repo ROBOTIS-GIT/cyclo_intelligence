@@ -48,7 +48,7 @@ import asyncio
 import csv
 import hashlib
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import logging
@@ -59,6 +59,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
@@ -1304,12 +1305,15 @@ _include_router_with_eager_routes(app, navigation_router)
 
 # Inference trial results share the existing API and persistent workspace.
 _TRIAL_RESULTS_DIR = Path("/workspace/inference_results")
-_TRIAL_RESULTS_LOCK = threading.Lock()
+_TRIAL_MODEL_ROOT = Path("/workspace/model")
+_TRIAL_RESULTS_LOCK = threading.RLock()
 _TRIAL_FIELDS = ["try", "result", "created_at", "updated_at", "model_path"]
+_TRIAL_TIMEZONE = timezone(timedelta(hours=9))
 
 
 class TrialResultRequest(BaseModel):
     model: str = Field(min_length=1, max_length=4096)
+    robot_type: str = Field(default="", max_length=128)
     result: Optional[Literal["success", "fail"]] = None
     trial: Optional[int] = Field(default=None, alias="try", ge=1)
     tries: Optional[List[int]] = Field(default=None, max_length=10000)
@@ -1359,6 +1363,196 @@ def _trial_file(model: str, create: bool = False) -> Optional[Path]:
         return path
 
 
+def _old_evaluation_file(model: str, robot_type: str = "") -> Path:
+    label = Path(model).name or "model"
+    label = re.sub(r"[^a-zA-Z0-9_.-]", "_", label)[:100].strip(".") or "model"
+    digest = hashlib.sha256(json.dumps([model, robot_type]).encode()).hexdigest()[:20]
+    return _TRIAL_RESULTS_DIR / f"{label}_{digest}.json"
+
+
+def _model_directory(model: str) -> Path:
+    candidate = Path(model)
+    if not candidate.is_absolute():
+        raise HTTPException(400, "Select a model folder under /workspace/model")
+    try:
+        directory = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(404, "Model folder not found") from exc
+    root = _TRIAL_MODEL_ROOT.resolve()
+    if not directory.is_dir() or directory == root or not directory.is_relative_to(root):
+        raise HTTPException(400, "Select a model folder under /workspace/model")
+    return directory
+
+
+def _evaluation_file(model: str) -> Path:
+    return _model_directory(model) / "evaluation_manifest.json"
+
+
+def _model_provenance(model: str) -> tuple[dict, dict]:
+    path = Path(model)
+    try:
+        if not path.resolve().is_relative_to(_TRIAL_MODEL_ROOT.resolve()):
+            return {}, {}
+        manifest_path = path / "training_manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink() or manifest_path.stat().st_size > 2_000_000:
+            return {}, {}
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            return {}, {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        logger.warning("Cannot read training manifest for %s: %s", model, exc)
+        return {}, {}
+    model_info = {
+        key: manifest[key] for key in ("model_id", "run_id", "source_artifact")
+        if isinstance(manifest.get(key), str) and manifest[key]
+    }
+    dataset = manifest.get("dataset")
+    context = {}
+    if isinstance(dataset, dict):
+        repo_id = dataset.get("repo_id") or dataset.get("dataset_id")
+        if isinstance(repo_id, str) and repo_id:
+            context["dataset_repo_id"] = repo_id
+    return model_info, context
+
+
+def _new_evaluation(model: str, robot_type: str) -> dict:
+    provenance, context = _model_provenance(model)
+    return {
+        "schema_version": 1,
+        "model": provenance,
+        "context": {"mode": "real_robot", **({"robot_type": robot_type} if robot_type else {}), **context},
+        "trials": [],
+    }
+
+
+def _read_json_document(path: Path) -> Optional[dict]:
+    if path.is_symlink():
+        raise HTTPException(500, "Invalid evaluation history")
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HTTPException(500, "Invalid evaluation history") from exc
+    if not isinstance(document, dict):
+        raise HTTPException(500, "Invalid evaluation history")
+    return document
+
+
+def _validate_evaluation(document: dict, model: str) -> None:
+    if (
+        document.get("schema_version") != 1
+        or not isinstance(document.get("model"), dict)
+        or document["model"].get("local_path", model) != model
+        or not isinstance(document.get("context"), dict)
+        or document["context"].get("mode") != "real_robot"
+        or not isinstance(document["context"].get("robot_type", ""), str)
+        or not isinstance(document.get("trials"), list)
+        or any(
+            not isinstance(trial, dict)
+            or isinstance(trial.get("trial_id"), bool)
+            or not (
+                isinstance(trial.get("trial_id"), int) and trial["trial_id"] > 0
+                or isinstance(trial.get("trial_id"), str) and bool(trial["trial_id"])
+            )
+            or trial.get("result") not in {"success", "fail"}
+            or not isinstance(trial.get("recorded_at"), str) or not trial["recorded_at"]
+            for trial in document["trials"]
+        )
+    ):
+        raise HTTPException(500, "Invalid evaluation history")
+    trial_ids = [trial["trial_id"] for trial in document["trials"]]
+    if len(trial_ids) != len(set(trial_ids)):
+        raise HTTPException(500, "Invalid evaluation history")
+
+
+def _read_model_evaluation(path: Path, model: str) -> Optional[dict]:
+    document = _read_json_document(path)
+    if document is None:
+        return None
+    if "evaluations" in document:
+        evaluations = document["evaluations"]
+        if not isinstance(evaluations, list) or len(evaluations) != 1:
+            raise HTTPException(409, "Multiple robot evaluations require manual separation")
+        document = evaluations[0]
+        if not isinstance(document, dict):
+            raise HTTPException(500, "Invalid evaluation history")
+    _validate_evaluation(document, model)
+    return document
+
+
+def _evaluation_rows(document: dict, model: str) -> list:
+    return [
+        {
+            "try": str(number), "result": trial["result"],
+            "created_at": trial["recorded_at"],
+            "updated_at": trial.get("updated_at", trial["recorded_at"]),
+            "model_path": model,
+        }
+        for number, trial in enumerate(document["trials"], start=1)
+    ]
+
+
+def _number_trials(document: dict) -> None:
+    document["model"].pop("local_path", None)
+    for number, trial in enumerate(document["trials"], start=1):
+        trial["trial_id"] = number
+
+
+def _write_evaluation(path: Path, document: dict) -> None:
+    document.pop("evaluation_id", None)
+    document.pop("uploaded", None)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _legacy_evaluation(model: str) -> Optional[dict]:
+    path = _trial_file(model)
+    rows = _read_trials(path)
+    if not rows:
+        return None
+    # Old CSV rows do not identify the model version or robot used at record time.
+    document = {
+        "schema_version": 1,
+        "model": {}, "context": {"mode": "real_robot"},
+        "trials": [],
+    }
+    document["trials"] = [
+        {
+            "trial_id": number, "result": row["result"],
+            "recorded_at": row["created_at"],
+            **({"updated_at": row["updated_at"]} if row["updated_at"] != row["created_at"] else {}),
+        }
+        for number, row in enumerate(rows, start=1)
+    ]
+    return document
+
+
+def _current_evaluation(model: str, robot_type: str) -> tuple[Optional[dict], Optional[Path], list]:
+    path = _evaluation_file(model)
+    evaluation = _read_model_evaluation(path, model)
+    if evaluation is None:
+        old_path = _old_evaluation_file(model, robot_type)
+        evaluation = _read_json_document(old_path)
+        if evaluation is not None:
+            _validate_evaluation(evaluation, model)
+        elif not robot_type:
+            evaluation = _legacy_evaluation(model)
+    if evaluation is not None and evaluation["context"].get("robot_type", "") != robot_type:
+        raise HTTPException(409, "This model already has an evaluation for a different robot")
+    return evaluation, path if evaluation is not None else None, (
+        _evaluation_rows(evaluation, model) if evaluation is not None else []
+    )
+
+
 def _read_trials(path: Optional[Path]) -> list:
     if path is None or not path.exists():
         return []
@@ -1392,18 +1586,25 @@ def _check_trial_revision(body: TrialResultRequest, rows: list) -> None:
         raise HTTPException(409, "Trial history changed. Refresh and try again.")
 
 
+def _trial_selection(model: str, robot_type: str) -> tuple[str, str]:
+    model = model.strip().rstrip("/")
+    if not model:
+        raise HTTPException(400, "Select a model first")
+    return str(_model_directory(model)), robot_type.strip()
+
+
 @app.get("/try-results")
-def get_trial_results(response: Response, model: str, download: bool = False):
+def get_trial_results(response: Response, model: str, download: bool = False, robot_type: str = ""):
     response.headers["Cache-Control"] = "no-store"
-    path = _trial_file(model)
+    model, robot_type = _trial_selection(model, robot_type)
     with _TRIAL_RESULTS_LOCK:
-        rows = _read_trials(path)
+        _, path, rows = _current_evaluation(model, robot_type)
     if download:
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=_TRIAL_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
-        filename = path.name if path else "inference_results.csv"
+        filename = f"{path.stem}.csv" if path else "inference_results.csv"
         return Response(output.getvalue(), media_type="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{filename}"',
                                  "Cache-Control": "no-store"})
@@ -1414,13 +1615,19 @@ def get_trial_results(response: Response, model: str, download: bool = False):
 def add_trial_result(body: TrialResultRequest):
     if body.result is None:
         raise HTTPException(400, "Select success or fail")
-    path = _trial_file(body.model, create=True)
-    now = datetime.now(timezone.utc).isoformat()
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
+    now = datetime.now(_TRIAL_TIMEZONE).isoformat()
     with _TRIAL_RESULTS_LOCK:
-        rows = _read_trials(path)
-        rows.append(dict(zip(_TRIAL_FIELDS, [str(len(rows) + 1), body.result, now, now,
-                                              body.model.strip().rstrip("/")])))
-        _write_trials(path, rows)
+        evaluation, _, _ = _current_evaluation(model, robot_type)
+        if evaluation is None:
+            evaluation = _new_evaluation(model, robot_type)
+        evaluation["trials"].append({
+            "trial_id": len(evaluation["trials"]) + 1, "result": body.result, "recorded_at": now,
+        })
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
     return _trial_response(path, rows)
 
 
@@ -1428,15 +1635,18 @@ def add_trial_result(body: TrialResultRequest):
 def edit_trial_result(body: TrialResultRequest):
     if body.trial is None or body.result is None:
         raise HTTPException(400, "Select a trial and result")
-    path = _trial_file(body.model)
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
     with _TRIAL_RESULTS_LOCK:
-        rows = _read_trials(path)
-        row = next((row for row in rows if row["try"] == str(body.trial)), None)
-        if row is None:
+        evaluation, _, rows = _current_evaluation(model, robot_type)
+        if evaluation is None or body.trial > len(rows):
             raise HTTPException(404, "Trial not found")
         _check_trial_revision(body, rows)
-        row.update(result=body.result, updated_at=datetime.now(timezone.utc).isoformat())
-        _write_trials(path, rows)
+        trial = evaluation["trials"][body.trial - 1]
+        trial.update(result=body.result, updated_at=datetime.now(_TRIAL_TIMEZONE).isoformat())
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
     return _trial_response(path, rows)
 
 
@@ -1444,17 +1654,23 @@ def edit_trial_result(body: TrialResultRequest):
 def delete_trial_results(body: TrialResultRequest):
     if not body.tries or any(number < 1 for number in body.tries):
         raise HTTPException(400, "Select trials to delete")
-    path = _trial_file(body.model)
-    if path is None:
-        raise HTTPException(404, "Model history not found")
-    targets = {str(number) for number in body.tries}
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
+    targets = set(body.tries)
     with _TRIAL_RESULTS_LOCK:
-        rows = _read_trials(path)
+        evaluation, _, rows = _current_evaluation(model, robot_type)
+        if evaluation is None:
+            raise HTTPException(404, "Model history not found")
         _check_trial_revision(body, rows)
-        rows = [row for row in rows if row["try"] not in targets]
-        for number, row in enumerate(rows, start=1):
-            row["try"] = str(number)
-        _write_trials(path, rows)
+        if not targets.intersection(range(1, len(rows) + 1)):
+            return _trial_response(path, rows)
+        evaluation["trials"] = [
+            trial for number, trial in enumerate(evaluation["trials"], start=1)
+            if number not in targets
+        ]
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
     return _trial_response(path, rows)
 
 

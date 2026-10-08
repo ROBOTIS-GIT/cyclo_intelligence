@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -71,30 +72,50 @@ _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
 @pytest.fixture
 def trial_client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(app, "_TRIAL_RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(app, "_TRIAL_RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr(app, "_TRIAL_MODEL_ROOT", tmp_path / "model")
     with TestClient(app.app) as client:
         yield client
 
 
+def trial_model(relative):
+    path = app._TRIAL_MODEL_ROOT / relative
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 def test_trial_results_crud_and_persistent_model_isolation(trial_client, tmp_path):
     client = trial_client
-    model = "/models/run/checkpoints/100000"
+    model = trial_model("run/checkpoints/100000")
     empty = client.get("/try-results", params={"model": model})
     assert empty.status_code == 200 and empty.json()["rows"] == []
     assert empty.headers["cache-control"] == "no-store"
-    assert not list(tmp_path.iterdir())
+    assert not app._TRIAL_RESULTS_DIR.exists()
     for result in ["success", "fail", "success"]:
         response = client.post("/try-results", json={"model": model, "result": result})
         assert response.status_code == 200
     original = response.json()
-    assert Path(original["file"]).name.startswith("run_")
+    assert Path(original["file"]) == Path(model) / "evaluation_manifest.json"
+    document = json.loads(Path(original["file"]).read_text())
+    assert document["schema_version"] == 1
+    assert set(document) == {"schema_version", "model", "context", "trials"}
+    assert document["model"] == {}
+    assert document["context"] == {"mode": "real_robot"}
+    assert [trial["trial_id"] for trial in document["trials"]] == [1, 2, 3]
+    assert all(
+        datetime.fromisoformat(trial["recorded_at"]).utcoffset() == timedelta(hours=9)
+        for trial in document["trials"]
+    )
     edited = client.patch("/try-results", json={
         "model": model, "try": 2, "result": "success", "revision": original["revision"],
     })
     assert edited.status_code == 200
     assert edited.json()["rows"][1]["result"] == "success"
     assert edited.json()["rows"][1]["created_at"] == original["rows"][1]["created_at"]
-    other = client.post("/try-results", json={"model": "/models/other", "result": "fail"}).json()
+    assert datetime.fromisoformat(edited.json()["rows"][1]["updated_at"]).utcoffset() == timedelta(hours=9)
+    assert [trial["trial_id"] for trial in json.loads(Path(original["file"]).read_text())["trials"]] == [1, 2, 3]
+    other_model = trial_model("other")
+    other = client.post("/try-results", json={"model": other_model, "result": "fail"}).json()
     assert other["file"] != original["file"]
     deleted = client.request("DELETE", "/try-results", json={
         "model": model, "tries": [1, 3], "revision": edited.json()["revision"],
@@ -102,27 +123,28 @@ def test_trial_results_crud_and_persistent_model_isolation(trial_client, tmp_pat
     assert deleted.status_code == 200
     assert [row["try"] for row in deleted.json()["rows"]] == ["1"]
     assert deleted.json()["rows"][0]["created_at"] == original["rows"][1]["created_at"]
+    assert [trial["trial_id"] for trial in json.loads(Path(original["file"]).read_text())["trials"]] == [1]
     added = client.post("/try-results", json={"model": model + "/", "result": "fail"}).json()
     assert added["file"] == original["file"]
     assert [row["try"] for row in added["rows"]] == ["1", "2"]
     assert client.get("/try-results", params={"model": model}).json() == added
-    assert client.get("/try-results", params={"model": "/models/other"}).json() == other
+    assert client.get("/try-results", params={"model": other_model}).json() == other
     exported = client.get("/try-results", params={"model": model, "download": True})
     assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
     assert "1,success" in exported.text and "2,fail" in exported.text
-    assert len(list(tmp_path.glob("*.csv"))) == 2
+    assert len(list(app._TRIAL_MODEL_ROOT.rglob("evaluation_manifest.json"))) == 2
     cleared = client.request("DELETE", "/try-results", json={
         "model": model, "tries": [1, 2], "revision": added["revision"],
     }).json()
     assert cleared["rows"] == [] and cleared["file"] == original["file"]
     fresh = client.post("/try-results", json={"model": model, "result": "success"}).json()
     assert fresh["rows"][0]["try"] == "1" and fresh["file"] == original["file"]
-    assert json.loads((tmp_path / "files.json").read_text())[model] == Path(original["file"]).name
+    assert not app._TRIAL_RESULTS_DIR.exists()
 
 
 def test_trial_edits_and_deletes_reject_stale_or_missing_revision(trial_client):
     client = trial_client
-    model = "/models/a"
+    model = trial_model("a")
     stale = client.post("/try-results", json={"model": model, "result": "success"}).json()
     current = client.post("/try-results", json={"model": model, "result": "fail"}).json()
     for revision in [None, stale["revision"]]:
@@ -144,28 +166,30 @@ def test_trial_edits_and_deletes_reject_stale_or_missing_revision(trial_client):
 
 def test_trial_results_invalid_requests_do_not_write(trial_client, tmp_path):
     client = trial_client
+    model = trial_model("a")
     assert client.get("/try-results", params={"model": " / "}).status_code == 400
-    assert client.post("/try-results", json={"model": "/models/a", "result": "invalid"}).status_code == 422
-    assert client.post("/try-results", json={"model": "/models/a"}).status_code == 400
-    assert client.patch("/try-results", json={"model": "/models/a", "try": 1, "result": "fail"}).status_code == 404
-    assert client.request("DELETE", "/try-results", json={"model": "/models/a"}).status_code == 400
-    assert client.request("DELETE", "/try-results", json={"model": "/models/a", "tries": [0]}).status_code == 400
-    assert not list(tmp_path.iterdir())
+    assert client.post("/try-results", json={"model": model, "result": "invalid"}).status_code == 422
+    assert client.post("/try-results", json={"model": model}).status_code == 400
+    assert client.patch("/try-results", json={"model": model, "try": 1, "result": "fail"}).status_code == 404
+    assert client.request("DELETE", "/try-results", json={"model": model}).status_code == 400
+    assert client.request("DELETE", "/try-results", json={"model": model, "tries": [0]}).status_code == 400
+    assert not list(Path(model).iterdir())
 
 
 def test_trial_concurrent_appends_do_not_lose_results(trial_client):
     from concurrent.futures import ThreadPoolExecutor
+    model = trial_model("a")
     def append(_):
-        return app.add_trial_result(app.TrialResultRequest(model="/models/a", result="success"))
+        return app.add_trial_result(app.TrialResultRequest(model=model, result="success"))
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(append, range(24)))
-    history = trial_client.get("/try-results", params={"model": "/models/a"}).json()
+    history = trial_client.get("/try-results", params={"model": model}).json()
     assert [row["try"] for row in history["rows"]] == [str(n) for n in range(1, 25)]
     assert len({result["file"] for result in results}) == 1
 
 
-def test_trial_write_failure_preserves_existing_csv(trial_client, monkeypatch):
-    model = "/models/a"
+def test_trial_write_failure_preserves_existing_json(trial_client, monkeypatch):
+    model = trial_model("a")
     original = trial_client.post("/try-results", json={"model": model, "result": "success"}).json()
     def fail_write(_):
         raise OSError("disk full")
@@ -179,18 +203,223 @@ def test_trial_write_failure_preserves_existing_csv(trial_client, monkeypatch):
 def test_trial_files_and_legacy_records_remain_portable(trial_client, tmp_path):
     import hashlib
     import re
-    model = "/models/legacy-act"
-    legacy = tmp_path / (re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:] + "_" + hashlib.sha256(model.encode()).hexdigest()[:16] + ".csv")
+    model = trial_model("legacy-act")
+    app._TRIAL_RESULTS_DIR.mkdir()
+    legacy = app._TRIAL_RESULTS_DIR / (re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:] + "_" + hashlib.sha256(model.encode()).hexdigest()[:16] + ".csv")
     row = {"try": "1", "result": "success", "created_at": "2026-09-18T01:02:03+00:00",
            "updated_at": "2026-09-18T01:02:03+00:00", "model_path": model}
     app._write_trials(legacy, [row])
     migrated = trial_client.get("/try-results", params={"model": model}).json()
-    assert Path(migrated["file"]).name.startswith("legacy-act_")
+    assert Path(migrated["file"]) == Path(model) / "evaluation_manifest.json"
     assert migrated["rows"] == [row] and not legacy.exists()
+    preserved = app._TRIAL_RESULTS_DIR / json.loads((app._TRIAL_RESULTS_DIR / "files.json").read_text())[model]
+    assert preserved.exists()
     assert trial_client.get("/try-results", params={"model": model}).json() == migrated
-    # Model text is an identity, never a path to write directly.
-    traversal = trial_client.post("/try-results", json={"model": "../../outside", "result": "fail"}).json()
-    assert Path(traversal["file"]).parent == tmp_path
+    converted = trial_client.post("/try-results", json={"model": model, "result": "fail"}).json()
+    assert Path(converted["file"]) == Path(model) / "evaluation_manifest.json"
+    assert len(converted["rows"]) == 2
+    assert [trial["trial_id"] for trial in json.loads(Path(converted["file"]).read_text())["trials"]] == [1, 2]
+    assert preserved.exists()
+    assert trial_client.get("/try-results", params={"model": model}).json() == converted
+    # A request cannot write into an arbitrary directory outside the model root.
+    assert trial_client.post("/try-results", json={
+        "model": "../../outside", "result": "fail",
+    }).status_code == 400
+
+
+def test_trial_json_uses_manifest_when_available_and_omits_missing_fields(trial_client):
+    model = Path(trial_model("lerobot/act_1k_000024"))
+    (model / "training_manifest.json").write_text(json.dumps({
+        "model_id": "lerobot-act", "run_id": "1a3a129b-9687-452e-a941-b63ef82c04a4",
+        "source_artifact": "checkpoints/001000/pretrained_model",
+        "dataset": {"dataset_id": "Dongkkka/Task_000004_Peanut_Pick_Place_lerobot_Intern"},
+    }))
+    body = {"model": str(model), "robot_type": "ffw_sg2_rev1", "result": "success"}
+    response = trial_client.post("/try-results", json=body)
+    assert response.status_code == 200
+    saved = json.loads(Path(response.json()["file"]).read_text())
+    assert saved["model"] == {
+        "model_id": "lerobot-act",
+        "run_id": "1a3a129b-9687-452e-a941-b63ef82c04a4",
+        "source_artifact": "checkpoints/001000/pretrained_model",
+    }
+    assert saved["context"] == {
+        "mode": "real_robot", "robot_type": "ffw_sg2_rev1",
+        "dataset_repo_id": "Dongkkka/Task_000004_Peanut_Pick_Place_lerobot_Intern",
+    }
+    assert len(saved["trials"]) == 1
+    assert saved["trials"][0]["result"] == "success"
+    assert saved["trials"][0]["trial_id"] == 1
+    assert saved["trials"][0]["recorded_at"]
+    assert set(model.iterdir()) == {model / "training_manifest.json", model / "evaluation_manifest.json"}
+    (model / "training_manifest.json").unlink()
+    other = Path(trial_model("lerobot/no_manifest"))
+    missing = trial_client.post("/try-results", json={
+        "model": str(other), "robot_type": "ffw_sg2_rev1", "result": "fail",
+    })
+    assert missing.status_code == 200
+    saved = json.loads(Path(missing.json()["file"]).read_text())
+    assert saved["model"] == {}
+    assert saved["context"] == {"mode": "real_robot", "robot_type": "ffw_sg2_rev1"}
+    assert list(other.iterdir()) == [other / "evaluation_manifest.json"]
+
+
+def test_trial_json_rejects_a_different_robot_without_changing_history(trial_client):
+    model = trial_model("lerobot/act")
+    first = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "success",
+    }).json()
+    original = Path(first["file"]).read_text()
+    second = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "f2", "result": "fail",
+    })
+    assert second.status_code == 409
+    assert Path(first["file"]).read_text() == original
+    assert trial_client.get("/try-results", params={
+        "model": model, "robot_type": "ffw_sg2_rev1",
+    }).json()["rows"] == first["rows"]
+    assert trial_client.get("/try-results", params={
+        "model": model, "robot_type": "f2",
+    }).status_code == 409
+
+
+def test_old_external_json_is_imported_without_losing_trials(trial_client):
+    model = trial_model("lerobot/act")
+    app._TRIAL_RESULTS_DIR.mkdir()
+    old_path = app._old_evaluation_file(model, "f2")
+    old = app._new_evaluation(model, "f2")
+    old["trials"].append({
+        "trial_id": "original-trial", "result": "success", "recorded_at": "2026-10-02T05:00:00Z",
+    })
+    app._write_evaluation(old_path, old)
+    imported = trial_client.get("/try-results", params={"model": model, "robot_type": "f2"}).json()
+    assert imported["rows"][0]["result"] == "success"
+    trial_client.post("/try-results", json={"model": model, "robot_type": "f2", "result": "fail"})
+    saved = json.loads((Path(model) / "evaluation_manifest.json").read_text())
+    assert "evaluation_id" not in saved
+    assert [trial["trial_id"] for trial in saved["trials"]] == [1, 2]
+    assert "local_path" not in saved["model"]
+    assert json.loads(old_path.read_text()) == old
+
+
+def test_existing_single_evaluation_wrapper_is_migrated_without_losing_trials(trial_client):
+    model = trial_model("lerobot/act")
+    old = app._new_evaluation(model, "ffw_sg2_rev1")
+    old["model"]["local_path"] = model
+    old["trials"] = [{"trial_id": "old-uuid", "result": "success", "recorded_at": "2026-10-02T05:00:00Z"}]
+    path = Path(model) / "evaluation_manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "evaluations": [old]}))
+    assert trial_client.get("/try-results", params={"model": model, "robot_type": "ffw_sg2_rev1"}).status_code == 200
+    trial_client.post("/try-results", json={"model": model, "robot_type": "ffw_sg2_rev1", "result": "fail"})
+    saved = json.loads(path.read_text())
+    assert "evaluation_id" not in saved
+    assert [trial["trial_id"] for trial in saved["trials"]] == [1, 2]
+    assert saved["trials"][0]["recorded_at"] == "2026-10-02T05:00:00Z"
+
+
+def test_multiple_evaluation_wrapper_requires_manual_separation(trial_client):
+    model = trial_model("lerobot/act")
+    path = Path(model) / "evaluation_manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "evaluations": [
+        app._new_evaluation(model, "ffw_sg2_rev1"), app._new_evaluation(model, "f2"),
+    ]}))
+    before = path.read_text()
+    assert trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "fail",
+    }).status_code == 409
+    assert path.read_text() == before
+
+
+def test_trial_write_requires_a_model_directory(trial_client, tmp_path):
+    missing = app._TRIAL_MODEL_ROOT / "does-not-exist"
+    assert trial_client.post("/try-results", json={
+        "model": str(missing), "result": "success",
+    }).status_code == 404
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert trial_client.post("/try-results", json={
+        "model": str(outside), "result": "success",
+    }).status_code == 400
+    assert not list(outside.iterdir())
+    app._TRIAL_MODEL_ROOT.mkdir()
+    link = app._TRIAL_MODEL_ROOT / "escaped-link"
+    link.symlink_to(outside, target_is_directory=True)
+    assert trial_client.post("/try-results", json={
+        "model": str(link), "result": "success",
+    }).status_code == 400
+    assert not list(outside.iterdir())
+
+
+def test_legacy_rows_are_not_assigned_to_a_new_robot(trial_client, tmp_path):
+    model = trial_model("old")
+    legacy = app._trial_file(model, create=True)
+    app._write_trials(legacy, [{
+        "try": "1", "result": "success", "created_at": "2026-10-02T05:00:00Z",
+        "updated_at": "2026-10-02T05:00:00Z", "model_path": model,
+    }])
+    response = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "fail",
+    }).json()
+    saved = json.loads(Path(response["file"]).read_text())
+    assert len(saved["trials"]) == 1
+    assert saved["context"]["robot_type"] == "ffw_sg2_rev1"
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 409
+    assert legacy.exists()
+
+
+def test_trial_json_rejects_symlink_without_touching_target(trial_client, tmp_path):
+    model = trial_model("a")
+    target = tmp_path / "outside.json"
+    target.write_text('{"private": true}')
+    app._evaluation_file(model).symlink_to(target)
+    response = trial_client.get("/try-results", params={"model": model})
+    assert response.status_code == 500
+    response = trial_client.post("/try-results", json={"model": model, "result": "success"})
+    assert response.status_code == 500
+    assert target.read_text() == '{"private": true}'
+
+
+def test_trial_json_does_not_overwrite_invalid_history(trial_client):
+    model = trial_model("a")
+    path = app._evaluation_file(model)
+    path.write_text("{not json")
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 500
+    assert trial_client.post("/try-results", json={"model": model, "result": "success"}).status_code == 500
+    assert path.read_text() == "{not json"
+
+
+def test_ten_trials_store_five_successes_and_five_failures(trial_client):
+    model = trial_model("lerobot/act_1k_000024")
+    files = set()
+    for result in ["success", "fail"] * 5:
+        response = trial_client.post("/try-results", json={
+            "model": model, "robot_type": "ffw_sg2_rev1", "result": result,
+        }).json()
+        files.add(response["file"])
+    assert len(files) == 1
+    document = json.loads(Path(response["file"]).read_text())
+    assert "evaluation_id" not in document and "uploaded" not in document
+    trials = document["trials"]
+    assert len(trials) == 10
+    assert sum(trial["result"] == "success" for trial in trials) == 5
+    assert sum(trial["result"] == "fail" for trial in trials) == 5
+    assert [trial["trial_id"] for trial in trials] == list(range(1, 11))
+    assert "success_rate" not in document
+    assert "task_id" not in document["context"]
+
+
+def test_existing_evaluation_drops_retired_fields_on_write(trial_client):
+    model = trial_model("legacy")
+    path = Path(model) / "evaluation_manifest.json"
+    document = app._new_evaluation(model, "")
+    document["evaluation_id"] = "old-id"
+    document["uploaded"] = True
+    path.write_text(json.dumps(document))
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 200
+    trial_client.post("/try-results", json={"model": model, "result": "success"})
+    saved = json.loads(path.read_text())
+    assert set(saved) == {"schema_version", "model", "context", "trials"}
+    assert saved["trials"][0]["result"] == "success"
 
 
 def test_navigation_parses_binary_pgm():

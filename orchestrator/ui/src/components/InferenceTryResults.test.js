@@ -1,11 +1,16 @@
 import React from 'react';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import InferenceTryResults from './InferenceTryResults';
+import { InferencePhase } from '../constants/taskPhases';
 let mockState;
 jest.mock('react-redux', () => ({ useSelector: fn => fn(mockState) }));
 jest.mock('../features/tasks/taskSlice', () => ({ selectInferenceTaskInfo: s => s.info }));
 beforeEach(() => {
-  mockState = { info: { policyPath: '/models/selected' }, tasks: { inferenceStatus: { loadedModelPath: '/models/loaded' } } };
+  mockState = { info: { policyPath: '/models/loaded' }, tasks: {
+    robotType: 'ffw_sg2_rev1', inferenceStatus: {
+      inferencePhase: InferencePhase.INFERENCING, loadedModelPath: '/models/loaded',
+    },
+  } };
   global.fetch = jest.fn();
 });
 afterEach(() => { jest.restoreAllMocks(); jest.resetAllMocks(); });
@@ -17,6 +22,7 @@ test('uses loaded model, saves a try, and corrects it without adding another', a
   render(<InferenceTryResults />);
   await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
   expect(fetch.mock.calls[0][0]).toContain(encodeURIComponent('/models/loaded'));
+  expect(fetch.mock.calls[0][0]).toContain('robot_type=ffw_sg2_rev1');
   expect(screen.queryByRole('button', { name: 'Refresh try results' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByText('Success'));
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
@@ -25,7 +31,7 @@ test('uses loaded model, saves a try, and corrects it without adding another', a
   await screen.findByLabelText('Try 1 result');
   fireEvent.change(screen.getByLabelText('Try 1 result'), { target: { value: 'fail' } });
   await waitFor(() => expect(screen.getByText('1 trials · 0 success / 1 fail · 0%')).toBeInTheDocument());
-  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ model: '/models/loaded', result: 'success' });
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ model: '/models/loaded', robot_type: 'ffw_sg2_rev1', result: 'success' });
   expect(fetch.mock.calls[2][1].method).toBe('PATCH');
   expect(JSON.parse(fetch.mock.calls[2][1].body).revision).toBe('v1');
   fireEvent.click(screen.getByRole('button', { name: 'Toggle try results' }));
@@ -58,7 +64,7 @@ test('deletes only selected trials after confirmation and retains other rows', a
   fireEvent.click(screen.getByRole('button', { name: 'Delete selected trials' }));
   await waitFor(() => expect(screen.getByText('1 trials · 0 success / 1 fail · 0%')).toBeInTheDocument());
   expect(fetch.mock.calls[1][1].method).toBe('DELETE');
-  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ model: '/models/loaded', tries: ['1'], revision: 'v1' });
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ model: '/models/loaded', robot_type: 'ffw_sg2_rev1', tries: ['1'], revision: 'v1' });
   expect(screen.getByLabelText('Try 1 result')).toHaveValue('fail');
   expect(screen.queryByLabelText('Try 2 result')).not.toBeInTheDocument();
   expect(screen.getByLabelText('Select try 1')).not.toBeChecked();
@@ -84,6 +90,8 @@ test('does not request or enable logging without a selected model', () => {
 });
 
 test('reloads persisted history on remount and falls back to the selected model', async () => {
+  mockState.info.policyPath = '/models/selected';
+  mockState.tasks.inferenceStatus.inferencePhase = InferencePhase.READY;
   mockState.tasks.inferenceStatus.loadedModelPath = '';
   const row = { try: '1', result: 'fail', created_at: '2026-09-18T00:00:00Z' };
   fetch.mockResolvedValue(response([row]));
@@ -104,12 +112,53 @@ test('ignores an old model history arriving after the new model history', async 
     .mockResolvedValueOnce(response());
   const { rerender } = render(<InferenceTryResults />);
   mockState.tasks.inferenceStatus.loadedModelPath = '/models/new';
+  mockState.info.policyPath = '/models/new';
   rerender(<InferenceTryResults />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
   await act(async () => resolveOld(response([{ try: '99', result: 'fail', created_at: '2026-09-18T00:00:00Z' }])));
   fireEvent.click(screen.getByRole('button', { name: 'Toggle try results' }));
   expect(screen.queryByLabelText('Try 99 result')).not.toBeInTheDocument();
   expect(screen.getByText('0 trials · 0 success / 0 fail · 0%')).toBeInTheDocument();
+});
+
+test('shows the server conflict when the selected robot changes for the same model', async () => {
+  fetch.mockResolvedValueOnce(response([{ try: '1', result: 'success', created_at: '2026-10-02T05:00:00Z' }]))
+    .mockResolvedValueOnce({ ok: false, json: async () => ({ detail: 'Different robot evaluation' }) });
+  const { rerender } = render(<InferenceTryResults />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
+  mockState.tasks.robotType = 'f2';
+  rerender(<InferenceTryResults />);
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(fetch.mock.calls[1][0]).toContain('robot_type=f2');
+  expect(await screen.findByRole('alert')).toHaveTextContent('Different robot evaluation');
+  expect(screen.getByRole('button', { name: 'Success' })).toBeDisabled();
+});
+
+test('uses the selected model after Clear even if the previous loaded path remains', async () => {
+  mockState.tasks.inferenceStatus.inferencePhase = InferencePhase.READY;
+  let resolveNew;
+  fetch.mockResolvedValueOnce(response())
+    .mockReturnValueOnce(new Promise(resolve => { resolveNew = resolve; }))
+    .mockResolvedValue(response());
+  const { rerender } = render(<InferenceTryResults />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
+  mockState.info.policyPath = '/models/new';
+  rerender(<InferenceTryResults />);
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(fetch.mock.calls[1][0]).toContain(encodeURIComponent('/models/new'));
+  expect(screen.getByRole('button', { name: 'Success' })).toBeDisabled();
+  await act(async () => resolveNew(response()));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Success' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+  expect(JSON.parse(fetch.mock.calls[2][1].body).model).toBe('/models/new');
+});
+
+test('does not label a model when selected and loaded paths disagree during inference', () => {
+  mockState.info.policyPath = '/models/new';
+  render(<InferenceTryResults />);
+  expect(fetch).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Success' })).toBeDisabled();
 });
 
 test('old model write completion cannot release a newer pending write', async () => {
@@ -124,6 +173,7 @@ test('old model write completion cannot release a newer pending write', async ()
   fireEvent.click(screen.getByRole('button', { name: 'Success' }));
   expect(fetch).toHaveBeenCalledTimes(2);
   mockState.tasks.inferenceStatus.loadedModelPath = '/models/new';
+  mockState.info.policyPath = '/models/new';
   rerender(<InferenceTryResults />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'Fail' }));
