@@ -63,6 +63,7 @@ string robot_type
 string task_instruction
 bool publish_to_robot
 string action_request_mode
+bool vla_rail_enabled
 string acceleration_mode
 string acceleration_engine_path
 uint16 control_hz
@@ -100,6 +101,7 @@ string[] action_keys
 int32 chunk_size
 int32 action_dim
 float64[] action_list
+string timing_json
 """
 
 # --- StopTraining (interfaces/srv/StopTraining.srv) ---

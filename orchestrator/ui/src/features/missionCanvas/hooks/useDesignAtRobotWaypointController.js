@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useRef } from "react";
-import { STAGE_AUTHORING } from "../lib/stages";
+import { STAGE_AUTHORING } from "../../mapWorkspace/lib/stages";
 
 function staleDocumentError() {
   const error = new Error("Design document changed during At Robot localization");

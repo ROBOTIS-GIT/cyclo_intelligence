@@ -9,10 +9,11 @@ import {
   localBtPathForSpot,
   localBtPathsForSpot,
   withLocalBtLibrary,
-} from "../lib/missionBtFiles";
-import { DEFAULT_MAP_NAME } from "../lib/missionNames";
+} from "../../mapWorkspace/lib/missionBtFiles";
+import { DEFAULT_MAP_NAME } from "../../mapWorkspace/lib/missionNames";
 
 export default function useDesignDocumentContentController({
+  setMetadata,
   applySpots,
   updateSpots,
   setFlowNodes,
@@ -53,6 +54,7 @@ export default function useDesignDocumentContentController({
         snapshot.behaviorNodesPatch,
       );
     }
+    setMetadata?.({ ...(snapshot.metadata || {}) });
     applySpots(spots);
     setFlowNodes(flowNodes);
     setFlowEdges(flowEdges);
@@ -61,6 +63,7 @@ export default function useDesignDocumentContentController({
     resetTransientSelections();
     return { spots, flowNodes, flowEdges, btFiles, baseline };
   }, [
+    setMetadata,
     applySpots,
     commitLedgerSnapshot,
     mergeBehaviorMapPatch,
@@ -71,6 +74,7 @@ export default function useDesignDocumentContentController({
   ]);
 
   const resetNewDocument = useCallback(({ btFiles = {} } = {}) => {
+    setMetadata?.({});
     applySpots([]);
     setFlowNodes([]);
     setFlowEdges([]);
@@ -84,6 +88,7 @@ export default function useDesignDocumentContentController({
     setEditingSpotLabel("");
     setLoadError("");
   }, [
+    setMetadata,
     applySpots,
     clearBehaviorSelection,
     clearPendingBehaviorPlacement,

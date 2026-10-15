@@ -1,0 +1,17 @@
+{
+  "world": "home_autonomy",
+  "map": "house",
+  "stations": {
+    "observation": [
+      0.3,
+      -3.35,
+      3.141592653589793
+    ],
+    "tv_control": [
+      -1.1,
+      -4.05,
+      -2.554051730526506
+    ]
+  },
+  "initial_power_on": true
+}

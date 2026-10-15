@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useRef, useState } from "react";
-import { isValidMissionName } from "../lib/missionNames";
+import { isValidMissionName } from "../../mapWorkspace/lib/missionNames";
 
 export function confirmDesignMissionSave({ name, close, saveMission }) {
   const target = String(name || "").trim();

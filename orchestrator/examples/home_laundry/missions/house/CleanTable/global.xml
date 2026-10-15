@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="GlobalMission">
+      <MissionStep name="Step_1_Table" waypoint_id="home_mission1_01_table" label="Table" local_bt="locals/home_mission1_01_table/main.xml" x="2.04224" y="0.060437" yaw="0.0" />
+      <MissionStep name="Step_2_Sink" waypoint_id="home_mission1_05_sink" label="Sink" local_bt="locals/home_mission1_05_sink/main.xml" x="6.34224" y="1.760437" yaw="1.570796" />
+      </Sequence>
+  </BehaviorTree>
+</root>

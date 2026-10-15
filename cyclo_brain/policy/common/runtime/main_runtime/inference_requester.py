@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any
 
@@ -63,7 +64,9 @@ class InferenceRequester:
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
-    def get_action(self, task_instruction: str, timeout_s: float | None = None) -> EngineCommandResponse:
+    def get_action(
+        self, task_instruction: str, timeout_s: float | None = None
+    ) -> EngineCommandResponse:
         with self._lock:
             if self._get_action_in_flight:
                 return EngineCommandResponse(
@@ -111,12 +114,14 @@ class InferenceRequester:
                 success=False,
                 seq_id=request.seq_id,
                 message=f"engine request seq={request.seq_id} timed out after {timeout_s:.1f}s",
+                timing_json=json.dumps({"version": 1, "seq_id": request.seq_id, "status": "timeout"}),
             )
         except Exception as e:
             return EngineCommandResponse(
                 success=False,
                 seq_id=request.seq_id,
                 message=str(e),
+                timing_json=json.dumps({"version": 1, "seq_id": request.seq_id, "status": "error"}),
             )
 
         if not isinstance(response, EngineCommandResponse):
@@ -129,5 +134,6 @@ class InferenceRequester:
                     f"stale engine response discarded: expected seq={request.seq_id}, "
                     f"got seq={response.seq_id}"
                 ),
+                timing_json=json.dumps({"version": 1, "seq_id": request.seq_id, "status": "stale_response"}),
             )
         return response

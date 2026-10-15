@@ -103,6 +103,11 @@ orchestrator/
 ## BT node lifecycle
 
 `BehaviorTreeNode` (`bt/bt_node.py`) runs as the `bt_node` executable.
+
+Process `up` does not mean ROS services are registered yet. Before requesting the
+node catalog, the UI waits for `/api/bt/readiness` to confirm the catalog, load,
+and stop services. This read-only ROS discovery probe never starts the engine
+or executes a tree. A readiness timeout blocks mission admission with an error.
 The normal bringup launch no longer starts it automatically:
 ```
 ros2 launch orchestrator orchestrator_bringup.launch.py
@@ -178,7 +183,12 @@ backend without exposing arbitrary Docker names or images:
 
 - `target=INFERENCE` (the default): `LOAD`, `RESUME`, `STOP`, or `CLEAR`.
   `LOAD` first ensures the selected `model` backend is installed, running, and
-  internally ready, then continues through the existing inference stages.
+  internally ready, then sends `LOAD_INFERENCE` (command 25). The policy is
+  loaded and remains idle (`PAUSED`); no first action chunk is generated.
+  `RESUME` explicitly starts the loaded session. Repeated `LOAD` settles
+  STOP/UNLOAD before preparing the next session. The Inference UI's explicit
+  `START_INFERENCE` still loads and starts, including simulation previews.
+  The legacy Action Canvas and supervised BT paths share these semantics.
 - `target=DOCKER`: `START`, `STOP`, or `RESTART` for the allowlisted `groot` or
   `lerobot` backend selected by `model`. `START` is idempotent.
 
@@ -212,3 +222,11 @@ After `colcon build`:
 - `bt_node` — behaviour tree runner.
 
 Both dropped into `install/orchestrator/lib/orchestrator/`.
+
+### SendCommand RESUME: Initial Pose Sync
+
+RESUME defaults to `initial_pose_sync=true` and `initial_pose_sync_duration_s=5`.
+On robot output, a stopped session first moves to the first predicted pose, discards
+that preview chunk, then requests fresh actions. Each explicit RESUME after STOP
+repeats alignment. Simulation output skips physical alignment. Set
+`initial_pose_sync=false` on RESUME to opt out. LOAD remains idle.

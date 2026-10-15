@@ -36,8 +36,10 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
+from orchestrator.bt.actions.motion_pause import JointPause
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.constants import *  # noqa: F403
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -121,7 +123,7 @@ def _timeout_for_group(group: str) -> int:
     return MOVE_ARMS_TIMEOUT_TICKS  # noqa: F405
 
 
-class JointControl(BaseAction):
+class JointControl(JointPause, BaseAction):
     """Publish JointTrajectory commands and wait for configured state feedback."""
 
     @classmethod
@@ -261,7 +263,11 @@ class JointControl(BaseAction):
 
         self._joint_state_topics = self._configured_joint_state_topics()
         self._joint_states = self._empty_joint_states()
+        self._joint_received = {}
+        self._joint_previous_position = {}
+        self._joint_velocities = {}
         self.joint_state_subscriptions = []
+        self._feedback_group = ReentrantCallbackGroup()
         for topic in self._joint_state_topics:
             sub = self.node.create_subscription(
                 JointState,
@@ -270,6 +276,7 @@ class JointControl(BaseAction):
                     topic_name, msg
                 ),
                 qos_profile,
+                callback_group=self._feedback_group,
             )
             self.joint_state_subscriptions.append(sub)
 
@@ -281,6 +288,8 @@ class JointControl(BaseAction):
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._paused = threading.Event()
+        self._motion_lock = threading.RLock()
         self._thread = None
         self._result = None
         self._control_rate = CONTROL_RATE_HZ  # noqa: F405
@@ -473,15 +482,29 @@ class JointControl(BaseAction):
     def _joint_state_callback(self, topic_name, msg):
         if topic_name in self._joint_states:
             self._joint_states[topic_name] = msg
+            received = time.monotonic()
+            for i, name in enumerate(msg.name):
+                if i < len(msg.position):
+                    previous_time = self._joint_received.get(name, received)
+                    previous_position = self._joint_previous_position.get(name, msg.position[i])
+                    dt = received - previous_time
+                    estimate = ((msg.position[i] - previous_position) / dt
+                                if dt > 0 else float('inf'))
+                    self._joint_received[name] = received
+                    self._joint_previous_position[name] = msg.position[i]
+                    self._joint_velocities[name] = msg.velocity[i] if i < len(msg.velocity) else estimate
 
     # -- Control loop ---------------------------------------------------------
 
-    def _publish_channel(self, channel):
+    def _publish_channel(self, channel, positions=None, duration=None):
         traj = JointTrajectory()
         traj.joint_names = list(channel['joint_names'])
         point = JointTrajectoryPoint()
-        point.positions = list(channel['positions'])
-        point.time_from_start.sec = int(self.duration)
+        point.positions = ([positions[n] for n in channel['joint_names']]
+                           if positions is not None else list(channel['positions']))
+        seconds = self.duration if duration is None else duration
+        point.time_from_start.sec = int(seconds)
+        point.time_from_start.nanosec = int((seconds - int(seconds)) * 1e9)
         traj.points.append(point)
         channel['pub'].publish(traj)
 
@@ -512,8 +535,10 @@ class JointControl(BaseAction):
     def _control_loop(self):
         rate_sleep = RATE_SLEEP_SEC  # noqa: F405
 
-        for ch in self._channels:
-            self._publish_channel(ch)
+        with self._motion_lock:
+            if not self._paused.is_set() and not self._stop_event.is_set():
+                for ch in self._channels:
+                    self._publish_channel(ch)
         groups = ', '.join(ch['group'] for ch in self._channels)
         self.log_info(f'JointControl trajectory published [{groups}]')
 
@@ -522,6 +547,9 @@ class JointControl(BaseAction):
             not self._stop_event.is_set()
             and timeout_count < self._timeout_ticks
         ):
+            if self._paused.is_set():
+                time.sleep(rate_sleep)
+                continue
             if not any(msg is not None for msg in self._joint_states.values()):
                 time.sleep(rate_sleep)
                 timeout_count += 1
@@ -555,6 +583,7 @@ class JointControl(BaseAction):
             self._joint_states = self._empty_joint_states()
             self._missing_joint_names = set()
             self._stop_event.clear()
+            self._paused.clear()
             with self._lock:
                 self._result = None
             self._thread = threading.Thread(
@@ -573,10 +602,20 @@ class JointControl(BaseAction):
 
     def reset(self):
         super().reset()
+        # Stop/reset must replace any still executing topic trajectory too.
+        hold_error = None
+        if self._thread is not None and self._result is None:
+            try:
+                self.pause()
+            except Exception as exc:
+                hold_error = exc
         self._stop_event.set()
+        self._paused.clear()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=THREAD_JOIN_TIMEOUT_SEC)  # noqa: F405
         self._thread = None
         with self._lock:
             self._result = None
         self._joint_states = self._empty_joint_states()
+        if hold_error is not None:
+            raise RuntimeError(str(hold_error))

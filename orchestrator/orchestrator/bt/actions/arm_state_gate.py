@@ -22,6 +22,7 @@ import time
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
+from orchestrator.bt.pause_control import TimerPause
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.constants import QOS_QUEUE_DEPTH
 from rclpy.qos import QoSProfile
@@ -80,7 +81,7 @@ def _make_targets(side: str, joints, positions) -> list[tuple[str, float]]:
     return list(zip(joint_names, target_positions))
 
 
-class ArmStateGate(BaseAction):
+class ArmStateGate(TimerPause, BaseAction):
     """Gate a behavior tree until selected arm state conditions are met.
 
     Optional gripper detection gates SUCCESS behind a closed-then-opened

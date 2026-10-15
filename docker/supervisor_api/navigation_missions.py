@@ -520,6 +520,7 @@ def _write_manifest(manifest: MissionLoadResponse) -> None:
     path = _MANIFEST_WRITE_PATH.get()
     if path is None:
         path = _manifest_path(manifest.map_name, manifest.mission_name)
+    manifest.metadata.setdefault("reasoning_mission_id", str(uuid4()))
     payload = _serialize_model(manifest)
     payload.pop("exists", None)
     payload["schema_version"] = MISSION_SCHEMA_VERSION
@@ -729,12 +730,37 @@ def save_mission(
         mission_name,
         global_bt=request.global_bt,
         waypoints=compatible_waypoints,
-        metadata=request.metadata,
+        metadata={**request.metadata, "reasoning_mission_id": existing_manifest.metadata.get("reasoning_mission_id") or str(uuid4())},
         exists=True,
         revision=existing_manifest.revision + 1,
     )
     _write_manifest(manifest)
     _prune_orphan_local_bt_files(manifest)
+    return manifest
+
+
+class MissionRulesRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    description: str = Field(default="", max_length=4000)
+    start_condition: str = Field(default="", max_length=4000)
+    completion_condition: str = Field(default="", max_length=4000)
+    stop_condition: str = Field(default="", max_length=4000)
+    post_stop_action: str = Field(default="", max_length=4000)
+
+
+@router.put("/{map_name}/rules", response_model=MissionLoadResponse)
+@_serialized_mission_mutation
+def save_mission_rules(map_name: str, request: MissionRulesRequest,
+                       mission_name: str = DEFAULT_MISSION_NAME):
+    manifest = _read_manifest(map_name, mission_name)
+    if not manifest.exists:
+        raise HTTPException(404, "Mission not found")
+    _require_manifest_revision(manifest, request.expected_revision)
+    for key in ("description", "start_condition", "completion_condition",
+                "stop_condition", "post_stop_action"):
+        manifest.metadata[key] = getattr(request, key).strip()
+    manifest.revision += 1
+    _write_manifest(manifest)
     return manifest
 
 
@@ -906,7 +932,7 @@ def duplicate_mission(map_name: str, request: MissionDuplicateRequest):
         request.new_name,
         global_bt=source_manifest.global_bt,
         waypoints=source_manifest.waypoints,
-        metadata=source_manifest.metadata,
+        metadata={**source_manifest.metadata, "reasoning_mission_id": str(uuid4())},
         exists=True,
         revision=target_generation,
     )
@@ -1329,3 +1355,22 @@ def delete_bt_file(
         exists=False,
         revision=next_revision,
     )
+
+
+@_serialized_mission_mutation
+def collection_catalog(map_name):
+    """Freeze Design definitions; migrate stable IDs once under the mission lock."""
+    catalog = []
+    for name in list_missions(map_name).missions:
+        manifest = _read_manifest(map_name, name)
+        if not manifest.metadata.get('reasoning_mission_id'):
+            manifest.revision += 1
+            _write_manifest(manifest)
+        catalog.append({
+            'mission_id': manifest.metadata['reasoning_mission_id'],
+            'map_name': manifest.map_name, 'mission_name': manifest.mission_name,
+            'revision': manifest.revision,
+            **{key: manifest.metadata.get(key, '') for key in (
+                'description', 'start_condition', 'completion_condition', 'stop_condition', 'post_stop_action')},
+        })
+    return catalog

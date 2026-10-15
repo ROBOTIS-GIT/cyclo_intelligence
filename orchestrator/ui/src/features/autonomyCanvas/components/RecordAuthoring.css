@@ -1,0 +1,17 @@
+.record-authoring { position: relative; z-index: 30; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--mc-text); font: inherit; }
+.record-authoring-toolbar { position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 14px; background: color-mix(in srgb, var(--mc-surface) 88%, transparent); border: 1px solid var(--mc-border); box-shadow: var(--mc-shadow); backdrop-filter: blur(8px); }
+.record-authoring-button { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; border-radius: 9px; border: 1px solid var(--mc-border-strong); background: var(--mc-surface); color: var(--mc-text); }
+.record-authoring-button.is-active { border-color: var(--mc-accent); background: var(--mc-accent-soft); }
+.record-authoring button:disabled { opacity: .45; }
+.record-authoring-divider { width: 1px; height: 20px; background: var(--mc-border); }
+.record-waypoint-options { position: absolute; left: 0; top: calc(100% + 6px); z-index: 50; display: flex; gap: 8px; padding: 8px; border-radius: 12px; background: var(--mc-surface); border: 1px solid var(--mc-border-strong); box-shadow: var(--mc-shadow); }
+.record-waypoint-editor { display: flex; flex-direction: column; gap: 8px; width: min(320px, calc(100vw - 80px)); min-width: 0; max-height: min(65vh, 540px); padding: 12px; border: 1px solid var(--mc-border-strong); border-radius: 12px; background: var(--mc-surface); box-shadow: var(--mc-shadow); font-size: 13px; }
+.record-authoring-heading, .record-authoring-actions { display: flex; align-items: center; gap: 6px; }
+.record-authoring-heading { justify-content: space-between; min-width: 0; }
+.record-authoring-heading strong { font-size: 13px; }
+.record-authoring-note { font-size: 12px; color: var(--mc-text-subtle); }
+.record-waypoint-editor label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; }
+.record-waypoint-editor input { min-width: 0; height: 32px; padding: 0 8px; color: var(--mc-text); background: var(--mc-surface-2); border: 1px solid var(--mc-border-strong); border-radius: 8px; font: inherit; font-size: 13px; }
+.record-waypoint-editor .record-waypoint-yaw { flex-direction: row; align-items: center; }
+.record-waypoint-yaw input { width: 66px; }
+.record-authoring-error { max-width: 320px; margin: 0; border-radius: 8px; background: var(--mc-surface); padding: 8px; font-size: 12px; color: var(--mc-danger); }

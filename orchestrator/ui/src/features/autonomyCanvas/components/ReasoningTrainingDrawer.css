@@ -1,0 +1,45 @@
+.collect-dataset-toolbar .learn-training-launcher {display:flex;align-items:center;gap:8px;margin-left:auto;}
+.learn-training-map {font-size:12px;color:var(--mc-text-muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.collect-dataset-toolbar .learn-training-button {position:relative;isolation:isolate;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;box-sizing:border-box;width:34px;height:34px;padding:2px;border:1px solid var(--mc-border);color:var(--mc-text);background:var(--mc-surface);}
+.learn-training-fill {position:absolute;bottom:0;left:0;right:0;background:var(--mc-accent-soft);z-index:-1;transition:height .35s;}
+.learn-training-percent {font-size:9px;line-height:10px;}
+.collect-dataset-toolbar .learn-training-button.is-failed {color:#b54836;border-color:#b54836;}
+.learn-training-overlay {position:fixed;inset:0;z-index:1800;display:flex;justify-content:flex-end;padding:12px;background:#10271f33;}
+.learn-training-drawer {display:flex;flex-direction:column;width:min(400px,100%);min-height:0;box-sizing:border-box;border:1px solid var(--mc-border);border-radius:12px;background:var(--mc-surface);color:var(--mc-text);box-shadow:0 12px 36px #0003;font-size:12px;}
+.learn-training-drawer>header {display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--mc-border);}
+.learn-training-drawer>header strong {font-size:14px;}
+.learn-training-drawer button {font:inherit;cursor:pointer;border:1px solid var(--mc-border);background:var(--mc-surface);color:var(--mc-text);border-radius:6px;padding:6px 10px;min-height:32px;}
+.learn-training-drawer>header button {display:flex;align-items:center;justify-content:center;width:32px;padding:0;}
+.learn-training-body {display:flex;flex-direction:column;gap:14px;min-height:0;overflow-y:auto;padding:14px;}
+.learn-training-body label {display:grid;gap:6px;min-width:0;margin:0;}
+.learn-training-body input:not([type="checkbox"]),.learn-training-body select {width:100%;min-width:0;box-sizing:border-box;height:32px;padding:0 8px;border:1px solid var(--mc-border);border-radius:6px;background:var(--mc-surface);color:var(--mc-text);font:inherit;}
+.learn-training-body input[type="checkbox"] {width:14px;height:14px;margin:0;accent-color:var(--mc-accent);}
+.learn-training-body small {font-size:11px;color:var(--mc-text-muted);}
+.learn-training-data,.learn-training-job,.learn-trained-models {display:grid;gap:8px;}
+.learn-training-data {border:1px solid var(--mc-border);border-radius:8px;padding:10px;background:var(--mc-surface-2);}
+.learn-training-counts {display:flex;flex-wrap:wrap;gap:6px 12px;font-size:11px;}
+.learn-training-counts b {margin-left:3px;font-variant-numeric:tabular-nums;}
+.learn-training-fields {display:grid;grid-template-columns:minmax(0,1fr) 105px;gap:10px;}
+.learn-training-advanced>summary,.learn-training-body .training-balance-details>summary {cursor:pointer;color:var(--mc-text-muted);}
+.learn-training-advanced>label,.learn-training-advanced>fieldset {margin-top:10px;}
+.learn-training-body .reasoning-type-scope label {display:flex;align-items:center;gap:6px;min-height:26px;}
+.learn-training-body .learn-training-submit {background:var(--mc-accent);color:var(--mc-accent-contrast,#fff);border-color:var(--mc-accent);}
+.learn-training-drawer button:disabled,.learn-training-drawer input:disabled,.learn-training-drawer select:disabled {opacity:.5;cursor:default;}
+.learn-training-job,.learn-trained-models {padding-top:12px;border-top:1px solid var(--mc-border);}
+.learn-training-job progress {width:100%;accent-color:var(--mc-accent);}
+.learn-training-body p {margin:0;}
+.learn-training-body [role="alert"] {color:#b54836;overflow-wrap:anywhere;}
+
+.learn-training-job-heading {display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.learn-training-job-heading .training-cancel-button {display:flex;align-items:center;justify-content:center;width:32px;padding:0;flex:none;}
+
+.learn-model-picker {display:flex;align-items:center;gap:6px;min-width:0;}
+.learn-model-picker select {flex:1;}
+.learn-training-drawer .learn-model-delete {display:flex;align-items:center;justify-content:center;flex:none;width:32px;height:32px;padding:0;}
+.learn-model-delete-confirm {display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:12px;}
+.learn-model-delete-confirm span {margin-right:auto;overflow-wrap:anywhere;}
+
+.learn-training-header-actions {display:flex;align-items:center;gap:6px;}
+.learn-training-drawer>header .training-cancel-button {width:auto;gap:6px;padding:0 10px;}
+.collect-dataset-toolbar .learn-training-launcher .training-cancel-button {display:flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid var(--mc-border);background:var(--mc-surface);color:var(--mc-text);border-radius:6px;}
+.collect-dataset-toolbar .learn-training-launcher .training-cancel-button:disabled {opacity:.5;cursor:default;}

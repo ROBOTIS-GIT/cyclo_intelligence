@@ -12,6 +12,7 @@ import pytest
 APP_PATH = Path(__file__).resolve().with_name("app.py")
 REPO_ROOT = APP_PATH.parents[2]
 
+_previous_docker_modules = {key: sys.modules.get(key) for key in ("docker", "docker.errors")}
 docker_stub = types.ModuleType("docker")
 docker_errors_stub = types.ModuleType("docker.errors")
 
@@ -29,6 +30,7 @@ class NotFound(DockerException):
 
 
 docker_stub.from_env = lambda: None
+docker_stub.errors = docker_errors_stub
 docker_errors_stub.DockerException = DockerException
 docker_errors_stub.ImageNotFound = ImageNotFound
 docker_errors_stub.NotFound = NotFound
@@ -55,6 +57,12 @@ try:
     spec.loader.exec_module(app)
 finally:
     sys.path = original_path
+    # Keep this isolated app import from replacing the SDK for other test modules.
+    for _key, _previous in _previous_docker_modules.items():
+        if _previous is None:
+            sys.modules.pop(_key, None)
+        else:
+            sys.modules[_key] = _previous
 
 _missing_required_mounts = app._missing_required_mounts
 _mount_source_for_destination = app._mount_source_for_destination
@@ -217,7 +225,11 @@ def test_navigation_validates_map_name():
         navigation._validate_map_name("factory; reboot")
 
 
-def test_navigation_delete_pgm_removes_sidecars_and_missions(monkeypatch):
+def test_navigation_delete_pgm_removes_sidecars_and_missions(monkeypatch, tmp_path):
+    monkeypatch.setattr(navigation_spots, "SPOTS_ROOT", tmp_path)
+    spot_dir = tmp_path / "maps" / "factory"
+    spot_dir.mkdir(parents=True)
+    (spot_dir / "spots.json").write_text("{}")
     executed = []
 
     def fake_exec(command, **kwargs):
@@ -229,7 +241,8 @@ def test_navigation_delete_pgm_removes_sidecars_and_missions(monkeypatch):
 
     result = navigation.delete_pgm("factory.pgm")
 
-    assert result == {"path": "factory.pgm", "removed_missions": 2, "deleted": True}
+    assert result == {"path": "factory.pgm", "removed_missions": 2, "removed_spot_storage": True, "deleted": True}
+    assert not spot_dir.exists()
     rm_command = executed[-1]
     assert rm_command[:2] == ["rm", "-f"]
     assert str(navigation.MAPS_DIR / "factory.pgm") in rm_command
@@ -3088,7 +3101,7 @@ def test_compose_uses_repo_local_workspace_mounts():
     assert "CYCLO_WORKSPACE_DIR" not in compose
     assert "CYCLO_HUGGINGFACE_DIR" not in compose
     assert compose.count("./workspace:/workspace") == 3
-    assert compose.count("./huggingface:/root/.cache/huggingface") == 3
+    assert compose.count("./huggingface:/root/.cache/huggingface") == 5  # Cyclo, LeRobot, GR00T, Qwen, SAM2
 
 
 def test_container_helper_does_not_export_workspace_mount_overrides():
@@ -3990,3 +4003,82 @@ def test_bt_trees_seed_from_the_pre_1_4_source_directory(monkeypatch, tmp_path):
     ))
     assert (legacy / "user_task.xml").read_text() == "<root user='1'/>"
     assert asyncio.run(bt_trees.read_tree("user_task.xml")).content == "<root user='2'/>"
+
+
+def test_remove_map_spots_scoped_and_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(navigation_spots, "SPOTS_ROOT", tmp_path)
+    for name in ["factory", "other"]:
+        directory = tmp_path / "maps" / name
+        directory.mkdir(parents=True)
+        (directory / "spots.json").write_text("{}")
+    assert navigation_spots.remove_map_spots("factory") is True
+    assert not (tmp_path / "maps" / "factory").exists()
+    assert (tmp_path / "maps" / "other" / "spots.json").is_file()
+    assert navigation_spots.remove_map_spots("factory") is False
+
+
+@pytest.mark.parametrize("map_name", [".", "..", "../outside", "linked"])
+def test_delete_map_rejects_unsafe_spot_paths_before_removing_pgm(tmp_path, monkeypatch, map_name):
+    from fastapi import HTTPException
+    from pathlib import PurePosixPath
+    monkeypatch.setattr(navigation_spots, "SPOTS_ROOT", tmp_path)
+    (tmp_path / "maps").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "spots.json").write_text("keep")
+    (tmp_path / "maps" / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(HTTPException):
+        navigation_spots.remove_map_spots(map_name)
+    assert (outside / "spots.json").read_text() == "keep"
+    if map_name == "linked":
+        calls = []
+        monkeypatch.setattr(navigation, "_exec", lambda command, **kw: (calls.append(command) or 0, ""))
+        with pytest.raises(HTTPException):
+            navigation.delete_pgm("linked.pgm")
+        assert all(command[0] != "rm" for command in calls)
+
+
+def test_delete_map_failure_keeps_spots(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setattr(navigation_spots, "SPOTS_ROOT", tmp_path)
+    directory = tmp_path / "maps" / "factory"
+    directory.mkdir(parents=True)
+    (directory / "spots.json").write_text("keep")
+    monkeypatch.setattr(navigation, "_exec", lambda command, **kw: (1, "permission denied") if command[0] == "rm" else (0, ""))
+    with pytest.raises(HTTPException):
+        navigation.delete_pgm("factory.pgm")
+    assert (directory / "spots.json").read_text() == "keep"
+
+
+def test_spot_cleanup_failure_is_reported(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setattr(navigation_spots, "SPOTS_ROOT", tmp_path)
+    directory = tmp_path / "maps" / "factory"
+    directory.mkdir(parents=True)
+    def fail(*args, **kwargs):
+        raise PermissionError("denied")
+    monkeypatch.setattr(navigation_spots.shutil, "rmtree", fail)
+    with pytest.raises(HTTPException) as info:
+        navigation_spots.remove_map_spots("factory")
+    assert info.value.status_code == 503
+    assert directory.exists()
+
+
+def test_bt_readiness_route_is_registered_without_starting_ros():
+    paths = {route.path for route in app.app.routes if hasattr(route, "path")}
+    assert "/bt/readiness" in paths
+
+
+def test_bt_readiness_closes_with_supervisor_lifespan(monkeypatch):
+    closed = []
+    monkeypatch.setattr(app._navigation_module, "ensure_ros_grid_subscriber_started", lambda: None)
+    monkeypatch.setattr(app._autonomy, "owned", False)
+    monkeypatch.setattr(app._bt_readiness, "close", lambda: closed.append(True))
+    monkeypatch.setattr(app._reasoning_module, "shutdown_head_camera", lambda: None)
+
+    async def exercise_lifespan():
+        async with app.app.router.lifespan_context(app.app):
+            assert closed == []
+
+    asyncio.run(exercise_lifespan())
+    assert closed == [True]

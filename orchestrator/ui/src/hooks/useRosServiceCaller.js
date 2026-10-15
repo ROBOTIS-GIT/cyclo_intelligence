@@ -23,6 +23,7 @@ import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { DEFAULT_PATHS } from '../constants/paths';
+import { readBtNodeCatalog } from '../utils/btCatalogClient';
 import {
   selectInferenceTaskInfo,
   selectRecordTaskInfo,
@@ -476,11 +477,7 @@ export function useRosServiceCaller() {
 
   const getNodeCatalog = useCallback(async () => {
     try {
-      const result = await callService(
-        '/bt/nodes/catalog',
-        'interfaces/srv/GetNodeCatalog',
-        {}
-      );
+      const result = await readBtNodeCatalog(callService);
       return result;
     } catch (error) {
       console.error('Failed to get BT node catalog:', error);

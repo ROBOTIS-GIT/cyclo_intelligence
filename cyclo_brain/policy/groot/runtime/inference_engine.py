@@ -16,7 +16,7 @@
 #
 # Author: Dongyun Kim
 
-"""GR00T N1.6 inference engine.
+"""GR00T N1.7 inference engine.
 
 Encapsulates Gr00tPolicy loading, RobotClient setup, observation
 preprocessing, and action chunk postprocessing. Imported by
@@ -321,11 +321,14 @@ class GR00TInference:
             )
             self._sync_hf_token_for_gated_backbones()
 
-            self.policy = Gr00tPolicy(
-                embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
-                model_path=model_path,
-                device="cuda",
-            )
+            from runtime.cached_cosmos_processor import cached_cosmos_processor
+
+            with cached_cosmos_processor():
+                self.policy = Gr00tPolicy(
+                    embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+                    model_path=model_path,
+                    device="cuda",
+                )
 
             self.init_policy_info()
             self.init_robot_info(robot_type)
@@ -355,12 +358,21 @@ class GR00TInference:
                 "action_keys": list(self.policy_info["action"]),
             }
         except Exception as e:
+            # Failed loads must not leave a partially initialized policy active.
+            try:
+                self.cleanup()
+            except Exception:
+                self.logger.warning("Failed to close sensors after LOAD error", exc_info=True)
+            finally:
+                self.policy = None
+                self.robot = None
             self._loaded_model_path = None
             self._loaded_acceleration_mode = ACCELERATION_PYTORCH
             self._loaded_acceleration_engine_path = ""
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
             return self.fail(message)
+
 
     @staticmethod
     def _normalize_acceleration_mode(value: str) -> str:
@@ -716,31 +728,43 @@ class GR00TInference:
 
         self.logger.info("Robot info: %s", self.robot_info)
 
+
     def get_action_chunk(self, request) -> dict:
-        """Build observation from RobotClient, run inference, return action chunk."""
+        """Build the sensor observation and run standard GR00T inference."""
         if not self.is_ready:
             return self.fail("Not in inference mode")
 
+        timing = {}
         try:
+            task = request.task_instruction
+            preprocess_started = time.monotonic()
             images = self.robot.get_images(format="rgb")
             joints = self.robot.get_joint_positions()
-            task = request.task_instruction
-
             observation = self.preprocess(images, joints, task)
+            timing["observation_preprocess_duration_s"] = time.monotonic() - preprocess_started
             if "success" in observation:
+                observation["timing"] = timing
                 return observation
 
             t0 = time.monotonic()
             self.logger.info("Running GR00T inference...")
-            action, info = self.policy.get_action(observation)
-            self.logger.info("GR00T inference completed in %.3fs", time.monotonic() - t0)
-            return self.postprocess_action(action)
+            action, _info = self.policy.get_action(observation)
+            timing["mode"] = "standard"
+            timing["policy_duration_s"] = time.monotonic() - t0
+            self.logger.info("GR00T inference completed in %.3fs", timing["policy_duration_s"])
+            result = self.postprocess_action(action)
+            result["timing"] = timing
+            return result
 
         except Exception as e:
             self.logger.error("Inference failed: %s", e, exc_info=True)
-            return self.fail(str(e))
+            result = self.fail(str(e))
+            result["timing"] = timing
+            return result
 
-    def preprocess(self, images: dict, joints: dict, task: str) -> dict:
+    def preprocess(
+        self, images: dict, joints: dict, task: str
+    ) -> dict:
         """Build observation dict from raw sensor data. Returns fail dict on error."""
         if not images or not joints:
             return self.fail("No recent observations from sensors")

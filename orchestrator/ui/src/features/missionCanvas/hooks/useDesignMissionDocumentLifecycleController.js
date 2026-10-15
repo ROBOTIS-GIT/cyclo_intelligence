@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useRef } from "react";
-import { uniqueMissionName } from "../lib/missionNames";
+import { uniqueMissionName } from "../../mapWorkspace/lib/missionNames";
 
 function sameIdentity(left, right) {
   return left?.mapName === right?.mapName && left?.missionName === right?.missionName;

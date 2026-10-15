@@ -1,0 +1,40 @@
+@font-face { font-family:"Nunito Thought"; src:url("../../../../public/fonts/nunito-variable.ttf") format("truetype"); font-weight:200 1000; font-style:normal; font-display:swap; }
+.operate-experience { position:relative; display:flex; flex:1; min-height:0; min-width:0; overflow:hidden; }
+.operate-experience > .operate-scene-surface { flex:1; min-width:0; position:relative; display:flex; overflow:hidden; }
+.operate-map-canvas { position:relative; flex:1; min-height:0; min-width:0; overflow:hidden; }
+.operate-tools { position:absolute; top:20px; right:16px; z-index:32; display:flex; flex-direction:column; gap:8px; padding:8px; border:1px solid var(--mc-border); border-radius:14px; background:var(--mc-surface); box-shadow:var(--mc-shadow); }
+.operate-tools button,.operate-drawer-heading button { width:34px; height:34px; display:grid; place-items:center; border:1px solid var(--mc-border-strong); border-radius:9px; color:var(--mc-text); background:var(--mc-surface); }
+.operate-tools button:hover,.operate-tools button[aria-expanded="true"] { color:var(--mc-accent); background:var(--mc-accent-soft); border-color:var(--mc-accent); }
+.operate-tools button:focus-visible,.operate-drawer-heading button:focus-visible { outline:2px solid var(--mc-accent); outline-offset:3px; }
+.operate-detail-drawer { position:absolute; z-index:31; top:20px; right:80px; bottom:20px; width:min(360px,calc(100% - 104px)); background:var(--mc-surface); border:1px solid var(--mc-border); border-radius:16px; box-shadow:0 8px 32px rgba(28,26,23,.14); display:flex; flex-direction:column; color:var(--mc-text); }
+.operate-detail-drawer[hidden] { display:none; }
+.operate-drawer-heading { padding:12px 16px; border-bottom:1px solid var(--mc-border); display:flex; align-items:center; justify-content:space-between; font-size:14px; }
+.operate-drawer-body { min-height:0; padding:12px; overflow:auto; }
+.operate-drawer-body .operate-sidebar-events { max-height:none; }
+.operate-robot-thought { position:absolute; inset:0; pointer-events:none; z-index:8; overflow:hidden; color:var(--mc-text); opacity:0; visibility:hidden; transition:opacity var(--thought-fade-duration,700ms) cubic-bezier(.4,0,.2,1),visibility 0s linear var(--thought-fade-duration,700ms); }
+.operate-robot-thought.is-visible { opacity:1; visibility:visible; transition-delay:0s; }
+.operate-thought-connector { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+.operate-thought-connector circle { fill:color-mix(in srgb,var(--mc-surface) 40%,transparent); stroke:color-mix(in srgb,var(--mc-border-strong) 55%,transparent); stroke-width:1; stroke-linejoin:round; transition:transform 180ms ease-out; }
+.operate-thought-bubble { position:absolute; isolation:isolate; box-sizing:border-box; display:flex; flex-direction:column; width:480px; max-width:calc(100% - 96px); padding:var(--thought-pad-top,72px) var(--thought-pad-x,72px) var(--thought-pad-bottom,100px); transition:left 180ms ease-out,top 180ms ease-out; background:transparent; max-height:calc(100% - 168px); overflow:visible; }
+.operate-thought-content { position:relative; min-height:0; min-width:0; overflow:auto; scrollbar-width:none; border-radius:24px; }
+.operate-thought-content::-webkit-scrollbar { display:none; width:0; height:0; }
+.operate-thought-cloud { position:absolute; inset:0; width:100%; height:100%; z-index:-1; overflow:visible; filter:drop-shadow(0 5px 12px rgba(28,26,23,.08)); pointer-events:none; }
+.operate-thought-cloud path { fill:color-mix(in srgb,var(--mc-surface) 52%,transparent); stroke:color-mix(in srgb,var(--mc-border-strong) 65%,transparent); stroke-width:1; }
+.operate-robot-thought.is-visible .operate-thought-bubble { pointer-events:auto; }
+.operate-thought-bubble.is-docked { left:20px; bottom:80px; }
+.operate-thought-bubble.tone-danger .operate-thought-cloud path { stroke:var(--mc-danger); }
+.operate-thought-reason-stack { display:grid; margin-top:16px; min-height:90px; }
+.operate-thought-reason { grid-area:1/1; align-self:start; font-family:"Nunito Thought",ui-rounded,"Hanken Grotesk",sans-serif; font-size:20px; font-weight:800; line-height:1.45; letter-spacing:.005em; margin:0; overflow:visible; overflow-wrap:anywhere; white-space:pre-wrap; }
+.operate-thought-reason.is-current { animation:thought-text-in 320ms ease both; }
+.operate-thought-reason.is-outgoing { animation:thought-text-out 320ms ease both; pointer-events:none; }
+.operate-thought-reason.is-immediate { animation:none; }
+.operate-thought-action { color:#c65046; font-weight:950; }
+@keyframes thought-text-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
+@keyframes thought-text-out { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(-3px); } }
+.operate-thought-camera { width:100%; border-radius:24px; overflow:hidden; opacity:0; transition:opacity var(--thought-fade-duration,700ms) cubic-bezier(.4,0,.2,1); }
+.operate-thought-camera.is-visible { opacity:1; }
+.operate-thought-camera .collect-live-camera,.operate-thought-camera .collect-live-image { position:relative; width:100%; height:100%; min-height:0; }
+.operate-thought-camera .operate-head-image { display:block; width:100%; height:100%; max-height:none; object-fit:contain; border:0; border-radius:0; }
+@media(prefers-reduced-motion:reduce) { .operate-robot-thought,.operate-thought-camera,.operate-thought-bubble,.operate-thought-connector circle { transition:none; } .operate-thought-reason.is-current { animation:none; } .operate-thought-reason.is-outgoing { animation:none; visibility:hidden; } }
+.operate-chat-trigger { top:auto; bottom:20px; }
+@media(max-width:700px) { .operate-thought-bubble { width:390px; padding:var(--thought-pad-top,58px) var(--thought-pad-x,52px) var(--thought-pad-bottom,80px); } .operate-thought-reason { font-size:18px; } }

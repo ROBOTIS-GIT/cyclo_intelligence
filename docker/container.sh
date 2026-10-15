@@ -32,6 +32,7 @@ MAIN_SERVICE="cyclo_intelligence"
 MAIN_CONTAINER="cyclo_intelligence"
 LEROBOT_SERVICE="lerobot"
 LEROBOT_CONTAINER="${LEROBOT_CONTAINER_NAME:-lerobot_server}"
+QWEN_CONTAINER="qwen_server"
 GROOT_SERVICE="groot"
 GROOT_CONTAINER="${GROOT_CONTAINER_NAME:-groot_server}"
 
@@ -205,6 +206,15 @@ GR00T policy container:
   start-groot      Build + start groot (N1.7 baseline). Same boot-idle
                    + LOAD-time configure pattern as lerobot.
   enter-groot      Open an interactive bash in groot_server
+
+Qwen reasoning container (AMD64 NVIDIA GPU):
+  start-sam2      Build/start click segmentation service (lazy model load)
+  stop-sam2       Stop SAM2 and release GPU memory
+  logs-sam2       Tail SAM2 logs
+  start-qwen      Build if missing + start idle Qwen HTTP server
+  enter-qwen      Open a bash in qwen_server
+  logs-qwen       Tail Qwen logs
+  stop-qwen       Stop Qwen and release GPU memory
 
 Lifecycle:
   status           s6-svstat on all containers (when running)
@@ -403,6 +413,25 @@ start_lerobot() {
     $COMPOSE up -d $BUILD_FLAG "$LEROBOT_SERVICE"
 }
 
+start_qwen() {
+    if [ "$ARCH" != "amd64" ]; then
+        echo "Error: Qwen currently supports AMD64 NVIDIA GPUs; Jetson is not configured." >&2
+        exit 1
+    fi
+    ensure_host_dir "${SCRIPT_DIR}/huggingface"
+    ensure_host_dir "${SCRIPT_DIR}/workspace/model/qwen"
+    # This is a locally built image, not a published ROBOTIS image.
+    $COMPOSE up -d --wait --wait-timeout 60 $BUILD_FLAG qwen
+}
+
+enter_qwen() {
+    if ! container_running "$QWEN_CONTAINER"; then
+        echo "Error: $QWEN_CONTAINER is not running. Run 'start-qwen' first." >&2
+        exit 1
+    fi
+    enter_bash "$QWEN_CONTAINER"
+}
+
 start_groot() {
     prepare_host_mounts
     setup_x11
@@ -450,7 +479,7 @@ show_logs() {
 show_status() {
     echo "=== Containers ==="
     docker ps --format '{{.Names}}\t{{.Status}}' \
-        | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${GROOT_CONTAINER})\\b" \
+        | grep -E "^(${MAIN_CONTAINER}|${LEROBOT_CONTAINER}|${GROOT_CONTAINER}|${QWEN_CONTAINER})\\b" \
         || echo "(none running)"
 
     # s6-overlay installs s6-svstat under /package/admin/s6-*/command/
@@ -513,6 +542,16 @@ case "${1:-help}" in
     start)           start_main ;;
     start-lerobot)   start_lerobot ;;
     start-groot)     start_groot ;;
+    start-sam2)
+        if [ "$ARCH" != "amd64" ]; then echo "SAM2 requires AMD64 NVIDIA GPU" >&2; exit 1; fi
+        ensure_host_dir "${SCRIPT_DIR}/huggingface"
+        $COMPOSE up -d --no-deps --wait --wait-timeout 60 $BUILD_FLAG sam2 ;;
+    stop-sam2)       $COMPOSE stop sam2 ;;
+    logs-sam2)       $COMPOSE logs -f sam2 ;;
+    start-qwen)      start_qwen ;;
+    enter-qwen)      enter_qwen ;;
+    logs-qwen)       $COMPOSE logs -f qwen ;;
+    stop-qwen)       $COMPOSE stop qwen ;;
     enter)           enter_main ;;
     enter-lerobot)   enter_lerobot ;;
     enter-groot)     enter_groot ;;

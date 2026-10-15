@@ -1,0 +1,5 @@
+# Keep the tested inference stack; add only the adapter training dependency.
+FROM mission-reasoning/qwen:0.1.0-amd64
+RUN python -m pip install --no-cache-dir --no-deps peft==0.19.1 \
+    && python -c "import peft; print(peft.__version__)"
+ENTRYPOINT ["python"]

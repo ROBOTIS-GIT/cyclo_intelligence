@@ -1,0 +1,118 @@
+{
+  "map_name": "house",
+  "schema_version": 1,
+  "spots": [
+    {
+      "id": "home_observation",
+      "label": "Observation",
+      "linked_bt_tree": "",
+      "map_name": "house",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 0.0,
+        "y": 0.0,
+        "yaw": 0.0
+      }
+    },
+    {
+      "id": "home_table",
+      "label": "Table",
+      "linked_bt_tree": "",
+      "map_name": "house",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 2.04224,
+        "y": 0.060437,
+        "yaw": 0.0
+      }
+    },
+    {
+      "id": "home_sink",
+      "label": "Sink",
+      "linked_bt_tree": "",
+      "map_name": "house",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 6.34224,
+        "y": 1.760437,
+        "yaw": 1.570796
+      }
+    },
+    {
+      "id": "home_fridge",
+      "label": "Fridge",
+      "linked_bt_tree": "",
+      "map_name": "house",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 1.04224,
+        "y": 2.110437,
+        "yaw": 1.570796
+      }
+    },
+    {
+      "id": "house_laundry_observation",
+      "label": "LaundryObservation",
+      "map_name": "house",
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 6.04224,
+        "y": 5.560437,
+        "yaw": 1.570796
+      }
+    },
+    {
+      "id": "house_laundry_basket",
+      "label": "LaundryBasket",
+      "map_name": "house",
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 6.04224,
+        "y": 6.100437,
+        "yaw": 1.570796
+      }
+    },
+    {
+      "id": "house_laundry_washer",
+      "label": "WashingMachine",
+      "map_name": "house",
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      },
+      "pose": {
+        "frame_id": "map",
+        "x": 7.79224,
+        "y": 6.060437,
+        "yaw": 1.570796
+      }
+    }
+  ]
+}

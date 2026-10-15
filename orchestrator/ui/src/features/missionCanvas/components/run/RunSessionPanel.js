@@ -14,8 +14,8 @@
 //
 // Author: Seongwoo Kim
 
-import { MISSION_TEXT, MISSION_TEXT_MUTED } from "../../lib/theme";
-import { Panel, SessionRow } from "../primitives";
+import { MISSION_TEXT, MISSION_TEXT_MUTED } from "../../../mapWorkspace/lib/theme";
+import { Panel, SessionRow } from "../../../mapWorkspace/components/primitives";
 
 export const RUNNER_PHASE_LABEL = {
   "nav-sent": "Navigating",

@@ -1,4 +1,5 @@
 from glob import glob
+from pathlib import Path
 
 from setuptools import setup
 
@@ -76,7 +77,7 @@ setup(
         ),
         (
             'share/' + package_name + '/bt/templates',
-            glob(f'{package_name}/bt/templates/*'),
+            [p for p in glob(f'{package_name}/bt/templates/*') if Path(p).is_file()],
         ),
     ],
     install_requires=[

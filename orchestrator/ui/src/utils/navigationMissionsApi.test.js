@@ -1,10 +1,12 @@
 import {
+  NAVIGATION_MISSIONS_CHANGED_EVENT,
   deleteNavigationMission,
   deleteNavigationMissionBtFile,
   duplicateNavigationMission,
   renameNavigationMission,
   saveNavigationMissionBtFile,
   setNavigationMissionDefaultBtFile,
+  subscribeNavigationMissionChanges,
 } from './navigationMissionsApi';
 
 beforeEach(() => {
@@ -112,6 +114,8 @@ test('deletes an unowned BT file at the expected mission revision', async () => 
 });
 
 test('renames only the mission revision the user loaded', async () => {
+  const changed = jest.fn();
+  const unsubscribe = subscribeNavigationMissionChanges(changed);
   await renameNavigationMission(
     'warehouse',
     'morning',
@@ -130,6 +134,33 @@ test('renames only the mission revision the user loaded', async () => {
       }),
     }),
   );
+  expect(changed).toHaveBeenCalledWith(expect.objectContaining({
+    type: NAVIGATION_MISSIONS_CHANGED_EVENT,
+    detail: {
+      mapName: 'warehouse',
+      previousMissionName: 'morning',
+      missionName: 'evening',
+      mutation: 'rename-mission',
+    },
+  }));
+  unsubscribe();
+});
+
+test('does not publish a catalog mutation when persistence fails', async () => {
+  const changed = jest.fn();
+  const unsubscribe = subscribeNavigationMissionChanges(changed);
+  global.fetch.mockResolvedValueOnce({
+    ok: false,
+    status: 409,
+    statusText: 'Conflict',
+    json: async () => ({ detail: 'stale revision' }),
+  });
+
+  await expect(deleteNavigationMission('warehouse', 'morning')).rejects.toThrow(
+    'stale revision',
+  );
+  expect(changed).not.toHaveBeenCalled();
+  unsubscribe();
 });
 
 test('duplicates a stable source mission revision', async () => {

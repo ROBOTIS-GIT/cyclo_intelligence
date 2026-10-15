@@ -7,7 +7,7 @@ import {
   behaviorNodeId,
   behaviorNodeSerialFromNodes,
 } from "../lib/designStore";
-import { spotPoseFromMapPose } from "../lib/missionSpots";
+import { spotPoseFromMapPose } from "../../mapWorkspace/lib/missionSpots";
 
 export default function useDesignBehaviorNodeController({
   designMapName,

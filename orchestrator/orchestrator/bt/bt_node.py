@@ -20,10 +20,13 @@
 
 import json
 import os
+import threading
+import xml.etree.ElementTree as ET
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from interfaces.srv import GetNodeCatalog
 from interfaces.srv import LoadAndRunTree
@@ -33,6 +36,7 @@ from shared.robot_configs.schema import is_bt_supported
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
+from orchestrator.bt.execution_pause import ExecutionPause, serialized, nonblocking_tick
 from orchestrator.bt.blackboard import Blackboard  # noqa: I100
 from orchestrator.bt.bt_core import NodeStatus  # noqa: I100
 from orchestrator.bt.bt_nodes_loader import TreeLoader  # noqa: I100
@@ -74,7 +78,7 @@ def resolve_tree_path(tree_xml: str) -> str:
     return candidates[0]
 
 
-class BehaviorTreeNode(Node):
+class BehaviorTreeNode(ExecutionPause, Node):
     """ROS 2 node that loads and executes behavior trees."""
 
     def __init__(self):
@@ -84,6 +88,8 @@ class BehaviorTreeNode(Node):
         self.blackboard = Blackboard()
 
         self.tree_execution_mode = 'stopped'
+        self._execution_lock = threading.RLock()
+        self.inference_supervisor = None
         self.main_tree_path = None
 
         self.declare_parameter('robot_type', DEFAULT_BT_ROBOT_TYPE)
@@ -148,6 +154,13 @@ class BehaviorTreeNode(Node):
         # Service: start/stop BT execution
         self.set_running_srv = self.create_service(
             SetBool, '/bt/set_running', self._set_running_callback
+        )
+
+        # Dedicated callback group allows actuator feedback during hold waits.
+        self._pause_callback_group = ReentrantCallbackGroup()
+        self.set_paused_srv = self.create_service(
+            SetBool, '/bt/set_paused', self._set_paused_callback,
+            callback_group=self._pause_callback_group,
         )
 
         # Service: load tree from XML string and start execution
@@ -274,6 +287,7 @@ class BehaviorTreeNode(Node):
         )
         return config
 
+    @nonblocking_tick
     def tick_callback(self):
         """Execute one tick of the behavior tree."""
         if self.root is None:
@@ -308,9 +322,14 @@ class BehaviorTreeNode(Node):
             )
             self._handle_tree_completion(status)
 
+    @serialized
     def _set_running_callback(self, request, response):
         """Handle /bt/set_running service call."""
         if request.data:
+            if self.tree_execution_mode in ('paused', 'pausing', 'pause_failed'):
+                response.success = False
+                response.message = 'Use /bt/set_paused to resume preserved tree progress'
+                return response
             if self.root is None:
                 response.success = False
                 response.message = 'No tree loaded'
@@ -320,27 +339,50 @@ class BehaviorTreeNode(Node):
             response.message = 'BT started'
             self.get_logger().info('BT execution started via service')
         else:
-            if self.tree_execution_mode in ('running', 'completed', 'failed'):
+            if self.tree_execution_mode in ('running', 'completed', 'failed', 'paused', 'pausing', 'pause_failed'):
+                self.tree_execution_mode = 'pausing'
+                try:
+                    if self.inference_supervisor is not None:
+                        self.inference_supervisor.stop()
+                    if self.root is not None:
+                        self.root.reset()
+                except Exception as exc:
+                    self.tree_execution_mode = 'pause_failed'
+                    response.success = False
+                    response.message = 'Stop hold failed: ' + str(exc)
+                    self._publish_status()
+                    return response
+                finally:
+                    self._send_cleanup_command()
                 self.tree_execution_mode = 'stopped'
-                if self.root is not None:
-                    self.root.reset()
-                self._send_cleanup_command()
                 self.get_logger().info('BT execution stopped via service')
             response.success = True
             response.message = 'BT stopped'
         self._publish_status()
         return response
 
+    @serialized
     def _load_and_run_callback(self, request, response):
         """Handle /bt/load_and_run: load XML tree and start execution."""
         try:
             # Stop current tree if running
-            if self.tree_execution_mode == 'running':
-                self.tree_execution_mode = 'stopped'
-                if self.root is not None:
-                    self.root.reset()
-                self._send_cleanup_command()
+            if self.tree_execution_mode in ('running', 'paused', 'pausing', 'pause_failed'):
+                stop_request, stop_response = SetBool.Request(), SetBool.Response()
+                stop_request.data = False
+                self._set_running_callback(stop_request, stop_response)
+                if not stop_response.success:
+                    # Keep the previous tree and lifecycle owner for Stop retry.
+                    response.success = False
+                    response.message = stop_response.message
+                    return response
 
+            # Only server-owned tasks opt into direct, serialized policy calls.
+            # Ordinary Run keeps its existing orchestrator lifecycle path.
+            xml_root = ET.fromstring(request.tree_xml)
+            self.inference_supervisor = None
+            if xml_root.get('autonomy_supervised') == 'true':
+                from .inference_supervisor import InferenceSupervisor
+                self.inference_supervisor = InferenceSupervisor(self)
             # Load new tree from XML string
             self.root = self.tree_loader.load_tree_from_string(
                 request.tree_xml
@@ -402,6 +444,8 @@ class BehaviorTreeNode(Node):
 
     def _send_cleanup_command(self):
         """Send STOP_INFERENCE to pause inference (model stays loaded)."""
+        if self.inference_supervisor is not None:
+            return  # Direct supervisor owns its policy; do not touch /task session.
         try:
             if not self._cleanup_client.service_is_ready():
                 self.get_logger().warn(
@@ -430,6 +474,19 @@ class BehaviorTreeNode(Node):
 
     def _handle_tree_completion(self, status: NodeStatus):
         """Handle the completion of a behavior tree execution."""
+        if self.inference_supervisor is not None:
+            try:
+                if status == NodeStatus.SUCCESS:
+                    self.inference_supervisor.complete()
+                else:
+                    self.inference_supervisor.stop()
+            except Exception as exc:
+                self.get_logger().error(str(exc))
+                # Preserve the policy owner and cursor until a Stop retry has
+                # confirmed hold. A failed stop is not a completed task.
+                self.tree_execution_mode = 'pause_failed'
+                self._publish_status()
+                return
         if self.root is not None:
             self.root.reset()
 

@@ -68,8 +68,10 @@ function throwIfAborted(signal) {
 
 export function useMissionRunner({
   orderedSpots,
+  pausableNavigation = false,
   resolveBtXml,
   btStatusRef,
+  btStatusHistoryRef,
   callService,
   sendGoal,
   sendGoals,
@@ -88,6 +90,14 @@ export function useMissionRunner({
 
   const [state, dispatch] = useReducer(missionRunnerReducer, orderedSpots || [], initialRunnerState);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [pauseFailed, setPauseFailed] = useState(false);
+  const pauseFailedRef = useRef(false);
+  const pauseRef = useRef(false);
+  const pausingRef = useRef(false);
+  const navAttemptRef = useRef(null);
+  const pauseCleanupRef = useRef(Promise.resolve());
 
   // Everything the loop needs, read live through refs (no stale closures).
   const spotsRef = useRef(orderedSpots || []);
@@ -151,7 +161,7 @@ export function useMissionRunner({
   // Keep the newly-loaded tree ticking until it reports a FRESH terminal status.
   // The engine latches the previous run's `completed`, so we only accept a
   // terminal once we've seen `running` (or the status object identity changed).
-  const awaitBtTerminal = useCallback(async (signal, timeoutMs) => {
+  const awaitBtTerminal = useCallback(async (signal, timeoutMs, baselineSequence) => {
     const cfg = configRef.current;
     const statusAtLoad = btStatusRef.current;
     let sawRunning = false;
@@ -159,6 +169,11 @@ export function useMissionRunner({
     const runDeadline = Date.now() + (timeoutMs ?? cfg.btTimeoutMs);
     for (;;) {
       const status = normStatus(btStatusRef.current);
+      const history = btStatusHistoryRef?.current;
+      if (history && history.runningSequence > baselineSequence) sawRunning = true;
+      if (history && history.runningSequence > baselineSequence && history.terminalSequence > history.runningSequence) {
+        return history.terminalStatus;
+      }
       if (status === "running") sawRunning = true;
       const fresh = sawRunning || btStatusRef.current !== statusAtLoad;
       if (fresh && status === "completed") return "completed";
@@ -167,13 +182,16 @@ export function useMissionRunner({
       if (Date.now() > runDeadline) return "timeout";
       await cancellableSleep(cfg.pollMs, signal);
     }
-  }, [btStatusRef]);
+  }, [btStatusRef, btStatusHistoryRef]);
 
   const runWaypointBt = useCallback(async (index, xml, signal) => {
     const spot = spotsRef.current[index];
     const label = (spot && (spot.label || spot.id)) || `Waypoint ${index + 1}`;
 
     dispatch({ type: "runBt", index });
+    // A short tree can publish running and completed before the service reply.
+    // Keep the event sequence from before load so neither transition is lost.
+    const baselineSequence = btStatusHistoryRef?.current?.sequence ?? 0;
     let loadResult;
     const loadPromise = Promise.resolve().then(() => callServiceRef.current(
       "/bt/load_and_run",
@@ -204,7 +222,7 @@ export function useMissionRunner({
     const timeoutMs = requiresBackendTaskTimeout(xml)
       ? cfg.backendTaskTimeoutMs
       : cfg.btTimeoutMs;
-    const outcome = await awaitBtTerminal(signal, timeoutMs);
+    const outcome = await awaitBtTerminal(signal, timeoutMs, baselineSequence);
     if (outcome === "completed") {
       btNeedsStopRef.current = false;
       dispatch({ type: "finish", index, skipped: false });
@@ -222,14 +240,59 @@ export function useMissionRunner({
     }
     dispatch({ type: "fail", reason: reasonByOutcome[outcome] || `Waypoint Task error at ${label}`, index });
     return false;
-  }, [awaitBtTerminal, stopEngagedBt]);
+  }, [awaitBtTerminal, btStatusHistoryRef, stopEngagedBt]);
+
+  // Record keeps each unfinished waypoint pending while its current goal is cancelled.
+  const sendPausableGoal = useCallback(async (goal, signal) => {
+    while (true) {
+      while (pauseRef.current) await cancellableSleep(50, signal);
+      throwIfAborted(signal);
+      await pauseCleanupRef.current;
+      throwIfAborted(signal);
+      if (pauseRef.current) continue;
+      const attempt = new AbortController();
+      const abort = () => attempt.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      navAttemptRef.current = attempt;
+      try {
+        const result = await sendGoalRef.current(goal.x, goal.y, goal.yaw, attempt.signal);
+        throwIfAborted(signal);
+        if (!attempt.signal.aborted) return result;
+      } catch (error) {
+        throwIfAborted(signal);
+        if (!attempt.signal.aborted) throw error;
+      } finally {
+        signal.removeEventListener("abort", abort);
+        if (navAttemptRef.current === attempt) navAttemptRef.current = null;
+      }
+    }
+  }, []);
+
+  const pause = useCallback(async () => {
+    if (!pausableNavigation || !isRunningRef.current || pausingRef.current) return;
+    pauseRef.current = true; setPaused(true);
+    pausingRef.current = true; setPausing(true);
+    navAttemptRef.current?.abort();
+    const cleanup = Promise.resolve().then(() => cancelGoalRef.current?.());
+    pauseCleanupRef.current = cleanup.catch(() => {});
+    try { await cleanup; pauseFailedRef.current = false; setPauseFailed(false); }
+    catch (error) { pauseFailedRef.current = true; setPauseFailed(true); emit("Pause failed. Retry Pause before resuming."); throw error; }
+    finally { pausingRef.current = false; setPausing(false); }
+  }, [pausableNavigation, emit]);
+
+  const resume = useCallback(() => {
+    if (!isRunningRef.current || pausingRef.current || pauseFailedRef.current) return;
+    pauseRef.current = false; setPaused(false);
+  }, []);
 
   const runNavigationBatch = useCallback(async (startIndex, signal) => {
     const spots = spotsRef.current;
     const resolveXml = (spot) => (
       resolveBtXmlRef.current ? resolveBtXmlRef.current(spot) : ""
     );
-    const batch = navigationBatchFromIndex(spots, startIndex, resolveXml);
+    const batch = pausableNavigation
+      ? { indices: startIndex < spots.length ? [startIndex] : [], useThroughPoses: false }
+      : navigationBatchFromIndex(spots, startIndex, resolveXml);
     const indices = batch.indices;
     if (!indices.length) {
       dispatch({
@@ -252,7 +315,9 @@ export function useMissionRunner({
 
     let navigationResult;
     try {
-      if (batch.useThroughPoses) {
+      if (pausableNavigation) {
+        navigationResult = await sendPausableGoal(goals[0], signal);
+      } else if (batch.useThroughPoses) {
         if (typeof sendGoalsRef.current !== "function") {
           throw new Error("NavigateThroughPoses client is unavailable");
         }
@@ -308,28 +373,30 @@ export function useMissionRunner({
 
     const ok = await runWaypointBt(endpointIndex, endpointXml, signal);
     return { ok, nextIndex: endpointIndex + 1 };
-  }, [runWaypointBt]);
+  }, [runWaypointBt, pausableNavigation, sendPausableGoal]);
 
   const start = useCallback(() => {
-    if (isRunningRef.current) return;
+    if (isRunningRef.current) return false;
     const spots = spotsRef.current;
     if (!spots.length) {
       emit("No route to run — connect waypoints in Design first");
-      return;
+      return false;
     }
     const flags = getFlagsRef.current ? getFlagsRef.current() : {};
     if (!flags.navRunning) {
       emit("Start navigation before running the mission");
-      return;
+      return false;
     }
     const needsBt = spots.some((spot) => !isEmptyBt(resolveBtXmlRef.current ? resolveBtXmlRef.current(spot) : ""));
     // Without an activation callback the caller owns the BT lifecycle
     // (legacy behavior): refuse to start while the node is down.
     if (needsBt && !flags.btNodeIsUp && !ensureBtActiveRef.current) {
       emit("Activate the Task Engine before running the mission");
-      return;
+      return false;
     }
 
+    pauseRef.current = false; setPaused(false);
+    pauseFailedRef.current = false; setPauseFailed(false);
     const controller = new AbortController();
     abortRef.current = controller;
     isRunningRef.current = true;
@@ -379,6 +446,7 @@ export function useMissionRunner({
         // shut down resources already acquired by a newer run.
         try {
           await stopCleanupRef.current;
+          await pauseCleanupRef.current;
           await stopEngagedBt().catch(() => {});
           if (needsBt && releaseBtRef.current) {
             await Promise.resolve().then(releaseBtRef.current).catch(() => {});
@@ -392,11 +460,13 @@ export function useMissionRunner({
         }
       }
     })();
+    return true;
   }, [emit, runNavigationBatch, stopEngagedBt]);
 
   const stop = useCallback(() => {
     const controller = abortRef.current;
     if (controller) controller.abort();
+    pauseRef.current = false; setPaused(false);
     dispatch({ type: "cancel" });
     const cleanup = Promise.allSettled([
       Promise.resolve().then(() => (cancelGoalRef.current ? cancelGoalRef.current() : null)),
@@ -435,6 +505,7 @@ export function useMissionRunner({
     : "";
 
   return {
+    pause, resume, paused, pausing, pauseFailed,
     status: state.status,
     phase: state.phase,
     currentIndex: state.currentIndex,

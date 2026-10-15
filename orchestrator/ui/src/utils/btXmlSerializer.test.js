@@ -52,6 +52,54 @@ function sampleGraph() {
 }
 
 describe('btXmlSerializer', () => {
+  it.each([
+    ['vla_rail_enabled', 'true'],
+    ['vla_rail_enabled', 'false'],
+  ])('preserves %s=%s on GR00T LOAD through XML round trip', (param, value) => {
+    const node = { id: 'load', type: 'btAction', position: { x: 0, y: 0 }, data: {
+      nodeType: 'SendCommand', label: 'Load', params: {
+        command: 'LOAD', model: 'groot:n17', [param]: value,
+      },
+    } };
+    const xml = serializeFromGraph([node], [], new Map([
+      ['load', { tag: 'SendCommand', name: 'Load', params: node.data.params }],
+    ]));
+    expect(xml).toContain(`${param}="${value}"`);
+    const parsed = parseBTXml(xml);
+    expect([...parsed.nodeDataMap.values()].find(entry => entry.tag === 'SendCommand')
+      .params[param]).toBe(value);
+  });
+
+  it.each([
+    ['INFERENCE', 'RESUME', 'groot:n17'],
+    ['INFERENCE', 'STOP', 'groot:n17'],
+    ['INFERENCE', 'CLEAR', 'groot:n17'],
+    ['INFERENCE', 'LOAD', 'lerobot:act'],
+    ['DOCKER', 'START', 'groot:n17'],
+  ])('omits chunk postprocessors for %s %s %s', (target, command, model) => {
+    const node = { id: 'command', position: { x: 0, y: 0 } };
+    const params = {
+      target, command, model, vla_rail_enabled: 'true',
+    };
+    const xml = serializeFromGraph([node], [], new Map([
+      ['command', { tag: 'SendCommand', name: 'Command', params }],
+    ]));
+    expect(xml).not.toContain('vla_rail_enabled=');
+  });
+
+  it('drops all retired inference flags from a saved GR00T LOAD', () => {
+    const { nodes, edges, nodeDataMap } = sampleGraph();
+    const retired = ['ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+      'chunk_endpoint_interpolation', 'remac_enabled'];
+    nodeDataMap.set('bt_1', { tag: 'SendCommand', name: 'Load', params: {
+      command: 'LOAD', model: 'groot:n17', vla_rail_enabled: 'true',
+      ...Object.fromEntries(retired.map(key => [key, 'true'])),
+    } });
+    const xml = serializeFromGraph(nodes, edges, nodeDataMap);
+    for (const field of retired) expect(xml).not.toContain(`${field}=`);
+    expect(xml).toContain('vla_rail_enabled="true"');
+  });
+
   it('serializes graph nodes without layout attributes', () => {
     const { nodes, edges, nodeDataMap } = sampleGraph();
     const xml = serializeFromGraph(nodes, edges, nodeDataMap);

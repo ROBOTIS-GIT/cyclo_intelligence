@@ -85,7 +85,8 @@ RUN git clone -b jazzy https://github.com/ROBOTIS-GIT/robotis_interfaces.git \
 # so it must be declared explicitly outside the rosdep package graph.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ros-${ROS_DISTRO}-map-msgs && \
+      ros-${ROS_DISTRO}-map-msgs \
+      ros-${ROS_DISTRO}-nav2-msgs && \
     rosdep update && \
     rosdep install -i \
       --from-paths src src/cyclo_intelligence/cyclo_data/recorder/rosbag_recorder \

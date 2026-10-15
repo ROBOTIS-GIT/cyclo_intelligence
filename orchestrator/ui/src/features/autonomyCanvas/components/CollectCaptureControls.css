@@ -1,0 +1,41 @@
+.collect-capture-controls.collect-capture-compact {
+  gap: 6px;
+  min-width: 0;
+}
+
+.collect-capture-controls .collect-capture-summary-heading {
+  align-items: center;
+}
+
+.collect-capture-summary-heading > span {
+  margin-left: auto;
+}
+
+.collect-capture-controls .collect-capture-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  color: var(--mc-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.collect-capture-compact .collect-capture-options {
+  padding: 6px 0;
+  border-top: 1px solid var(--mc-border);
+  border-bottom: 1px solid var(--mc-border);
+}
+
+.collect-capture-compact .collect-capture-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, 32px);
+  justify-content: center;
+  gap: 8px;
+}
+
+.collect-capture-compact > p {
+  margin: 0;
+  line-height: 1.4;
+}

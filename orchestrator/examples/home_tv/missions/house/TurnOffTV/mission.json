@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "mission_name": "TurnOffTV",
+  "map_name": "house",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "895e88d1-cb8a-49d2-b859-f1b729063183",
+    "description": "Turn off the television when nobody is watching.",
+    "start_condition": "The TV is on and no awake person is watching from the sofa. Sleeping occupants do not count as viewers.",
+    "completion_condition": "The television screen is black and its standby light is red.",
+    "stop_condition": "A person or pet blocks the robot or its arm movement.",
+    "post_stop_action": "Pause and wait for a clear path.",
+    "behavior_node_count": 0,
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "house_turn_off",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        }
+      ],
+      "edges": []
+    }
+  },
+  "waypoints": [
+    {
+      "id": "house_turn_off",
+      "label": "TVControl",
+      "pose": {
+        "frame_id": "map",
+        "x": 9.79224,
+        "y": -4.039563,
+        "yaw": -0.983255
+      },
+      "local_bt": "locals/house_turn_off/main.xml",
+      "local_bt_files": [
+        "locals/house_turn_off/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/house_turn_off/main.xml",
+        "local_bt": "locals/house_turn_off/main.xml",
+        "local_bt_files": [
+          "locals/house_turn_off/main.xml"
+        ]
+      }
+    }
+  ]
+}

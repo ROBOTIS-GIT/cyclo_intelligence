@@ -16,6 +16,27 @@
 
 const API_BASE = '/api/navigation/missions';
 
+export const NAVIGATION_MISSIONS_CHANGED_EVENT = 'cyclo:navigation-missions-changed';
+
+function publishMissionChange(detail) {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+  window.dispatchEvent(new CustomEvent(NAVIGATION_MISSIONS_CHANGED_EVENT, { detail }));
+}
+
+async function mutate(path, init, detail) {
+  const result = await request(path, init);
+  publishMissionChange(detail);
+  return result;
+}
+
+export function subscribeNavigationMissionChanges(listener) {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    return () => {};
+  }
+  window.addEventListener(NAVIGATION_MISSIONS_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(NAVIGATION_MISSIONS_CHANGED_EVENT, listener);
+}
+
 async function request(path = '', init) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -51,26 +72,31 @@ export function getNavigationMission(mapName, missionName = "") {
 }
 
 export function saveNavigationMission(mapName, mission, missionName = "") {
-  return request(`/${encodeURIComponent(mapName)}${missionQuery(missionName)}`, {
+  return mutate(`/${encodeURIComponent(mapName)}${missionQuery(missionName)}`, {
     method: 'POST',
     body: JSON.stringify(mission),
+  }, {
+    mapName,
+    missionName: missionName || 'default',
+    mutation: 'save-mission',
   });
 }
 
 export function deleteNavigationMission(mapName, missionName, options = {}) {
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(
+  return mutate(
     `/${encodeURIComponent(mapName)}?mission_name=${encodeURIComponent(missionName)}`
       + `${Number.isInteger(expectedRevision)
         ? `&expected_revision=${encodeURIComponent(expectedRevision)}`
         : ''}`,
     { method: 'DELETE' },
+    { mapName, missionName: missionName || 'default', mutation: 'delete-mission' },
   );
 }
 
 export function renameNavigationMission(mapName, missionName, newName, options = {}) {
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(`/${encodeURIComponent(mapName)}/rename`, {
+  return mutate(`/${encodeURIComponent(mapName)}/rename`, {
     method: 'POST',
     body: JSON.stringify({
       mission_name: missionName,
@@ -79,12 +105,17 @@ export function renameNavigationMission(mapName, missionName, newName, options =
         ? { expected_revision: expectedRevision }
         : {}),
     }),
+  }, {
+    mapName,
+    previousMissionName: missionName || 'default',
+    missionName: newName || 'default',
+    mutation: 'rename-mission',
   });
 }
 
 export function duplicateNavigationMission(mapName, missionName, newName, options = {}) {
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(`/${encodeURIComponent(mapName)}/duplicate`, {
+  return mutate(`/${encodeURIComponent(mapName)}/duplicate`, {
     method: 'POST',
     body: JSON.stringify({
       mission_name: missionName,
@@ -93,6 +124,11 @@ export function duplicateNavigationMission(mapName, missionName, newName, option
         ? { expected_revision: expectedRevision }
         : {}),
     }),
+  }, {
+    mapName,
+    sourceMissionName: missionName || 'default',
+    missionName: newName || 'default',
+    mutation: 'duplicate-mission',
   });
 }
 
@@ -111,7 +147,7 @@ export function saveNavigationMissionBtFile(
 ) {
   const waypointId = options?.waypointId || options?.waypoint_id || "";
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(`/${encodeURIComponent(mapName)}/bt${missionQuery(missionName)}`, {
+  return mutate(`/${encodeURIComponent(mapName)}/bt${missionQuery(missionName)}`, {
     method: 'PUT',
     body: JSON.stringify({
       path,
@@ -121,6 +157,10 @@ export function saveNavigationMissionBtFile(
         ? { expected_revision: expectedRevision }
         : {}),
     }),
+  }, {
+    mapName,
+    missionName: missionName || 'default',
+    mutation: 'save-bt',
   });
 }
 
@@ -132,7 +172,7 @@ export function setNavigationMissionDefaultBtFile(
   options = {},
 ) {
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(
+  return mutate(
     `/${encodeURIComponent(mapName)}/bt/default${missionQuery(missionName)}`,
     {
       method: 'PUT',
@@ -144,6 +184,11 @@ export function setNavigationMissionDefaultBtFile(
           : {}),
       }),
     },
+    {
+      mapName,
+      missionName: missionName || 'default',
+      mutation: 'set-default-bt',
+    },
   );
 }
 
@@ -154,12 +199,13 @@ export function deleteNavigationMissionBtFile(
   options = {},
 ) {
   const expectedRevision = options?.expectedRevision ?? options?.expected_revision;
-  return request(
+  return mutate(
     `/${encodeURIComponent(mapName)}/bt?path=${encodeURIComponent(path)}`
       + `${missionName ? `&mission_name=${encodeURIComponent(missionName)}` : ""}`
       + `${Number.isInteger(expectedRevision)
         ? `&expected_revision=${encodeURIComponent(expectedRevision)}`
         : ""}`,
     { method: 'DELETE' },
+    { mapName, missionName: missionName || 'default', mutation: 'delete-bt' },
   );
 }

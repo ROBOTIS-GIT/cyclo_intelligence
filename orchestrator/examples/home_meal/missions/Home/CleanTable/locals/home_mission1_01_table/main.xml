@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="HomeMealSequence">
+      <HomeMeal name="CheckMealAndStation" operation="pickup_table" check_only="true" timeout="15" />
+      <JointControl name="Retract" enable_arms="true" left_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" right_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" duration="5.0" enable_lift="true" lift_position="-0.28" enable_head="true" head_positions="0.35, 0" />
+      <JointControl name="Reach" enable_arms="true" left_positions="-0.17852, 0.02, -0.01937, -1.89811, 0.00106, 0.2234, -0.00395, 0.0" right_positions="-0.17852, -0.02, 0.01937, -1.89811, -0.00106, 0.2234, 0.00395, 0.0" duration="3.0" />
+      <Wait duration="0.5" />
+      <HomeMeal operation="pickup_table" timeout="15" />
+      <JointControl name="Retract" enable_arms="true" left_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" right_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" duration="3.0" />
+    </Sequence>
+  </BehaviorTree>
+</root>

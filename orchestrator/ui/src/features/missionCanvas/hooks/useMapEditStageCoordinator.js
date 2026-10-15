@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useEffect, useState } from "react";
-import { isTextInputTarget } from "../lib/dom";
-import { mapNameFromPgmPath } from "../lib/missionNames";
+import { isTextInputTarget } from "../../mapWorkspace/lib/dom";
+import { mapNameFromPgmPath } from "../../mapWorkspace/lib/missionNames";
 
 // Owns the stage-level UI glue around useMapEditor. The editor remains the
 // source of truth for map pixels, annotations, history, files and loading.

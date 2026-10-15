@@ -8,10 +8,10 @@ import {
   STAGE_MAP_EDIT,
   STAGE_NAVIGATE,
   STAGE_RUN,
-} from "../../lib/stages";
+} from "../../../mapWorkspace/lib/stages";
 import MissionStageChrome from "./MissionStageChrome";
 
-jest.mock("./StageHeader", () => ({ workspaceStage }) => (
+jest.mock("../../../mapWorkspace/components/workspace/StageHeader", () => ({ workspaceStage }) => (
   <div data-testid="header">{workspaceStage}</div>
 ));
 jest.mock("../stages/DesignStageSidebar", () => () => <div data-testid="design-sidebar" />);

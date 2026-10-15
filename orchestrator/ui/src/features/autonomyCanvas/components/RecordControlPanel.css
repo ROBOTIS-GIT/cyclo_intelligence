@@ -1,0 +1,28 @@
+/* Capture at map right; navigation and edit tools at map left. */
+.record-control-panel { position: absolute; top: 20px; right: 20px; z-index: 30; width: 300px; max-width: calc(100% - 40px); max-height: calc(100% - 40px); display: flex; flex-direction: column; border: 1px solid var(--mc-border); border-radius: 14px; background: var(--mc-surface); box-shadow: var(--mc-shadow); color: var(--mc-text); font: inherit; font-size: 12px; }
+.record-control-panel [hidden] { display: none !important; }
+.record-control-header { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--mc-border); flex-shrink: 0; }
+.record-control-title { flex: 1; font-size: 13px; padding: 4px 2px; }
+.record-control-panel button:disabled, .record-movement-controls button:disabled { opacity: .45; cursor: default; }
+.record-control-panel button:focus-visible, .record-movement-controls button:focus-visible { outline: 2px solid var(--mc-focus); outline-offset: 2px; }
+.record-control-icon { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--mc-border-strong); border-radius: 9px; flex-shrink: 0; color: var(--mc-text); background: var(--mc-surface); }
+.record-control-content { display: grid; gap: 10px; min-height: 0; overflow-y: auto; padding: 10px; }
+.record-control-footer { flex-shrink: 0; padding: 10px; border-top: 1px solid var(--mc-border); }
+.record-movement-status { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--mc-text-muted); font-size: 11px; }
+.record-movement-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.record-movement-controls { display: flex; align-items: center; gap: 8px; }
+.record-movement-controls .record-patrol-button { background: var(--mc-success); border-color: var(--mc-success); color: var(--mc-accent-fg); }
+.record-movement-controls .record-stop-button { color: var(--mc-danger); }
+.record-control-error { padding: 0 10px 8px; margin: 0; color: var(--mc-danger); font-size: 11px; overflow-wrap: anywhere; }
+.record-control-panel .record-mission-control { margin-top: 0; }
+@container (max-width: 780px) {
+  .record-control-panel { top: 76px; right: 12px; max-width: calc(100% - 24px); max-height: calc(100% - 88px); }
+}
+@container (max-width: 520px) { .record-control-panel { width: 280px; } }
+
+.record-control-icon[aria-pressed="true"] { background: var(--mc-accent-soft); color: var(--mc-accent); }
+.record-control-panel .collect-capture-buttons { display: grid; grid-template-columns: repeat(4, 32px); gap: 8px; justify-content: center; }
+.record-control-panel .collect-episode-delete { display: contents; }
+.record-control-panel .collect-episode-delete-list { position: static; grid-column: 1 / -1; justify-self: center; width: 248px; max-width: calc(100cqw - 56px); max-height: 220px; box-shadow: none; }
+
+@container (max-width: 410px) { .record-control-panel { top: 116px; max-height: calc(100% - 128px); } }

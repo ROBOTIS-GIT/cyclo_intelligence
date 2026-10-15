@@ -26,13 +26,15 @@ const SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND = {
     'task_instruction',
     'inference_mode',
     'action_request_mode',
+    'vla_rail_enabled',
     'inference_hz',
     'control_hz',
     'chunk_align_window_s',
     'acceleration_mode',
     'acceleration_engine_path',
   ]),
-  RESUME: new Set(['target', 'command', 'task_instruction']),
+  RESUME: new Set(['target', 'command', 'task_instruction',
+    'initial_pose_sync', 'initial_pose_sync_duration_s']),
   STOP: new Set(['target', 'command']),
   CLEAR: new Set(['target', 'command']),
 };
@@ -113,6 +115,8 @@ function paramsForXml(tag, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (key === 'target' || key === 'command' || !allowed.has(key)) return;
     if (value === undefined || value === null || value === '') return;
+    if (key === 'vla_rail_enabled'
+      && !String(params.model || '').startsWith('groot')) return;
     out[key] = value;
   });
 

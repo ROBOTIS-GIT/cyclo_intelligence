@@ -1,0 +1,105 @@
+/* Segmentation editor and fullscreen canvas. */
+.sam2-annotation {
+  margin: 12px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--mc-border);
+}
+.sam2-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.sam2-toolbar button {
+  padding: 5px 8px;
+  border: 1px solid var(--mc-border-strong);
+  border-radius: 6px;
+}
+.sam2-toolbar button[aria-pressed="true"] {
+  border-color: var(--mc-accent);
+  background: var(--mc-accent-soft);
+}
+.sam2-canvas {
+  display: block;
+  width: 100%;
+  height: 280px;
+  background: #111;
+  border-radius: 8px;
+  touch-action: none;
+  user-select: none;
+}
+.collect-annotation-panel .sam2-canvas {
+  height: clamp(280px, 32vh, 420px);
+}
+.sam2-annotation summary {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.sam2-empty {
+  min-height: 150px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  border: 1px dashed var(--mc-border-strong);
+  border-radius: 8px;
+  background: var(--mc-surface-2);
+  color: var(--mc-text-muted);
+  font-size: 12px;
+}
+.sam2-empty p {
+  max-width: 380px;
+  margin: 0;
+  line-height: 1.5;
+}
+.sam2-image-editor {
+  min-width: 0;
+}
+.sam2-view-controls output {
+  min-width: 42px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.sam2-image-editor:fullscreen {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  background: var(--mc-surface-2, #f6f4ee);
+  color: var(--mc-text, #111);
+}
+.sam2-image-editor:fullscreen .sam2-toolbar {
+  flex-shrink: 0;
+}
+.collect-annotation-panel .sam2-image-editor:fullscreen .sam2-canvas,
+.sam2-image-editor:fullscreen .sam2-canvas {
+  flex: 1;
+  height: 0;
+  min-height: 0;
+}
+.sam2-image-editor:fullscreen button:disabled {
+  opacity: 0.45;
+}
+.sam2-save-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.sam2-save-row .collect-field {
+  flex: 1;
+  min-width: 0;
+}
+.sam2-save-row button {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}

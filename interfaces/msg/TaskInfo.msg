@@ -31,6 +31,8 @@ string inference_mode
 # Action chunk request scheduling. "async" requests the next chunk while the
 # current buffer is still executing. "sync" waits until the buffer is empty.
 string action_request_mode
+# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
+bool vla_rail_enabled
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
 # "tensorrt_dit" enables GR00T DiT-only TensorRT acceleration when supported.

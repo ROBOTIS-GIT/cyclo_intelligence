@@ -74,6 +74,8 @@ def generate_launch_description():
         executable='web_video_server',
         name='web_video_server',
         output='screen',
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[{'port': web_video_server_port}]
     )
 

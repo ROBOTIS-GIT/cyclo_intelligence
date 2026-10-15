@@ -20,6 +20,10 @@ uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
                                # Requires LOAD + START already issued. Touches
                                # task_instruction only — no lifecycle change.
 
+# Runtime extensions, sent as numeric command values without changing ROSIDL:
+# 7: CAPABILITIES, read-only; confirmed_pose_hold_v2 advertises confirmed STOP
+#    and fault latch support.
+# 8: FAULT_STOP, confirmed hold + permanent START/LOAD lockout until Main restart.
 uint8 command
 
 # LOAD fields — required when command = LOAD, "" otherwise.
@@ -36,6 +40,8 @@ bool publish_to_robot
 # Action chunk request scheduling at LOAD time. Empty / "async" preserves the
 # current prefetch behavior. "sync" requests only after the active buffer drains.
 string action_request_mode
+# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
+bool vla_rail_enabled
 # Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
 # PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
 # supported by the backend.

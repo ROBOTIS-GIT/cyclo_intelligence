@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import numpy as np
 import sys
 import types
 import unittest
+import threading
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -98,6 +102,31 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         self.assertEqual(mode, "tensorrt_dit")
         self.assertEqual(engine_path, "/models/policy/custom.trt")
         self.assertTrue(strict)
+
+    def _load_engine_module(self):
+        spec = importlib.util.spec_from_file_location("groot_runtime_engine_extra_test", INFERENCE_ENGINE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+
+
+    def test_ordinary_inference_uses_original_sensor_api(self):
+        module = self._load_engine_module()
+        engine = module.create_engine()
+        from unittest.mock import Mock
+        engine.robot = types.SimpleNamespace(get_images=Mock(return_value={"cam": "rgb"}),
+                                             get_joint_positions=Mock(return_value={"arm": "state"}))
+        engine.policy = types.SimpleNamespace(get_action=Mock(return_value=({"arm": "actions"}, {})))
+        engine.preprocess = Mock(return_value={"observation": True})
+        engine.postprocess_action = Mock(return_value={"success": True})
+        result = engine.get_action_chunk(types.SimpleNamespace(task_instruction="pick"))
+        self.assertTrue(result["success"])
+        engine.robot.get_images.assert_called_once_with(format="rgb")
+        engine.preprocess.assert_called_once_with({"cam": "rgb"}, {"arm": "state"}, "pick")
+        engine.policy.get_action.assert_called_once_with({"observation": True})
+
 
     def test_synthetic_observation_uses_model_schema(self):
         spec = importlib.util.spec_from_file_location(

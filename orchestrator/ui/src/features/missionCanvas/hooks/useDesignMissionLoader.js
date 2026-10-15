@@ -24,20 +24,20 @@ import {
   buildGlobalMissionXml,
   localBtPathsForSpot,
   missionBtFileDefaultsForSpots,
-} from "../lib/missionBtFiles";
+} from "../../mapWorkspace/lib/missionBtFiles";
 import {
   missionStepSpotsFromMissionFlow,
   normalizeMissionFlow,
-} from "../lib/missionFlow";
+} from "../../mapWorkspace/lib/missionFlow";
 import {
   orderedMissionSpots,
   spotsFromMissionWaypoints,
-} from "../lib/missionSpots";
+} from "../../mapWorkspace/lib/missionSpots";
 import {
   DEFAULT_MAP_NAME,
   DEFAULT_MISSION_NAME,
   missionRequestName,
-} from "../lib/missionNames";
+} from "../../mapWorkspace/lib/missionNames";
 import { savedBehaviorNodesForMap } from "../lib/designStore";
 
 function normalizedName(value, fallback) {
@@ -175,6 +175,7 @@ export async function loadDesignMissionSnapshot(
     ? [...new Set(spots.flatMap((spot) => localBtPathsForSpot(spot)))]
     : [];
   const snapshot = {
+    metadata: exists && mission.metadata && typeof mission.metadata === "object" && !Array.isArray(mission.metadata) ? { ...mission.metadata } : {},
     identity,
     spots,
     behaviorNodesPatch,

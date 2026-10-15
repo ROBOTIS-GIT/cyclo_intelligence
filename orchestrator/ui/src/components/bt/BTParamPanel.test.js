@@ -16,6 +16,7 @@
 
 import { fireEvent, render, screen } from '@testing-library/react';
 import BTParamPanel from './BTParamPanel';
+import { FALLBACK_CATALOG } from '../../constants/btNodeCatalogFallback';
 
 jest.mock('react-redux', () => ({
   useDispatch: () => jest.fn(),
@@ -294,4 +295,59 @@ test('switches SendCommand to Docker controls and enables only target, command, 
     'acceleration_mode',
     'acceleration_engine_path',
   ].forEach((key) => expect(fieldControl(key)).toBeDisabled());
+});
+
+test('VLA-RAIL is opt-in for GR00T Async LOAD', () => {
+  const change = jest.fn();
+  const node = { id: 'rail', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'async',
+  } } };
+  const { rerender } = render(<BTParamPanel nodes={[node]} selectedNodeId="rail"
+    onParamChange={change} onNameChange={jest.fn()} />);
+  const option = screen.getByRole('checkbox', { name: 'vla_rail_enabled' });
+  expect(option).toBeEnabled(); expect(option).not.toBeChecked();
+  fireEvent.click(option);
+  expect(change).toHaveBeenCalledWith('rail', 'vla_rail_enabled', 'true');
+  for (const [id, params] of [
+    ['sync', { action_request_mode: 'sync' }],
+    ['other', { model: 'lerobot:act' }],
+    ['resume', { command: 'RESUME' }],
+    ['stop', { command: 'STOP' }],
+    ['clear', { command: 'CLEAR' }],
+    ['docker', { target: 'DOCKER', command: 'START' }],
+  ]) {
+    const next = { ...node, id, data: { ...node.data, params: { ...node.data.params, ...params } } };
+    rerender(<BTParamPanel nodes={[next]} selectedNodeId={id}
+      onParamChange={change} onNameChange={jest.fn()} />);
+    expect(screen.getByRole('checkbox', { name: 'vla_rail_enabled' })).toBeDisabled();
+  }
+});
+
+test.each(['action_request_mode', 'model'])('changing %s clears incompatible RAIL', (field) => {
+  const change = jest.fn();
+  const node = { id: 'rail', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'async', vla_rail_enabled: 'true',
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="rail" onParamChange={change} onNameChange={jest.fn()} />);
+  fireEvent.change(fieldControl(field), { target: { value: field === 'model' ? 'lerobot:act' : 'sync' } });
+  expect(change).toHaveBeenCalledWith('rail', 'vla_rail_enabled', 'false');
+  expect(screen.getByRole('checkbox', { name: 'vla_rail_enabled' })).not.toBeChecked();
+});
+
+test('retired options are hidden in saved nodes and absent from the catalog', () => {
+  const retired = ['ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+    'chunk_endpoint_interpolation', 'remac_enabled'];
+  const node = { id: 'old', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', ...Object.fromEntries(retired.map(key => [key, 'true'])),
+  } } };
+  const change = jest.fn();
+  render(<BTParamPanel nodes={[node]} selectedNodeId="old" onParamChange={change} onNameChange={jest.fn()} />);
+  const ports = FALLBACK_CATALOG.find(({ tag }) => tag === 'SendCommand').ports;
+  for (const name of retired) {
+    expect(screen.queryByText(name)).not.toBeInTheDocument();
+    expect(ports.find(port => port.name === name)).toBeUndefined();
+  }
+  expect(ports.find(port => port.name === 'vla_rail_enabled')).toEqual({ name: 'vla_rail_enabled', type: 'bool', default: 'false' });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'vla_rail_enabled' }));
+  expect(change.mock.calls).toEqual([['old', 'vla_rail_enabled', 'true']]);
 });

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "map_name": "Home",
+  "spots": [
+    {
+      "id": "home_observation",
+      "label": "Observation",
+      "map_name": "Home",
+      "pose": {
+        "frame_id": "map",
+        "x": 0.0,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      }
+    },
+    {
+      "id": "home_table",
+      "label": "Table",
+      "map_name": "Home",
+      "pose": {
+        "frame_id": "map",
+        "x": 2.04224,
+        "y": 0.060437,
+        "yaw": 0.0
+      },
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      }
+    },
+    {
+      "id": "home_sink",
+      "label": "Sink",
+      "map_name": "Home",
+      "pose": {
+        "frame_id": "map",
+        "x": 6.34224,
+        "y": 1.760437,
+        "yaw": 1.570796
+      },
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      }
+    },
+    {
+      "id": "home_fridge",
+      "label": "Fridge",
+      "map_name": "Home",
+      "pose": {
+        "frame_id": "map",
+        "x": 1.04224,
+        "y": 2.110437,
+        "yaw": 1.570796
+      },
+      "linked_bt_tree": "",
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas"
+      }
+    }
+  ]
+}

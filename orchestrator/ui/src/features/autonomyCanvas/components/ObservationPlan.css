@@ -1,0 +1,15 @@
+.observation-plan { min-width: 0; margin: 0 0 14px; padding: 10px; border: 1px solid var(--mc-border); border-radius: 9px; font: inherit; font-size: 11px; }
+.observation-plan legend { padding: 0 5px; font-weight: 600; }
+.observation-plan-toolbar { display: flex; gap: 4px; align-items: center; }
+.observation-plan-toolbar select { flex: 1; min-width: 0; }
+.observation-plan select, .observation-plan input[type=number] { height: 30px; border: 1px solid var(--mc-border-strong); border-radius: 6px; color: var(--mc-text); background: var(--mc-surface-2); padding: 0 6px; font: inherit; }
+.observation-plan-toolbar button { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 28px; flex-shrink: 0; border: 1px solid var(--mc-border); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); }
+.observation-plan-point { padding-top: 9px; margin-top: 8px; border-top: 1px solid var(--mc-border); }
+.observation-plan-dwell { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }
+.observation-plan input[type=number] { width: 72px; }
+.observation-plan details { margin-top: 7px; color: var(--mc-text-muted); }
+.observation-plan summary { cursor: pointer; }
+.observation-plan-mission { display: flex; align-items: center; gap: 6px; padding-top: 5px; }
+.observation-plan-mission input { width: 13px; height: 13px; margin: 0; }
+.observation-plan button:disabled { opacity: .45; }
+

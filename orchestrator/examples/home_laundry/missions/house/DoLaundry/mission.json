@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "mission_name": "DoLaundry",
+  "map_name": "house",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "f8f41ae8-e074-459c-b3b4-bdbbc656c0d3",
+    "description": "Collect laundry from the basket, load the washing machine, and start a wash cycle.",
+    "start_condition": "Laundry is visible in the basket and the path to the basket and washing machine is clear.",
+    "completion_condition": "Laundry is in the washing machine and its wash cycle has started.",
+    "stop_condition": "A person blocks the robot or its reach.",
+    "post_stop_action": "Pause and wait until the area is clear.",
+    "behavior_node_count": 0,
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "house_laundry_basket",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        },
+        {
+          "id": "house_laundry_washer",
+          "position": {
+            "x": 300,
+            "y": 72
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "laundry_edge_1",
+          "source": "house_laundry_basket",
+          "target": "house_laundry_washer"
+        }
+      ]
+    }
+  },
+  "waypoints": [
+    {
+      "id": "house_laundry_basket",
+      "label": "LaundryBasket",
+      "pose": {
+        "frame_id": "map",
+        "x": 6.04224,
+        "y": 6.100437,
+        "yaw": 1.570796
+      },
+      "local_bt": "locals/house_laundry_basket/main.xml",
+      "local_bt_files": [
+        "locals/house_laundry_basket/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/house_laundry_basket/main.xml",
+        "local_bt": "locals/house_laundry_basket/main.xml",
+        "local_bt_files": [
+          "locals/house_laundry_basket/main.xml"
+        ]
+      }
+    },
+    {
+      "id": "house_laundry_washer",
+      "label": "WashingMachine",
+      "pose": {
+        "frame_id": "map",
+        "x": 7.79224,
+        "y": 6.060437,
+        "yaw": 1.570796
+      },
+      "local_bt": "locals/house_laundry_washer/main.xml",
+      "local_bt_files": [
+        "locals/house_laundry_washer/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/house_laundry_washer/main.xml",
+        "local_bt": "locals/house_laundry_washer/main.xml",
+        "local_bt_files": [
+          "locals/house_laundry_washer/main.xml"
+        ]
+      }
+    }
+  ]
+}

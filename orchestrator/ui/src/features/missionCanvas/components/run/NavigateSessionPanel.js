@@ -14,7 +14,7 @@
 //
 // Author: Seongwoo Kim
 
-import { Panel, SessionRow } from "../primitives";
+import { Panel, SessionRow } from "../../../mapWorkspace/components/primitives";
 
 export default function NavigateSessionPanel({ mapName, poseReady, goalStatus }) {
   const goalLabel = goalStatus === "driving"

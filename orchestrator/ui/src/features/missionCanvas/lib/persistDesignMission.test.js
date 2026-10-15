@@ -356,3 +356,11 @@ test("preserves a newer editor value while an older snapshot is saving", async (
   );
   expect(view.result.current.designDirty).toBe(true);
 });
+
+
+test("saves mission annotation and preserves unrelated metadata", async () => {
+  const view = renderLedger();
+  const metadata = {description:"사람이 떠나면 테이블의 컵을 수거한다.", custom:{owner:"lab"}};
+  await act(async () => { await persistDesignMission(request(view, {metadata}), dependencies()); });
+  expect(saveMission).toHaveBeenCalledWith(MAP_NAME, expect.objectContaining({metadata:expect.objectContaining(metadata)}), MISSION_NAME);
+});

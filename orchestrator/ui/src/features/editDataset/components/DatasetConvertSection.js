@@ -20,7 +20,7 @@ import FileBrowserModal from '../../../components/FileBrowserModal';
 import {
   selectRecordTaskInfo,
   setRecordTaskInfo,
-} from '../../../features/tasks/taskSlice';
+} from '../../tasks/taskSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 

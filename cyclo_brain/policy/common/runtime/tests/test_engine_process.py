@@ -109,7 +109,7 @@ class EngineWorkerTests(unittest.TestCase):
         self.assertEqual(response.chunk_size, 2)
         self.assertEqual(response.action_dim, 3)
         self.assertEqual(response.action_list, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
-        self.assertIsInstance(engine.action_requested_with, SimpleNamespace)
+        self.assertIsInstance(engine.action_requested_with, EngineCommandRequest)
         self.assertEqual(engine.action_requested_with.task_instruction, "move")
 
     def test_unload_is_idempotent_cleanup(self) -> None:

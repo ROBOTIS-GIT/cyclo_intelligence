@@ -9,10 +9,16 @@
 from __future__ import annotations
 
 from typing import List, Optional
+import threading
+
+from .confirmed_hold import HOLD_CAPABILITY
 
 
 CMD_LOAD, CMD_START, CMD_PAUSE, CMD_RESUME, CMD_STOP, CMD_UNLOAD = 0, 1, 2, 3, 4, 5
 CMD_UPDATE_INSTRUCTION = 6
+# Read-only capability query; request/response wire fields are unchanged.
+CMD_CAPABILITIES = 7
+CMD_FAULT_STOP = 8
 
 
 class ServiceHandler:
@@ -21,10 +27,31 @@ class ServiceHandler:
         self._requester = requester
         self._control_loop = control_loop
         self._response_factory = response_factory
+        self._lifecycle_lock = threading.RLock()
+        self._fault_latched = threading.Event()
 
     def handle(self, request):
+        # A reply confirms the lifecycle operation has settled. A late START
+        # must never overtake STOP/PAUSE and republish after hold acknowledgment.
+        if int(request.command) == CMD_FAULT_STOP:
+            # Set before waiting for an in-flight START to finish. A delayed
+            # START delivered after STOP must also be rejected, not re-enable
+            # publishing. Only a Main process restart clears this fault latch.
+            self._fault_latched.set()
+        with self._lifecycle_lock:
+            return self._handle_serialized(request)
+
+    def _handle_serialized(self, request):
         cmd = int(request.command)
         try:
+            if cmd == CMD_CAPABILITIES:
+                return self._make_response(True, HOLD_CAPABILITY)
+            if self._fault_latched.is_set() and cmd in (
+                CMD_LOAD, CMD_START, CMD_RESUME, CMD_UPDATE_INSTRUCTION,
+            ):
+                return self._make_response(False, "supervision fault latched; restart policy runtime")
+            if cmd == CMD_FAULT_STOP:
+                return self._stop()
             if cmd == CMD_LOAD:
                 return self._load(request)
             if cmd == CMD_START:
@@ -56,33 +83,53 @@ class ServiceHandler:
             return self._make_response(False, response.message)
 
         action_keys = list(response.action_keys)
+        try:
+            self._control_loop.configure(
+                robot_type=request.robot_type,
+                task_instruction=request.task_instruction or "",
+                action_keys=action_keys,
+                publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
+                vla_rail_enabled=bool(getattr(request, "vla_rail_enabled", False)),
+                action_request_mode=getattr(request, "action_request_mode", "async"),
+                control_hz=getattr(request, "control_hz", 0),
+                inference_hz=getattr(request, "inference_hz", 0),
+                chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
+                initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
+                initial_pose_sync_duration_s=(
+                    float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
+                ),
+            )
+        except Exception:
+            self._control_loop.deconfigure()
+            self._requester.unload_policy()
+            raise
         self._session.mark_loaded(
             robot_type=request.robot_type,
             task_instruction=request.task_instruction or "",
             action_keys=action_keys,
         )
-        self._control_loop.configure(
-            robot_type=request.robot_type,
-            task_instruction=self._session.task_instruction,
-            action_keys=action_keys,
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
-            action_request_mode=getattr(request, "action_request_mode", "async"),
-            control_hz=getattr(request, "control_hz", 0),
-            inference_hz=getattr(request, "inference_hz", 0),
-            chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
-            initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
-            initial_pose_sync_duration_s=(
-                float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
-            ),
-        )
         return self._make_response(True, response.message or "loaded", action_keys)
+
+    def _start_control_loop(self, request):
+        options = {}
+        if getattr(request, 'initial_pose_sync', False) or (
+                request.command == CMD_RESUME and hasattr(request, 'initial_pose_sync')):
+            options = {
+                'initial_pose_sync': bool(getattr(request, 'initial_pose_sync', False)),
+                'initial_pose_sync_duration_s': float(getattr(request, 'initial_pose_sync_duration_s', 0.0)) or 5.0,
+            }
+        return self._control_loop.start(
+            publish_to_robot=bool(getattr(request, 'publish_to_robot', False)), **options
+        )
 
     def _start(self, request):
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
-        syncing = self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
-        )
+        instruction = str(getattr(request, "task_instruction", "") or "").strip()
+        if instruction:
+            self._session.task_instruction = instruction
+            self._control_loop.set_task_instruction(instruction)
+        syncing = self._start_control_loop(request)
         self._session.mark_running()
         return self._make_response(True, "syncing" if syncing else "running")
 
@@ -96,13 +143,15 @@ class ServiceHandler:
         return self._make_response(True, "paused")
 
     def _resume(self, request):
+        if not self._session.loaded:
+            raise RuntimeError("LOAD first")
         if not self._session.running:
-            raise RuntimeError("not running")
+            # LOAD prepares an idle session without a speculative START/STOP.
+            # Use the same start/hold checks for its first explicit RESUME.
+            return self._start(request)
         task_instruction = request.task_instruction or self._session.task_instruction
         self._control_loop.set_task_instruction(task_instruction)
-        syncing = self._control_loop.start(
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False))
-        )
+        syncing = self._start_control_loop(request)
         self._session.mark_resumed(task_instruction)
         return self._make_response(True, "syncing" if syncing else "resumed")
 

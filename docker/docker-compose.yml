@@ -262,6 +262,8 @@ services:
   # via supervisor_api (PLAN §4.8).
   # ============================================================
   groot:
+    # Validate shared N1.7 sources; execution mode is selected by each LOAD.
+    entrypoint: ["/bin/sh", "/app/model-preflight.sh"]
     container_name: groot_server
     image: robotis/groot-zenoh:1.3.5-${ARCH:-arm64}
     build:
@@ -293,6 +295,8 @@ services:
       # Main-runtime waits on the local engine process while weights and
       # first-time gated backbones download/load.
       - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
+      - INFERENCE_TRACE_PATH=${INFERENCE_TRACE_PATH:-}
+      - VLA_RAIL_CAPTURE_ACTIONS=${VLA_RAIL_CAPTURE_ACTIONS:-0}
       - CMD_VEL_LINEAR_DEADBAND=0.02
       - CMD_VEL_ANGULAR_DEADBAND=0.02
       - NVIDIA_VISIBLE_DEVICES=all
@@ -300,6 +304,108 @@ services:
       - PYTHONUNBUFFERED=1
 
     volumes:
+      - type: bind
+        source: ../cyclo_brain/policy/groot/scripts/model-preflight.sh
+        target: /app/model-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/configs/data/embodiment_configs.py
+        target: /gr00t/gr00t/configs/data/embodiment_configs.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/configs/model/gr00t_n1d7.py
+        target: /gr00t/gr00t/configs/model/gr00t_n1d7.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/data/interfaces.py
+        target: /gr00t/gr00t/data/interfaces.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/data/state_action/state_action_processor.py
+        target: /gr00t/gr00t/data/state_action/state_action_processor.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/data/types.py
+        target: /gr00t/gr00t/data/types.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/gr00t_n1d7/gr00t_n1d7.py
+        target: /gr00t/gr00t/model/gr00t_n1d7/gr00t_n1d7.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/gr00t_n1d7/image_augmentations.py
+        target: /gr00t/gr00t/model/gr00t_n1d7/image_augmentations.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py
+        target: /gr00t/gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/modules/attn_supervision.py
+        target: /gr00t/gr00t/model/modules/attn_supervision.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/modules/dit.py
+        target: /gr00t/gr00t/model/modules/dit.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/modules/embodiment_conditioned_mlp.py
+        target: /gr00t/gr00t/model/modules/embodiment_conditioned_mlp.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/modules/qwen3_backbone.py
+        target: /gr00t/gr00t/model/modules/qwen3_backbone.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/model/modules/vision_overlay.py
+        target: /gr00t/gr00t/model/modules/vision_overlay.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides/gr00t/policy/gr00t_policy.py
+        target: /gr00t/gr00t/policy/gr00t_policy.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/model_overrides
+        target: /app/model_overrides
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../cyclo_brain/policy/groot/scripts/verify_model_overlay.py
+        target: /app/verify_model_overlay.py
+        read_only: true
+        bind:
+          create_host_path: false
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
@@ -355,4 +461,72 @@ services:
         reservations:
           devices:
             - driver: nvidia
+              capabilities: [gpu]
+
+
+  # VLM reasoning service. Starts idle; POST /load allocates model memory.
+  # HTTP returns text, so this does not use the action-chunk policy runtime.
+  qwen:
+    profiles: [reasoning]
+    container_name: qwen_server
+    image: mission-reasoning/qwen:0.1.0-amd64
+    platform: linux/amd64
+    build:
+      context: ../cyclo_brain/policy/qwen
+      dockerfile: Dockerfile.amd64
+    ports:
+      - "127.0.0.1:${QWEN_PORT:-7110}:7110"
+    environment:
+      QWEN_MODEL_ID: ${QWEN_MODEL_ID:-Qwen/Qwen3.5-9B}
+      QWEN_MODEL_REVISION: ${QWEN_MODEL_REVISION:-main}
+      QWEN_QUANTIZATION: ${QWEN_QUANTIZATION:-4bit}
+      QWEN_MAX_INPUT_TOKENS: ${QWEN_MAX_INPUT_TOKENS:-4096}
+      QWEN_ADAPTER_PATH: ${QWEN_ADAPTER_PATH:-}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./huggingface:/root/.cache/huggingface
+      - ./workspace/model/qwen:/workspace/model/qwen:ro
+      - ../cyclo_brain/policy/qwen/qwen_engine:/app/qwen_engine:ro
+      - ../cyclo_brain/policy/qwen/scripts:/app/scripts:ro
+    shm_size: 2gb
+    init: true
+    restart: "no"
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${QWEN_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+
+  # Click-based image annotation. Loads SAM2 weights lazily on the first click.
+  sam2:
+    profiles: [annotation]
+    container_name: sam2_server
+    image: mission-reasoning/sam2:0.1.0-amd64
+    platform: linux/amd64
+    build:
+      context: ../cyclo_brain/policy/sam2
+      dockerfile: Dockerfile.amd64
+    ports:
+      - "127.0.0.1:${SAM2_PORT:-7111}:7111"
+    environment:
+      SAM2_DEVICE: cuda
+      SAM2_ADAPTER_ROOT: /workspace/model/sam2/adapters
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./huggingface:/root/.cache/huggingface
+      - ../cyclo_brain/policy/sam2/sam2_engine:/app/sam2_engine:ro
+      - ./workspace/model/sam2:/workspace/model/sam2
+    shm_size: 1gb
+    init: true
+    restart: "no"
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${SAM2_GPU_DEVICE:-0}"]
               capabilities: [gpu]

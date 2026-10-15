@@ -18,9 +18,9 @@ import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MdDelete } from "react-icons/md";
 import { getNavigationMissions } from "../../../../utils/navigationMissionsApi";
-import { mapNameFromPgmPath } from "../../lib/missionNames";
-import { MapEditToolButton } from "../primitives";
-import { DeleteMapDialog } from "../dialogs";
+import { mapNameFromPgmPath } from "../../../mapWorkspace/lib/missionNames";
+import { MapEditToolButton } from "../../../mapWorkspace/components/primitives";
+import { DeleteMapDialog } from "../../../mapWorkspace/components/dialogs";
 
 // Mapping HUD control: a trash icon opening a saved-map list popover (the
 // HUD popover idiom); picking a map raises the warning confirm popup, and

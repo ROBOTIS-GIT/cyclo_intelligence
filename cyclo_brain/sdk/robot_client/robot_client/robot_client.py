@@ -209,6 +209,7 @@ class RobotClient:
         self._joint_position_timestamps_by_name: dict[str, float] = {}
         self._sensors: dict[str, dict] = {}
         self._sensor_timestamps: dict[str, float] = {}
+        self._sensor_received_monotonic: dict[str, float] = {}
         self._task_instruction: str = ""
 
         self._subscribers: list = []
@@ -476,6 +477,7 @@ class RobotClient:
             with self._lock:
                 self._sensors[sensor_name] = data
                 self._sensor_timestamps[sensor_name] = time.time()
+                self._sensor_received_monotonic[sensor_name] = time.monotonic()
         except Exception as e:
             logger.warning(f"Failed to parse sensor {sensor_name}: {e}")
 
@@ -712,8 +714,8 @@ class RobotClient:
         self,
         action_keys: Optional[list[str]] = None,
         duration_s: float = 0.1,
-    ) -> None:
-        """Replace active position trajectories with the latest joint pose."""
+    ) -> dict:
+        """Publish a hold and return its receipt for feedback confirmation."""
         duration_s = float(duration_s)
         if not math.isfinite(duration_s) or duration_s <= 0.0:
             raise ValueError("duration_s must be a positive finite value")
@@ -721,7 +723,27 @@ class RobotClient:
         if not segments:
             raise ValueError("current pose hold requires a position action group")
         self.publish_idle_action(action_keys)
+        commanded = time.monotonic()
         self._publish_position_segments(segments, duration_s)
+        keys = list(action_keys) if action_keys else self._action_keys
+        return {
+            'commanded_at': commanded,
+            'positions': {name: float(value) for _, names, values in segments
+                          for name, value in zip(names, values)},
+            'mobile': any(self._action_groups[self._resolve_action_key(key)]['msg_type']
+                          == 'geometry_msgs/msg/Twist' for key in keys),
+        }
+
+
+    def current_hold_feedback(self):
+        """Snapshot named joint and base feedback for confirmed policy holds."""
+        with self._lock:
+            return {
+                'positions': dict(self._joint_positions_by_name),
+                'received': dict(self._joint_position_timestamps_by_name),
+                'odom': dict(getattr(self, '_sensors', {}).get('odom', {})),
+                'odom_received': getattr(self, '_sensor_received_monotonic', {}).get('odom', 0),
+            }
 
     def _build_action_segments(
         self,
@@ -774,6 +796,7 @@ class RobotClient:
     def _build_current_position_segments(
         self,
         action_keys: Optional[list[str]],
+        max_age_s: Optional[float] = None,
     ) -> list[tuple[ROS2Publisher, list[str], np.ndarray]]:
         keys = list(action_keys) if action_keys else self._action_keys
         planned = []
@@ -783,7 +806,9 @@ class RobotClient:
         with self._lock:
             positions_by_name = dict(self._joint_positions_by_name)
             timestamps_by_name = dict(self._joint_position_timestamps_by_name)
-            max_age_s = self._initial_pose_sync_state_max_age_s
+            max_age_s = self._initial_pose_sync_state_max_age_s if max_age_s is None else float(max_age_s)
+        if not math.isfinite(max_age_s) or max_age_s <= 0:
+            raise ValueError("joint state max_age_s must be positive and finite")
         for action_key in keys:
             publish_key = self._resolve_action_key(action_key)
             cfg = self._action_groups.get(publish_key)

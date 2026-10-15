@@ -1,0 +1,54 @@
+.operate-sidebar { min-width: 0; color: var(--mc-text); }
+.operate-sidebar-status { display: flex; align-items: center; gap: 7px; padding-bottom: 12px; font-size: 11px; font-weight: 600; color: var(--mc-text-muted); }
+.operate-sidebar-status > span { height: 7px; width: 7px; background: var(--mc-warning); border-radius: 50%; }
+.operate-sidebar-status > span.is-localized { background: var(--mc-success); }
+.operate-observation { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-height: 104px; border: 1px dashed var(--mc-border-strong); border-radius: 10px; background: var(--mc-surface-2); color: var(--mc-text-muted); }
+.operate-observation strong { font-size: 11px; font-weight: 500; }
+.operate-observation span { font-size: 10px; }
+.operate-sidebar-note { margin: 10px 0 0; font-size: 10px; line-height: 1.6; color: var(--mc-text-muted); overflow-wrap: anywhere; }
+.operate-activity-label { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--mc-text-muted); padding-bottom: 8px; }
+.operate-activity-label > span { color: var(--mc-accent); }
+.operate-sidebar-events { padding: 0; margin: 0; list-style: none; max-height: 150px; overflow-y: auto; }
+.operate-sidebar-events li { display: flex; gap: 10px; padding: 9px 0; border-top: 1px solid var(--mc-border); font-size: 11px; }
+.operate-sidebar-events time { flex-shrink: 0; color: var(--mc-text-muted); font-size: 10px; padding-top: 1px; }
+.operate-sidebar-events strong { font-weight: 600; }
+.operate-sidebar-events p { margin: 3px 0 0; line-height: 1.5; color: var(--mc-text-muted); overflow-wrap: anywhere; }
+.operate-language-label { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 11px; font-weight: 500; }
+.operate-language-label span { font-size: 10px; color: var(--mc-accent); background: var(--mc-accent-soft); border-radius: 4px; padding: 1px 6px; }
+.operate-sidebar textarea { width: 100%; min-height: 78px; max-height: 150px; resize: vertical; border: 1px solid var(--mc-border-strong); border-radius: 8px; padding: 9px; background: var(--mc-surface-2); color: var(--mc-text); font-size: 11px; line-height: 1.7; }
+.operate-sidebar textarea::placeholder { color: var(--mc-text-subtle); }
+.operate-sidebar button:focus-visible, .operate-sidebar textarea:focus-visible { outline: 2px solid var(--mc-focus); outline-offset: 2px; }
+.operate-language-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.operate-language-presets button { padding: 4px 7px; font-size: 10px; border: 1px solid var(--mc-border); border-radius: 5px; color: var(--mc-text-muted); background: var(--mc-surface); }
+.operate-language-submit { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.operate-language-submit > span { font-size: 10px; color: var(--mc-text-subtle); }
+.operate-language-submit button { display: flex; align-items: center; gap: 6px; border-radius: 7px; padding: 7px 10px; font-size: 11px; font-weight: 600; background: var(--mc-accent); color: var(--mc-accent-fg); }
+.operate-sidebar button { cursor: pointer; }
+.operate-sidebar button:disabled { opacity: .45; cursor: not-allowed; }
+
+.operate-head-image { width: 100%; max-height: 190px; object-fit: contain; border-radius: 8px; background: #151515; }
+.operate-qwen-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; font-size: 11px; }
+.operate-qwen-heading button { border: 1px solid var(--mc-border); border-radius: 5px; padding: 4px 6px; font-size: 10px; }
+.operate-qwen-text { margin-top: 10px; font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.operate-qwen-error { color: var(--mc-danger); font-size: 11px; line-height: 1.6; margin-top: 8px; }
+
+.operate-stop-mission { margin-top: 10px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--mc-danger-border); color: var(--mc-danger); background: var(--mc-surface); font: inherit; }
+.operate-stop-mission:disabled { opacity: .45; }
+
+.operate-model-select { margin-bottom: 12px; min-width: 0; }
+.operate-model-select label { display: block; margin-bottom: 6px; font-size: 11px; font-weight: 500; }
+.operate-model-controls { display: flex; align-items: center; gap: 6px; }
+.operate-model-controls select { flex: 1; min-width: 0; width: 100%; height: 32px; padding: 0 7px; border: 1px solid var(--mc-border-strong); border-radius: 7px; background: var(--mc-surface-2); color: var(--mc-text); font: inherit; font-size: 11px; }
+.operate-model-controls button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 30px; height: 30px; border: 1px solid var(--mc-border); border-radius: 7px; background: var(--mc-surface); color: var(--mc-text-muted); }
+.operate-model-controls select:focus-visible { outline: 2px solid var(--mc-focus); outline-offset: 2px; }
+.operate-model-status { margin: 5px 0 0; font-size: 10px; line-height: 1.5; color: var(--mc-text-muted); overflow-wrap: anywhere; }
+
+.observation-spot-delete { position: relative; }
+.observation-spot-delete > button { color: var(--mc-danger); }
+.observation-spot-delete-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 25; width: 220px; max-height: 240px; overflow-y: auto; display: grid; gap: 5px; padding: 8px; border: 1px solid var(--mc-border-strong); border-radius: 10px; background: var(--mc-surface); box-shadow: var(--mc-shadow); }
+.observation-plan-toolbar .observation-spot-delete-list button { width: 100%; padding: 0 8px; gap: 8px; justify-content: space-between; text-align: left; font: inherit; }
+.observation-spot-delete-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.observation-spot-delete-list svg { flex-shrink: 0; color: var(--mc-danger); }
+
+.operate-execution-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.operate-pause-mission { margin-top: 10px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--mc-border-strong); color: var(--mc-text); background: var(--mc-surface); font: inherit; }

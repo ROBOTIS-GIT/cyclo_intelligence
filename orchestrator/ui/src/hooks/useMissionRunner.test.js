@@ -89,8 +89,11 @@ async function completeBt(btStatusRef) {
   });
 }
 
-test("runs each BT only after Nav2 succeeds, then advances", async () => {
-  const h = makeHarness();
+test.each([
+  ["Run", false],
+  ["Record", true],
+])("%s runs each waypoint BT only after Nav2 succeeds, then advances", async (_, pausableNavigation) => {
+  const h = makeHarness({ pausableNavigation });
   act(() => { h.view.result.current.start(); });
 
   await waitFor(() => expect(h.sendGoal).toHaveBeenCalledWith(0, 0, 0, expect.any(Object)));
@@ -272,6 +275,28 @@ test("does not accept a stale latched completed as fresh BT completion", async (
   await waitFor(() => expect(h.callService).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(h.view.result.current.status).toBe(RunnerStatus.FAILED));
   expect(h.view.result.current.reason).toBe("Waypoint Task did not start at Dock");
+});
+
+test("recognizes a BT that starts and completes before load_and_run replies", async () => {
+  const btStatusRef = { current: "completed" };
+  const btStatusHistoryRef = { current: {
+    sequence: 1, runningSequence: 0, terminalSequence: 1, terminalStatus: "completed",
+  } };
+  const callService = jest.fn(async () => {
+    btStatusHistoryRef.current.sequence += 1;
+    btStatusHistoryRef.current.runningSequence = btStatusHistoryRef.current.sequence;
+    btStatusRef.current = "running";
+    btStatusHistoryRef.current.sequence += 1;
+    btStatusHistoryRef.current.terminalSequence = btStatusHistoryRef.current.sequence;
+    btStatusHistoryRef.current.terminalStatus = "completed";
+    btStatusRef.current = "completed";
+    return { success: true };
+  });
+  const h = makeHarness({ orderedSpots: [SPOTS[0]], btStatusRef, btStatusHistoryRef, callService });
+  act(() => { h.view.result.current.start(); });
+  await waitFor(() => expect(h.view.result.current.status).toBe(RunnerStatus.DONE));
+  expect(callService).toHaveBeenCalledTimes(1);
+  expect(h.stopBt).not.toHaveBeenCalled();
 });
 
 test("uses the extended watchdog for a backend-provisioning command", async () => {
@@ -598,4 +623,45 @@ test("blocks a restart until the previous run has released the BT node", async (
   act(() => { h.view.result.current.stop(); });
   await waitFor(() => expect(releaseBt).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(h.view.result.current.isRunning).toBe(false));
+});
+
+test("Record pause resumes the unfinished waypoint without restarting completed waypoints", async () => {
+  let complete;
+  const sendGoal = jest.fn().mockResolvedValueOnce({status:"SUCCEEDED"})
+    .mockImplementation((x,y,yaw,signal) => new Promise((resolve,reject) => {
+      complete=resolve;
+      signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});
+    }));
+  const h=makeHarness({pausableNavigation:true,resolveBtXml:()=>'',sendGoal});
+  act(()=>{h.view.result.current.start();});
+  await waitFor(()=>expect(sendGoal).toHaveBeenCalledTimes(2));
+  await act(async()=>{await h.view.result.current.pause();});
+  expect(h.view.result.current.paused).toBe(true);
+  expect(h.view.result.current.isRunning).toBe(true);
+  expect(h.cancelGoal).toHaveBeenCalledTimes(1);
+  expect(sendGoal).toHaveBeenCalledTimes(2);
+  act(()=>{h.view.result.current.resume();});
+  await waitFor(()=>expect(sendGoal).toHaveBeenCalledTimes(3));
+  expect(sendGoal.mock.calls.map(c=>c[0])).toEqual([0,5,5]);
+  await act(async()=>{complete({status:'SUCCEEDED'});});
+  await waitFor(()=>expect(h.view.result.current.status).toBe(RunnerStatus.DONE));
+});
+
+test("Record cannot resume until failed pause cancellation is retried successfully", async () => {
+  const sendGoal=jest.fn((x,y,yaw,signal)=>new Promise((resolve,reject)=>{
+    signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});
+  }));
+  const cancelGoal=jest.fn().mockRejectedValueOnce(new Error('cancel failed')).mockResolvedValue(undefined);
+  const h=makeHarness({pausableNavigation:true,resolveBtXml:()=>'',sendGoal,cancelGoal});
+  act(()=>{h.view.result.current.start();});
+  await waitFor(()=>expect(sendGoal).toHaveBeenCalledTimes(1));
+  await act(async()=>{await expect(h.view.result.current.pause()).rejects.toThrow('cancel failed');});
+  act(()=>h.view.result.current.resume());
+  expect(h.view.result.current.paused).toBe(true);
+  expect(h.view.result.current.pauseFailed).toBe(true);
+  await act(async()=>{await h.view.result.current.pause();});
+  act(()=>h.view.result.current.resume());
+  await waitFor(()=>expect(sendGoal).toHaveBeenCalledTimes(2));
+  await act(async()=>{await h.view.result.current.stop();});
+  await waitFor(()=>expect(h.view.result.current.isRunning).toBe(false));
 });

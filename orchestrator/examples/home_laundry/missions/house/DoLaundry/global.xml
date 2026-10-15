@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="GlobalMission">
+      <MissionStep name="Step_1_LaundryBasket" waypoint_id="house_laundry_basket" label="LaundryBasket" local_bt="locals/house_laundry_basket/main.xml" x="6.04224" y="6.100437" yaw="1.570796" />
+      <MissionStep name="Step_2_WashingMachine" waypoint_id="house_laundry_washer" label="WashingMachine" local_bt="locals/house_laundry_washer/main.xml" x="7.79224" y="6.060437" yaw="1.570796" />
+    </Sequence>
+  </BehaviorTree>
+</root>

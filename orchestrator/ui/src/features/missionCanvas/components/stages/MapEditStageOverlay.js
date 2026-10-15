@@ -28,7 +28,7 @@ import {
   ANNOTATION_TOOL,
   EDIT_TOOLS,
 } from "../../../../components/navigation/MapEditor";
-import { MapEditToolButton, WaypointOptionButton } from "../primitives";
+import { MapEditToolButton, WaypointOptionButton } from "../../../mapWorkspace/components/primitives";
 import {
   MAP_EDIT_AREA_TOOLS,
   MAP_EDIT_AREA_TOOL_IDS,

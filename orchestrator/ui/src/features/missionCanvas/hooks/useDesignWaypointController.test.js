@@ -287,3 +287,28 @@ test("finalizes a failed create and releases the lock for retry", async () => {
   expect(createSpot).toHaveBeenCalledTimes(2);
   expect(finalize).toHaveBeenCalledTimes(2);
 });
+
+test("imports the source name and pose into an independent waypoint, even with a duplicate name", async () => {
+  const createSpot = jest.fn(async (request) => ({ ...request, id: "new-waypoint" }));
+  const { view, markDirty } = renderController({ createSpot });
+  await act(async () => {
+    await view.result.current.controller.createFromMission({ ...SPOT, pose: { frame_id: "map", x: 4, y: 5, yaw: 1.2 } }, "map-a");
+  });
+  expect(createSpot).toHaveBeenCalledWith(expect.objectContaining({
+    label: SPOT.label, map_name: "map-a", pose: { frame_id: "map", x: 4, y: 5, yaw: 1.2 },
+  }));
+  expect(createSpot.mock.calls[0][0]).not.toHaveProperty("local_bt_files");
+  expect(view.result.current.spots[1].id).toBe("new-waypoint");
+  expect(view.result.current.spots[1].linked_bt_tree).not.toBe(SPOT.linked_bt_tree);
+  expect(markDirty).toHaveBeenCalled();
+});
+
+test("rejects waypoints from another map or with invalid coordinates", async () => {
+  const createSpot = jest.fn();
+  const { view } = renderController({ createSpot });
+  await act(async () => {
+    await expect(view.result.current.controller.createFromMission(SPOT, "map-b")).rejects.toThrow("current map");
+    await expect(view.result.current.controller.createFromMission({ pose: { x: NaN, y: 0, yaw: 0 } }, "map-a")).rejects.toThrow("current map");
+  });
+  expect(createSpot).not.toHaveBeenCalled();
+});

@@ -89,8 +89,6 @@ def _load_sibling_module(module_name: str, filename: str):
     return module
 
 
-_navigation_module = _load_sibling_module("navigation", "navigation.py")
-navigation_router = _navigation_module.router
 _navigation_spots_module = _load_sibling_module(
     "navigation_spots", "navigation_spots.py"
 )
@@ -99,9 +97,13 @@ _navigation_missions_module = _load_sibling_module(
     "navigation_missions", "navigation_missions.py"
 )
 navigation_missions_router = _navigation_missions_module.router
+_navigation_module = _load_sibling_module("navigation", "navigation.py")
+navigation_router = _navigation_module.router
 _bt_support_module = _load_sibling_module("bt_support", "bt_support.py")
 _bt_trees_module = _load_sibling_module("bt_trees", "bt_trees.py")
 bt_trees_router = _bt_trees_module.router
+_bt_readiness_module = _load_sibling_module("bt_readiness", "bt_readiness.py")
+_bt_readiness = _bt_readiness_module.BTReadiness()
 
 
 logger = logging.getLogger("supervisor_api")
@@ -1158,7 +1160,18 @@ async def _app_lifespan(_app: FastAPI):
     # Stay subscribed before Nav2 starts. Its global costmap publishes one
     # full snapshot followed by incremental dirty rectangles.
     _navigation_module.ensure_ros_grid_subscriber_started()
-    yield
+    try:
+        if _autonomy.owned:
+            _autonomy.stop()  # Interrupted sessions never resume a physical step automatically.
+        yield
+    finally:
+        try:
+            if _autonomy.owned:
+                _autonomy.stop()
+                await asyncio.to_thread(_autonomy.stop_thread.join, 120)
+        finally:
+            _bt_readiness.close()
+            _reasoning_module.shutdown_head_camera()
 
 
 app = FastAPI(
@@ -1172,6 +1185,188 @@ _include_router_with_eager_routes(app, navigation_router)
 _include_router_with_eager_routes(app, navigation_spots_router)
 _include_router_with_eager_routes(app, navigation_missions_router)
 _include_router_with_eager_routes(app, bt_trees_router)
+_include_router_with_eager_routes(app, _bt_readiness_module.create_router(_bt_readiness))
+
+# Observation-only Qwen bridge; its allowlisted container is independent of Nav2.
+def _start_qwen_container():
+    client = _docker_client()
+    try:
+        try:
+            container = client.containers.get("qwen_server")
+        except NotFound:
+            result = subprocess.run(
+                _compose_base_cmd() + ["up", "-d", "--no-deps", "--no-build", "qwen"],
+                capture_output=True, text=True, timeout=120, env=_compose_env(),
+            )
+            if result.returncode:
+                raise RuntimeError("Qwen container could not start. Build the qwen image with docker/container.sh start-qwen --build.")
+        else:
+            if container.status == "paused":
+                container.unpause()
+            elif container.status != "running":
+                container.start()
+    finally:
+        client.close()
+
+
+def _stop_qwen_container():
+    client = _docker_client()
+    try:
+        try:
+            container = client.containers.get("qwen_server")
+        except NotFound:
+            return
+        if container.status == "paused":
+            container.unpause()
+        # Docker stop includes its bounded SIGTERM grace period, then SIGKILL.
+        # This also interrupts an in-flight model load/generate and releases GPU memory.
+        container.stop(timeout=10)
+        container.reload()
+        if container.status not in {"exited", "created", "dead"}:
+            raise RuntimeError(f"Qwen container is still {container.status}")
+    finally:
+        client.close()
+
+
+_collection_module = _load_sibling_module("collection", "collection.py")
+_collection_store = _collection_module.CollectionStore(catalog_provider=_navigation_missions_module.collection_catalog)
+_include_router_with_eager_routes(app, _collection_module.create_router(_collection_store))
+def _start_sam2_container():
+    client = _docker_client()
+    try:
+        try:
+            container = client.containers.get("sam2_server")
+        except NotFound:
+            result = subprocess.run(
+                _compose_base_cmd() + ["up", "-d", "--no-deps", "--no-build", "sam2"],
+                capture_output=True, text=True, timeout=30, env=_compose_env(),
+            )
+            if result.returncode:
+                raise HTTPException(503, "SAM2 could not start. Run docker/container.sh start-sam2 --build.")
+        else:
+            if container.status == "paused":
+                container.unpause()
+            elif container.status != "running":
+                container.start()
+    finally:
+        client.close()
+
+
+_segmentation_module = _load_sibling_module("segmentation", "segmentation.py")
+_segmentation_service = _segmentation_module.SegmentationService(_collection_store, _start_sam2_container)
+_include_router_with_eager_routes(app, _segmentation_module.create_router(_segmentation_service))
+_segmentation_workflow_module = _load_sibling_module("segmentation_workflow", "segmentation_workflow.py")
+_segmentation_workflow = _segmentation_workflow_module.SegmentationWorkflow(_segmentation_service)
+_include_router_with_eager_routes(app, _segmentation_workflow_module.create_router(_segmentation_workflow))
+_reasoning_module = _load_sibling_module("reasoning", "reasoning.py")
+_qwen_annotation_runtime_module = _load_sibling_module("qwen_annotation_runtime", "qwen_annotation_runtime.py")
+_qwen_annotation_workflow_module = _load_sibling_module("qwen_annotation_workflow", "qwen_annotation_workflow.py")
+_qwen_annotation_workflow = _qwen_annotation_workflow_module.QwenAnnotationWorkflow(
+    _collection_store,
+    _qwen_annotation_runtime_module.QwenAnnotationRuntime(
+        _docker_client, _host_workspace_dir, _host_project_dir, _host_huggingface_dir),
+)
+_include_router_with_eager_routes(app, _qwen_annotation_workflow_module.create_router(_qwen_annotation_workflow))
+
+_collection_frames_module = _load_sibling_module("collection_frames", "collection_frames.py")
+_collection_frames_service = _collection_frames_module.FrameDeletionService(
+    _collection_store, _segmentation_workflow, _qwen_annotation_workflow)
+_include_router_with_eager_routes(app, _collection_frames_module.create_router(_collection_frames_service))
+
+_reasoning_service = _reasoning_module.ReasoningService(_start_qwen_container, _stop_qwen_container, _collection_store)
+def _annotation_model_in_use(model):
+    path = model.get('adapter_path')
+    if _reasoning_service.status().get('adapter') == path:
+        return True
+    try:
+        health = _reasoning_module.qwen_request('/health', timeout=2)
+        return bool(health.get('adapter')) and health.get('adapter') == path
+    except HTTPException:
+        # A stopped engine cannot use an adapter. A live but unresponsive engine
+        # must not lose files while loading them.
+        client = _docker_client()
+        try:
+            try:
+                container = client.containers.get('qwen_server')
+            except docker.errors.NotFound:
+                return False
+            if container.status == 'running':
+                raise HTTPException(409, 'Qwen is unavailable; stop it before deleting models')
+            return False
+        finally:
+            client.close()
+
+_qwen_annotation_workflow.model_in_use = _annotation_model_in_use
+_include_router_with_eager_routes(app, _reasoning_module.create_router(
+    _start_qwen_container, _stop_qwen_container, _collection_store, service=_reasoning_service))
+_autonomy_module = _load_sibling_module("autonomy", "autonomy.py")
+from supervisor_api.autonomy_runtime import AutonomyRosRuntime
+
+
+def _autonomy_navigation_ready(map_name):
+    status = _navigation_module.navigation_status()
+    code, launch_args = _navigation_module._exec(["cat", "/run/launch_args/ai_worker_navigation"])
+    if (not status.is_up or status.mode != "nav" or code != 0
+            or f"map_name:={map_name}" not in launch_args.split()):
+        raise HTTPException(409, "Navigation must be running on the selected map")
+
+
+def _autonomy_start_bt():
+    robot_type = ""
+    if os.path.isfile(_BT_ROBOT_TYPE_FILE):
+        with open(_BT_ROBOT_TYPE_FILE) as stream: robot_type = stream.read().strip()
+    result = asyncio.run(service_start("bt_node", ServiceActionRequest(robot_type=robot_type)))
+    if not result.ok: raise RuntimeError(result.message)
+
+
+def _autonomy_stop_bt():
+    result = asyncio.run(service_stop("bt_node"))
+    if not result.ok: raise RuntimeError(result.message)
+
+
+def _autonomy_recovery_stop():
+    # A restarted process has no action handles. Cancel Nav2 and halt the BT
+    # independently so one unavailable service cannot prevent the other stop.
+    errors = []
+    try:
+        if _navigation_module.navigation_status().is_up:
+            _navigation_module.cancel_goal()
+    except Exception as exc: errors.append(str(getattr(exc, 'detail', exc)))
+    runtime = AutonomyRosRuntime(_autonomy_start_bt, _autonomy_stop_bt)
+    try:
+        if asyncio.run(service_status('bt_node')).state == 'up':
+            runtime.open(check_busy=False)
+            runtime.bt_owned = True
+            runtime.cancel()
+            runtime.close()
+    except Exception as exc: errors.append(str(getattr(exc, 'detail', exc)))
+    finally:
+        if runtime.node is not None and not runtime.closed.is_set(): runtime.close(stop_service=False)
+    if errors: raise RuntimeError('; '.join(errors))
+
+
+_autonomy = _autonomy_module.AutonomyController(
+    _reasoning_service, lambda: AutonomyRosRuntime(_autonomy_start_bt, _autonomy_stop_bt),
+    _autonomy_navigation_ready,
+    session_path=os.path.join(os.environ.get("CYCLO_NAVIGATION_DATA_DIR", "/workspace/navigation"), ".autonomy_session.json"),
+    recovery_stop=_autonomy_recovery_stop)
+_reasoning_service.context_provider = _autonomy.capture_context
+_include_router_with_eager_routes(app, _autonomy_module.create_router(_autonomy))
+
+
+@app.middleware("http")
+async def autonomy_execution_ownership(request, call_next):
+    # Direct controller calls bypass HTTP. Other tabs/clients cannot replace
+    # the model, stop Nav2, or submit goals underneath an active session.
+    path = request.url.path
+    protected = (path.startswith("/navigation/") or path.startswith("/services/bt_node/")
+                 or path in {"/reasoning/start", "/reasoning/stop", "/reasoning/decide", "/reasoning/observe"})
+    if _autonomy.owned and request.method not in {"GET", "HEAD", "OPTIONS"} and protected:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=409, content={"detail": "Autonomy owns execution. Stop autonomy first."})
+    return await call_next(request)
+
+
 
 
 @app.get("/health", response_model=HealthResponse)

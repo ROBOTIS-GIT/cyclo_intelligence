@@ -3,20 +3,22 @@
 
 import React from "react";
 import { MapViewer } from "../../../../components/navigation/MapViewer";
-import { EDITOR_BRUSH_RING_COLORS } from "../../lib/theme";
+import { EDITOR_BRUSH_RING_COLORS } from "../../../mapWorkspace/lib/theme";
 import {
   STAGE_AUTHORING,
   STAGE_MAPPING,
   STAGE_MAP_EDIT,
   STAGE_NAVIGATE,
   STAGE_RUN,
-} from "../../lib/stages";
-import { LayersPopover } from "../mapChrome";
+} from "../../../mapWorkspace/lib/stages";
+import { LayersPopover } from "../../../mapWorkspace/components/mapChrome";
 import DesignStageHud from "../stages/DesignStageHud";
 import MapEditStageOverlay from "../stages/MapEditStageOverlay";
 import MappingStageHud from "../stages/MappingStageHud";
 import { NavigationStageHud } from "../stages/NavigationStage";
 import { RunStageHud } from "../stages/RunStage";
+
+const EMPTY_LIST = Object.freeze([]);
 
 export default function MissionCanvasSceneSurface({
   stage,
@@ -31,13 +33,17 @@ export default function MissionCanvasSceneSurface({
   const { mapEditor, designMapEditor, runDisplayMapEditor } = editors;
   const mappingEditorActive = stage.mappingEditorActive;
   const authoring = stage.id === STAGE_AUTHORING;
+  const visiblePlan = mappingEditorActive || !layers.needsPlan ? null : scene.plan;
 
   return (
     <section
       className="min-h-0 overflow-hidden relative"
       style={{ backgroundColor: "var(--mc-surface)", borderRight: "1px solid var(--mc-border)" }}
     >
+      <div className="contents">
       <MapViewer
+        renderProfile="default"
+        robotType={scene.robotType}
         map={scene.displayedMap}
         globalCostmap={mappingEditorActive ? null : layers.needsGlobalCostmap ? scene.globalCostmap : null}
         localCostmap={mappingEditorActive ? null : layers.needsLocalCostmap ? scene.localCostmap : null}
@@ -58,17 +64,17 @@ export default function MissionCanvasSceneSurface({
             : null}
         goalPose={stage.id === STAGE_NAVIGATE ? scene.navGoalPose : null}
         showGoalPose={stage.id === STAGE_NAVIGATE && !!scene.navGoalPose && scene.navGoalStatus !== "reached"}
-        plan={mappingEditorActive ? null : layers.needsPlan ? scene.plan : null}
+        plan={visiblePlan}
         footprint={mappingEditorActive ? null : layers.needsRobotModel ? scene.footprint : null}
         tf={mappingEditorActive ? null : (layers.needsTf || layers.needsRobotModel) ? scene.displayTf : null}
-        spots={mission.overlayActive ? mission.renderedVisibleSpots : []}
+        spots={mission.overlayActive ? mission.renderedVisibleSpots : EMPTY_LIST}
         selectedSpotId={mission.overlayActive && authoring ? mission.selectedSpotId : ""}
         activeWaypointId={stage.id === STAGE_RUN ? mission.activeWaypointId : ""}
         missionFollowRobot={mission.followRobot}
-        behaviorNodes={mission.overlayActive ? mission.renderedBehaviorNodes : []}
+        behaviorNodes={mission.overlayActive ? mission.renderedBehaviorNodes : EMPTY_LIST}
         selectedBehaviorNodeId={mission.overlayActive ? mission.selectedBehaviorNodeId : ""}
         behaviorPreviewNode={mission.overlayActive ? mission.behaviorPreviewNode : null}
-        missionRouteOrder={mission.overlayActive ? mission.renderedRouteView.order : []}
+        missionRouteOrder={mission.overlayActive ? mission.renderedRouteView.order : EMPTY_LIST}
         missionRouteClosed={mission.overlayActive && mission.renderedRouteView.closed}
         missionRouteMode={authoring && mission.routeMode}
         selectedMissionRouteSourceId={mission.routeSourceId}
@@ -79,7 +85,7 @@ export default function MissionCanvasSceneSurface({
               ? designMapEditor.annotations
               : stage.runFamily && mission.mapLoaded && layers.active.mapAreas
                 ? runDisplayMapEditor.annotations
-                : []
+                : EMPTY_LIST
         }
         selectedMapAnnotationId={mappingEditorActive ? mapEditor.selectedAnnotationId : ""}
         mapRefined={false}
@@ -96,9 +102,10 @@ export default function MissionCanvasSceneSurface({
         showGlobalCostmap={mappingEditorActive ? false : layers.needsGlobalCostmap}
         showLocalCostmap={mappingEditorActive ? false : layers.needsLocalCostmap}
         showScan={mappingEditorActive ? false : layers.needsScan}
-        showGlobalPlan={mappingEditorActive ? false : layers.needsPlan}
+        showGlobalPlan={!mappingEditorActive && layers.needsPlan}
         showTf={mappingEditorActive ? false : layers.needsTf && layers.active.tf}
         showRobotModel={mappingEditorActive ? false : layers.needsRobotModel}
+        showFootprint={!mappingEditorActive && layers.needsRobotModel}
         interactionDisabled={
           !!interaction.busy
           || (authoring && !mission.documentReady)
@@ -131,14 +138,11 @@ export default function MissionCanvasSceneSurface({
           ? interaction.onBehaviorNodeClick
           : undefined}
         onMissionRouteSpotClick={authoring && mission.documentReady
-          ? interaction.onRouteSpotClick
-          : undefined}
+          ? interaction.onRouteSpotClick : undefined}
         onMissionRouteMapClick={authoring && mission.documentReady
-          ? interaction.onRouteMapClick
-          : undefined}
+          ? interaction.onRouteMapClick : undefined}
         onSpotPoseChange={authoring && mission.documentReady && !mission.routeMode && !bt.waypointLayer
-          ? interaction.onSpotPoseChange
-          : undefined}
+            ? interaction.onSpotPoseChange : undefined}
         onBehaviorNodePoseChange={authoring && mission.documentReady && !mission.routeMode && !bt.waypointLayer
           ? interaction.onBehaviorNodePoseChange
           : undefined}
@@ -159,6 +163,7 @@ export default function MissionCanvasSceneSurface({
       {stage.id === STAGE_RUN && <RunStageHud {...hud.run} />}
       {stage.id === STAGE_NAVIGATE && <NavigationStageHud {...hud.navigate} />}
       {!bt.activeLayer && !mappingEditorActive && <LayersPopover layerToggles={layers.toggles} />}
+      </div>
     </section>
   );
 }

@@ -22,13 +22,14 @@ import time
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
+from orchestrator.bt.pause_control import TimerPause
 from orchestrator.bt.bt_core import NodeStatus
 
 if TYPE_CHECKING:
     from rclpy.node import Node
 
 
-class Wait(BaseAction):
+class Wait(TimerPause, BaseAction):
     """Block the surrounding sequence for a fixed duration, then return SUCCESS.
 
     Useful for letting hardware settle between motion commands.

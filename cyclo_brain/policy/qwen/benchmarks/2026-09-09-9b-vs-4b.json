@@ -1,0 +1,189 @@
+{
+  "date": "2026-09-09",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "image_sha256": "08e79e1eb799179a20b8a8d803382566b4e703de7705f83e09e38714134fb9c3",
+  "settings": {
+    "quantization": "bitsandbytes NF4 4bit",
+    "enable_thinking": false,
+    "max_new_tokens": 384,
+    "do_sample": true,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20
+  },
+  "notes": [
+    "Same fixed head camera JPEG and production observation prompt.",
+    "One warmup and five timed requests per model.",
+    "GR00T and Gazebo stayed running; this is not a controlled simultaneous GR00T inference benchmark.",
+    "Sampled output lengths differ; no speed guarantee or accuracy benchmark.",
+    "Engine elapsed_seconds includes preprocessing, generation and decoding, excluding camera capture and the UI polling delay."
+  ],
+  "results": {
+    "9b": {
+      "health": {
+        "model": "Qwen/Qwen3.5-9B",
+        "revision": "main",
+        "quantization": "4bit",
+        "state": "ready",
+        "ready": true,
+        "busy": false,
+        "gpu_memory": {
+          "allocated_mib": 7538.4,
+          "reserved_mib": 10232.0
+        }
+      },
+      "runs": [
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지에는 노란색 팔레트 잭이 바닥에 서 있습니다. 왼쪽에는 금속 구조물이 보이며, 그 옆에는 상자가 놓여 있습니다. 오른쪽에는 큰 상자와 작은 상자들이 쌓여 있습니다. 바닥에는 녹색 선이 그려져 있습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 58,
+          "elapsed_seconds": 1.852,
+          "wall_seconds": 1.855,
+          "warmup": true
+        },
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지는 창고 내부의 로봇 헤드 카메라가 촬영한 것으로 보입니다. 노란색 팔레트 잭이 바닥에 있고, 그 옆에는 박스가 쌓여 있습니다. 왼쪽에는 금속 선반이 있으며, 벽면과 바닥은 회색으로 보입니다. 공간은 비교적 넓고, 물건들이 정리되어 있는 상태입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 72,
+          "elapsed_seconds": 2.237,
+          "wall_seconds": 2.239,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지는 창고 내부의 한 구역을 보여줍니다. 바닥에는 녹색과 노란색의 선이 그려져 있고, 벽은 흰색입니다. 왼쪽에는 노란색 금속 선반이 있고, 그 옆에는 박스가 놓여 있습니다. 오른쪽에도 큰 박스가 보입니다. 중앙에는 노란색 팔레트 잭이 바닥 위에 있습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 77,
+          "elapsed_seconds": 2.351,
+          "wall_seconds": 2.353,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지는 창고나 물류 센터의 내부로 보입니다. 바닥에는 녹색과 노란색의 선이 그려져 있으며, 이는 아마도 작업 영역을 구분하기 위한 것 같습니다.\n\n왼쪽에는 노란색 금속 재질의 선반이 보이며, 선반에는 몇 개의 박스가 쌓여 있습니다.\n\n중앙에는 노란색 팔레트 잭이 위치해 있고, 오른쪽에는 큰 박스가 보입니다.\n\n이 모든 요소들은 실제 사진처럼 보이지 않고, 3D 모델링으로 만들어진 것처럼 보입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 112,
+          "elapsed_seconds": 3.486,
+          "wall_seconds": 3.487,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지에는 노란색 팔레트 잭이 보입니다.  \n노란색 팔레트 잭은 바닥에 있고, 그 주변에는 녹색 선이 그려져 있습니다.  \n왼쪽에는 노란색 금속 구조물이 있고, 오른쪽에는 갈색 박스가 있습니다.  \n배경은 흰색 벽입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 70,
+          "elapsed_seconds": 2.176,
+          "wall_seconds": 2.178,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-9B",
+          "text": "이미지에는 노란색 팔레트 잭이 바닥에 서 있습니다.\n왼쪽에는 금속 선반이 있고, 오른쪽에는 큰 상자가 보입니다.\n바닥에는 녹색과 노란색의 선이 그려져 있습니다.\n벽은 흰색으로 보입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 61,
+          "elapsed_seconds": 1.917,
+          "wall_seconds": 1.919,
+          "warmup": false
+        }
+      ],
+      "summary": {
+        "mean_seconds": 2.4334000000000002,
+        "min_seconds": 1.917,
+        "max_seconds": 3.486,
+        "mean_output_tokens": 78.4,
+        "effective_output_tokens_per_second": 32.21829538916742
+      }
+    },
+    "4b": {
+      "health": {
+        "model": "Qwen/Qwen3.5-4B",
+        "revision": "main",
+        "quantization": "4bit",
+        "state": "ready",
+        "ready": true,
+        "busy": false,
+        "gpu_memory": {
+          "allocated_mib": 3167.6,
+          "reserved_mib": 4744.0
+        }
+      },
+      "runs": [
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "화면에는 흰색 벽과 회색 바닥이 보입니다. 바닥에는 녹색과 노란색 선이 그려져 있고, 왼쪽에는 노란색 금속 선반, 오른쪽에는 큰 상자가 있습니다. 중앙에는 노란색 팔레트叉车가 있습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 57,
+          "elapsed_seconds": 2.676,
+          "wall_seconds": 2.696,
+          "warmup": true
+        },
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "이미지에는 로봇의 헤드 카메라가 촬영한 장면이 보입니다. 왼쪽에는 노란색 금속 구조물이 있고, 오른쪽에는 큰 상자가 있습니다. 바닥에는 녹색과 노란색 선이 그려져 있으며, 중앙에는 작은 노란색 차량이 위치해 있습니다. 전체적으로 창고 내부 공간처럼 보입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 68,
+          "elapsed_seconds": 2.036,
+          "wall_seconds": 2.038,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "이미지에는 파lett truck, 카arton 박스, 그리고 금속 선반이 보입니다. 바닥에는 녹색과 노란색 마킹이 그려져 있고, 배경은 단순한 벽입니다. 현재는 사람이나 다른 움직임이 보이지 않습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 53,
+          "elapsed_seconds": 1.629,
+          "wall_seconds": 1.631,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "화면에는 흰색 벽과 바닥이 보입니다. 왼쪽에는 노란색 선반과 오른쪽에는 큰 상자, 그 옆에 작은 선반이 위치해 있습니다. 바닥에는 녹색과 노란색 줄이 그려져 있으며, 중앙에는 노란색 포크리프트가 있습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 63,
+          "elapsed_seconds": 1.812,
+          "wall_seconds": 1.814,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "화면에는 노란색 팔레트 포크 리프트가 바닥에 놓여 있고, 오른쪽에는 큰 상자와 작은 박스들이 보입니다. 왼쪽에는 노란색 금속 선반이 있고, 바닥에는 녹색과 노란색 마킹선이 그려져 있습니다. 벽은 흰색으로 전체 공간은 창고 내부처럼 보입니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 73,
+          "elapsed_seconds": 2.146,
+          "wall_seconds": 2.148,
+          "warmup": false
+        },
+        {
+          "model": "Qwen/Qwen3.5-4B",
+          "text": "화면에는 노란색 팔레트랙과, 왼쪽에 있는 금속 재고 보관장치가 보입니다. 바닥에는 녹색과 노란색 선이 그려져 있으며, 오른쪽에는 큰 상자가 위치해 있습니다. 배경은 평평한 벽면으로, 다른 물체나 사람의 존재는 보이지 않습니다.",
+          "finish_reason": "stop",
+          "input_tokens": 387,
+          "output_tokens": 67,
+          "elapsed_seconds": 1.936,
+          "wall_seconds": 1.939,
+          "warmup": false
+        }
+      ],
+      "summary": {
+        "mean_seconds": 1.9118,
+        "min_seconds": 1.629,
+        "max_seconds": 2.146,
+        "mean_output_tokens": 64.8,
+        "effective_output_tokens_per_second": 33.89475886599017
+      }
+    }
+  }
+}

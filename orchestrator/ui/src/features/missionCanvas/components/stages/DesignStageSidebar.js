@@ -15,7 +15,7 @@
 // Author: Seongwoo Kim
 
 import { MdDelete } from "react-icons/md";
-import { localBtPathForSpot } from "../../lib/missionBtFiles";
+import { localBtPathForSpot } from "../../../mapWorkspace/lib/missionBtFiles";
 
 export default function DesignStageSidebar({
   busy,

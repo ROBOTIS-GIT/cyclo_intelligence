@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "mission_name": "TurnOnTV",
+  "map_name": "house",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "55bdb150-aae6-4ab6-bcde-08e530a78db5",
+    "description": "Turn on the television for an awake adult seated on the sofa.",
+    "start_condition": "The TV is off and an awake adult is seated on the sofa facing the television. A sleeping child or dog alone does not request the TV.",
+    "completion_condition": "The television screen is playing video.",
+    "stop_condition": "A person or pet blocks the robot or its arm movement.",
+    "post_stop_action": "Pause and wait for a clear path.",
+    "behavior_node_count": 0,
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "house_turn_on",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        }
+      ],
+      "edges": []
+    }
+  },
+  "waypoints": [
+    {
+      "id": "house_turn_on",
+      "label": "TVControl",
+      "pose": {
+        "frame_id": "map",
+        "x": 9.79224,
+        "y": -4.039563,
+        "yaw": -0.983255
+      },
+      "local_bt": "locals/house_turn_on/main.xml",
+      "local_bt_files": [
+        "locals/house_turn_on/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/house_turn_on/main.xml",
+        "local_bt": "locals/house_turn_on/main.xml",
+        "local_bt_files": [
+          "locals/house_turn_on/main.xml"
+        ]
+      }
+    }
+  ]
+}

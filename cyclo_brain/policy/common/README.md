@@ -93,6 +93,22 @@ a Hugging Face token for an approved account before first inference, or pre-cach
 the Cosmos files under the shared Hugging Face cache. Policy containers sync the
 Cyclo endpoint token store to the standard Hugging Face token file on startup.
 
+Cyclo's GR00T loader resolves a cached `nvidia/Cosmos-Reason2-2B` processor
+revision to its local snapshot directory before constructing the N1.7 policy.
+This avoids the Transformers 4.57.3 tokenizer metadata lookup that otherwise
+fails with `HF_HUB_OFFLINE=1`, even when processor files are cached. The adapter
+is scoped to policy loading and restores the upstream processor factory afterward.
+A cache miss keeps the normal download path when online; offline loading reports
+that the requested Cosmos processor revision must be cached first. Other model
+IDs and explicit local paths are passed through unchanged.
+
+Regression verification: the local GR00T checkpoint
+`RobotisSW/PickGreenCoffeeCan_WhiteShdlf_byGrootModel_80K` loaded with both
+`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`, with HTTP requests intercepted
+and zero HTTP calls during processor/policy loading. This verifies loading,
+not robot motion or task success.
+
+
 ## Adding a new policy
 
 1. Create `cyclo_brain/policy/<policy>/<policy>_engine/` implementing the ABC.

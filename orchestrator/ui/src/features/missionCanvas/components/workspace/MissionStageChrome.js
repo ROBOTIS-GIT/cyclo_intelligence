@@ -9,16 +9,18 @@ import {
   STAGE_AUTHORING,
   STAGE_MAPPING,
   STAGE_NAVIGATE,
-} from "../../lib/stages";
-import StageHeader from "./StageHeader";
+  normalizeWorkspaceStage,
+} from "../../../mapWorkspace/lib/stages";
+import StageHeader from "../../../mapWorkspace/components/workspace/StageHeader";
 
 export default function MissionStageChrome({
-  stage,
+  stage: requestedStage,
   header,
   map,
   sidebar,
   children,
 }) {
+  const stage = normalizeWorkspaceStage(requestedStage);
   const waypointBtLayer = map.waypointBtLayer;
   const mappingEditorActive = map.mappingEditorActive;
 

@@ -1,0 +1,386 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
+
+from huggingface_hub.errors import GatedRepoError
+import torch
+from transformers.feature_extraction_utils import BatchFeature
+
+
+logger = logging.getLogger(__name__)
+
+
+try:
+    from transformers import Qwen3VLForConditionalGeneration
+
+    _QWEN3VL_AVAILABLE = True
+except ImportError:
+    _QWEN3VL_AVAILABLE = False
+
+
+_GATED_BACKBONE_HINT = (
+    "Cannot download the VLM backbone '{model_name}', which is a gated Hugging "
+    "Face repo. Every GR00T checkpoint (including the base nvidia/GR00T-N1.7-3B) "
+    "loads this backbone, so both zero-shot inference and finetuning require "
+    "access to it. Request access at https://huggingface.co/{model_name} and "
+    "authenticate with `hf auth login` (or set the HF_TOKEN environment variable) "
+    "before loading a GR00T model."
+)
+
+
+_GATED_MARKERS = ("gated repo", "is restricted", "access to model", "401 client error")
+
+
+def _is_gated_repo_error(exc: BaseException) -> bool:
+    """True if ``exc`` (or any exception it wraps) is a gated/forbidden HF download.
+
+    transformers may raise ``GatedRepoError`` directly or wrap it (as
+    ``__cause__``/``__context__``) inside an ``OSError`` whose own message omits
+    the gated markers, so we walk the chain.
+    """
+    cur: BaseException | None = exc
+    for _ in range(10):  # bounded walk guards against cyclic exception chains
+        if cur is None:
+            break
+        if isinstance(cur, GatedRepoError) or any(m in str(cur).lower() for m in _GATED_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _real_inference_device(module: torch.nn.Module) -> torch.device:
+    """Best-effort real (non-meta) device backing a module, defaulting to CPU.
+
+    RoPE buffers must be rebuilt on the device holding the loaded weights, never
+    on the ``meta`` device that may be the active default during nested load.
+    """
+    for tensor in module.parameters():
+        if tensor.device.type != "meta":
+            return tensor.device
+    for tensor in module.buffers():
+        if tensor.device.type != "meta":
+            return tensor.device
+    return torch.device("cpu")
+
+
+def recompute_vision_rotary_inv_freq(
+    rotary: torch.nn.Module, head_dim_half: int, device: torch.device
+) -> torch.Tensor:
+    """Re-derive Qwen3-VL's vision RoPE ``inv_freq`` via the module's own class.
+
+    Reusing ``type(rotary)(...)`` keeps the analytic formula owned by Transformers;
+    the real-device context makes it correct even under a ``meta`` default device.
+    """
+    with torch.device(device):
+        fresh = type(rotary)(head_dim_half)
+    return fresh.inv_freq.detach().to(device=device, dtype=torch.float32)
+
+
+def recompute_text_rotary_inv_freq(
+    rotary: torch.nn.Module, config, device: torch.device
+) -> tuple[torch.Tensor, float]:
+    """Re-derive Qwen3-VL's text RoPE ``inv_freq`` via the module's own class.
+
+    Delegates to the module's constructor so the configured ``rope_init_fn``
+    (default / scaled / dynamic) stays the single source of truth; returns the
+    FP32 ``inv_freq`` and its ``attention_scaling``.
+    """
+    with torch.device(device):
+        fresh = type(rotary)(config=config, device=device)
+    inv_freq = fresh.inv_freq.detach().to(device=device, dtype=torch.float32)
+    attention_scaling = float(getattr(fresh, "attention_scaling", 1.0))
+    return inv_freq, attention_scaling
+
+
+def _assign_inv_freq(
+    rotary: torch.nn.Module, name: str, value: torch.Tensor, *, persistent: bool
+) -> bool:
+    """Write ``value`` onto ``rotary.<name>`` if it differs; return whether it changed.
+
+    Returns ``True`` when the buffer/attribute was (re)written, ``False`` when the
+    existing value already matched (idempotent no-op). This boolean lets tests
+    assert that a corrupted buffer is actually repaired rather than silently
+    skipped.
+    """
+    current = getattr(rotary, name, None)
+    if (
+        isinstance(current, torch.Tensor)
+        and current.device.type != "meta"
+        and current.device == value.device
+        and current.shape == value.shape
+        and current.dtype == value.dtype
+        and torch.equal(current, value)
+    ):
+        return False
+    if name in rotary._buffers:
+        rotary.register_buffer(name, value, persistent=persistent)
+    else:
+        setattr(rotary, name, value)
+    return True
+
+
+class Qwen3Backbone(torch.nn.Module):
+    def __init__(
+        self,
+        model_name: str = "nvidia/Cosmos-Reason2-2B",
+        tune_llm: bool = False,
+        tune_visual: bool = False,
+        select_layer: int = -1,
+        reproject_vision: bool = True,
+        use_flash_attention: bool = False,
+        projector_dim: int = -1,
+        load_bf16: bool = False,
+        tune_top_llm_layers: int = 0,
+        trainable_params_fp32: bool = False,
+        transformers_loading_kwargs: dict = {},
+    ):
+        """
+        Qwen3Backbone is to generate n_queries to represent the future action hidden states.
+        Args:
+            model_name: nvidia/Cosmos-Reason2-2B
+            tune_llm: whether to tune the LLM model (default: False)
+            tune_visual: whether to tune the visual model (default: False)
+        """
+        if not _QWEN3VL_AVAILABLE:
+            raise ImportError(
+                "Qwen3VLForConditionalGeneration is not available. "
+                "Please upgrade transformers to a version that supports Qwen3-VL: "
+                "pip install transformers>=4.57.0"
+            )
+
+        super().__init__()
+
+        # Add attention kwargs
+        extra_kwargs = {}
+        if use_flash_attention:
+            try:
+                import flash_attn  # noqa: F401
+
+                extra_kwargs["attn_implementation"] = "flash_attention_2"
+            except ImportError:
+                logger.warning(
+                    "flash_attn is not installed. Falling back to sdpa attention. "
+                    "Install flash-attn for better performance: pip install flash-attn"
+                )
+                extra_kwargs["attn_implementation"] = "sdpa"
+        if load_bf16:
+            extra_kwargs["torch_dtype"] = torch.bfloat16
+
+        try:
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_name,
+                **extra_kwargs,
+                **transformers_loading_kwargs,
+            ).eval()
+        except Exception as exc:
+            if _is_gated_repo_error(exc):
+                raise RuntimeError(_GATED_BACKBONE_HINT.format(model_name=model_name)) from exc
+            raise
+
+        # needed since we don't use these layers. Also saves compute
+        retained_layers = (
+            len(self.model.language_model.layers) if select_layer < 0 else select_layer
+        )
+        while len(self.model.language_model.layers) > retained_layers:
+            self.model.language_model.layers.pop(-1)
+
+        self.select_layer = select_layer
+        self.set_trainable_parameters(tune_llm, tune_visual, tune_top_llm_layers)
+        if load_bf16 and trainable_params_fp32:
+            # cast trainable parameters to fp32
+            for n, p in self.named_parameters():
+                if p.requires_grad:
+                    p.data = p.data.to(torch.float32)
+                    logger.debug(f"Casting trainable parameter {n} to fp32")
+
+        # Repair Qwen3-VL's non-persistent RoPE buffers once, after weights are
+        # loaded and trainable dtypes are finalized. See _reset_rotary_inv_freq.
+        self._reset_rotary_inv_freq()
+
+        # Restore the fast vision patch-embed kernel on torch>=2.9. See method docstring.
+        self._apply_vision_patch_embed_channels_last()
+
+    def _apply_vision_patch_embed_channels_last(self) -> None:
+        """Force the Qwen3-VL vision patch-embed ``Conv3d`` to ``channels_last_3d``.
+
+        On torch>=2.9 (cuDNN 9.10.x) the contiguous bf16 patch-embed ``Conv3d``
+        dispatches to a pathologically slow kernel on sm_80; ``channels_last_3d``
+        selects the fast one and is numerically equivalent (harmless elsewhere).
+        """
+        visual = getattr(self.model, "visual", None)
+        if visual is None:
+            return
+
+        def _to_channels_last_3d(_module, inputs):
+            # Skip while tracing: the legacy TorchScript ONNX exporter cannot lower a
+            # memory_format on .contiguous() ("onnx memory_format support is not
+            # implemented"). This is a runtime-only perf hint, so the plain contiguous
+            # graph is numerically equivalent for export.
+            if not inputs or torch.jit.is_tracing():
+                return inputs
+            x = inputs[0]
+            if isinstance(x, torch.Tensor) and x.dim() == 5:
+                return (x.contiguous(memory_format=torch.channels_last_3d), *inputs[1:])
+            return inputs
+
+        patched = 0
+        for module in visual.modules():
+            if isinstance(module, torch.nn.Conv3d):
+                module.to(memory_format=torch.channels_last_3d)
+                module.register_forward_pre_hook(_to_channels_last_3d)
+                patched += 1
+        if patched:
+            logger.debug(
+                "Applied channels_last_3d to %d vision patch-embed Conv3d module(s) "
+                "(torch>=2.9 cuDNN Conv3d perf workaround).",
+                patched,
+            )
+
+    def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool, tune_top_llm_layers: int):
+        self.tune_llm = tune_llm
+        self.tune_visual = tune_visual
+        self.requires_grad_(False)
+        if tune_llm:
+            self.model.language_model.requires_grad_(True)
+        if tune_visual:
+            self.model.visual.requires_grad_(True)
+        if not tune_llm:
+            self.model.language_model.requires_grad_(False)
+        if not tune_visual:
+            self.model.visual.requires_grad_(False)
+
+        if tune_top_llm_layers > 0:
+            for layer in self.model.language_model.layers[-tune_top_llm_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+        logger.debug(f"Tune backbone llm: {self.tune_llm}")
+        logger.debug(f"Tune backbone visual: {self.tune_visual}")
+        # Check if any parameters are still trainable. If not, log a warning.
+        for name, p in self.named_parameters():
+            if p.requires_grad:
+                logger.debug(f"Backbone trainable parameter: {name}")
+        if not any(p.requires_grad for p in self.parameters()):
+            logger.warning("No backbone trainable parameters found.")
+
+    def train(self, mode=True):
+        super().train(mode)
+        if not any(p.requires_grad for p in self.parameters()):
+            super().train(False)
+        elif mode:
+            self.set_frozen_modules_to_eval_mode()
+        return self
+
+    def set_frozen_modules_to_eval_mode(self):
+        """
+        Huggingface will call model.train() at each training_step. To ensure
+        the expected behaviors for modules like dropout, batchnorm, etc., we
+        need to call model.eval() for the frozen modules.
+        """
+        if self.training:
+            if self.model.language_model and not self.tune_llm:
+                self.model.language_model.eval()
+            if self.model.visual and not self.tune_visual:
+                self.model.visual.eval()
+
+    def _reset_rotary_inv_freq(self) -> None:
+        """Re-derive Qwen3-VL's non-persistent RoPE ``inv_freq`` buffers once at load.
+
+        These ``persistent=False`` buffers are not restored from a checkpoint and
+        can be left uninitialized under the nested ``no_init_weights`` load, so we
+        rebuild the analytic FP32 frequencies here (load time only, no per-forward
+        cost). Fails closed (raises) when the layout/config needed to rebuild is
+        missing, so a drifted transformers version cannot silently serve
+        uninitialized buffers.
+        """
+        config = getattr(self.model, "config", None)
+        vision_changed = self._reset_vision_rotary_inv_freq(config)
+        text_changed = self._reset_language_rotary_inv_freq()
+        logger.debug(
+            "Qwen3-VL RoPE inv_freq reset (vision_rewritten=%s, text_rewritten=%s).",
+            vision_changed,
+            text_changed,
+        )
+
+    def _reset_vision_rotary_inv_freq(self, config) -> bool:
+        visual = getattr(self.model, "visual", None)
+        rotary = getattr(visual, "rotary_pos_emb", None)
+        if rotary is None or not hasattr(rotary, "inv_freq"):
+            raise RuntimeError(
+                "Qwen3-VL visual rotary_pos_emb/inv_freq not found; cannot rebuild the "
+                "non-persistent vision RoPE inv_freq. Continuing would leave it "
+                "uninitialized and silently corrupt inference, so we fail the load. The "
+                "transformers Qwen3-VL layout may have changed; pin a compatible version."
+            )
+
+        vision_config = getattr(config, "vision_config", None)
+        if vision_config is None or not all(
+            hasattr(vision_config, attr) for attr in ("hidden_size", "num_heads")
+        ):
+            raise RuntimeError(
+                "Qwen3-VL vision_config missing hidden_size/num_heads; cannot rebuild the "
+                "non-persistent vision RoPE inv_freq (continuing would leave it "
+                "uninitialized and silently corrupt inference)."
+            )
+
+        head_dim = vision_config.hidden_size // vision_config.num_heads
+        device = _real_inference_device(visual)
+        inv_freq = recompute_vision_rotary_inv_freq(rotary, head_dim // 2, device)
+        return _assign_inv_freq(rotary, "inv_freq", inv_freq, persistent=False)
+
+    def _reset_language_rotary_inv_freq(self) -> bool:
+        language_model = getattr(self.model, "language_model", None)
+        rotary = getattr(language_model, "rotary_emb", None)
+        text_config = getattr(rotary, "config", None) or getattr(language_model, "config", None)
+        if rotary is None or not hasattr(rotary, "inv_freq") or text_config is None:
+            raise RuntimeError(
+                "Qwen3-VL language rotary_emb/inv_freq/config not found; cannot rebuild the "
+                "non-persistent text RoPE inv_freq. Continuing would leave it uninitialized "
+                "and silently corrupt inference, so we fail the load. The transformers "
+                "Qwen3-VL layout may have changed; pin a compatible version."
+            )
+
+        device = _real_inference_device(language_model)
+        inv_freq, _attention_scaling = recompute_text_rotary_inv_freq(rotary, text_config, device)
+        changed = _assign_inv_freq(rotary, "inv_freq", inv_freq, persistent=False)
+        # ``original_inv_freq`` is a plain attribute (not a buffer) that dynamic
+        # RoPE updates restore from; keep it consistent with inv_freq.
+        if hasattr(rotary, "original_inv_freq"):
+            changed = (
+                _assign_inv_freq(rotary, "original_inv_freq", inv_freq.clone(), persistent=False)
+                or changed
+            )
+        return changed
+
+    def prepare_input(self, batch: dict) -> BatchFeature:
+        return BatchFeature(data=batch)
+
+    def forward(self, vl_input: BatchFeature) -> BatchFeature:
+        self.set_frozen_modules_to_eval_mode()
+        # 0. Set frozen module to eval
+        keys_to_use = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
+        vl_input = {k: vl_input[k] for k in keys_to_use}
+        outputs = self.model(**vl_input, output_hidden_states=True, use_cache=False)
+        outputs = outputs.hidden_states[-1]
+        image_mask = vl_input["input_ids"] == self.model.config.image_token_id
+        attention_mask = vl_input["attention_mask"] == 1
+        return BatchFeature(
+            data={
+                "backbone_features": outputs,
+                "backbone_attention_mask": attention_mask,
+                "image_mask": image_mask,
+            }
+        )  # [B, T2, hidden_size]

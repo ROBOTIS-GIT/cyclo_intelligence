@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -83,6 +85,15 @@ class FakeRobot:
             self.hold_failures_remaining -= 1
             raise RuntimeError("hold publish failed")
         self.holds.append((list(action_keys), float(duration_s)))
+        self._hold_stamp = time.monotonic()
+        return {'commanded_at': self._hold_stamp, 'positions': {'arm_joint': 0.25},
+                'mobile': 'mobile' in action_keys}
+
+    def current_hold_feedback(self):
+        self._hold_stamp += .02
+        return {'positions': {'arm_joint': 0.25}, 'received': {'arm_joint': self._hold_stamp},
+                'odom_received': self._hold_stamp,
+                'odom': {'linear_velocity': [0, 0, 0], 'angular_velocity': [0, 0, 0]}}
 
     def close(self) -> None:
         pass
@@ -117,6 +128,39 @@ class ControlLoopSafetyTests(unittest.TestCase):
         loop._action_keys = ["arm"]
         return loop
 
+    def test_async_preserves_model_actions_and_policy_rate(self) -> None:
+        loop = ControlLoop(requester=object(), inference_hz=15, control_hz=100,
+                           postprocess_actions=True, target_chunk_size=100)
+        with mock.patch.object(control_loop_module, "RobotClient", return_value=FakeRobot()):
+            loop.configure(robot_type="ffw", action_request_mode="async")
+        processor = loop._processor
+        chunks = [np.array([[1., 9.], [20., -3.], [7., 2.]]),
+                  np.array([[-30., 15.], [2., 40.]])]
+        for chunk in chunks:
+            processor.push_actions(chunk)
+        self.assertEqual(processor.buffer_size, 5)
+        self.assertEqual(loop._tick_period(), 1. / 15)
+        actual = np.stack([processor.pop_action() for _ in range(5)])
+        np.testing.assert_array_equal(actual, np.concatenate(chunks))
+        self.assertIsNone(processor.pop_action())
+
+    def test_sync_keeps_legacy_commands_without_rail(self):
+        from action_chunk_processing import ActionChunkProcessor
+        loop = ControlLoop(requester=object())
+        with mock.patch.object(control_loop_module, "RobotClient", return_value=FakeRobot()):
+            loop.configure(robot_type="ffw", action_request_mode="sync")
+        self.assertIsNone(loop._rail)
+        expected = ActionChunkProcessor(inference_hz=15, control_hz=100)
+        self.assertEqual(loop._tick_period(), .01)
+        for chunk in (np.arange(32.).reshape(16,2), -np.arange(32.).reshape(16,2)):
+            expected.push_actions(chunk, scheduled_start_delay_s=None, align=False)
+            loop._processor.push_actions(chunk, scheduled_start_delay_s=None, align=False)
+            self.assertFalse(loop._should_request_actions(loop._processor))
+            while expected.buffer_size:
+                np.testing.assert_array_equal(loop._processor.pop_action(), expected.pop_action())
+            self.assertTrue(loop._should_request_actions(loop._processor))
+
+
     def test_configure_applies_requested_timing(self) -> None:
         loop = ControlLoop(
             requester=object(),
@@ -147,9 +191,9 @@ class ControlLoopSafetyTests(unittest.TestCase):
             inference_hz=20.0,
             control_hz=50.0,
             chunk_align_window_s=0.25,
-            postprocess=True,
+            postprocess=False,
             target_chunk_size=None,
-            alignment_mode="l2",
+            alignment_mode="none",
         )
         self.assertIn(
             "control_hz=50 inference_hz=20 chunk_align_window_s=0.25",
@@ -293,6 +337,55 @@ class ControlLoopSafetyTests(unittest.TestCase):
 
         self.assertEqual(processor.clear_count, 1)
 
+    def test_normal_physical_pause_holds_and_prevents_more_action_publish(self):
+        robot = FakeRobot()
+        processor = FakeProcessor(actions=[np.asarray([0.4])])
+        loop = self._make_loop(processor, robot)
+        loop._publish_to_robot = True
+        self.assertTrue(loop.pause())
+        loop.tick()
+        self.assertEqual(robot.holds, [(["arm"], .1)])
+        self.assertFalse(loop._running)
+        self.assertFalse(loop.initial_pose_sync_hold_required())
+        self.assertEqual(robot.commands, [])
+        self.assertEqual(processor.clear_count, 1)
+
+    def test_failed_normal_hold_blocks_resume_until_retry_confirms(self):
+        robot = FakeRobot(); robot.hold_failures_remaining = 1
+        loop = self._make_loop(FakeProcessor(), robot)
+        loop._publish_to_robot = True
+        self.assertFalse(loop.pause())
+        self.assertFalse(loop._running)
+        with self.assertRaisesRegex(RuntimeError, "hold is still pending"):
+            loop.start()
+        self.assertTrue(loop.stop())
+        self.assertFalse(loop.initial_pose_sync_hold_required())
+        self.assertFalse(loop.start())
+        self.assertTrue(loop._running)
+
+    def test_late_chunk_after_pause_is_discarded(self):
+        entered, release = threading.Event(), threading.Event()
+        response = SimpleNamespace(success=True, message='ok', chunk_size=1, action_dim=1, action_list=[.9])
+        class BlockingRequester:
+            def get_action(self, instruction):
+                entered.set()
+                if not release.wait(2):
+                    raise RuntimeError('test did not release requester')
+                return response
+        processor = FakeProcessor(buffer_size=0)
+        loop = self._make_loop(processor, FakeRobot())
+        loop._requester = BlockingRequester()
+        worker = threading.Thread(target=loop._request_and_buffer, args=('pick', loop._generation, 'async'))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(loop.pause())
+        finally:
+            release.set(); worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(processor.pushed_chunks, [])
+        self.assertFalse(loop._running)
+
     def test_refill_threshold_includes_observed_request_latency(self) -> None:
         processor = FakeProcessor()
         robot = FakeRobot()
@@ -369,7 +462,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertIsNone(processor.scheduled_delays[-1])
         self.assertEqual(processor.align_flags[-1], False)
 
-    def test_async_mode_buffers_chunk_with_latency_and_buffer_delay(self) -> None:
+    def test_async_mode_buffers_chunk_without_alignment_or_latency_skip(self) -> None:
         response = SimpleNamespace(
             success=True,
             message="ok",
@@ -385,9 +478,8 @@ class ControlLoopSafetyTests(unittest.TestCase):
         loop._request_and_buffer("pick", loop._generation, "async")
 
         self.assertEqual(len(processor.pushed_chunks), 1)
-        self.assertIsNotNone(processor.scheduled_delays[-1])
-        self.assertGreaterEqual(processor.scheduled_delays[-1], 0.5)
-        self.assertEqual(processor.align_flags[-1], True)
+        self.assertIsNone(processor.scheduled_delays[-1])
+        self.assertEqual(processor.align_flags[-1], False)
 
     def test_initial_pose_sync_discards_first_chunk_and_requests_fresh_chunk(self) -> None:
         first = SimpleNamespace(
@@ -530,6 +622,32 @@ class ControlLoopSafetyTests(unittest.TestCase):
 
         self.assertEqual(requester.calls, [])
         self.assertEqual(robot.sync_targets, [])
+
+    def test_explicit_resume_sync_realigns_after_stop(self) -> None:
+        response = SimpleNamespace(success=True, message="ok", chunk_size=1,
+                                   action_dim=2, action_list=[0.1, 0.2])
+        requester = FakeRequester(response)
+        robot = FakeRobot()
+        loop = ControlLoop(requester=requester)
+        loop._robot = robot
+        loop._processor = FakeProcessor(buffer_size=100)
+        loop._action_keys = ["arm"]
+        loop._publish_to_robot = True
+        loop._initial_pose_sync_completed = True
+        self.assertTrue(loop.start(initial_pose_sync=True, initial_pose_sync_duration_s=2.0))
+        self.assertEqual(len(robot.sync_targets), 1)
+        self.assertFalse(loop._initial_pose_sync_completed)
+        loop.stop()
+        self.assertTrue(loop.start(initial_pose_sync=True, initial_pose_sync_duration_s=2.0))
+        self.assertEqual(len(robot.sync_targets), 2)
+
+    def test_explicit_resume_sync_is_ignored_for_simulation(self) -> None:
+        requester = FakeRequester(None)
+        loop = ControlLoop(requester=requester)
+        loop._robot = FakeRobot()
+        loop._processor = FakeProcessor()
+        self.assertFalse(loop.start(publish_to_robot=False, initial_pose_sync=True))
+        self.assertEqual(requester.calls, [])
 
     def test_simulation_ignores_initial_pose_sync(self) -> None:
         requester = FakeRequester(None)

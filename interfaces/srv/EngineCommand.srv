@@ -21,6 +21,7 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+
 ---
 uint64 seq_id
 bool success
@@ -34,3 +35,6 @@ string[] action_keys
 int32 chunk_size
 int32 action_dim
 float64[] action_list
+
+# Versioned timing metadata; monotonic values are comparable only with matching clock_id.
+string timing_json

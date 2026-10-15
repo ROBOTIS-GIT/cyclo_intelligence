@@ -25,6 +25,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import threading
+from functools import wraps
 from typing import Any, Optional
 import uuid
 
@@ -37,6 +40,18 @@ router = APIRouter(prefix="/navigation/spots", tags=["navigation-spots"])
 SPOTS_ROOT = Path(
     os.environ.get("CYCLO_NAVIGATION_DATA_DIR", "/workspace/navigation")
 )
+# Serialize read-modify-write operations, including Autonomy plan cleanup.
+_SPOT_MUTATION_LOCK = threading.RLock()
+
+
+def _spot_mutation(function):
+    @wraps(function)
+    def serialized(*args, **kwargs):
+        with _SPOT_MUTATION_LOCK:
+            return function(*args, **kwargs)
+    return serialized
+
+
 SPOTS_SCHEMA_VERSION = 1
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -214,6 +229,7 @@ def list_spots(map_name: str = Query(min_length=1, max_length=128)):
 
 
 @router.post("", response_model=MapSpot)
+@_spot_mutation
 def create_spot(request: SpotCreateRequest):
     map_name = _validate_map_name(request.map_name)
     store = _read_store(map_name)
@@ -241,6 +257,7 @@ def create_spot(request: SpotCreateRequest):
 
 
 @router.patch("/{spot_id}", response_model=MapSpot)
+@_spot_mutation
 def update_spot(spot_id: str, request: SpotUpdateRequest):
     normalized_id = _validate_spot_id(spot_id)
     map_name = _validate_map_name(request.map_name)
@@ -268,6 +285,7 @@ def update_spot(spot_id: str, request: SpotUpdateRequest):
 
 
 @router.delete("/{spot_id}", response_model=ActionResult)
+@_spot_mutation
 def delete_spot(
     spot_id: str,
     map_name: str = Query(min_length=1, max_length=128),
@@ -283,3 +301,28 @@ def delete_spot(
         {"spots": [_serialize_spot(item) for item in next_spots]},
     )
     return ActionResult(ok=True, message=f"Spot deleted: {normalized_id}")
+
+
+def map_spots_directory_for_removal(map_name: str) -> Path:
+    """Resolve only a direct map child; never follow a stored map symlink."""
+    normalized = _validate_map_name(map_name)
+    if normalized in {".", ".."}:
+        raise HTTPException(400, "Invalid map name for spot cleanup")
+    root = (SPOTS_ROOT / "maps").resolve()
+    candidate = root / normalized
+    if candidate.is_symlink() or candidate.resolve().parent != root:
+        raise HTTPException(400, "Map spot directory must not be a symlink or escape the maps directory")
+    return candidate
+
+
+@_spot_mutation
+def remove_map_spots(map_name: str) -> bool:
+    """Remove legacy spot storage for exactly one deleted map."""
+    directory = map_spots_directory_for_removal(map_name)
+    if not directory.exists():
+        return False
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        raise HTTPException(503, f"Failed to remove spot storage for {map_name}: {exc}") from exc
+    return True

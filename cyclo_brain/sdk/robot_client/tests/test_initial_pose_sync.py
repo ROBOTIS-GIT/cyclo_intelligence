@@ -67,6 +67,9 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
         client._joint_efforts = {}
         client._joint_timestamps = {}
         client._joint_children = {}
+        client._sensors = {}
+        client._sensor_timestamps = {}
+        client._sensor_received_monotonic = {}
         client._lock = threading.Lock()
         client._cmd_vel_linear_deadband = 0.0
         client._cmd_vel_angular_deadband = 0.0
@@ -79,6 +82,7 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
                 cfg.get("joint_names", [])
             )
         return client
+
 
     def test_joint_state_max_age_environment_override_and_fallback(self) -> None:
         with mock.patch.object(RobotClient, "_init_subscriptions"):
@@ -168,12 +172,45 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
             ),
         )
 
-        client.publish_current_pose_hold(action_keys, duration_s=0.1)
+        receipt = client.publish_current_pose_hold(action_keys, duration_s=0.1)
+        self.assertGreater(receipt["commanded_at"], 0)
+        self.assertEqual(receipt["positions"], client._joint_positions_by_name)
+        self.assertFalse(receipt["mobile"])
 
         message = client._command_publishers["leader_arm"].messages[0]
         expected = [client._joint_positions_by_name[name] for name in joint_names]
         np.testing.assert_allclose(message["points"][0].positions, expected)
         self.assertEqual(message["points"][0].time_from_start.nanosec, 100_000_000)
+
+    def test_mobile_hold_receipt_and_feedback_preserve_named_freshness(self):
+        client = self._make_client('ffw_sg2_rev1')
+        self._seed_joint_state(client)
+        receipt = client.publish_current_pose_hold(client._action_keys)
+        self.assertTrue(receipt['mobile'])
+        self.assertEqual(receipt['positions'], client._joint_positions_by_name)
+        for key, group in client._action_groups.items():
+            if group['msg_type'] == 'geometry_msgs/msg/Twist':
+                command = client._command_publishers[f'leader_{key}'].messages[-1]
+                self.assertEqual(command['linear'].x, 0)
+                self.assertEqual(command['angular'].z, 0)
+        vector = lambda: SimpleNamespace(x=0.0, y=0.0, z=0.0)
+        odom = SimpleNamespace(
+            pose=SimpleNamespace(pose=SimpleNamespace(position=vector(),
+                orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))),
+            twist=SimpleNamespace(twist=SimpleNamespace(linear=vector(), angular=vector())))
+        client._update_sensor('odom', odom)
+        feedback = client.current_hold_feedback()
+        self.assertEqual(feedback['positions'], receipt['positions'])
+        self.assertEqual(feedback['received'], client._joint_position_timestamps_by_name)
+        self.assertGreater(feedback['odom_received'], receipt['commanded_at'])
+        np.testing.assert_array_equal(feedback['odom']['linear_velocity'], [0, 0, 0])
+        np.testing.assert_array_equal(feedback['odom']['angular_velocity'], [0, 0, 0])
+        # Named snapshots must not mutate when the next callback updates state.
+        name = next(iter(client._joint_positions_by_name))
+        client._joint_positions_by_name[name] += 1
+        client._joint_position_timestamps_by_name[name] += 1
+        self.assertNotEqual(feedback['positions'][name], client._joint_positions_by_name[name])
+        self.assertNotEqual(feedback['received'][name], client._joint_position_timestamps_by_name[name])
 
     def test_missing_current_joint_state_prevents_any_sync_command(self):
         client = self._make_client("omy_f3m")

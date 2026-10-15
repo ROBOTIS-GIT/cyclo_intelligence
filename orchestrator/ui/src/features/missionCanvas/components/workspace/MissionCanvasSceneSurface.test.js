@@ -2,14 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { render, screen } from "@testing-library/react";
-import { STAGE_AUTHORING, STAGE_MAPPING, STAGE_MAP_EDIT, STAGE_NAVIGATE, STAGE_RUN } from "../../lib/stages";
+import { STAGE_AUTHORING, STAGE_MAPPING, STAGE_MAP_EDIT, STAGE_NAVIGATE, STAGE_RUN } from "../../../mapWorkspace/lib/stages";
 import MissionCanvasSceneSurface from "./MissionCanvasSceneSurface";
+
 
 const mockMapViewer = jest.fn(() => <div data-testid="map-viewer" />);
 jest.mock("../../../../components/navigation/MapViewer", () => ({
   MapViewer: (props) => mockMapViewer(props),
 }));
-jest.mock("../mapChrome", () => ({
+jest.mock("../../../mapWorkspace/components/mapChrome", () => ({
   LayersPopover: () => <div data-testid="layers" />,
 }));
 jest.mock("../stages/DesignStageHud", () => () => <div data-testid="design-hud" />);
@@ -167,4 +168,14 @@ test("Navigate alone exposes goal visualization and Navigate HUD", () => {
   expect(map.pose).toBe("pose");
   expect(map.selectedSpotId).toBe("");
   expect(screen.getByTestId("navigate-hud")).toBeInTheDocument();
+});
+
+
+
+test("Run retains its existing global plan display independently of Record",()=>{
+ const input=props();input.stage.id=STAGE_RUN;input.layers.needsPlan=true;
+ input.scene.plan={poses:["run path"]};
+ render(<MissionCanvasSceneSurface {...input}/>);
+ expect(viewerProps().plan).toBe(input.scene.plan);
+ expect(viewerProps().showGlobalPlan).toBe(true);
 });

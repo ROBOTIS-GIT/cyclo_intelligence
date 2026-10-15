@@ -18,14 +18,11 @@
 
 """BT action for inference and policy-Docker lifecycle commands.
 
-The four BT commands ride entirely on top of the SendCommand enums the
-UI already uses (START_INFERENCE / STOP_INFERENCE / RESUME_INFERENCE /
-FINISH). The only BT-specific bit is the LOAD command, which runs a
-two-step sequence inside this node — START_INFERENCE (to leverage
-orchestrator's "fresh load or skip if already loaded" logic) followed
-by STOP_INFERENCE — so the policy ends up paused-in-memory and the BT
-graph's next Resume node can kick it into INFERENCING. RESUME, STOP,
-and CLEAR each run as a single-stage call.
+LOAD prepares an idle policy through LOAD_INFERENCE. It never calls
+START_INFERENCE and never generates a throwaway first action chunk.
+RESUME explicitly starts the loaded session; STOP and CLEAR retain their
+single-stage pause and teardown calls. The UI's explicit START_INFERENCE
+continues to load and start the policy.
 
 For each stage the node polls /task/inference_status and only advances
 once the phase the orchestrator publishes matches the expected target,
@@ -65,24 +62,19 @@ if TYPE_CHECKING:
     from rclpy.node import Node
 
 
-# Per BT command, the ordered list of (SendCommandSrv enum, target phase,
-# stage timeout, whether to attach task_info) the node executes. LOAD
-# is the only multi-stage command — it runs START_INFERENCE first so
-# the orchestrator's existing already-loaded-vs-fresh-load logic does
-# the right thing, then immediately pauses the policy.
+# Only a constant was added to the existing uint8 command wire field. The
+# numeric value also works with pre-existing generated interfaces; an older
+# orchestrator rejects it, without falling back to a motion-start command.
+LOAD_INFERENCE_COMMAND = getattr(SendCommandSrv.Request, 'LOAD_INFERENCE', 25)
+
+# Each BT inference command waits for its acknowledged lifecycle phase.
 COMMAND_STAGES = {
     'LOAD': [
         {
-            'command': SendCommandSrv.Request.START_INFERENCE,
-            'target_phase': InferenceStatus.INFERENCING,
+            'command': LOAD_INFERENCE_COMMAND,
+            'target_phase': InferenceStatus.PAUSED,
             'timeout': 600.0,
             'with_task_info': True,
-        },
-        {
-            'command': SendCommandSrv.Request.STOP_INFERENCE,
-            'target_phase': InferenceStatus.PAUSED,
-            'timeout': 5.0,
-            'with_task_info': False,
         },
     ],
     'RESUME': [
@@ -328,6 +320,12 @@ class SendCommand(BaseAction):
         target = params.get('target', 'INFERENCE')
         command = params.get('command', 'LOAD')
         command_str = str(command or '').strip().upper()
+        # Reject enabled retired flags in raw XML; re-saving a Canvas node removes them.
+        retired = ('ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+                   'chunk_endpoint_interpolation', 'remac_enabled')
+        enabled = [key for key in retired if str(params.get(key, False)).strip().lower() in {'true', '1'}]
+        if command_str == 'LOAD' and enabled:
+            raise ValueError(f'Retired inference options: {", ".join(enabled)}. Re-save the LOAD node using ordinary Async or VLA-RAIL.')
         inference_mode = (
             params.get('inference_mode', 'simulation')
             if command_str == 'LOAD'
@@ -355,6 +353,9 @@ class SendCommand(BaseAction):
             chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
             inference_mode=inference_mode,
             action_request_mode=action_request_mode,
+            initial_pose_sync=params.get('initial_pose_sync', True),
+            initial_pose_sync_duration_s=params.get('initial_pose_sync_duration_s', 5.0),
+            vla_rail_enabled=params.get('vla_rail_enabled', False),
             acceleration_mode=acceleration_mode,
             acceleration_engine_path=params.get(
                 'acceleration_engine_path',
@@ -382,8 +383,11 @@ class SendCommand(BaseAction):
         chunk_align_window_s: float = 0.3,
         inference_mode: str = 'simulation',
         action_request_mode: str = 'async',
+        vla_rail_enabled: bool = False,
         acceleration_mode: str = 'pytorch',
         acceleration_engine_path: str = '',
+        initial_pose_sync: bool = True,
+        initial_pose_sync_duration_s: float = 5.0,
         service_name: str = '/task/command',
     ):
         """Initialize an inference or Docker lifecycle action."""
@@ -392,6 +396,10 @@ class SendCommand(BaseAction):
         self.target_str = (target or 'INFERENCE').strip().upper()
         self.model = model
         self.backend = _service_type_from_model(model)
+        self.initial_pose_sync = str(initial_pose_sync).strip().lower() in {'true', '1'}
+        self.initial_pose_sync_duration_s = float(initial_pose_sync_duration_s)
+        if not 1.0 <= self.initial_pose_sync_duration_s <= 60.0:
+            raise ValueError('initial_pose_sync_duration_s must be between 1 and 60')
         self.policy_path = policy_path
         self.task_instruction = task_instruction
         self.inference_hz = int(inference_hz) if inference_hz else 0
@@ -409,6 +417,9 @@ class SendCommand(BaseAction):
             if self.command_str == 'LOAD'
             else ''
         )
+        self.vla_rail_enabled = self.command_str == 'LOAD' and str(vla_rail_enabled).strip().lower() in {'true', '1'}
+        if self.vla_rail_enabled and (self.backend != 'groot' or self.action_request_mode != 'async'):
+            raise ValueError('VLA-RAIL requires ordinary GR00T Async')
         self.acceleration_mode = (
             self._normalize_acceleration_mode(acceleration_mode)
             if self.command_str == 'LOAD'
@@ -468,12 +479,20 @@ class SendCommand(BaseAction):
             if self.target_str == 'INFERENCE'
             else []
         )
+        self._stages = [dict(stage) for stage in self._stages]
+        if self.target_str == 'INFERENCE' and self.command_str == 'RESUME' and self.initial_pose_sync:
+            self._stages[0]['timeout'] = self.initial_pose_sync_duration_s + 10.0
         self._stage_idx = 0
         self._future = None
         self._result = None
         self._service_wait_started = None
         self._phase_deadline = None
         self._backend_job = None
+        self._supervised = None
+        supervisor = getattr(self.node, 'inference_supervisor', None)
+        if supervisor is not None:
+            from .supervised_command import SupervisedCommand
+            self._supervised = SupervisedCommand(self, supervisor)
 
     def _status_callback(self, msg: InferenceStatus):
         with self._phase_lock:
@@ -732,6 +751,8 @@ class SendCommand(BaseAction):
 
     def tick(self) -> NodeStatus:
         """Advance the non-blocking backend or inference state machine."""
+        if self._supervised is not None:
+            return self._supervised.tick()
         if self._state == self._STATE_INIT:
             configuration_error = self._configuration_error()
             if configuration_error:
@@ -810,8 +831,7 @@ class SendCommand(BaseAction):
                 self._result = True
                 return NodeStatus.SUCCESS
             # Clear latched phase so we don't match a transition from a
-            # previous stage (LOAD's stage 1 entered while phase is still
-            # INFERENCING from stage 0).
+            # previous operation or loop iteration.
             self._reset_phase_cache()
             self._service_wait_started = time.monotonic()
             self._state = self._STATE_WAITING_SERVICE
@@ -927,10 +947,18 @@ class SendCommand(BaseAction):
     def _build_task_info(self) -> TaskInfo:
         ti = TaskInfo()
         ti.task_type = 'inference'
+        if self.command_str == 'RESUME':
+            ti.initial_pose_sync = self.initial_pose_sync
+            ti.initial_pose_sync_duration_s = self.initial_pose_sync_duration_s
         ti.policy_path = self.policy_path
         ti.service_type = _service_type_from_model(self.model)
         if self.command_str == 'LOAD' and hasattr(ti, 'inference_mode'):
             ti.inference_mode = self.inference_mode
+        if self.command_str == 'LOAD':
+            if self.vla_rail_enabled and not hasattr(ti, 'vla_rail_enabled'):
+                raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
+            if hasattr(ti, 'vla_rail_enabled'):
+                ti.vla_rail_enabled = self.vla_rail_enabled
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):
             ti.action_request_mode = self.action_request_mode
         ti.tags = (
@@ -958,9 +986,21 @@ class SendCommand(BaseAction):
                 ti.task_instruction = [self.task_instruction]
         return ti
 
+    def pause(self):
+        if self._supervised is None:
+            raise RuntimeError('SendCommand pause requires a supervised task tree')
+        self._supervised.pause()
+
+    def resume(self):
+        if self._supervised is None:
+            raise RuntimeError('SendCommand resume requires a supervised task tree')
+        self._supervised.resume()
+
     def reset(self):
         """Cancel pending work without letting a late START escape cleanup."""
         super().reset()
+        if self._supervised is not None:
+            self._supervised.reset()
         backend_job = self._backend_job
         if backend_job is not None:
             backend_result, _ = backend_job.snapshot()

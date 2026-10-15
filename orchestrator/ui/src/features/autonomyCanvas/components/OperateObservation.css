@@ -1,0 +1,60 @@
+.operate-scene-surface { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.operate-map-top-panels {
+  display: flex; flex: 0 0 auto; width: 100%;
+  max-height: 44%; overflow-y: auto;
+  background: var(--mc-surface); border-bottom: 1px solid var(--mc-border);
+}
+.operate-map-canvas { flex: 1 1 0; min-height: 0; position: relative; overflow: hidden; }
+.operate-map-observation {
+  width: 100%; min-width: 0; padding: 20px 24px; border-radius: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start;
+  border: none; background: var(--mc-surface);
+  color: var(--mc-text);
+  font-family: inherit; font-style: normal; font-weight: 400; letter-spacing: inherit;
+  min-height: 0;
+}
+.operate-map-observation .operate-observation { min-height: 160px; border-style: solid; }
+.operate-map-reasoning { min-width: 0; font-family: inherit; }
+.operate-map-observation strong { font-family: inherit; font-weight: 600; }
+.operate-map-observation p, .operate-map-observation span { font-family: inherit; }
+.operate-map-observation .operate-head-image { display: block; width: 100%; height: auto; max-height: 340px; object-fit: contain; }
+.operate-map-observation .operate-observation strong { font-size: 18px; }
+.operate-map-observation .operate-observation span { font-size: 14px; }
+.operate-map-observation .operate-qwen-heading { font-size: 20px; margin-top: 0; }
+.operate-map-decision { display: grid; gap: 4px; margin-top: 12px; }
+.operate-map-decision span { font-size: 13px; color: var(--mc-text-muted); }
+.operate-map-decision strong { font-size: 24px; overflow-wrap: anywhere; }
+.operate-map-observation .operate-qwen-text { font-size: 22px; line-height: 1.55; margin: 12px 0 0; }
+.operate-map-observation .operate-sidebar-note { font-size: 13px; }
+.operate-map-observation .operate-qwen-error { font-size: 16px; }
+@media (max-width: 1100px) {
+  .operate-map-observation { padding: 16px; }
+  .operate-map-observation .operate-qwen-text { font-size: 18px; }
+}
+@media (max-width: 700px) {
+  .operate-map-observation { grid-template-columns: minmax(0, 1fr); }
+}
+
+.operate-mode-heading { display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px; }
+.operate-mode-flow { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
+.operate-mode-item { display:flex; align-items:center; gap:8px; color:var(--mc-text-muted); }
+.operate-mode-item > span { display:flex; align-items:center; gap:7px; padding:8px 10px; border:1px solid transparent; border-radius:8px; font-size:15px; }
+.operate-mode-item.is-current > span { color:var(--mc-accent); background:var(--mc-accent-soft); border-color:var(--mc-accent); }
+.operate-mode-item.mode-patrol.is-current > span { color:#597994; background:rgba(89,121,148,.12); border-color:#597994; }
+.operate-mode-item.mode-mission.is-current > span { color:var(--mc-warning); background:color-mix(in srgb,var(--mc-warning) 12%,transparent); border-color:var(--mc-warning); }
+.operate-mode-arrow { width:12px; height:12px; opacity:.65; }
+.operate-mode-status { display:inline-flex; align-items:center; gap:6px; color:var(--mc-text-muted); font-size:13px; }
+.operate-mode-status::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.operate-mode-status.tone-active { color:var(--mc-success); }
+.operate-mode-status.tone-warning { color:var(--mc-warning); }
+.operate-mode-status.tone-danger { color:var(--mc-danger); }
+.operate-mode-location { min-height:24px; margin-top:10px; font-size:17px; font-weight:600; overflow-wrap:anywhere; }
+.operate-decision-card { padding:12px 14px; background:var(--mc-bg); border:1px solid var(--mc-border); border-left:3px solid var(--mc-accent); border-radius:8px; }
+.operate-decision-card[data-decision="pause"], .operate-decision-card[data-decision="unknown"] { border-left-color:var(--mc-warning); }
+.operate-decision-card[data-decision="cancel"] { border-left-color:var(--mc-danger); }
+.operate-decision-card strong { font-size:21px; }
+@media (max-width:1100px) {
+  .operate-mode-flow { gap:4px; }
+  .operate-mode-item { gap:4px; }
+  .operate-mode-item > span { padding:6px; font-size:13px; gap:5px; }
+}

@@ -16,7 +16,7 @@
 
 import { MdMyLocation, MdOutlinedFlag, MdStop } from "react-icons/md";
 
-import { TopicStatusPanel } from "../mapChrome";
+import { TopicStatusPanel } from "../../../mapWorkspace/components/mapChrome";
 import NavigateSessionPanel from "../run/NavigateSessionPanel";
 
 export function NavigationStageHud({

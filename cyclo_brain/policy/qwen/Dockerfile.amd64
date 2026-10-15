@@ -1,0 +1,20 @@
+# Build context: cyclo_brain/policy/qwen. Desktop NVIDIA GPUs, including sm_120.
+ARG BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
+FROM ${BASE_IMAGE}
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/root/.cache/huggingface \
+    QWEN_MODEL_ID=Qwen/Qwen3.5-9B QWEN_QUANTIZATION=4bit
+WORKDIR /app
+RUN uv venv --seed --system-site-packages /app/.venv --python /usr/bin/python3
+ENV VIRTUAL_ENV=/app/.venv PATH="/app/.venv/bin:$PATH"
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && python -c "from transformers import Qwen3_5ForConditionalGeneration, AutoProcessor; import bitsandbytes"
+COPY qwen_engine /app/qwen_engine
+COPY scripts /app/scripts
+EXPOSE 7110
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7110/health', timeout=3)"
+# One process owns CUDA weights. Never increase uvicorn worker count.
+ENTRYPOINT ["python", "-m", "uvicorn", "qwen_engine.server:app", "--host", "0.0.0.0", "--port", "7110", "--workers", "1"]

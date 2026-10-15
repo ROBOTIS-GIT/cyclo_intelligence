@@ -14,9 +14,9 @@
 //
 // Author: Seongwoo Kim
 
-import { TopicStatusPanel } from "../mapChrome";
+import { TopicStatusPanel } from "../../../mapWorkspace/components/mapChrome";
 import MappingSessionPanel from "../mapping/MappingSessionPanel";
-import MappingTeleopPanel from "../mapping/MappingTeleopPanel";
+import MappingTeleopPanel from "../../../mapWorkspace/components/MappingTeleopPanel";
 
 export default function MappingStageSidebar({
   teleopDisabled,

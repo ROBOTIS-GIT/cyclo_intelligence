@@ -17,6 +17,7 @@
 import { StrictMode } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AutonomyStudioPage from './AutonomyStudioPage';
+jest.mock('react-redux', () => ({ ...jest.requireActual('react-redux'), useSelector: selector => selector({ros:{rosHost:'localhost'}}) }));
 import {
   cancelNavigateToPoseGoal,
   configureDesignLocalizationAmcl,
@@ -94,6 +95,7 @@ function mockJsonResponse(data, ok = true, status = ok ? 200 : 500) {
     ok,
     status,
     text: () => Promise.resolve(JSON.stringify(data)),
+    json: () => Promise.resolve(data),
   };
 }
 
@@ -246,10 +248,17 @@ jest.mock('../utils/navigationMissionsApi', () => ({
 }));
 
 jest.mock('../hooks/useNavigationRosTopic', () => ({
-  useNavigationRosTopic: (topic) => ({
-    status: topic && mockTopicDataByName[topic] ? 'connected' : 'disconnected',
-    topicData: topic ? mockTopicDataByName[topic] || null : null,
-  }),
+  useNavigationRosTopic: (topic, options = {}) => {
+    const React = jest.requireActual('react');
+    const data = topic ? mockTopicDataByName[topic] || null : null;
+    const onMessage = React.useRef(options.onMessage);
+    onMessage.current = options.onMessage;
+    // Production delivers each receipt before its visual topicData update.
+    React.useEffect(() => {
+      if (data) onMessage.current?.(data.available ? data.data : data);
+    }, [data]);
+    return { topicData: data, status: topic && data ? 'connected' : 'disconnected' };
+  },
   useNavigationRosPublisher: () => mockPublishRosTopic,
 }));
 
@@ -1813,7 +1822,7 @@ test('edits mission manifest waypoints without legacy spot persistence', async (
     },
   });
   expect(screen.getByRole('button', { name: 'Mission Pickup' })).toBeInTheDocument();
-  expect(latestMapViewerProps().missionRouteOrder).toEqual([]);
+  expect(latestMapViewerProps().missionRouteOrder).toEqual([{id: 'mission_pickup', order: 1}]);
   expect(screen.queryByText('legacy.xml')).not.toBeInTheDocument();
   expect(getNavigationSpots.mock.calls.some(([mapName]) => mapName === 'factory')).toBe(false);
   expect(getNavigationMissionBtFile).toHaveBeenCalledWith('factory', 'global.xml', '');
@@ -2116,7 +2125,7 @@ test('shows waypoint actions in Waypoints after placing a waypoint', async () =>
   await waitFor(() => expect(saveNavigationMissionBtFile).toHaveBeenCalledWith(
     'factory',
     'global.xml',
-    expect.stringContaining('<Sequence name="GlobalMission"/>'),
+    expect.stringContaining('waypoint_id="spot_a"'),
     '',
     { expectedRevision: 0 },
   ));
@@ -4389,7 +4398,7 @@ test('deletes a saved map from the Mapping HUD behind a warning confirm popup', 
   // The popup spells out the cascade before asking.
   expect(await screen.findByText('Delete this map?')).toBeInTheDocument();
   await waitFor(() => expect(
-    screen.getByText('This map, its areas, and 2 missions will be deleted permanently.'),
+    screen.getByText('This map, its areas, saved spots, and 2 missions will be deleted permanently.'),
   ).toBeInTheDocument());
   expect(deletePgmMap).not.toHaveBeenCalled();
 
@@ -6423,8 +6432,12 @@ test('run mission activates the BT node on demand and releases it on stop', asyn
   // Supervisor mock with real node state: status reflects start/stop calls.
   let btUp = false;
   let resolveBtStop;
+  let resolveBtDiscovery;
   global.fetch.mockImplementation((url) => {
     const target = String(url);
+    if (target.endsWith('/bt/readiness')) {
+      return new Promise(resolve => { resolveBtDiscovery = () => resolve(mockJsonResponse({ ready: true })); });
+    }
     if (target.includes('/services/bt_node/start')) {
       btUp = true;
       return Promise.resolve(mockJsonResponse({ ok: true }));
@@ -6479,9 +6492,9 @@ test('run mission activates the BT node on demand and releases it on stop', asyn
   mockTopicDataByName['/bt/status'] = stringTopicMessage('running');
   mockTopicDataByName['/bt/active_nodes'] = stringTopicMessage('Wait');
 
-  // s6 can already report up while the ROS services are still being created.
-  // Hold the read-only catalog probe to prove navigation cannot start in that
-  // window; once it resolves, /bt/load_and_run is known to be registered too.
+  // Hold discovery first: an up process must not trigger an absent ROS service.
+  // After discovery succeeds, the read-only catalog request still confirms the
+  // node responds before navigation or a mutating BT request can start.
   let resolveBtReady;
   mockCallService.mockImplementation((serviceName) => {
     if (serviceName === '/bt/nodes/catalog') {
@@ -6515,6 +6528,12 @@ test('run mission activates the BT node on demand and releases it on stop', asyn
     '/api/services/bt_node/start',
     expect.objectContaining({ method: 'POST' }),
   ));
+  await waitFor(() => expect(resolveBtDiscovery).toBeDefined());
+  expect(mockCallService).not.toHaveBeenCalledWith(
+    '/bt/nodes/catalog', 'interfaces/srv/GetNodeCatalog', {}, 1000,
+  );
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  await act(async () => { resolveBtDiscovery(); });
   await waitFor(() => expect(mockCallService).toHaveBeenCalledWith(
     '/bt/nodes/catalog',
     'interfaces/srv/GetNodeCatalog',
@@ -6623,6 +6642,9 @@ test.each([
   // the supervisor process when the run ends.
   global.fetch.mockImplementation((url) => {
     const target = String(url);
+    if (target.endsWith('/bt/readiness')) {
+      return Promise.resolve(mockJsonResponse({ ready: true }));
+    }
     if (target.endsWith('/services/bt_node/status')) {
       return Promise.resolve(mockJsonResponse({ name: 'bt_node', state: 'up', raw: 'up' }));
     }
@@ -7430,4 +7452,591 @@ test('is light-only: suspends the global dark theme class while mounted and rest
     root.classList.remove('dark');
     root.removeAttribute('data-theme');
   }
+});
+
+test('Operate requires localization before enabling actual autonomy', async () => {
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+  fireEvent.click(screen.getByRole('tab', { name: 'Operate' }));
+  expect(screen.getByText('Mission Canvas Map')).toBeInTheDocument();
+  expect(screen.queryByRole('complementary',{name:'Status and settings'})).not.toBeInTheDocument();
+  expect(screen.getByRole('button', {name:'Status and settings'})).toBeInTheDocument();
+  expect(screen.getByRole('button', {name:'Activity',exact:true})).toBeInTheDocument();
+  expect(screen.getByRole('button', {name:'Talk to robot'})).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Localize' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Run autonomy' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Run Mission' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Talk to robot'}));
+  expect(screen.getByRole('complementary',{name:'Talk to robot'})).toBeInTheDocument();
+  expect(startNavigation).not.toHaveBeenCalled();
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  expect(mockPublishRosTopic).not.toHaveBeenCalled();
+  expect(mockCallService).not.toHaveBeenCalled();
+});
+
+// Record and Operate share the saved observation plan, not a Design mission selection.
+function observationPlanFixture() {
+  return {
+    plan: { revision: 7, mode: 'patrol', route_closed: true, observations: [
+      { spot_id: 'wp1', dwell_seconds: 120, departure_policy: 'timed', mission_ids: [] },
+      { spot_id: 'wp2', dwell_seconds: 120, departure_policy: 'timed', mission_ids: [] },
+    ], excluded_mission_ids: [] },
+    spots: [
+      { id: 'wp1', label: 'Dock', pose: { frame_id: 'map', x: 1, y: 2, yaw: 0.5 }, metadata: { role: 'observation' } },
+      { id: 'wp2', label: 'Shelf', pose: { frame_id: 'map', x: 3, y: 2, yaw: 0.5 }, metadata: { role: 'observation' } },
+    ], missions: [],
+  };
+}
+
+function installObservationPlanFixture() {
+  const previousFetch = global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url, ...args) => url.startsWith('/api/autonomy/maps/')
+    ? Promise.resolve(mockJsonResponse(observationPlanFixture())) : previousFetch(url, ...args));
+}
+
+async function loadAutonomyMap() {
+  getPgmFiles.mockResolvedValue({ files: [{ path: 'factory.pgm', name: 'factory.pgm' }, { path: 'second.pgm', name: 'second.pgm' }] });
+  fireEvent.click(screen.getByRole('button', { name: 'Load Map' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Load Map' });
+  expect(within(dialog).getAllByRole('combobox')).toHaveLength(1);
+  await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Autonomy map file' })).toHaveValue('factory.pgm'));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Load' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Localize' })).toBeEnabled());
+}
+
+function installAutonomyLocalization() {
+  let navigationUp = false;
+  getServiceStatus.mockImplementation(async () => ({ is_up: navigationUp, mode: navigationUp ? 'nav' : 'idle' }));
+  startNavigation.mockImplementation(async () => { navigationUp = true; return { ok: true }; });
+  stopNavigation.mockImplementation(async () => { navigationUp = false; return { ok: true }; });
+  mockTopicDataByName['/amcl_pose'] = amclPoseMessage(0, 0, 0);
+  sendInitialPoseEstimate.mockImplementationOnce(async () => {
+    mockTopicDataByName['/amcl_pose'] = amclPoseMessage(1, 2, 0.5);
+    return { ok: true };
+  });
+  return () => navigationUp;
+}
+
+async function localizeAutonomyMap() {
+  fireEvent.click(screen.getByRole('button', { name: 'Localize' }));
+  await waitFor(() => expect(mockMapViewer.mock.calls.at(-1)[0].interactionMode).toBe('initial'));
+  await act(async () => { mockMapViewer.mock.calls.at(-1)[0].onMapPose(1, 2, 0.5); });
+  await waitFor(() => expect(mockMapViewer.mock.calls.at(-1)[0].interactionMode).toBe('view'), { timeout: 5000 });
+}
+
+test('Operate preserves localization and uses the server autonomy session before stopping navigation on exit', async () => {
+  let status = { phase: 'idle', active: false, needsStop: false, events: [] };
+  const previousFetch = global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url, options) => {
+    if (url.startsWith('/api/reasoning/models?')) return Promise.resolve(mockJsonResponse({ models: [
+      { id: 'tuned', map_name: 'factory', model_name: 'Warehouse tuned model', base_model: 'Qwen/Qwen3.5-4B' },
+    ] }));
+    if (url === '/api/autonomy/start') status = { phase: 'observing', active: true, needsStop: true,
+      observation: { spot_id: 'wp1', label: 'Dock' }, events: [{ time_ms: 1000, title: 'Autonomy started', detail: 'Dock' }] };
+    if (url === '/api/autonomy/stop') status = { phase: 'stopped', active: false, needsStop: false, events: [] };
+    if (['/api/autonomy/start', '/api/autonomy/status', '/api/autonomy/stop'].includes(url)) return Promise.resolve(mockJsonResponse(status));
+    return previousFetch(url, options);
+  });
+  installObservationPlanFixture();
+  const navigationUp = installAutonomyLocalization();
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Autonomy Canvas' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'Operate' }));
+  await loadAutonomyMap();
+  expect(screen.getByRole('tab', { name: 'Operate' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('button', { name: 'Run autonomy' })).toBeDisabled();
+  expect(screen.queryByRole('region', { name: 'Autonomy operation panels' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Status and settings' }));
+  await screen.findByRole('option', { name: 'Warehouse tuned model' });
+  fireEvent.change(screen.getByLabelText('Reasoning model'), { target: { value: 'tuned' } });
+  expect(screen.getByRole('button', { name: 'Run autonomy' })).toBeDisabled();
+  await localizeAutonomyMap();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Run autonomy' })).toBeEnabled(), { timeout: 5000 });
+  expect(startNavigation).toHaveBeenCalledWith('nav', 'factory');
+  expect(screen.getByRole('tab', { name: 'Operate' })).toHaveAttribute('aria-selected', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'Run autonomy' }));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/autonomy/start', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ map_name: 'factory', model_id: 'tuned', localized: true, plan_revision: 7 }),
+  })));
+  await waitFor(() => expect(screen.getByLabelText('Reasoning model')).toBeDisabled());
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  expect(sendNavigateThroughPosesGoalsAndWait).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Activity', exact: true }));
+  expect(await screen.findByText('Autonomy started')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Stop', exact: true }));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/autonomy/stop', expect.objectContaining({ method: 'POST' })));
+  await waitFor(() => expect(stopNavigation).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Record' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('tab', { name: 'Record' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Record' })).toHaveAttribute('aria-selected', 'true'));
+  expect(navigationUp()).toBe(false);
+}, 15000);
+
+test('Record Live previews map missions with a selected model without starting navigation or executing a mission', async () => {
+  const previousFetch = global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url, ...args) => url.startsWith('/api/reasoning/models?')
+    ? Promise.resolve({ok:true,json:async()=>({models:[{id:'tuned',map_name:'factory',model_name:'Warehouse tuned model',base_model:'Qwen/Qwen3.5-4B'}]})})
+    : previousFetch(url, ...args));
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+  fireEvent.click(screen.getByRole('tab', { name: 'Record' }));
+  mockMapViewer.mockClear();
+  expect(screen.getByRole('button',{name:'Localize'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Start reasoning'})).toBeDisabled();
+  getPgmFiles.mockResolvedValue({files:[{path:'factory.pgm',name:'factory.pgm'}]});
+  fireEvent.click(screen.getByRole('button',{name:'Load Map'}));
+  const dialog=await screen.findByRole('dialog',{name:'Load Map'});
+  await waitFor(()=>expect(within(dialog).getByRole('combobox',{name:'Autonomy map file'})).toHaveValue('factory.pgm'));
+  fireEvent.click(within(dialog).getByRole('button',{name:'Load'}));
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Localize'})).toBeEnabled());
+  await screen.findByRole('option',{name:'Warehouse tuned model'});
+  expect(screen.getByRole('button',{name:'Start reasoning'})).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Reasoning model'),{target:{value:'tuned'}});
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Start reasoning'})).toBeEnabled());
+  getNavigationMission.mockClear();
+
+  global.fetch.mockImplementation(url => Promise.resolve({ ok:true, json:async () => (
+    url.endsWith('/observe') ? {selected_model_id:'tuned',session_id:'preview-session',text:'raw JSON',decision:{decision:'start',mission_id:'m2',reason:'A shelf is visible.'},selected_mission:{mission_name:'Mission2'},map_name:'factory',preview_only:true,action_allowed:false,captured_at:1,frame_stamp:'1',elapsed_seconds:2,image_base64:'AA=='} : {phase:'ready',selected_model_id:'tuned',session_id:'preview-session'}
+  ) }));
+  fireEvent.click(screen.getByRole('button',{name:'Start reasoning'}));
+  await screen.findByText('A shelf is visible.');
+  expect(global.fetch).toHaveBeenCalledWith('/api/reasoning/start', expect.objectContaining({body:JSON.stringify({model_id:'tuned',map_name:'factory'})}));
+  expect(screen.getByLabelText('Reasoning model')).toBeDisabled();
+  expect(screen.getByAltText('Live head camera').getAttribute('src')).toContain('/stream?type=ros_compressed');
+  expect(screen.queryByAltText('Saved frame for annotation')).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region',{name:'Autonomy collection panels'})).getAllByRole('img')).toHaveLength(2);
+  expect(screen.getByAltText('Analyzed camera frame')).toHaveAttribute('src','data:image/jpeg;base64,AA==');
+  expect(mockMapViewer).toHaveBeenCalled();
+  expect(startNavigation).not.toHaveBeenCalled();
+  expect(getNavigationMission).not.toHaveBeenCalled();
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  expect(sendNavigateThroughPosesGoalsAndWait).not.toHaveBeenCalled();
+  expect(mockCallService).not.toHaveBeenCalledWith('/bt/load_and_run', expect.anything(), expect.anything(), expect.anything());
+  expect(screen.getByText('start · Mission2')).toBeInTheDocument();
+  expect(screen.queryByAltText('Frame used for this mission decision')).not.toBeInTheDocument();
+  expect(global.fetch.mock.calls.some(([url])=>url.endsWith('/decide'))).toBe(false);
+  expect(screen.queryByRole('button',{name:'Pause observation'})).not.toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Start reasoning'})).toBeDisabled();
+  fireEvent.click(screen.getByRole('button',{name:'Stop reasoning'}));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/reasoning/stop',expect.objectContaining({method:'POST'})));
+  await waitFor(() => expect(screen.getByRole('button',{name:'Start reasoning'})).toBeEnabled());
+  expect(screen.getByRole('button',{name:'Start reasoning'})).toBeEnabled();
+  expect(stopNavigation).not.toHaveBeenCalled();
+});
+
+test.each([true,false])('Record opens Dataset only after preview shutdown succeeds (%s)', async (stopSucceeds) => {
+  let completeStop;
+  const previousFetch=global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url,...args) => {
+    const response=data=>({ok:true,json:async()=>data});
+    if(url.startsWith('/api/reasoning/models?')) return Promise.resolve(response({models:[{id:'tuned',map_name:'factory',model_name:'Warehouse tuned model',base_model:'Qwen/Qwen3.5-4B'}]}));
+    if(url === '/api/reasoning/stop') return new Promise(resolve=>{completeStop=resolve;});
+    if(url === '/api/reasoning/observe') return Promise.resolve(response({decision:{decision:'wait',reason:'The scene is clear.'},frame_stamp:'frame-1'}));
+    if(url.startsWith('/api/reasoning/')) return Promise.resolve(response({phase:'ready',session_id:'switch-session',selected_model_id:'tuned'}));
+    return previousFetch(url,...args);
+  });
+  getPgmFiles.mockResolvedValue({files:[{path:'factory.pgm',name:'factory.pgm'}]});
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+  fireEvent.click(screen.getByRole('tab',{name:'Record'}));
+  fireEvent.click(screen.getByRole('button',{name:'Load Map'}));
+  const dialog=await screen.findByRole('dialog',{name:'Load Map'});
+  await waitFor(()=>expect(within(dialog).getByRole('combobox',{name:'Autonomy map file'})).toHaveValue('factory.pgm'));
+  fireEvent.click(within(dialog).getByRole('button',{name:'Load'}));
+  await screen.findByRole('option',{name:'Warehouse tuned model'});
+  fireEvent.change(screen.getByLabelText('Reasoning model'),{target:{value:'tuned'}});
+  fireEvent.click(screen.getByRole('button',{name:'Start reasoning'}));
+  await screen.findByText('The scene is clear.');
+  fireEvent.click(screen.getByRole('tab',{name:'Train'}));
+  await waitFor(()=>expect(completeStop).toEqual(expect.any(Function)));
+  expect(screen.getByRole('tab',{name:'Record'})).toHaveAttribute('aria-selected','true');
+  expect(screen.getByRole('tab',{name:'Train'})).toBeDisabled();
+  expect(screen.queryByRole('list',{name:'Saved episodes'})).not.toBeInTheDocument();
+  await act(async()=>{completeStop({ok:stopSucceeds,json:async()=>stopSucceeds ? {phase:'stopped'} : {detail:'Preview stop failed'}});});
+  if(!stopSucceeds) {
+    expect(screen.getByRole('tab',{name:'Record'})).toHaveAttribute('aria-selected','true');
+    expect(screen.getByText('Preview stop failed')).toBeInTheDocument();
+    expect(screen.getByLabelText('Reasoning model')).toBeDisabled();
+    expect(screen.queryByRole('list',{name:'Saved episodes'})).not.toBeInTheDocument();
+    const failedStop=completeStop;
+    fireEvent.click(screen.getByRole('tab',{name:'Train'}));
+    await waitFor(()=>expect(completeStop).not.toBe(failedStop));
+    await act(async()=>{completeStop({ok:true,json:async()=>({phase:'stopped'})});});
+  }
+  expect(screen.getByRole('tab',{name:'Train'})).toHaveAttribute('aria-selected','true');
+  expect(screen.getByRole('list',{name:'Saved episodes'})).toBeInTheDocument();
+  expect(startNavigation).not.toHaveBeenCalled();
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+});
+
+test('Record keeps keyboard motion inactive while switching between capture, Train and Operate', async () => {
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Autonomy Canvas' }));
+  expect(screen.getByAltText('Live head camera')).toBeInTheDocument();
+  expect(screen.queryByRole('group', { name: 'Mobile Teleop' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Activate' })).not.toBeInTheDocument();
+  mockPublishRosTopic.mockClear();
+  fireEvent.keyDown(window, { key: 'w' });
+  fireEvent.keyDown(screen.getByLabelText('Capture mode'), { key: 'w' });
+  fireEvent.blur(window);
+  fireEvent.click(screen.getByRole('tab', { name: 'Train' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Train' })).toHaveAttribute('aria-selected', 'true'));
+  fireEvent.keyDown(window, { key: 'w' });
+  fireEvent.click(screen.getByRole('tab', { name: 'Record' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Record' })).toHaveAttribute('aria-selected', 'true'));
+  fireEvent.click(screen.getByRole('tab', { name: 'Operate' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Operate' })).toHaveAttribute('aria-selected', 'true'));
+  expect(mockPublishRosTopic).not.toHaveBeenCalled();
+  expect(startNavigation).not.toHaveBeenCalled();
+});
+
+test('Record stores task-aligned episodes and Train requires the saved image before approving labels', async () => {
+  let episode = { id: 'episode-test', scenario: 'Shelf', group_id: 'shelf-1', map_name: 'factory',
+    started_at: Date.now(), ended_at: null, observations: [], annotations: [], catalog: { missions: [] } };
+  let created = false, deleted = false;
+  const previousFetch = global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url, options) => {
+    const payload = options?.body ? JSON.parse(options.body) : null;
+    if (url === '/api/collection/episodes') {
+      if (options?.method === 'POST') { created = true; episode = { ...episode, ...payload }; return Promise.resolve(mockJsonResponse(episode)); }
+      return Promise.resolve(mockJsonResponse({ episodes: created && !deleted ? [{ ...episode, frame_count: episode.observations.length }] : [] }));
+    }
+    if (url === '/api/collection/episodes/episode-test') {
+      if (options?.method === 'DELETE') { deleted = true; return Promise.resolve(mockJsonResponse({ deleted: true })); }
+      return Promise.resolve(mockJsonResponse(episode));
+    }
+    if (url.endsWith('/episode-test/capture')) {
+      const frame = { frame_id: 'frame1', capture: { received_at_ms: Date.now() }, context: {
+        reasoning_task: 'mission_selection', map_name: 'factory', localized: true,
+        source: 'server_at_capture', runtime_source: 'record', observation: { phase: 'observing', at_spot_id: 'wp1' },
+      } };
+      episode = { ...episode, observations: [frame] };
+      return Promise.resolve(mockJsonResponse({ episode, saved_frame: frame }));
+    }
+    if (url.endsWith('/episode-test/end')) {
+      episode = { ...episode, ended_at: Date.now() };
+      return Promise.resolve(mockJsonResponse(episode));
+    }
+    if (url.endsWith('/episode-test/annotations')) {
+      episode = { ...episode, annotations: [{ frame_ids: [payload.frame_id], target: {
+        decision: payload.decision, mission_id: payload.mission_id, reason: payload.reason,
+      }, review_status: payload.review_status, revision: 1 }] };
+      return Promise.resolve(mockJsonResponse(episode));
+    }
+    return previousFetch(url, options);
+  });
+  installObservationPlanFixture();
+  installAutonomyLocalization();
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Autonomy Canvas' }));
+  const panels = await screen.findByRole('region', { name: 'Autonomy collection panels' });
+  expect(screen.getByRole('region', { name: 'Record control panel' })).toBeInTheDocument();
+  expect(screen.getByAltText('Live head camera')).toBeInTheDocument();
+  expect(screen.queryByRole('list', { name: 'Saved episodes' })).not.toBeInTheDocument();
+  expect(within(panels).getByRole('button', { name: 'Start episode' })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Capture mode'), { target: { value: 'single' } });
+  await loadAutonomyMap();
+  await localizeAutonomyMap();
+  await waitFor(() => expect(screen.getByLabelText('Recording type')).toHaveTextContent('Observation'), { timeout: 5000 });
+  fireEvent.click(within(panels).getByRole('button', { name: 'Start episode' }));
+  await waitFor(() => expect(within(panels).getByRole('button', { name: 'Capture' })).toBeEnabled());
+  expect(episode).toMatchObject({ capture_contract: 'task_aligned_v1', episode_type: 'observation', observation_spot_id: 'wp1' });
+  expect(screen.getByRole('tab', { name: 'Train' })).toBeDisabled();
+  expect(within(panels).getByRole('button', { name: 'Save episode' })).toBeEnabled();
+  fireEvent.click(within(panels).getByRole('button', { name: 'Capture' }));
+  await waitFor(() => expect(episode.observations).toHaveLength(1));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Capture' })).toBeEnabled());
+  fireEvent.click(within(panels).getByRole('button', { name: 'Save episode' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Train' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('tab', { name: 'Train' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Train' })).toHaveAttribute('aria-selected', 'true'));
+  expect(screen.queryByAltText('Live head camera')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reasoning labels' })).toHaveAttribute('aria-pressed', 'true');
+  const library = screen.getByRole('list', { name: 'Saved episodes' });
+  fireEvent.click(await within(library).findByRole('button', { name: /Shelf/ }));
+  const savedImage = await screen.findByAltText('Saved frame for reasoning annotation');
+  expect(screen.getByLabelText('Current frame')).toHaveTextContent('1 / 1');
+  fireEvent.change(screen.getByLabelText('Expected decision'), { target: { value: 'wait' } });
+  fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'No mission is needed for this shelf.' } });
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(screen.getByRole('tab', { name: 'Record' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: /Object masks/ })).toBeDisabled();
+  fireEvent.load(savedImage);
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/collection/episodes/episode-test/annotations', expect.objectContaining({
+    body: JSON.stringify({ decision: 'wait', mission_id: null, reason: 'No mission is needed for this shelf.', annotator: 'collect-ui', review_status: 'approved', frame_id: 'frame1', expected_revision: 0 }),
+  })));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Record' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('tab', { name: 'Record' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Record' })).toHaveAttribute('aria-selected', 'true'));
+  const confirmation = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  try {
+    fireEvent.click(screen.getByRole('button', { name: 'Delete episode' }));
+    const episodes = screen.getByRole('region', { name: 'Saved episodes' });
+    fireEvent.click(within(episodes).getByRole('checkbox', { name: 'Select all visible episodes' }));
+    fireEvent.click(within(episodes).getByRole('button', { name: 'Delete (1)' }));
+    expect(global.fetch.mock.calls.some(([, options]) => options?.method === 'DELETE')).toBe(false);
+    confirmation.mockReturnValue(true);
+    fireEvent.click(within(episodes).getByRole('button', { name: 'Delete (1)' }));
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/collection/episodes/episode-test', expect.objectContaining({ method: 'DELETE' })));
+  } finally { confirmation.mockRestore(); }
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  expect(mockCallService).not.toHaveBeenCalledWith('/bt/load_and_run', expect.anything(), expect.anything(), expect.anything());
+});
+
+
+test('Design preserves reasoning metadata while Dataset Annotation hides mission rules', async () => {
+  const savedEpisode={id:'rules-episode',scenario:'Rules episode',map_name:'factory',ended_at:Date.now(),observations:[],annotations:[],catalog:{missions:[]}};
+  const previousFetch=global.fetch.getMockImplementation();
+  global.fetch.mockImplementation((url,...args) => {
+    if(url === '/api/collection/episodes') return Promise.resolve({ok:true,json:async()=>({episodes:[savedEpisode]})});
+    if(url === '/api/collection/episodes/rules-episode') return Promise.resolve({ok:true,json:async()=>savedEpisode});
+    if(url === '/api/navigation/missions?map_name=factory') return Promise.resolve({ok:true,json:async()=>({missions:['default','second']})});
+    return previousFetch(url,...args);
+  });
+  getPgmFiles.mockResolvedValue({files:[{path:'factory.pgm',name:'factory.pgm'}]});
+  getNavigationMissions.mockResolvedValue({map_name:'factory',missions:['default','second']});
+  getNavigationMission.mockImplementation((mapName, missionName) => Promise.resolve({
+    exists:true, revision:1, map_name:mapName, mission_name:missionName || 'default', global_bt:'global.xml',waypoints:[],
+    metadata:{description:'Pick up the stick', start_condition:'Object visible', custom:{owner:'lab'}},
+  }));
+  render(<AutonomyStudioPage />);
+  fireEvent.click(screen.getByRole('tab',{name:'Design'}));
+  fireEvent.click(screen.getByRole('button',{name:'Load Map'}));
+  await screen.findByRole('combobox',{name:'Design mission map file'});
+  fireEvent.click(screen.getByRole('button',{name:'Load'}));
+  await waitFor(() => expect(screen.getByRole('button',{name:'Save Mission'})).toBeEnabled());
+  expect(screen.queryByRole('textbox',{name:'Mission annotation'})).not.toBeInTheDocument();
+  expect(screen.queryByRole('textbox',{name:'Start condition'})).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Save Mission'}));
+  await waitFor(() => expect(saveNavigationMission).toHaveBeenCalledWith('factory', expect.objectContaining({
+    metadata:expect.objectContaining({description:'Pick up the stick', start_condition:'Object visible', custom:{owner:'lab'}}),
+  }), ''));
+  fireEvent.click(screen.getByRole('button',{name:'Back to workspace chooser'}));
+  fireEvent.click(await screen.findByRole('button',{name:'Open Autonomy Canvas'}));
+  fireEvent.click(screen.getByRole('tab',{name:'Train'}));
+  const library=screen.getByRole('list',{name:'Saved episodes'});
+  fireEvent.click(await within(library).findByRole('button',{name:/Rules episode/}));
+  await waitFor(()=>expect(within(library).getByRole('button',{name:/Rules episode/})).toHaveAttribute('aria-pressed','true'));
+  expect(screen.queryByText('Mission rules · factory')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Mission rules target')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button',{name:'Load Map'})).not.toBeInTheDocument();
+  expect(startNavigation).not.toHaveBeenCalled();
+});
+
+test('Record loads observation waypoints and allows selection before localization without starting navigation', async () => {
+  installObservationPlanFixture();
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Autonomy Canvas' }));
+  await loadAutonomyMap();
+  await waitFor(() => expect(mockMapViewer.mock.calls.at(-1)[0].spots).toEqual([
+    expect.objectContaining({ id: 'wp1', label: 'Dock' }), expect.objectContaining({ id: 'wp2', label: 'Shelf' }),
+  ]));
+  expect(screen.queryByLabelText('Collect map mission')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Start patrol' })).toBeDisabled();
+  act(() => {
+    const map = mockMapViewer.mock.calls.at(-1)[0];
+    map.onSpotClick('wp1');
+    map.onSelectedSpotScreenPositionChange({ x: 100, y: 100, width: 960, height: 720 });
+  });
+  expect(await screen.findByRole('region', { name: 'Selected observation' })).toHaveTextContent('Dock');
+  expect(screen.getByRole('button', { name: 'Go to selected observation' })).toBeDisabled();
+  expect(mockMapViewer.mock.calls.at(-1)[0].selectedSpotId).toBe('wp1');
+  expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+  expect(startNavigation).not.toHaveBeenCalled();
+});
+
+test.each(['idle', 'route', 'route-delayed', 'waypoint'])('Record Stop cancels %s movement and leaving Record releases navigation', async (motion) => {
+  installObservationPlanFixture();
+  const navigationUp = installAutonomyLocalization();
+  let acknowledgeCancel, delayCancellation = false;
+  cancelNavigateToPoseGoal.mockImplementation(() => delayCancellation
+    ? new Promise(resolve => { acknowledgeCancel = () => resolve({ ok: true }); }) : Promise.resolve({ ok: true }));
+  sendNavigateToPoseGoalAndWait.mockImplementation((_goal, signal) => new Promise(resolve => {
+    signal?.addEventListener('abort', () => resolve({ ok: false, status: 'CANCELED' }));
+  }));
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Autonomy Canvas' }));
+  await loadAutonomyMap();
+  await localizeAutonomyMap();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start patrol' })).toBeEnabled(), { timeout: 5000 });
+  expect(screen.getByRole('button', { name: 'Start episode' })).toBeEnabled();
+  if (motion.startsWith('route')) fireEvent.click(screen.getByRole('button', { name: 'Start patrol' }));
+  else if (motion === 'waypoint') {
+    act(() => {
+      const map = mockMapViewer.mock.calls.at(-1)[0];
+      map.onSpotClick('wp2');
+      map.onSelectedSpotScreenPositionChange({ x: 100, y: 100, width: 960, height: 720 });
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Go to selected observation' }));
+  }
+  const moving = motion !== 'idle';
+  await waitFor(() => expect(sendNavigateToPoseGoalAndWait).toHaveBeenCalledTimes(moving ? 1 : 0));
+  expect(screen.getByRole('button', { name: 'Load Map' })).toHaveProperty('disabled', moving);
+  expect(screen.getByRole('button', { name: 'Stop', exact: true })).toHaveProperty('disabled', !moving);
+  cancelNavigateToPoseGoal.mockClear();
+  delayCancellation = motion === 'route-delayed';
+  fireEvent.click(screen.getByRole('button', { name: 'Stop', exact: true }));
+  await waitFor(() => expect(cancelNavigateToPoseGoal).toHaveBeenCalledTimes(moving ? 1 : 0));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start patrol' })).toHaveProperty('disabled', delayCancellation));
+  expect(screen.getByRole('button', { name: 'Load Map' })).toHaveProperty('disabled', delayCancellation);
+  delayCancellation = false;
+  if (acknowledgeCancel) await act(async () => { acknowledgeCancel(); });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start patrol' })).toBeEnabled());
+  expect(sendNavigateToPoseGoalAndWait.mock.calls.map(([, signal]) => signal.aborted)).toEqual(moving ? [true] : []);
+  expect(screen.getByRole('button', { name: 'Stop', exact: true })).toBeDisabled();
+  expect(stopNavigation).not.toHaveBeenCalled();
+  expect(navigationUp()).toBe(true);
+  expect(global.fetch.mock.calls.some(([url, options]) => url === '/api/collection/episodes' && options?.method === 'POST')).toBe(false);
+  fireEvent.click(screen.getByRole('tab', { name: 'Train' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Train' })).toHaveAttribute('aria-selected', 'true'));
+  expect(stopNavigation).toHaveBeenCalledTimes(1);
+  expect(navigationUp()).toBe(false);
+  expect(cancelNavigateToPoseGoal).toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('tab', { name: 'Record' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Load Map' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Load Map' }));
+  const next = await screen.findByRole('dialog', { name: 'Load Map' });
+  await screen.findByRole('option', { name: 'second.pgm' });
+  fireEvent.change(within(next).getByRole('combobox', { name: 'Autonomy map file' }), { target: { value: 'second.pgm' } });
+  fireEvent.click(within(next).getByRole('button', { name: 'Load' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Localize' })).toBeEnabled());
+  expect(screen.getByRole('button', { name: 'Start patrol' })).toBeDisabled();
+}, 15000);
+
+
+test('Autonomy combines labeling and training in Train and preserves the selected tool', async () => {
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+  const stages=screen.getByRole('tablist',{name:'Autonomy Canvas stages'});
+  expect(within(stages).getAllByRole('tab').map(tab=>tab.textContent)).toEqual(['Record','Train','Operate']);
+  expect(screen.queryByRole('tablist',{name:'Record views'})).not.toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Load Map'})).toBeInTheDocument();
+  expect(screen.getAllByAltText('Live head camera')).toHaveLength(1);
+  fireEvent.click(screen.getByRole('tab',{name:'Train'}));
+  expect(await screen.findByRole('region',{name:'Autonomy training panels'})).toBeInTheDocument();
+  expect(screen.getAllByRole('list',{name:'Saved episodes'})).toHaveLength(1);
+  expect(screen.getByRole('button',{name:'Reasoning labels'})).toHaveAttribute('aria-pressed','true');
+  expect(screen.queryByRole('button',{name:'Load Map'})).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Training purpose')).not.toBeInTheDocument();
+  expect(screen.queryByAltText('Live head camera')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:/Object masks/}));
+  fireEvent.click(screen.getByRole('button',{name:'Train model'}));
+  const settings=await screen.findByRole('dialog',{name:'Train reasoning model'});
+  expect(within(settings).getByLabelText('Training map')).toBeInTheDocument();
+  fireEvent.change(within(settings).getByLabelText('Training steps'),{target:{value:'900'}});
+  fireEvent.click(within(settings).getByRole('button',{name:'Close training settings'}));
+  expect(screen.queryByRole('dialog',{name:'Train reasoning model'})).not.toBeInTheDocument();
+  expect(screen.getByRole('button',{name:/Object masks/})).toHaveAttribute('aria-pressed','true');
+  fireEvent.click(screen.getByRole('button',{name:'Train model'}));
+  expect(screen.getByLabelText('Training steps')).toHaveValue(900);
+  fireEvent.click(screen.getByRole('button',{name:'Close training settings'}));
+  fireEvent.click(screen.getByRole('tab',{name:'Record'}));
+  expect(await screen.findByRole('button',{name:'Load Map'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab',{name:'Train'}));
+  expect(await screen.findByRole('button',{name:/Object masks/})).toHaveAttribute('aria-pressed','true');
+  expect(startNavigation).not.toHaveBeenCalled();
+});
+
+test.each(['annotate','reasoning'])('restores the legacy %s stage into Train', async(workspaceStage) => {
+  window.sessionStorage.setItem('autonomy_studio_session',JSON.stringify({workspaceKind:'mission_canvas',workspaceStage}));
+  render(<AutonomyStudioPage />);
+  expect(await screen.findByRole('tab',{name:'Train'})).toHaveAttribute('aria-selected','true');
+  expect(screen.getByRole('list',{name:'Saved episodes'})).toBeInTheDocument();
+  expect(screen.queryByRole('button',{name:'Localize'})).not.toBeInTheDocument();
+  expect(startNavigation).not.toHaveBeenCalled();
+  expect(JSON.parse(window.sessionStorage.getItem('autonomy_studio_session'))).toEqual(expect.objectContaining({workspaceStage:'learn',autonomyLayoutVersion:2}));
+});
+
+test.each([{}, {autonomy:'collect'}])('opening Mission Canvas first preserves legacy Autonomy Dataset migration %o', async(workspaceStages)=>{
+  window.sessionStorage.setItem('autonomy_studio_session',JSON.stringify({workspaceKind:'mission',workspaceStage:'collect',workspaceStages,recordMode:'dataset'}));
+  render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Mission Canvas'}));
+  expect(await screen.findByRole('tab',{name:'Mapping'})).toHaveAttribute('aria-selected','true');
+  fireEvent.click(screen.getByRole('button',{name:'Back to workspace chooser'}));
+  fireEvent.click(await screen.findByRole('button',{name:'Open Autonomy Canvas'}));
+  expect(await screen.findByRole('tab',{name:'Train'})).toHaveAttribute('aria-selected','true');
+});
+
+test('Record map load leaves observation authoring enabled before localization and capture', async()=>{
+ const previousFetch=global.fetch.getMockImplementation();
+ const spot={id:'tv',label:'TVObservation',pose:{frame_id:'map',x:1,y:2,yaw:0},metadata:{role:'observation'}};
+ const configuration={spots:[spot],missions:[],plan:{revision:1,route_closed:true,observations:[{spot_id:'tv',mission_ids:[],dwell_seconds:30}]}};
+ global.fetch.mockImplementation((url,...args)=>{
+  const value=url==='/api/autonomy/maps/factory' ? configuration
+   : url==='/api/autonomy/status' ? {phase:'idle',active:false,needsStop:false,events:[]}
+   : url==='/api/collection/episodes' ? {episodes:[]} : null;
+  return value ? Promise.resolve({...mockJsonResponse(value),json:async()=>value}) : previousFetch(url,...args);
+ });
+ getPgmFiles.mockResolvedValue({files:[{path:'factory.pgm',name:'factory.pgm'}]});
+ render(<AutonomyStudioPage showWorkspaceChooser/>);
+  fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+ fireEvent.click(screen.getByRole('tab',{name:'Record'}));
+ fireEvent.click(screen.getByRole('button',{name:'Load Map'}));
+ const dialog=await screen.findByRole('dialog',{name:'Load Map'});
+ await waitFor(()=>expect(within(dialog).getByRole('combobox',{name:'Autonomy map file'})).toHaveValue('factory.pgm'));
+ fireEvent.click(within(dialog).getByRole('button',{name:'Load'}));
+ await waitFor(()=>expect(mockMapViewer.mock.calls.at(-1)[0].spots).toEqual([expect.objectContaining({id:'tv'})]));
+ expect(screen.queryByRole('tab',{name:'Route',exact:true})).not.toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'Create observation waypoint'})).toBeEnabled();
+ expect(screen.getByRole('button',{name:'Edit observation route'})).toBeEnabled();
+ expect(mockMapViewer.mock.calls.at(-1)[0].selectedSpotId).toBe('');
+ expect(mockMapViewer.mock.calls.at(-1)[0].activeWaypointId).toBe('');
+ act(()=>mockMapViewer.mock.calls.at(-1)[0].onSpotClick('tv'));
+ expect(mockMapViewer.mock.calls.at(-1)[0].selectedSpotId).toBe('tv');
+ fireEvent.click(screen.getByRole('button',{name:'Create observation waypoint'}));
+ expect(screen.getByRole('button',{name:'On Map'})).toBeEnabled();
+ fireEvent.click(screen.getByRole('button',{name:'On Map'}));
+ expect(screen.getByRole('textbox',{name:'Observation name'})).toBeInTheDocument();
+ await act(async()=>mockMapViewer.mock.calls.at(-1)[0].onMapPose(3,4,0));
+ await act(async()=>mockMapViewer.mock.calls.at(-1)[0].onSpotPoseChange('observation-preview',5,6,1));
+ expect(mockMapViewer.mock.calls.at(-1)[0].spots).toEqual([
+  expect.objectContaining({id:'tv',poseEditable:false}),
+  expect.objectContaining({id:'observation-preview',pose:{frame_id:'map',x:5,y:6,yaw:1}}),
+ ]);
+ expect(mockMapViewer.mock.calls.at(-1)[0].selectedSpotId).toBe('observation-preview');
+ expect(startNavigation).not.toHaveBeenCalled();
+ expect(sendNavigateToPoseGoalAndWait).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole('button',{name:'Cancel observation edit'}));
+ fireEvent.click(screen.getByRole('button',{name:'Edit observation route'}));
+ expect(screen.getByRole('button',{name:'Create observation waypoint'})).toBeDisabled();
+ expect(mockMapViewer.mock.calls.at(-1)[0].onSpotPoseChange).toBeDefined();
+ expect(mockMapViewer.mock.calls.at(-1)[0].missionRouteMode).toBe(false);
+ await act(async()=>mockMapViewer.mock.calls.at(-1)[0].onSpotPoseChange('tv',8,9,0.5));
+ expect(mockMapViewer.mock.calls.at(-1)[0].spots[0].pose).toMatchObject({x:8,y:9,yaw:0.5});
+ const confirmDiscard=jest.spyOn(window,'confirm').mockReturnValue(true);
+ await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Edit observation route'})));
+ confirmDiscard.mockRestore();
+ expect(mockMapViewer.mock.calls.at(-1)[0].spots[0].pose).toMatchObject({x:1,y:2,yaw:0});
+ fireEvent.click(screen.getByRole('button',{name:'Load Map'}));
+ const reloadDialog=await screen.findByRole('dialog',{name:'Load Map'});
+ await waitFor(()=>expect(within(reloadDialog).getByRole('button',{name:'Load'})).toBeEnabled());
+ fireEvent.click(within(reloadDialog).getByRole('button',{name:'Load'}));
+ await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Load Map'})).not.toBeInTheDocument());
+ expect(screen.getByRole('button',{name:'Create observation waypoint'})).toBeEnabled();
+ expect(mockMapViewer.mock.calls.at(-1)[0].selectedSpotId).toBe('');
+ expect(mockMapViewer.mock.calls.at(-1)[0].activeWaypointId).toBe('');
+});
+
+
+test('Autonomy Canvas has three stages while Mission Canvas keeps design and navigation',async()=>{
+ render(<AutonomyStudioPage showWorkspaceChooser/>);
+ fireEvent.click(screen.getByRole('button',{name:'Open Autonomy Canvas'}));
+ expect(await screen.findByRole('tablist',{name:'Autonomy Canvas stages'})).toBeInTheDocument();
+ expect(screen.getByRole('tab',{name:'Record'})).toHaveAttribute('aria-selected','true');
+ expect(screen.getByRole('tab',{name:'Operate'})).toBeInTheDocument();
+ expect(screen.queryByRole('tab',{name:'Design'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('tab',{name:'Mapping'})).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('tab',{name:'Operate'}));
+ expect(await screen.findByRole('button',{name:'Status and settings'})).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Back to workspace chooser'}));
+ fireEvent.click(await screen.findByRole('button',{name:'Open Mission Canvas'}));
+ expect(await screen.findByRole('tab',{name:'Mapping'})).toHaveAttribute('aria-selected','true');
+ expect(screen.getByRole('tab',{name:'Design'})).toBeInTheDocument();
+ expect(screen.queryByRole('tab',{name:'Record'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('tab',{name:'Operate'})).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Back to workspace chooser'}));
+ fireEvent.click(await screen.findByRole('button',{name:'Open Autonomy Canvas'}));
+ expect(await screen.findByRole('tab',{name:'Operate'})).toHaveAttribute('aria-selected','true');
 });

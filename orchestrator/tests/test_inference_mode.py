@@ -133,3 +133,8 @@ class InferenceModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_rail_changes_runtime_reuse_signature():
+    args = ('/model', 'pytorch', '', 'async', 100, 15, 0.3)
+    assert inference_runtime_signature(*args) != inference_runtime_signature(*args, vla_rail_enabled=True)

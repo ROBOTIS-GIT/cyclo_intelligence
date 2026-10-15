@@ -35,6 +35,8 @@ class _ReliabilityPolicy:
 
 def _install_ros_stubs():
     rclpy_mod = types.ModuleType('rclpy')
+    callback_mod = types.ModuleType('rclpy.callback_groups')
+    callback_mod.ReentrantCallbackGroup = type('ReentrantCallbackGroup', (), {})
     qos_mod = types.ModuleType('rclpy.qos')
     qos_mod.QoSProfile = _QoSProfile
     qos_mod.ReliabilityPolicy = _ReliabilityPolicy
@@ -66,6 +68,7 @@ def _install_ros_stubs():
         PAUSED = 3
 
     class _TaskInfo:
+        vla_rail_enabled = False
         inference_mode = ''
         action_request_mode = ''
         acceleration_mode = ''
@@ -90,6 +93,7 @@ def _install_ros_stubs():
 
     sys.modules.setdefault('rclpy', rclpy_mod)
     sys.modules.setdefault('rclpy.qos', qos_mod)
+    sys.modules.setdefault('rclpy.callback_groups', callback_mod)
     sys.modules.setdefault('sensor_msgs', sensor_msgs_mod)
     sys.modules.setdefault('sensor_msgs.msg', sensor_msgs_msg_mod)
     sys.modules.setdefault('trajectory_msgs', trajectory_msgs_mod)
@@ -942,3 +946,44 @@ def test_load_send_command_sets_action_processing_timing():
     assert task_info.control_hz == 80
     assert task_info.inference_hz == 20
     assert task_info.chunk_align_window_s == 0.25
+
+
+@pytest.mark.parametrize('flag,expected', [(None, False), ('false', False), ('true', True), (True, True)])
+def test_rail_load_is_explicit_and_defaults_off(flag, expected):
+    params = {'command': 'LOAD', 'model': 'groot:n17', 'action_request_mode': 'async'}
+    if flag is not None:
+        params['vla_rail_enabled'] = flag
+    action = SendCommand.from_xml_params(types.SimpleNamespace(node=_DummyNode()), 'Load', params)
+    assert action._build_task_info().vla_rail_enabled is expected
+
+
+def test_rail_load_rejects_other_backends_and_sync():
+    context = types.SimpleNamespace(node=_DummyNode())
+    for override in [{'model': 'lerobot:act'}, {'action_request_mode': 'sync'}]:
+        with pytest.raises(ValueError, match='VLA-RAIL requires'):
+            SendCommand.from_xml_params(context, 'Load', {
+                'command': 'LOAD', 'model': 'groot:n17', 'vla_rail_enabled': 'true', **override})
+
+
+def test_rail_is_load_only_and_old_task_info_requires_rebuild(monkeypatch):
+    context = types.SimpleNamespace(node=_DummyNode())
+    resume = SendCommand.from_xml_params(context, 'Resume', {
+        'command': 'RESUME', 'model': 'groot:n17', 'vla_rail_enabled': 'true'})
+    assert not resume.vla_rail_enabled
+    action = SendCommand.from_xml_params(context, 'Load', {
+        'command': 'LOAD', 'model': 'groot:n17', 'vla_rail_enabled': 'true'})
+    monkeypatch.setattr(send_command_module, 'TaskInfo', type('OldTaskInfo', (), {}))
+    with pytest.raises(RuntimeError, match='Rebuild interfaces to enable VLA-RAIL'):
+        action._build_task_info()
+
+
+@pytest.mark.parametrize('field', ['ttrtc_enabled', 'ttrtc_rate_limit_enabled',
+    'chunk_spline_smoothing', 'chunk_endpoint_interpolation', 'remac_enabled'])
+def test_old_raw_xml_cannot_silently_enable_retired_processing(field):
+    context = types.SimpleNamespace(node=_DummyNode())
+    with pytest.raises(ValueError, match='Retired inference options'):
+        SendCommand.from_xml_params(context, 'Load', {
+            'command': 'LOAD', 'model': 'groot:n17', field: 'true'})
+    action = SendCommand.from_xml_params(context, 'Load', {
+        'command': 'LOAD', 'model': 'groot:n17', field: 'false'})
+    assert not hasattr(action, field)

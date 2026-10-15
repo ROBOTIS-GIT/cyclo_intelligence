@@ -15,7 +15,7 @@
 // Author: Seongwoo Kim
 
 import { MdArrowBack } from "react-icons/md";
-import { MISSION_BORDER, MISSION_SURFACE, MISSION_TEXT, MISSION_TEXT_MUTED } from "../../features/missionCanvas/lib/theme";
+import { MISSION_BORDER, MISSION_SURFACE, MISSION_TEXT, MISSION_TEXT_MUTED } from "../../features/mapWorkspace/lib/theme";
 
 export default function AutonomyStudioAppBar({
   onBack,

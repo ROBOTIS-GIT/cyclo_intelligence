@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "revision": 4,
+  "mission_name": "CleanTable",
+  "map_name": "Home",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "ee1b8dc7-f8ce-5e8f-9965-784ed3bb25f7",
+    "description": "Collect used dishes with food remnants after the meal, then wash and stack them beside the sink.",
+    "start_condition": "The meal has finished and used dishes with small food remnants remain on the table. Returning family members may be seated waiting for the next meal.",
+    "completion_condition": "Used dishes and food remnants are cleared from the table, and clean dishes are stacked beside the sink.",
+    "stop_condition": "",
+    "post_stop_action": "",
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "home_mission1_01_table",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        },
+        {
+          "id": "home_mission1_05_sink",
+          "position": {
+            "x": 300,
+            "y": 72
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "home_edge_1",
+          "source": "home_mission1_01_table",
+          "target": "home_mission1_05_sink"
+        }
+      ]
+    },
+    "behavior_node_count": 0
+  },
+  "waypoints": [
+    {
+      "id": "home_mission1_01_table",
+      "label": "Table",
+      "pose": {
+        "frame_id": "map",
+        "x": 2.04224,
+        "y": 0.060437,
+        "yaw": 0.0
+      },
+      "local_bt": "locals/home_mission1_01_table/main.xml",
+      "local_bt_files": [
+        "locals/home_mission1_01_table/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission1_01_table/main.xml",
+        "local_bt": "locals/home_mission1_01_table/main.xml",
+        "local_bt_files": [
+          "locals/home_mission1_01_table/main.xml"
+        ]
+      }
+    },
+    {
+      "id": "home_mission1_05_sink",
+      "label": "Sink",
+      "pose": {
+        "frame_id": "map",
+        "x": 6.34224,
+        "y": 1.760437,
+        "yaw": 1.570796
+      },
+      "local_bt": "locals/home_mission1_05_sink/main.xml",
+      "local_bt_files": [
+        "locals/home_mission1_05_sink/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission1_05_sink/main.xml",
+        "local_bt": "locals/home_mission1_05_sink/main.xml",
+        "local_bt_files": [
+          "locals/home_mission1_05_sink/main.xml"
+        ]
+      }
+    }
+  ]
+}

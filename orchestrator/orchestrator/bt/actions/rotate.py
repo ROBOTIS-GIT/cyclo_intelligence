@@ -26,8 +26,10 @@ from typing import TYPE_CHECKING
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from orchestrator.bt.actions.base_action import BaseAction
+from orchestrator.bt.actions.motion_pause import RotatePause
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.constants import *  # noqa: F403
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
     from rclpy.node import Node
 
 
-class Rotate(BaseAction):
+class Rotate(RotatePause, BaseAction):
     """Rotate the mobile base by a target angle around the vertical axis.
 
     Reads the configured mobile Odometry state topic for closed-loop control
@@ -111,13 +113,15 @@ class Rotate(BaseAction):
                 self.odom_topic = topic
                 break
 
+        self._feedback_group = ReentrantCallbackGroup()
         self.odom_sub = None
         if self.odom_topic:
             self.odom_sub = self.node.create_subscription(
                 Odometry,
                 self.odom_topic,
                 self._odom_callback,
-                qos_profile
+                qos_profile,
+                callback_group=self._feedback_group,
             )
         else:
             self.log_warn(
@@ -128,12 +132,18 @@ class Rotate(BaseAction):
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._paused = threading.Event()
+        self._motion_lock = threading.RLock()
+        self._odom_received = 0.0
+        self._odom_angular_velocity = 0.0
         self._thread = None
         self._result = None  # None=running, True=success, False=failure
         self._control_rate = CONTROL_RATE_HZ  # noqa: F405
 
     def _odom_callback(self, msg):
         """Receive odometry updates and compute yaw angle."""
+        self._odom_received = time.monotonic()
+        self._odom_angular_velocity = msg.twist.twist.angular.z
         q = msg.pose.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
@@ -179,6 +189,9 @@ class Rotate(BaseAction):
             return
 
         while not self._stop_event.is_set():
+            if self._paused.is_set():
+                time.sleep(rate_sleep)
+                continue
             if self.odom_last_yaw is None:
                 time.sleep(rate_sleep)
                 continue
@@ -217,7 +230,9 @@ class Rotate(BaseAction):
                 twist_msg.linear.x = ZERO_VELOCITY  # noqa: F405
                 twist_msg.linear.y = ZERO_VELOCITY  # noqa: F405
                 twist_msg.angular.z = angular_z
-                self.publishers['leader_mobile'].publish(twist_msg)
+                with self._motion_lock:
+                    if not self._paused.is_set() and not self._stop_event.is_set():
+                        self.publishers['leader_mobile'].publish(twist_msg)
 
             time.sleep(rate_sleep)
 
@@ -227,6 +242,7 @@ class Rotate(BaseAction):
             self.odom_start_yaw = None
             self.odom_last_yaw = None
             self._stop_event.clear()
+            self._paused.clear()
             with self._lock:
                 self._result = None
 
@@ -258,7 +274,10 @@ class Rotate(BaseAction):
     def reset(self):
         """Reset the action to its initial state."""
         super().reset()
-        self._stop_event.set()
+        with self._motion_lock:
+            self._stop_event.set()
+            self._paused.clear()
+            self._stop_mobile()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=THREAD_JOIN_TIMEOUT_SEC)  # noqa: F405
         self._thread = None

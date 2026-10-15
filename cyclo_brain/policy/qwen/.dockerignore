@@ -1,0 +1,7 @@
+*
+!Dockerfile.amd64
+!requirements.txt
+!qwen_engine/
+!qwen_engine/*.py
+!scripts/
+!scripts/*.py

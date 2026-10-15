@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useEffect, useRef } from "react";
-import { isTextInputTarget } from "../lib/dom";
+import { isTextInputTarget } from "../../mapWorkspace/lib/dom";
 
 // Owns only the interaction policy around the shared Design history. Snapshot
 // serialization and mutation history remain with their existing controllers.

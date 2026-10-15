@@ -14,7 +14,7 @@ import {
   isValidMissionName,
   mapNameFromPgmPath,
   uniqueMissionName,
-} from "../lib/missionNames";
+} from "../../mapWorkspace/lib/missionNames";
 
 export default function useDesignMissionCatalogController({
   currentMapName,

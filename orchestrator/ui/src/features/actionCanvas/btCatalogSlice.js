@@ -14,51 +14,6 @@
 //
 // Author: Seongwoo Kim
 
-import { createSlice } from '@reduxjs/toolkit';
-import {
-  FALLBACK_CATALOG,
-  FALLBACK_SCHEMA_VERSION,
-} from '../../constants/btNodeCatalogFallback';
-
-// Catalog source: 'fallback' = static file shipped with the UI,
-// 'ros' = fetched from /bt/nodes/catalog, 'loading' = in-flight.
-// The slice boots with the fallback so the palette renders even before
-// rosbridge connects; useBTNodeCatalog flips it to 'ros' on success.
-const initialState = {
-  catalog: FALLBACK_CATALOG,
-  schemaVersion: FALLBACK_SCHEMA_VERSION,
-  source: 'fallback',
-  error: null,
-};
-
-const btCatalogSlice = createSlice({
-  name: 'btCatalog',
-  initialState,
-  reducers: {
-    catalogFetchStarted: (state) => {
-      state.source = 'loading';
-      state.error = null;
-    },
-    catalogFetchSucceeded: (state, action) => {
-      const { catalog, schemaVersion } = action.payload;
-      state.catalog = catalog;
-      state.schemaVersion = schemaVersion;
-      state.source = 'ros';
-      state.error = null;
-    },
-    catalogFetchFailed: (state, action) => {
-      // Keep whatever's currently in `catalog` (fallback or previously
-      // fetched ROS copy) — just record the failure for diagnostics.
-      state.source = 'fallback';
-      state.error = action.payload || 'Unknown error';
-    },
-  },
-});
-
-export const {
-  catalogFetchStarted,
-  catalogFetchSucceeded,
-  catalogFetchFailed,
-} = btCatalogSlice.actions;
-
-export default btCatalogSlice.reducer;
+// Compatibility entry: the node catalog is shared by all BT editors.
+export { default } from '../btEditor/btCatalogSlice';
+export * from '../btEditor/btCatalogSlice';

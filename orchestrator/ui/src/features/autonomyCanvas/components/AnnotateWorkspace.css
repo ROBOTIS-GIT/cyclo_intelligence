@@ -1,0 +1,179 @@
+/* Annotate shares a library and frame stage. Scoped so Record
+   and Train keep their own sizing instead of inheriting editor overrides. */
+.annotate-workspace.record-workspace-dataset .record-workspace-body {
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  overflow: hidden;
+}
+.annotate-workspace .collect-episode-library { gap: 10px; border-radius: 12px; }
+.annotate-workspace .collect-episode-library > :first-child { margin-bottom: 2px; }
+.annotate-workspace .collect-library-list { flex: 1; gap: 6px; padding-right: 2px; }
+.annotate-workspace .collect-library-item { padding: 10px; gap: 4px; border-radius: 8px; }
+.annotate-workspace .collect-library-categories button { padding: 6px 3px; font-size: 11px; }
+.annotate-workspace .collect-library-categories span { display: block; margin: 2px 0 0; }
+.annotate-workspace .collect-library-tools { display: grid; grid-template-columns: minmax(0, 1fr) repeat(2, 28px); gap: 6px; align-items: center; }
+.annotate-workspace .collect-library-tools button { width: 28px; height: 28px; }
+.annotate-workspace .collect-library-progress { justify-content: flex-start; gap: 3px 8px; }
+.annotate-workspace .collect-dataset-panel {
+  border: 1px solid var(--mc-border);
+  border-radius: 12px;
+  background: var(--mc-surface);
+  overflow: hidden;
+}
+.annotate-workspace .collect-dataset-toolbar { padding: 10px 12px; gap: 8px; flex-shrink: 0; }
+.annotate-workspace .collect-dataset-tools,
+.annotate-workspace .collect-dataset-modes { gap: 3px; padding: 3px; border: 1px solid var(--mc-border); border-radius: 9px; background: var(--mc-surface-2); }
+.annotate-workspace .collect-dataset-toolbar button { min-height: 30px; padding: 4px 9px; border-radius: 6px; font-size: 12px; }
+.annotate-workspace .collect-dataset-modes button[aria-pressed="true"] { background: var(--mc-surface); }
+.annotate-workspace .collect-dataset-editor { padding: 0; flex: 1; overflow: hidden; min-height: 0; }
+.annotate-workspace .collect-dataset-editor .collect-mask-layout {
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
+  width: 100%; height: 100%; gap: 0; overflow: hidden;
+}
+.annotate-workspace .collect-dataset-panel .collect-mask-image { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.annotate-workspace .collect-dataset-panel .annotation-inspector {
+  display: flex; flex-direction: column; gap: 16px;
+  min-width: 0; min-height: 0; overflow-y: auto;
+  padding: 14px; border: 0; border-left: 1px solid var(--mc-border); border-radius: 0;
+  background: var(--mc-surface);
+}
+.annotate-frame-stage { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.annotate-frame-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; flex-shrink: 0; }
+.annotate-frame-heading > div { min-width: 0; display: grid; gap: 3px; }
+.annotate-frame-heading strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.annotate-frame-heading span { font-size: 11px; color: var(--mc-text-muted); }
+.annotate-frame-heading > span { white-space: nowrap; }
+.annotate-frame-navigation { padding: 0 14px 12px; flex-shrink: 0; }
+.annotate-workspace .annotate-frame-navigation .collect-frame-navigation { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; margin: 0; }
+.annotate-workspace .annotate-frame-navigation .collect-frame-navigation > button { width: 32px; height: 32px; padding: 0; flex: 0 0 32px; }
+.annotate-workspace .annotate-frame-navigation .collect-frame-navigation > label { flex: 1; min-width: 0; margin: 0; }
+.annotate-frame-navigation .collect-frame-navigation select { width: 100%; height: 32px; }
+.annotate-frame-viewport { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; padding: 12px; background: var(--mc-surface-2); border-top: 1px solid var(--mc-border); overflow: hidden; }
+.annotate-workspace .collect-dataset-panel .collect-reasoning-image { display: block; width: 100%; height: 0; flex: 1; min-height: 0; max-height: none; object-fit: contain; border-radius: 8px; }
+.annotate-frame-viewport > .sam2-empty { flex: 1; min-height: 0; }
+.annotate-workspace .collect-dataset-panel .sam2-layout-host { display: contents; }
+.annotate-workspace .collect-dataset-panel .annotate-frame-viewport .sam2-image-editor { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.annotate-workspace .collect-dataset-panel .annotate-frame-viewport .sam2-canvas { flex: 1; width: 100%; height: 0; min-height: 0; background: var(--mc-surface-2); border: 1px solid var(--mc-border); }
+.annotate-workspace .sam2-image-editor > .sam2-toolbar { flex-shrink: 0; margin: 0 0 8px; }
+.annotate-workspace .sam2-image-editor:fullscreen { background: var(--mc-surface-2); }
+.annotate-workspace .sam2-object-controls { display: flex; flex-direction: column; gap: 6px; }
+.annotate-workspace .sam2-object-controls .sam2-toolbar { margin: 0; }
+.annotate-workspace .collect-dataset-panel .sam2-instance-list,
+.annotate-workspace .collect-dataset-panel .sam-object-label-picker [aria-label="Object labels"] { max-height: none; overflow: visible; }
+.annotate-workspace .sam2-save-row { margin: 0; }
+.annotate-workspace .sam-object-label-picker .sam2-toolbar { gap: 8px; align-items: flex-end; }
+.annotate-workspace .sam-object-label-picker [aria-pressed="true"] { background: var(--mc-accent-soft); color: var(--mc-accent); }
+.annotate-workspace .annotation-inspector .collect-reasoning-fields { padding-top: 14px; border-top: 1px solid var(--mc-border); }
+.annotate-workspace .annotation-inspector .collect-label-form { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+.annotate-workspace .annotation-inspector .collect-label-form > strong { margin: 0; font-size: 12px; }
+.annotate-workspace .annotation-inspector .collect-field { margin: 0; }
+.annotate-workspace .annotation-inspector .sam-workflow-controls { padding: 0; border: 0; gap: 8px; background: transparent; }
+.annotate-workspace input:not([type="checkbox"]),
+.annotate-workspace select,
+.annotate-workspace textarea { font-family: inherit; font-size: 12px; }
+.annotate-workspace button { font-family: inherit; }
+.annotate-workspace .annotation-inspector input:not([type="checkbox"]),
+.annotate-workspace .annotation-inspector select { height: 32px; padding: 0 8px; border: 1px solid var(--mc-border); border-radius: 7px; background: var(--mc-surface-2); color: var(--mc-text); }
+.annotate-workspace .annotation-inspector textarea { min-height: 100px; max-height: 200px; background: var(--mc-surface-2); font-size: 12px; }
+.annotate-workspace .annotation-inspector .collect-actions { margin: 0; }
+.annotate-workspace .annotation-inspector .collect-primary { width: 100%; }
+.annotate-workspace .annotation-inspector .operate-sidebar-note { margin-top: 0; }
+.annotate-workspace .annotation-inspector small { font-size: 11px; }
+@media (max-width: 1250px) {
+  .annotate-workspace.record-workspace-dataset .record-workspace-body { grid-template-columns: 204px minmax(0, 1fr); gap: 10px; padding: 12px; }
+  .annotate-workspace .collect-dataset-editor .collect-mask-layout { grid-template-columns: minmax(0, 1fr) 288px; }
+}
+@media (max-width: 980px) {
+  .annotate-workspace .collect-dataset-panel { overflow-y: auto; }
+  .annotate-workspace .collect-dataset-editor { flex: 0 0 auto; overflow: visible; }
+  .annotate-workspace .collect-dataset-editor .collect-mask-layout { height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; overflow: visible; }
+  .annotate-workspace .annotate-frame-stage { height: 460px; }
+  .annotate-workspace .collect-dataset-panel .annotation-inspector { overflow: visible; border-left: 0; border-top: 1px solid var(--mc-border); }
+}
+@media (max-width: 760px) {
+  .annotate-workspace.record-workspace-dataset .record-workspace-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 340px auto; overflow: visible; }
+}
+
+.annotate-workspace .sam2-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; font-size: 12px; }
+.annotate-workspace .sam2-toolbar button[aria-label] { min-width: 32px; padding: 5px; }
+
+.annotate-workspace .sam2-instance-list [role="listitem"] { min-width: 0; max-width: 100%; }
+.annotate-workspace .sam2-instance-list button:first-child,
+.annotate-workspace .sam-object-label-picker [aria-label="Object labels"] button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; text-align: left; }
+.annotate-workspace .sam2-instance-list button[aria-label^="Remove instance"] { flex-shrink: 0; }
+
+/* Object masks: one central workspace, no right inspector. */
+.annotate-workspace .annotate-mask-workspace { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.annotate-workspace .annotate-mask-workspace .annotate-frame-stage { flex: 1; height: auto; flex-shrink: 1; }
+.annotate-mask-workflow[hidden] { display: none; }
+.annotate-mask-workflow { flex-shrink: 0; padding: 10px 14px; border-bottom: 1px solid var(--mc-border); }
+.annotate-workspace .sam-workflow-compact .sam-workflow-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; padding: 0; border: 0; }
+.annotate-workspace .sam-workflow-compact .sam-workflow-controls > label { flex: 0 1 200px; min-width: 120px; }
+.annotate-workspace .sam-workflow-compact .qwen-sampling-controls > label { flex-basis: 150px; }
+.annotate-workspace .sam-workflow-compact .sam-workflow-controls > p { margin: 0; align-self: center; }
+.annotate-workspace .sam-workflow-compact .sam-workflow-controls > small { align-self: center; }
+.annotate-workspace .sam-workflow-compact .sam-workflow-controls > details { flex-basis: 100%; }
+.annotate-frame-tools { padding: 0 14px 10px; flex-shrink: 0; }
+.annotate-frame-footer { padding: 8px 14px; max-height: 100px; flex-shrink: 0; overflow-y: auto; border-top: 1px solid var(--mc-border); }
+.annotate-workspace .sam2-object-edit-row { display: flex; align-items: flex-start; gap: 8px; }
+.annotate-workspace .sam2-edit-actions { display: flex; gap: 6px; margin-top: 18px; flex-shrink: 0; }
+.annotate-workspace .sam2-edit-actions button { min-height: 32px; padding: 5px 12px; border: 1px solid var(--mc-border); border-radius: 7px; color: var(--mc-text); font-size: 12px; }
+.annotate-workspace .sam2-edit-actions button:first-child:not(:last-child) { background: var(--mc-accent); border-color: var(--mc-accent); color: var(--mc-accent-fg); }
+.annotate-workspace .sam-object-label-picker > .sam2-toolbar { margin: 0; }
+.annotate-workspace .sam-object-label-picker .collect-field { margin: 0; }
+.annotate-workspace .sam-object-label-picker input { height: 32px; }
+.annotate-workspace .sam-object-label-picker [aria-label="Object labels"] { margin-top: 6px; flex-wrap: nowrap; overflow-x: auto; }
+.annotate-workspace .sam-object-label-picker [aria-label="Object labels"] button { flex-shrink: 0; }
+.annotate-workspace .sam2-object-controls p { margin: 0; font-size: 12px; }
+.annotate-workspace .sam2-image-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
+.annotate-workspace .sam2-image-tools .sam2-toolbar { margin: 0; }
+.annotate-workspace .sam2-instance-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.annotate-workspace .sam2-instance-controls .sam2-toolbar { margin: 0; font-size: 11px; }
+@media (max-width: 980px) {
+  .annotate-workspace .annotate-mask-workspace { height: auto; overflow: visible; }
+  .annotate-workspace .annotate-mask-workspace .annotate-frame-stage { min-height: 560px; }
+}
+
+/* Compact mask navigation and one image action bar. */
+.annotate-workspace .annotate-frame-stage-compact .annotate-frame-heading { justify-content: flex-start; flex-wrap: wrap; gap: 8px 16px; padding: 8px 12px; }
+.annotate-workspace .annotate-frame-stage-compact .annotate-frame-navigation { padding: 0; width: 310px; max-width: 100%; }
+.annotate-workspace .annotate-frame-stage-compact .collect-frame-navigation > label { font-size: 0; gap: 0; }
+.annotate-workspace .annotate-frame-stage-compact .collect-frame-navigation select { font-size: 12px; }
+.annotate-workspace .annotate-frame-stage-compact .collect-frame-navigation { gap: 4px; }
+.annotate-workspace .sam2-image-editor { position: relative; }
+.annotate-workspace .sam2-image-tools { justify-content: flex-start; gap: 6px 14px; }
+.annotate-workspace .sam2-image-tools .sam2-toolbar { gap: 4px; }
+.annotate-workspace .sam2-image-tools button[aria-label] { width: 32px; height: 32px; min-width: 32px; }
+.annotate-workspace .sam2-image-tools .sam2-save-action { background: var(--mc-accent); border-color: var(--mc-accent); color: var(--mc-accent-fg); }
+.sam2-tool-divider { width: 1px; height: 22px; margin: 0 4px; background: var(--mc-border); }
+.sam-object-label-input { flex: 0 1 170px; min-width: 110px; }
+.annotate-workspace .sam-object-label-input input { width: 100%; height: 32px; box-sizing: border-box; padding: 0 8px; border: 1px solid var(--mc-border); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); }
+.sam2-image-status { position: absolute; bottom: 8px; left: 8px; right: 8px; pointer-events: none; }
+.sam2-image-status p { display: table; max-width: 100%; margin: 4px 0 0; padding: 4px 8px; border-radius: 6px; background: var(--mc-surface); font-size: 12px; }
+
+.annotate-workspace .sam2-image-tools .sam2-view-controls { margin-left: auto; flex-shrink: 0; flex-wrap: nowrap; padding-left: 10px; border-left: 1px solid var(--mc-border); }
+
+.annotate-workspace .sam2-object-actions { display: inline-flex; align-items: center; flex-wrap: nowrap; gap: 4px; flex: 0 0 auto; }
+.annotate-workspace .sam2-object-actions .sam-object-label-input { width: 170px; }
+.annotate-workspace .sam2-object-actions button { flex: 0 0 32px; }
+
+/* Reasoning fields follow the mask toolbar: bounded inputs and adjacent actions. */
+.annotate-workspace .reasoning-label-tools { padding: 0; }
+.annotate-workspace .collect-label-form-compact {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: flex-start;
+  width: 100%; max-width: 660px; gap: 6px 8px; margin: 0;
+}
+.annotate-workspace .collect-label-form-compact .collect-field { margin: 0; min-width: 0; max-width: 100%; gap: 4px; font-size: 12px; }
+.annotate-workspace .collect-label-form-compact .collect-reasoning-decision { order: 1; flex: 0 1 144px; }
+.annotate-workspace .collect-label-form-compact .collect-reasoning-mission { order: 2; flex: 0 1 170px; }
+.annotate-workspace .collect-label-form-compact .collect-reasoning-preset { order: 3; flex: 0 1 240px; }
+.annotate-workspace .collect-label-form-compact select { box-sizing: border-box; width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--mc-border); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); font: inherit; text-overflow: ellipsis; }
+.annotate-workspace .collect-label-form-compact > .collect-actions { order: 4; display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; margin: 0; }
+.annotate-workspace .collect-label-form-compact > .collect-actions button { display: inline-flex; align-items: center; justify-content: center; width: 32px; min-width: 32px; height: 32px; padding: 5px; border: 1px solid var(--mc-border); border-radius: 6px; font: inherit; }
+.annotate-workspace .collect-label-form-compact .collect-primary { border-color: var(--mc-accent); }
+.annotate-workspace .collect-label-form-compact .collect-reasoning-reason { order: 5; flex: 0 0 100%; }
+.annotate-workspace .collect-label-form-compact textarea { box-sizing: border-box; width: 420px; max-width: 100%; min-width: 0; min-height: 52px; height: 52px; max-height: 120px; resize: vertical; padding: 6px 8px; border: 1px solid var(--mc-border); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); font: inherit; }
+.annotate-workspace .collect-label-form-compact > .operate-sidebar-note { order: 6; flex: 0 0 100%; margin: 0; font-size: 11px; }
+.annotate-workspace .collect-label-form-compact > [role="status"]:empty { display: none; }

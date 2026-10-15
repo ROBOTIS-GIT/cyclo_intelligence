@@ -319,3 +319,20 @@ def test_start_lerobot_removes_stale_workspace_mount(tmp_path):
         call == "rm -f lerobot_server"
         for call in docker_calls
     )
+
+
+def test_start_qwen_waits_for_api_and_only_starts_qwen(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log_path = _write_start_stub(tmp_path)
+    subprocess.run(
+        [str(docker_dir / "container.sh"), "start-qwen", "--build"],
+        cwd=tmp_path, env=_stub_env(tmp_path, log_path),
+        check=True, text=True, capture_output=True,
+    )
+    commands = log_path.read_text()
+    assert "up -d --wait --wait-timeout 60 --build qwen" in commands
+    assert "pull" not in commands
+    assert "lerobot" not in commands
+    assert "groot" not in commands
+    assert (docker_dir / "huggingface").is_dir()
+    assert (docker_dir / "workspace/model/qwen").is_dir()

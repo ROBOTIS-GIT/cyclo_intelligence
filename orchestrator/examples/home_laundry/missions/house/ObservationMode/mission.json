@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "mission_name": "ObservationMode",
+  "map_name": "house",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "4ece78bc-ec40-480a-87dd-75eeb6e11eb8",
+    "description": "Return to the observation position and watch the dining table.",
+    "start_condition": "Use as the initial observation position or after a meal mission.",
+    "completion_condition": "Robot is at the observation position.",
+    "stop_condition": "",
+    "post_stop_action": "",
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "home_observationmode_01_observation",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        }
+      ],
+      "edges": []
+    },
+    "behavior_node_count": 0
+  },
+  "waypoints": [
+    {
+      "id": "home_observationmode_01_observation",
+      "label": "Observation",
+      "pose": {
+        "frame_id": "map",
+        "x": 0.0,
+        "y": 0.0,
+        "yaw": 0.0
+      },
+      "local_bt": "locals/home_observationmode_01_observation/main.xml",
+      "local_bt_files": [
+        "locals/home_observationmode_01_observation/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_observationmode_01_observation/main.xml",
+        "local_bt": "locals/home_observationmode_01_observation/main.xml",
+        "local_bt_files": [
+          "locals/home_observationmode_01_observation/main.xml"
+        ]
+      }
+    }
+  ]
+}

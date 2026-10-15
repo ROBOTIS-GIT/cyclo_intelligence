@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="GlobalMission">
+      <MissionStep name="TurnOffTV" waypoint_id="house_turn_off" label="TVControl" local_bt="locals/house_turn_off/main.xml" x="9.79224" y="-4.039563" yaw="-0.983255" />
+    </Sequence>
+  </BehaviorTree>
+</root>

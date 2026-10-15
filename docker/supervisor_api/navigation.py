@@ -49,6 +49,7 @@ from supervisor_api.navigation_grid_cache import (
     ensure_ros_grid_subscriber_started,
 )
 from supervisor_api.navigation_missions import remove_map_missions
+from supervisor_api.navigation_spots import map_spots_directory_for_removal, remove_map_spots
 
 
 router = APIRouter(prefix="/navigation", tags=["navigation"])
@@ -874,11 +875,18 @@ def _save_map_with_cli(map_name: str) -> str:
 
 
 def _start_localization_process(map_name: str) -> str:
+    code, clock = _exec(
+        ["bash", "-c", "bash /etc/s6-overlay/s6-rc.d/ai_worker_navigation/run --resolve-clock"],
+        environment=_ros_exec_environment(),
+    )
+    clock = (clock or "").strip()
+    if code != 0 or clock not in ("true", "false"):
+        raise HTTPException(503, f"Robot clock unavailable: {clock}")
     map_path = MAPS_DIR / f"{map_name}.yaml"
     ros_command = (
         _ros_shell_prefix()
         + "exec ros2 launch nav2_bringup localization_launch.py "
-        + f"use_sim_time:=false "
+        + f"use_sim_time:={clock} "
         + f"map:={shlex.quote(str(map_path))} "
         + f"params_file:={shlex.quote(NAVIGATION_PARAMS_FILE)}"
     )
@@ -1578,11 +1586,12 @@ def save_pgm(request: PgmSaveRequest):
 @router.delete("/maps/pgm")
 def delete_pgm(path: str):
     """Delete a saved map: the .pgm plus its .yaml / annotations sidecars in
-    ai_worker, and every mission stored for the map on this side."""
+    ai_worker, and the missions and legacy spot directory stored for this map."""
     resolved = _resolve_pgm_path(path)
     code, _ = _exec(["test", "-f", str(resolved)])
     if code != 0:
         raise HTTPException(404, f"PGM file not found: {path}")
+    map_spots_directory_for_removal(resolved.stem)
     yaml_path = resolved.with_suffix(".yaml")
     annotations_path = _resolve_map_annotations_path(resolved)
     code, output = _exec(
@@ -1593,6 +1602,7 @@ def delete_pgm(path: str):
     return {
         "path": _relative_map_path(resolved),
         "removed_missions": remove_map_missions(resolved.stem),
+        "removed_spot_storage": remove_map_spots(resolved.stem),
         "deleted": True,
     }
 

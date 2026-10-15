@@ -1,0 +1,28 @@
+{
+  "spot": {
+    "id": "house_tv_observation",
+    "label": "TVObservation",
+    "map_name": "house",
+    "linked_bt_tree": "",
+    "metadata": {
+      "coordinate_space": "map",
+      "source": "mission_canvas",
+      "role": "observation"
+    },
+    "pose": {
+      "frame_id": "map",
+      "x": 9.09224,
+      "y": -1.139563,
+      "yaw": -1.570796
+    }
+  },
+  "plan_entry": {
+    "spot_id": "house_tv_observation",
+    "dwell_seconds": 15,
+    "mission_ids": [
+      "55bdb150-aae6-4ab6-bcde-08e530a78db5",
+      "895e88d1-cb8a-49d2-b859-f1b729063183"
+    ],
+    "arrival_bt": "<root BTCPP_format=\"4\" main_tree_to_execute=\"MainTree\">\n  <BehaviorTree ID=\"MainTree\">\n    <Sequence name=\"HomeMealSequence\">\n      <JointControl name=\"Retract\" enable_arms=\"true\" left_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" right_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" duration=\"5.0\" enable_lift=\"true\" lift_position=\"-0.28\" enable_head=\"true\" head_positions=\"0.15, 0\" />\n      <Wait duration=\"0.1\" />\n    </Sequence>\n  </BehaviorTree>\n</root>"
+  }
+}

@@ -1,0 +1,35 @@
+.record-map-tools { position: absolute; top: 20px; left: 20px; z-index: 40; display: flex; align-items: center; gap: 12px; padding: 8px; max-width: calc(100% - 40px); border: 1px solid var(--mc-border); border-radius: 14px; background: var(--mc-surface); box-shadow: var(--mc-shadow); color: var(--mc-text); }
+.record-tool-separator { width: 1px; height: 24px; flex: 0 0 1px; background: var(--mc-border-strong); }
+.record-map-tools .record-authoring-toolbar { padding: 0; border: 0; background: none; box-shadow: none; backdrop-filter: none; }
+.record-map-tools .record-authoring { z-index: auto; }
+.record-route-bar-position { position: absolute; top: 80px; left: 20px; width: max-content; max-width: calc(100% - 40px); z-index: 35; }
+.record-waypoint-popover { position: absolute; z-index: 36; width: 280px; max-width: calc(100% - 24px); overflow-y: auto; border: 1px solid var(--mc-border-strong); border-radius: 12px; background: var(--mc-surface); box-shadow: var(--mc-shadow); color: var(--mc-text); }
+.record-waypoint-go { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; }
+.record-waypoint-go strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.record-waypoint-create-position { position: absolute; top: 80px; left: 20px; z-index: 36; }
+.record-map-edit-error { position: absolute; bottom: 20px; left: 20px; z-index: 40; max-width: min(480px, calc(100% - 40px)); padding: 10px; border-radius: 10px; background: var(--mc-surface); color: var(--mc-danger); font-size: 12px; }
+@container (max-width: 780px) {
+  .record-map-tools { top: 12px; left: 12px; max-width: calc(100% - 24px); gap: 8px; }
+  .record-route-bar-position { max-width: calc(100% - 24px); }
+  .record-route-bar-position, .record-waypoint-create-position { top: 76px; left: 12px; max-width: calc(100% - 24px); }
+}
+@container (max-width: 410px) {
+  .record-map-tools { flex-wrap: wrap; }
+  .record-tool-separator { display: none; }
+  .record-route-bar-position, .record-waypoint-create-position { top: 116px; }
+}
+
+.record-waypoint-popover .record-observation-editor { width: 100%; border: 0; border-radius: 0; box-shadow: none; }
+
+.record-overlay-bounds { position: absolute; inset: 0; pointer-events: none; }
+@container (max-width: 780px) {
+  .record-map-tools.is-editing ~ .record-control-panel { top: 140px; }
+  .record-map-tools.is-editing ~ .record-control-panel .record-control-content,
+  .record-map-tools.is-editing ~ .record-control-panel .record-control-footer,
+  .record-map-tools.is-creating ~ .record-control-panel .record-control-content,
+  .record-map-tools.is-creating ~ .record-control-panel .record-control-footer { display: none; }
+  .record-map-tools.is-creating ~ .record-control-panel { top: auto; bottom: 12px; }
+}
+@container (max-width: 410px) { .record-map-tools.is-editing ~ .record-control-panel { top: 180px; } }
+
+.record-waypoint-go button:disabled { opacity: .45; cursor: default; }

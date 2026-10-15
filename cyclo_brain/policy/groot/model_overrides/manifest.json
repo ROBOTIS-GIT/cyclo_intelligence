@@ -1,0 +1,31 @@
+{
+  "baseline_dependencies": {
+    "gr00t/configs/data/embodiment_configs.py": "4c7626426cfd184034df772bca9f1ab5c2014c139c388f833012ca98ac6f948a",
+    "gr00t/data/interfaces.py": "daa4c6c41e785abc549181153d870fd8d6cca70e3a5ebc43e51bc6b492fad864",
+    "gr00t/data/state_action/state_action_processor.py": "0151dd0bb6cb727fd401bf78121efc532e7184f2575e6ef25294085f629ac145",
+    "gr00t/data/types.py": "329acd11ca7a92c3894bbe44fe3fed2677b9c9f83bee6adcb4aeab8b1e846a1a",
+    "gr00t/policy/gr00t_policy.py": "ad1183a3ce1ebed6cace4a9cb8c5a123e823a0760ebf46f3694639a5ad1521ec"
+  },
+  "compatibility": "Requires the pinned baseline and its installed dependencies. Validate actual inference image imports before deployment.",
+  "files": {
+    "gr00t/configs/data/embodiment_configs.py": "4c7626426cfd184034df772bca9f1ab5c2014c139c388f833012ca98ac6f948a",
+    "gr00t/configs/model/gr00t_n1d7.py": "417613536f8e41e9e1c5a020636357f70afba48c92e77c92a02579a7f866f8b2",
+    "gr00t/data/interfaces.py": "daa4c6c41e785abc549181153d870fd8d6cca70e3a5ebc43e51bc6b492fad864",
+    "gr00t/data/state_action/state_action_processor.py": "0151dd0bb6cb727fd401bf78121efc532e7184f2575e6ef25294085f629ac145",
+    "gr00t/data/types.py": "329acd11ca7a92c3894bbe44fe3fed2677b9c9f83bee6adcb4aeab8b1e846a1a",
+    "gr00t/model/gr00t_n1d7/gr00t_n1d7.py": "6b510453f63bf34e5371007b0b33a7b70ffd8ee5f7fbc4ade46e13e095ece80f",
+    "gr00t/model/gr00t_n1d7/image_augmentations.py": "d3288cc9e6454b1e22a6ad0605b33da416ea52c10d81cc0db010f439fe0cd3f7",
+    "gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py": "58176c96c8188ae3491bb94b48c585ac0473b2acc35053a565cf6a6fc59f3618",
+    "gr00t/model/modules/attn_supervision.py": "d9890199c15e400ab439ad695479ab9a246d8109b11f7e80f1f5ce128e902d9c",
+    "gr00t/model/modules/dit.py": "d4da27be51d9ebe1c923dedd3ae80fe2754c97f96500e82c26fe19fec0062c13",
+    "gr00t/model/modules/embodiment_conditioned_mlp.py": "d8c60775642016262e3df742e7ed10da38007d7a6bc6aa94fcb427f2ff9e1752",
+    "gr00t/model/modules/qwen3_backbone.py": "8099c3c4ca42aceb55413999efb07fe2fad1d61692ed057c3c4ab8ed534aada4",
+    "gr00t/model/modules/vision_overlay.py": "2e999469f15470830837b0bada2a17575bd0ef5fac2467de4795367b4427b32d",
+    "gr00t/policy/gr00t_policy.py": "ad1183a3ce1ebed6cace4a9cb8c5a123e823a0760ebf46f3694639a5ad1521ec"
+  },
+  "isaac_groot_baseline": "51d4c89f72fda44cbf77285c6a8114b52676b8a1",
+  "kind": "cyclo-model-overlay",
+  "scope": "GR00T standard inference with vision-compatible model sources; execution smoothing is provided by RAIL",
+  "source": "Isaac-GR00T-overrides",
+  "version": 1
+}

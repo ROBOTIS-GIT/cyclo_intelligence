@@ -14,7 +14,7 @@
 //
 // Author: Seongwoo Kim
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
@@ -111,6 +111,9 @@ export function useNavigationRosTopic(topic, options = {}) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   const [topicData, setTopicData] = useState(null);
   const [status, setStatus] = useState('disconnected');
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const onMessageRef = useRef(options.onMessage);
+  onMessageRef.current = options.onMessage;
 
   useEffect(() => {
     const usesServerGridSocket = SERVER_GRID_TOPICS.has(topic);
@@ -123,6 +126,16 @@ export function useNavigationRosTopic(topic, options = {}) {
 
     let mounted = true;
     let subscription = null;
+    let connection = null;
+    let retryTimer = null;
+    const retryConnection = () => {
+      if (!mounted || retryTimer !== null) return;
+      setTopicData(null);
+      setStatus('disconnected');
+      retryTimer = window.setTimeout(() => {
+        if (mounted) setConnectionAttempt(attempt => attempt + 1);
+      }, 1000);
+    };
     let staleTimer = null;
     const resetStaleTimer = () => {
       if (staleTimer) window.clearTimeout(staleTimer);
@@ -167,6 +180,9 @@ export function useNavigationRosTopic(topic, options = {}) {
       try {
         const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
         if (!mounted) return;
+        connection = ros;
+        ros.on?.('close', retryConnection);
+        ros.on?.('error', retryConnection);
         const messageType = TOPIC_TYPES[topic];
         if (!messageType) throw new Error(`Unknown Navigation topic: ${topic}`);
         subscription = new ROSLIB.Topic({
@@ -182,6 +198,8 @@ export function useNavigationRosTopic(topic, options = {}) {
           // a `data` array, so passing the raw message would be mistaken for
           // an envelope and discard its header/info fields.
           if (mounted) {
+            // Preserve every transition before React batches visual updates.
+            onMessageRef.current?.(message);
             setTopicData(wrapNavigationRosMessage(message));
             resetStaleTimer();
           }
@@ -191,6 +209,7 @@ export function useNavigationRosTopic(topic, options = {}) {
         if (mounted) {
           console.error(`Failed to subscribe to ${topic}:`, error);
           setStatus('error');
+          retryConnection();
         }
       }
     };
@@ -199,9 +218,12 @@ export function useNavigationRosTopic(topic, options = {}) {
     return () => {
       mounted = false;
       if (staleTimer) window.clearTimeout(staleTimer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      connection?.off?.('close', retryConnection);
+      connection?.off?.('error', retryConnection);
       if (subscription) subscription.unsubscribe();
     };
-  }, [options.staleMs, options.throttleMs, rosbridgeUrl, topic]);
+  }, [options.staleMs, options.throttleMs, rosbridgeUrl, topic, connectionAttempt]);
 
   return { status, topicData };
 }

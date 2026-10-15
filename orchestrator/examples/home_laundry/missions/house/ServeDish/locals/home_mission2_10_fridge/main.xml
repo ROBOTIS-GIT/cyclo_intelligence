@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="HomeMealSequence">
+      <SendCommand name="LoadGroot" command="LOAD" model="groot:n17"
+        policy_path="/workspace/model/groot/RobotisSW/PickGreenCoffeeCan_WhiteShdlf_byGrootModel_80K"
+        task_instruction="Pick up the green coffee can" inference_mode="robot"
+        action_request_mode="sync" acceleration_mode="pytorch"
+        inference_hz="15" control_hz="100" chunk_align_window_s="0.3" />
+      <SendCommand name="ResumeGroot" command="RESUME"
+        task_instruction="Pick up the green coffee can" />
+      <Wait name="RunGrootForFiveSeconds" duration="5.0" />
+      <SendCommand name="StopGroot" command="STOP" />
+      <SendCommand name="ClearGroot" command="CLEAR" />
+      <JointControl name="RetractAfterGroot" enable_arms="true"
+        left_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0"
+        right_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0"
+        duration="3.0" />
+    </Sequence>
+  </BehaviorTree>
+</root>

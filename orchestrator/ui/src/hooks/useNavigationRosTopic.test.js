@@ -1,7 +1,9 @@
 import React from 'react';
 import { configureStore } from '@reduxjs/toolkit';
-import { render } from '@testing-library/react';
+import { act, render, renderHook, waitFor } from '@testing-library/react';
 import { Provider } from 'react-redux';
+import ROSLIB from 'roslib';
+import rosConnectionManager from '../utils/rosConnectionManager';
 import {
   applyNavigationGridEnvelope,
   navigationGridWebSocketUrl,
@@ -110,4 +112,97 @@ test('opens a server grid WebSocket without a rosbridge URL', () => {
   view.unmount();
   expect(close).toHaveBeenCalledTimes(1);
   global.WebSocket = originalWebSocket;
+});
+
+
+test('delivers each BT status event before React batches topic state', async () => {
+  const store = configureStore({
+    reducer: () => ({ ros: { rosbridgeUrl: 'ws://localhost:7090' } }),
+  });
+  const onMessage = jest.fn();
+  let receive;
+  const connection = jest.spyOn(rosConnectionManager, 'getConnection').mockResolvedValue({ isConnected: true });
+  const topic = jest.spyOn(ROSLIB, 'Topic').mockImplementation(function MockTopic() {
+    this.subscribe = callback => { receive = callback; };
+    this.unsubscribe = jest.fn();
+  });
+  try {
+    const view = renderHook(() => useNavigationRosTopic('/bt/status', { onMessage }), {
+      wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+    });
+    await waitFor(() => expect(receive).toEqual(expect.any(Function)));
+    act(() => {
+      receive({ data: 'running' });
+      receive({ data: 'completed' });
+    });
+    expect(onMessage.mock.calls.map(([message]) => message.data)).toEqual(['running', 'completed']);
+    expect(view.result.current.topicData.data.data).toBe('completed');
+    view.unmount();
+  } finally {
+    topic.mockRestore();
+    connection.mockRestore();
+  }
+});
+
+ test('restores active BT node updates after rosbridge disconnects', async () => {
+  jest.useFakeTimers();
+  const { EventEmitter } = require('events');
+  const first = new EventEmitter();
+  const second = new EventEmitter();
+  const connections = jest.spyOn(rosConnectionManager, 'getConnection')
+    .mockResolvedValueOnce(first).mockResolvedValue(second);
+  const subscriptions = [];
+  const topic = jest.spyOn(ROSLIB, 'Topic').mockImplementation(function MockTopic() {
+    this.subscribe = callback => { this.receive = callback; };
+    this.unsubscribe = jest.fn();
+    subscriptions.push(this);
+  });
+  const store = configureStore({ reducer: () => ({ ros: { rosbridgeUrl: 'ws://localhost:7090' } }) });
+  let view;
+  try {
+    view = renderHook(() => useNavigationRosTopic('/bt/active_nodes'), {
+      wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+    });
+    await act(async () => {});
+    act(() => subscriptions[0].receive({ data: 'bt_1' }));
+    expect(view.result.current.topicData.data.data).toBe('bt_1');
+    act(() => first.emit('close'));
+    expect(view.result.current.topicData).toBeNull();
+    await act(async () => { jest.advanceTimersByTime(1000); });
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledTimes(1);
+    expect(first.listenerCount('close')).toBe(0);
+    act(() => subscriptions[1].receive({ data: 'bt_2' }));
+    expect(view.result.current.topicData.data.data).toBe('bt_2');
+    act(() => second.emit('close'));
+    view.unmount();
+    await act(async () => { jest.advanceTimersByTime(2000); });
+    expect(connections).toHaveBeenCalledTimes(2);
+  } finally {
+    view?.unmount(); connections.mockRestore(); topic.mockRestore(); jest.useRealTimers();
+  }
+});
+
+ test.each([
+  ['/amcl_pose', { pose: { pose: { position: { x: 1, y: 2 } } } }],
+  ['/bt/active_nodes', { data: 'bt_1' }],
+])('sends a real ROSLIB subscription and receives %s', async (name, message) => {
+  const ros = new ROSLIB.Ros();
+  ros.isConnected = true;
+  ros.socket = { send: jest.fn() };
+  const connection = jest.spyOn(rosConnectionManager, 'getConnection').mockResolvedValue(ros);
+  const store = configureStore({ reducer: () => ({ ros: { rosbridgeUrl: 'ws://localhost:7090' } }) });
+  let view;
+  try {
+    view = renderHook(() => useNavigationRosTopic(name), {
+      wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+    });
+    await waitFor(() => expect(ros.socket.send).toHaveBeenCalled());
+    expect(JSON.parse(ros.socket.send.mock.calls[0][0])).toMatchObject({ op: 'subscribe', topic: name });
+    act(() => ros.emit(name, message));
+    expect(view.result.current.topicData.data).toEqual(message);
+    expect(view.result.current.status).toBe('connected');
+    view.unmount();
+    expect(JSON.parse(ros.socket.send.mock.calls.at(-1)[0])).toMatchObject({ op: 'unsubscribe', topic: name });
+  } finally { view?.unmount(); connection.mockRestore(); }
 });

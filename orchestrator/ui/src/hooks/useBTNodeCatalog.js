@@ -21,7 +21,7 @@ import {
   catalogFetchFailed,
   catalogFetchStarted,
   catalogFetchSucceeded,
-} from '../features/actionCanvas/btCatalogSlice';
+} from '../features/btEditor/btCatalogSlice';
 import { useRosServiceCaller } from './useRosServiceCaller';
 
 const API_BASE = '/api';

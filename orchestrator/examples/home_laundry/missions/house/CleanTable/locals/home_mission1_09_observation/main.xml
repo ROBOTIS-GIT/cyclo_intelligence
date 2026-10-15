@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="HomeMealSequence">
+      <JointControl name="Retract" enable_arms="true" left_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" right_positions="0.8, 0, 0, -2.4, 0, 0, 0, 0" duration="5.0" enable_lift="true" lift_position="-0.28" enable_head="true" head_positions="0.35, 0" />
+      <Wait duration="0.1" />
+    </Sequence>
+  </BehaviorTree>
+</root>

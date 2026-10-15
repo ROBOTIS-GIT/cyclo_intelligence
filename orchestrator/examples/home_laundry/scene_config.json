@@ -1,0 +1,26 @@
+{
+  "world": "home_autonomy",
+  "map": "house",
+  "world_to_map": {
+    "x": 5.74224035,
+    "y": -2.93956349,
+    "yaw": 1.5707963267948966
+  },
+  "stations": {
+    "observation": [
+      8.5,
+      -0.3,
+      0
+    ],
+    "basket": [
+      9.04,
+      -0.3,
+      0
+    ],
+    "washer": [
+      9,
+      -2.05,
+      0
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+.collect-episode-delete-list .episode-type-filters { display:flex; gap:3px; flex-wrap:wrap; }
+.collect-episode-delete-list .episode-type-filters button { font:inherit; font-size:11px; padding:4px 5px; border-radius:6px; }
+.collect-episode-delete-list .episode-type-filters button[aria-pressed="true"] { color:var(--mc-accent); background:var(--mc-accent-soft); }
+.collect-episode-delete-list .episode-selection-actions { display:flex; align-items:center; justify-content:space-between; gap:6px; border-bottom:1px solid var(--mc-border); padding:6px 0; }
+.collect-episode-delete-list .episode-selection-actions label, .collect-episode-delete-list .episode-delete-row { display:flex; flex-direction:row; align-items:center; gap:7px; font:inherit; margin:0; }
+.collect-episode-delete-list input[type="checkbox"] { width:14px; height:14px; flex:0 0 14px; margin:0; accent-color:var(--mc-accent); }
+.collect-episode-delete-list .episode-delete-group { display:grid; gap:5px; min-width:0; }
+.collect-episode-delete-list .episode-delete-group > strong { font-size:11px; overflow-wrap:anywhere; color:var(--mc-text-muted); }
+.collect-episode-delete-list .episode-delete-row { padding:4px 0; cursor:pointer; }
+.episode-delete-row > span { display:grid; min-width:0; overflow-wrap:anywhere; }
+.episode-delete-row small { font-size:10px; color:var(--mc-text-muted); }
+.episode-delete-name { font-size:12px; }

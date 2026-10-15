@@ -1,0 +1,160 @@
+{
+  "schema_version": 2,
+  "revision": 4,
+  "mission_name": "ServeDish",
+  "map_name": "Home",
+  "global_bt": "global.xml",
+  "metadata": {
+    "source": "mission_canvas",
+    "reasoning_mission_id": "7929f7d1-a55b-5e31-bed9-514e7318828c",
+    "description": "Bring clean dishes from the sink to the seated family and serve a fresh meal.",
+    "start_condition": "All three family members are seated waiting, the table has been cleared, and clean dishes are stacked beside the sink.",
+    "completion_condition": "Clean dishes with a fresh full serving of food are on the table.",
+    "stop_condition": "",
+    "post_stop_action": "",
+    "mission_flow": {
+      "nodes": [
+        {
+          "id": "home_mission2_04_sink",
+          "position": {
+            "x": 80,
+            "y": 72
+          }
+        },
+        {
+          "id": "home_mission2_08_table",
+          "position": {
+            "x": 300,
+            "y": 72
+          }
+        },
+        {
+          "id": "home_mission2_10_fridge",
+          "position": {
+            "x": 520,
+            "y": 72
+          }
+        },
+        {
+          "id": "home_mission2_12_table",
+          "position": {
+            "x": 740,
+            "y": 72
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "home_edge_1",
+          "source": "home_mission2_04_sink",
+          "target": "home_mission2_08_table"
+        },
+        {
+          "id": "home_edge_2",
+          "source": "home_mission2_08_table",
+          "target": "home_mission2_10_fridge"
+        },
+        {
+          "id": "home_edge_3",
+          "source": "home_mission2_10_fridge",
+          "target": "home_mission2_12_table"
+        }
+      ]
+    },
+    "behavior_node_count": 0
+  },
+  "waypoints": [
+    {
+      "id": "home_mission2_04_sink",
+      "label": "Sink",
+      "pose": {
+        "frame_id": "map",
+        "x": 6.34224,
+        "y": 1.760437,
+        "yaw": 1.570796
+      },
+      "local_bt": "locals/home_mission2_04_sink/main.xml",
+      "local_bt_files": [
+        "locals/home_mission2_04_sink/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission2_04_sink/main.xml",
+        "local_bt": "locals/home_mission2_04_sink/main.xml",
+        "local_bt_files": [
+          "locals/home_mission2_04_sink/main.xml"
+        ]
+      }
+    },
+    {
+      "id": "home_mission2_08_table",
+      "label": "Table (Place Dishes)",
+      "pose": {
+        "frame_id": "map",
+        "x": 2.04224,
+        "y": 0.060437,
+        "yaw": 0.0
+      },
+      "local_bt": "locals/home_mission2_08_table/main.xml",
+      "local_bt_files": [
+        "locals/home_mission2_08_table/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission2_08_table/main.xml",
+        "local_bt": "locals/home_mission2_08_table/main.xml",
+        "local_bt_files": [
+          "locals/home_mission2_08_table/main.xml"
+        ]
+      }
+    },
+    {
+      "id": "home_mission2_10_fridge",
+      "label": "Fridge",
+      "pose": {
+        "frame_id": "map",
+        "x": 1.04224,
+        "y": 2.110437,
+        "yaw": 1.570796
+      },
+      "local_bt": "locals/home_mission2_10_fridge/main.xml",
+      "local_bt_files": [
+        "locals/home_mission2_10_fridge/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission2_10_fridge/main.xml",
+        "local_bt": "locals/home_mission2_10_fridge/main.xml",
+        "local_bt_files": [
+          "locals/home_mission2_10_fridge/main.xml"
+        ]
+      }
+    },
+    {
+      "id": "home_mission2_12_table",
+      "label": "Table (Serve Food)",
+      "pose": {
+        "frame_id": "map",
+        "x": 2.04224,
+        "y": 0.060437,
+        "yaw": 0.0
+      },
+      "local_bt": "locals/home_mission2_12_table/main.xml",
+      "local_bt_files": [
+        "locals/home_mission2_12_table/main.xml"
+      ],
+      "metadata": {
+        "coordinate_space": "map",
+        "source": "mission_canvas",
+        "linked_bt_tree": "locals/home_mission2_12_table/main.xml",
+        "local_bt": "locals/home_mission2_12_table/main.xml",
+        "local_bt_files": [
+          "locals/home_mission2_12_table/main.xml"
+        ]
+      }
+    }
+  ]
+}

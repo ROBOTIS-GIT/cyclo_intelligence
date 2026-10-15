@@ -29,15 +29,15 @@ import {
   localBtPathsForSpot,
   migrateCanonicalLocalBtFileKeys,
   withLocalBtLibrary,
-} from "./missionBtFiles";
+} from "../../mapWorkspace/lib/missionBtFiles";
 import {
   filterMissionFlowEdges,
   missionStepSpotsFromMissionFlow,
   serializeMissionFlow,
   syncMissionFlowNodesWithSpots,
-} from "./missionFlow";
-import { missionRequestName } from "./missionNames";
-import { missionWaypointsFromSpots } from "./missionSpots";
+} from "../../mapWorkspace/lib/missionFlow";
+import { missionRequestName } from "../../mapWorkspace/lib/missionNames";
+import { missionWaypointsFromSpots } from "../../mapWorkspace/lib/missionSpots";
 import { saveBehaviorNodesForMap } from "./designStore";
 
 function historyObject(historyAtStart) {
@@ -76,6 +76,7 @@ export default async function persistDesignMission({
   mapName,
   targetMissionName,
   targetKnown,
+  metadata = {},
   visibleSpots = [],
   behaviorNodes = [],
   missionFlowNodes = [],
@@ -190,6 +191,7 @@ export default async function persistDesignMission({
       global_bt: globalPath,
       waypoints: missionWaypointsFromSpots(canonicalMissionSpots),
       metadata: {
+        ...metadata,
         source: "mission_canvas",
         behavior_node_count: behaviorNodes.length,
         mission_flow: serializeMissionFlow(

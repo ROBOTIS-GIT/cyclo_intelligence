@@ -1,0 +1,45 @@
+/* Reserve the same space before, during and after camera/inference updates. */
+.record-reasoning-panel {
+  box-sizing: border-box; flex: 0 0 clamp(300px, 42vh, 440px);
+  width: 100%; min-height: 0; max-height: 52%;
+  display: grid; grid-template-rows: 96px minmax(0, 1fr); overflow: hidden;
+  border-bottom: 1px solid var(--mc-border); background: var(--mc-surface);
+}
+.record-reasoning-controls { display: flex; align-items: start; gap: 12px; padding: 12px 24px 0; min-height: 0; overflow: auto; }
+.record-reasoning-controls .operate-model-select { flex: 0 1 430px; min-width: 240px; margin-bottom: 0; }
+.record-reasoning-buttons { display: flex; flex-shrink: 0; gap: 6px; padding-top: 20px; }
+.record-reasoning-buttons button { border: 1px solid var(--mc-border); border-radius: 7px; padding: 7px 12px; background: var(--mc-surface-2); color: var(--mc-text); font: inherit; font-size: 12px; }
+.record-reasoning-buttons button:disabled { opacity: .5; cursor: not-allowed; }
+.record-reasoning-panel .operate-map-observation {
+  box-sizing: border-box; height: 100%; min-height: 0; padding: 8px 24px 16px;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); align-items: stretch;
+}
+.record-reasoning-panel .operate-map-observation > .operate-observation { display: block; min-width: 0; min-height: 0; border: 0; background: transparent; }
+.record-reasoning-panel .operate-map-reasoning { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.record-reasoning-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 16px; width: 100%; height: 100%; min-height: 0; }
+.record-reasoning-live,
+.record-reasoning-panel .collect-attention-preview {
+  position: relative; display: grid; grid-template-rows: 18px minmax(0, 1fr); gap: 6px;
+  margin: 0; min-width: 0; min-height: 0; width: 100%; height: 100%;
+}
+.record-reasoning-live figcaption,
+.record-reasoning-panel .collect-attention-preview figcaption { margin: 0; color: var(--mc-text-muted); font-size: 11px; line-height: 18px; }
+.record-reasoning-live .collect-camera { display: block; min-height: 0; overflow: hidden; border: 0; border-radius: 6px; background: var(--mc-surface-2); }
+.record-reasoning-live .collect-live-camera { position: relative; width: 100%; height: 100%; aspect-ratio: auto; }
+.record-reasoning-live .collect-live-image { width: 100%; height: 100%; }
+.record-reasoning-panel .record-reasoning-live .operate-head-image,
+.record-reasoning-panel .collect-attention-preview img {
+  display: block; width: 100%; height: 100%; min-height: 0; max-height: none;
+  object-fit: contain; border-radius: 6px; background: var(--mc-surface-2);
+}
+.record-reasoning-panel .collect-attention-placeholder { min-height: 0; height: 100%; display: grid; place-items: center; font-size: 12px; color: var(--mc-text-muted); background: var(--mc-surface-2); border-radius: 6px; }
+.record-reasoning-live .collect-live-status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.record-reasoning-panel .record-reasoning-live .collect-live-status span { font-size: 12px; color: var(--mc-text-muted); }
+.record-reasoning-panel .collect-attention-preview > span { position: absolute; bottom: 8px; left: 8px; right: 8px; padding: 4px 6px; border-radius: 4px; font-size: 11px; color: var(--mc-text-muted); background: var(--mc-surface); }
+@media (max-width: 700px) {
+  .record-reasoning-panel { flex-basis: 480px; max-height: none; grid-template-rows: 140px minmax(0, 1fr); }
+  .record-reasoning-controls { flex-wrap: wrap; align-content: start; gap: 4px 12px; padding: 12px 16px 0; }
+  .record-reasoning-buttons { padding-top: 0; }
+  .record-reasoning-panel .operate-map-observation { padding: 8px 16px 16px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .record-workspace-live .record-map-pane { min-height: 800px; flex-basis: 800px; }
+}

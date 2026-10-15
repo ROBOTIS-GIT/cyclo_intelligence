@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "mode": "patrol",
+  "settle_seconds": 1.0,
+  "interval_seconds": 1.0,
+  "start_confirmations": 4,
+  "resume_confirmations": 2,
+  "mission_start_policy": "confirm_at_arrival",
+  "resume_policy": "return_to_trigger_spot",
+  "observations": [
+    {
+      "spot_id": "home_observation",
+      "dwell_seconds": 15,
+      "mission_ids": [
+        "2e84b5b4-075c-48f1-856f-df13e5166f56",
+        "fa3f70bf-1a8f-4b01-997a-0d006fa82228"
+      ],
+      "arrival_bt": "<?xml version='1.0' encoding='utf-8'?>\n<root BTCPP_format=\"4\" main_tree_to_execute=\"MainTree\">\n  <BehaviorTree ID=\"MainTree\">\n    <Sequence name=\"HomeMealSequence\">\n      <JointControl name=\"Retract\" enable_arms=\"true\" left_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" right_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" duration=\"5.0\" enable_lift=\"true\" lift_position=\"-0.28\" enable_head=\"true\" head_positions=\"0.35, 0\" />\n      <Wait duration=\"0.1\" />\n    </Sequence>\n  </BehaviorTree>\n</root>"
+    },
+    {
+      "spot_id": "house_laundry_observation",
+      "dwell_seconds": 15,
+      "mission_ids": [
+        "f8f41ae8-e074-459c-b3b4-bdbbc656c0d3"
+      ],
+      "arrival_bt": "<?xml version='1.0' encoding='utf-8'?>\n<root BTCPP_format=\"4\" main_tree_to_execute=\"MainTree\">\n  <BehaviorTree ID=\"MainTree\">\n    <Sequence name=\"HomeMealSequence\">\n      <JointControl name=\"Retract\" enable_arms=\"true\" left_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" right_positions=\"0.8, 0, 0, -2.4, 0, 0, 0, 0\" duration=\"5.0\" enable_lift=\"true\" lift_position=\"-0.28\" enable_head=\"true\" head_positions=\"0.35, 0\" />\n      <Wait duration=\"0.1\" />\n    </Sequence>\n  </BehaviorTree>\n</root>"
+    }
+  ],
+  "excluded_mission_ids": [
+    "4ece78bc-ec40-480a-87dd-75eeb6e11eb8"
+  ]
+}

@@ -22,6 +22,8 @@ export ZENOH_TRANSPORT_SHM_ENABLED=${ZENOH_TRANSPORT_SHM_ENABLED:-true}
 # s6 does not read /root/.bashrc, so make the ROS Python packages visible.
 ROS_DISTRO="${ROS_DISTRO:-jazzy}"
 source "/opt/ros/${ROS_DISTRO}/setup.bash"
+# Autonomy uses custom BT interfaces from the workspace overlay, not just /opt/ros.
+source "${COLCON_WS:-/root/ros2_ws}/install/setup.bash"
 
 HOST="${CYCLO_SUPERVISOR_API_HOST:-127.0.0.1}"
 PORT="${CYCLO_SUPERVISOR_API_PORT:-7100}"

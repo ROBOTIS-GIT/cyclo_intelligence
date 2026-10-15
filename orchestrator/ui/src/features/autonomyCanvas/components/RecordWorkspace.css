@@ -1,0 +1,23 @@
+/* Record uses the same stage bounds, surface and spacing as Operate. */
+.collect-workspace.record-workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; padding: 0; overflow: hidden; }
+.record-workspace-body { flex: 1; display: grid; min-width: 0; min-height: 0; gap: 0; }
+.record-workspace-live .record-workspace-body { grid-template-columns: minmax(0, 1fr); }
+.record-map-pane { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; container-type: inline-size; }
+.record-map-canvas { display: flex; flex: 1 1 0; position: relative; width: 100%; min-height: 0; min-width: 0; overflow: hidden; }
+.record-map-canvas > section { flex: 1 1 0; width: 100%; min-width: 0; }
+.record-workspace-dataset .record-workspace-body { grid-template-columns: 224px minmax(0, 1fr); gap: 16px; padding: 16px; }
+.record-workspace-dataset .collect-episode-library { margin: 0; padding: 12px; }
+@media (min-width: 1600px) {
+  .record-workspace-dataset .record-workspace-body { grid-template-columns: 240px minmax(0, 1fr); }
+}
+@media (max-width: 1050px) {
+  .record-workspace-dataset .record-workspace-body { grid-template-columns: 190px minmax(0, 1fr); gap: 12px; padding: 12px; }
+}
+@media (max-width: 760px) {
+  .collect-workspace.record-workspace { overflow-y: auto; }
+  .record-workspace-live .record-workspace-body { display: flex; flex-direction: column; }
+  .record-map-pane { min-height: 440px; flex: 0 0 440px; }
+  .record-workspace-dataset .record-workspace-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 210px minmax(0, 1fr); overflow: visible; }
+}
+
+.record-workspace-dataset .collect-library-progress { flex-wrap: wrap; gap: 4px; }

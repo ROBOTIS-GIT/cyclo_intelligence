@@ -24,7 +24,8 @@ import {
   MdRoute,
   MdUndo,
 } from "react-icons/md";
-import { WaypointOptionButton } from "../primitives";
+import MissionWaypointImport from "./MissionWaypointImport";
+import { WaypointOptionButton } from "../../../mapWorkspace/components/primitives";
 
 export default function DesignStageHud({
   busy,
@@ -43,6 +44,7 @@ export default function DesignStageHud({
   missionRouteMode,
   missionRunnerActive,
   onCreateSpotAtRobot,
+  onImportWaypoint,
   onDeleteMission,
   onDuplicateMission,
   onMissionChange,
@@ -91,6 +93,14 @@ export default function DesignStageHud({
               >
                 At Robot
               </WaypointOptionButton>
+              <MissionWaypointImport
+                key={`${currentMapName}:${missionName}`}
+                mapName={currentMapName}
+                missionName={missionName}
+                missionNames={missionNames}
+                disabled={!!busy || !designMapAvailable || missionRouteMode || designHistoryLocked}
+                onImport={onImportWaypoint}
+              />
             </div>
           )}
         </div>
@@ -135,7 +145,7 @@ export default function DesignStageHud({
           the authoring tools so mission management sits with editing. */}
       {designMapActive && (
         <div
-          className="w-[210px] grid gap-1.5 p-2.5"
+          className="w-[260px] flex flex-col gap-1.5 p-2.5"
           style={{ borderRadius: 14, backgroundColor: "color-mix(in srgb, var(--mc-surface) 88%, transparent)", border: "1px solid var(--mc-border)", boxShadow: "var(--mc-shadow)", backdropFilter: "blur(8px)" }}
         >
           {/* The rail session card is gone; the loaded map is named here.
@@ -144,17 +154,15 @@ export default function DesignStageHud({
             {currentMapName}
           </div>
           <label className="grid gap-1">
-            {/* Mono styling stays on the caption span only, so the select
-                inherits the page's Hanken Grotesk instead of fighting it. */}
-            <span className="text-[10px] font-mono tracking-[0.12em]" style={{ color: "var(--mc-text-subtle)" }}>
-              MISSION
+            <span className="text-[12.5px] font-semibold" style={{ color: "var(--mc-text-subtle)" }}>
+              Mission
             </span>
             <select
               aria-label="Active mission"
               value={missionName}
               disabled={designMapBusy || !!busy}
               onChange={(event) => onMissionChange(event.currentTarget.value)}
-              className="w-full h-7 px-2 text-xs font-medium"
+              className="w-full h-8 px-2 text-[13px] font-medium"
               style={{ borderRadius: 8, color: "var(--mc-text)", backgroundColor: "var(--mc-surface-2)", border: "1px solid var(--mc-border-strong)" }}
             >
               {(missionNames.includes(missionName)
@@ -175,7 +183,7 @@ export default function DesignStageHud({
               : "Save Mission"}
             disabled={!!busy || designMapBusy || !!designMissionLoadError}
             onClick={onSaveMission}
-            className="w-full h-7 text-[11px] font-semibold disabled:opacity-40"
+            className="w-full h-8 text-[12.5px] font-semibold disabled:opacity-40"
             style={{ borderRadius: 8, border: "1px solid transparent", backgroundColor: "var(--mc-accent)", color: "var(--mc-accent-fg)" }}
           >
             Save

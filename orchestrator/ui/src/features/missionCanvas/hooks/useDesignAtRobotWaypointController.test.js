@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { act, renderHook } from "@testing-library/react";
-import { STAGE_AUTHORING } from "../lib/stages";
+import { STAGE_AUTHORING } from "../../mapWorkspace/lib/stages";
 import useDesignAtRobotWaypointController from "./useDesignAtRobotWaypointController";
 
 function deferred() {

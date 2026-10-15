@@ -1,0 +1,5 @@
+.operate-thought-current-action { display:flex; align-items:center; gap:7px; margin-top:12px; color:var(--mc-text-muted); font-family:"Nunito Thought",ui-rounded,"Hanken Grotesk",sans-serif; font-size:13px; font-weight:800; line-height:1.4; }
+.operate-thought-current-action > svg { width:16px; height:16px; flex:0 0 16px; color:#c65046; }
+.operate-thought-current-action > span { min-width:0; overflow-wrap:anywhere; }
+.operate-thought-current-action.tone-neutral > svg { color:var(--mc-text-muted); }
+.operate-thought-current-action.tone-danger > svg { color:var(--mc-danger); }

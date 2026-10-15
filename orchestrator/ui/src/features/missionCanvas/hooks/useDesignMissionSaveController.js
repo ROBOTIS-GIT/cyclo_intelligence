@@ -107,6 +107,7 @@ export default function useDesignMissionSaveController({
         targetMissionName: target,
         targetKnown: snapshot.catalog?.mapName === snapshot.identity.mapName
           && (snapshot.catalog?.names || []).includes(target),
+        metadata: snapshot.content?.metadata || {},
         visibleSpots: snapshot.content?.visibleSpots || [],
         behaviorNodes: snapshot.content?.behaviorNodes || [],
         missionFlowNodes: snapshot.content?.missionFlowNodes || [],
@@ -134,6 +135,7 @@ export default function useDesignMissionSaveController({
         ports.history.rebase(saveOutput.savedHistorySnapshot);
       } else {
         ports.history.reset();
+        ports.content.onSaveCompleted?.();
       }
       ports.catalog.record(snapshot.identity.mapName, target);
       try {

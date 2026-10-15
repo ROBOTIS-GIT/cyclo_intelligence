@@ -1,0 +1,293 @@
+/* Shared collection form styles. Record and annotation layouts live in their own stylesheets. */
+@import "./Sam2Annotation.css";
+.collect-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.collect-sidebar .collect-field textarea {
+  min-height: 58px;
+}
+.collect-field input {
+  width: 100%;
+  border: 1px solid var(--mc-border-strong);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--mc-surface-2);
+  color: var(--mc-text);
+  font-size: 11px;
+}
+.collect-field input:focus-visible {
+  outline: 2px solid var(--mc-focus);
+  outline-offset: 2px;
+}
+.collect-field input:disabled,
+.collect-field textarea:disabled {
+  opacity: 0.65;
+}
+.collect-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.collect-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--mc-border-strong);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.collect-sidebar .collect-primary {
+  background: var(--mc-accent);
+  color: var(--mc-accent-fg);
+  border-color: transparent;
+}
+.collect-camera {
+  min-height: 130px;
+}
+.collect-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  display: grid;
+  grid-template-rows: 220px minmax(0, 1fr);
+  gap: 12px;
+}
+.collect-observation-description {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.collect-observation-description .operate-qwen-heading {
+  margin-top: 0;
+}
+.collect-workspace .collect-camera {
+  flex: 0 0 auto;
+  width: min(28cqw, calc(100cqh * var(--collect-camera-aspect, 1.7778)));
+  aspect-ratio: var(--collect-camera-aspect, 1.7778);
+  min-height: 0;
+  height: auto;
+  max-height: 100%;
+  align-self: flex-start;
+  overflow: hidden;
+  text-align: center;
+}
+.collect-workspace .collect-camera img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+.collect-teleop {
+  flex: 0 0 310px;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--mc-border);
+  overflow: auto;
+}
+.collect-teleop [role="group"] {
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.collect-teleop [role="group"] > div:first-child {
+  gap: 4px;
+}
+.collect-teleop [role="group"] button {
+  height: 28px;
+  width: 32px;
+  font-size: 13px;
+  border-radius: 7px !important;
+}
+.collect-teleop input[type="range"] {
+  min-width: 0;
+  width: 100%;
+}
+.collect-teleop [role="group"] label {
+  grid-template-columns: 42px minmax(0, 1fr) 32px;
+  gap: 4px;
+  font-size: 10px;
+}
+.collect-workspace .collect-field {
+  margin-top: 8px;
+  gap: 4px;
+  font-size: 13px;
+}
+.collect-workspace .collect-field input,
+.collect-workspace .collect-field textarea {
+  font-size: 13px;
+  padding: 6px 8px;
+}
+.collect-workspace .collect-field textarea {
+  min-height: 46px;
+}
+.collect-workspace .operate-sidebar-note {
+  font-size: 11px;
+  margin-top: 6px;
+}
+.collect-workspace .collect-actions {
+  margin-top: 8px;
+}
+.collect-workspace .collect-actions button {
+  padding: 6px 10px;
+}
+.collect-workspace button:disabled {
+  opacity: 0.45;
+}
+@media (max-width: 1200px) {
+  .collect-teleop {
+    flex-basis: 280px;
+  }
+}
+@media (max-width: 760px) {
+  .collect-workspace {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+  .collect-workspace .collect-camera {
+    width: 40%;
+    max-height: 180px;
+  }
+  .collect-teleop {
+    flex: 1 0 100%;
+    padding: 10px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--mc-border);
+  }
+}
+.collect-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  color: inherit;
+  background: var(--input-bg, #fff);
+  border: 1px solid var(--border-color, #d9dfe7);
+  border-radius: 7px;
+  font: inherit;
+}
+
+.collect-live-camera,
+.collect-live-image {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+.collect-live-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.8);
+  color: #fff;
+  font-size: 12px;
+}
+.collect-live-status button {
+  padding: 6px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+.collect-label-form > strong {
+  font-size: 12px;
+}
+.collect-decision-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.collect-decision-fields > div {
+  display: grid;
+  gap: 2px;
+}
+.collect-decision-fields dt {
+  color: var(--mc-text-muted);
+}
+.collect-decision-fields dd {
+  margin: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+.collect-observation-description .operate-qwen-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.collect-workspace [hidden] {
+  display: none !important;
+}
+.collect-capture-controls { display: grid; gap: 8px; }
+.record-mission-control { border-top: 1px solid var(--mc-border); margin-top: 4px; padding-top: 8px; display: grid; gap: 8px; }
+.collect-capture-heading { display: flex; justify-content: space-between; gap: 6px; }
+.collect-capture-heading span { color: var(--mc-text-muted); font-size: 11px; }
+.collect-capture-options { display: grid; grid-template-columns: 1.3fr 1fr; gap: 6px; }
+.collect-capture-controls label { display: grid; gap: 4px; }
+.collect-capture-controls select { width: 100%; min-width: 0; height: 32px; border-radius: 8px; border: 1px solid var(--mc-border-strong); background: var(--mc-surface-2); color: var(--mc-text); font: inherit; padding: 0 6px; }
+.collect-capture-buttons { display: flex; justify-content: center; gap: 8px; }
+.collect-capture-buttons > button, .collect-episode-delete > button { width: 32px; height: 32px; padding: 0; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.collect-capture-buttons button:disabled { opacity: 0.45; cursor: default; }
+.collect-capture-buttons button { min-height: 32px; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--mc-border-strong); background: var(--mc-surface); color: var(--mc-text); font: inherit; font-weight: 600; }
+.collect-capture-buttons .collect-capture-active { background: var(--mc-accent-soft); color: var(--mc-accent); border-color: var(--mc-accent); }
+.collect-capture-buttons .collect-capture-active:disabled { opacity: 1; }
+.collect-capture-buttons .collect-capture-delete { color: var(--mc-danger); display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+.collect-capture-controls p[role="alert"] { color: var(--mc-danger); font-size: 11px; overflow-wrap: anywhere; }
+
+.collect-episode-delete { position: relative; min-width: 0; }
+
+.collect-episode-delete-list { position: absolute; right: 0; bottom: calc(100% + 6px); width: 216px; max-height: 240px; overflow-y: auto; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--mc-border-strong); border-radius: 12px; background: var(--mc-surface); box-shadow: var(--mc-shadow); z-index: 20; }
+.collect-episode-delete-list button { display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left; }
+.collect-episode-delete-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collect-episode-delete-list svg { flex-shrink: 0; color: var(--mc-danger); }
+
+.collect-capture-buttons > button, .collect-episode-delete > button { padding: 0; border-radius: 9px; }
+.collect-episode-library { min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; padding: 12px; }
+.collect-library-tools { display: flex; gap: 6px; }
+.collect-library-tools input, .collect-episode-library > select { min-width: 0; width: 100%; height: 32px; padding: 0 8px; border: 1px solid var(--mc-border); border-radius: 8px; background: var(--mc-surface-2); color: var(--mc-text); font: inherit; font-size: 12px; }
+.collect-library-tools button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 1px solid var(--mc-border); border-radius: 9px; background: var(--mc-surface); color: var(--mc-text); }
+.collect-library-categories { display: flex; gap: 4px; }
+.collect-library-categories button { flex: 1; min-width: 0; border: 1px solid var(--mc-border); border-radius: 7px; padding: 5px 7px; background: var(--mc-surface); color: var(--mc-text-muted); font: inherit; font-size: 12px; }
+.collect-library-categories button[aria-pressed="true"] { border-color: var(--mc-accent); background: var(--mc-accent-soft); color: var(--mc-text); }
+.collect-library-categories span { font-size: 11px; margin-left: 3px; }
+.collect-library-count { color: var(--mc-text-muted); font-size: 11px; }
+.collect-library-list { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.collect-library-item { display: flex; flex-direction: column; gap: 5px; width: 100%; text-align: left; padding: 10px; border: 1px solid var(--mc-border); border-radius: 9px; background: var(--mc-surface); color: var(--mc-text); font: inherit; font-size: 12px; overflow-wrap: anywhere; }
+.collect-library-item[aria-pressed="true"] { border-color: var(--mc-accent); background: var(--mc-accent-soft); }
+.collect-library-item > span { color: var(--mc-text-muted); font-size: 11px; }
+.collect-library-scenario { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.collect-library-progress { display: flex; justify-content: space-between; gap: 8px; }
+.collect-library-progress > span:first-child { white-space: nowrap; }
+
+.sam-object-label-picker { flex: 1; min-width: 0; }
+.sam-object-label-picker .collect-field { flex: 1; min-width: 100px; }
+.sam-object-label-picker button[aria-pressed="true"] { background: var(--accent, #2563eb); color: white; }
+
+.sam2-instance-list { display:flex; flex-wrap:wrap; gap:6px; }
+.sam2-instance-list [role="listitem"] { display:flex; border:1px solid var(--mc-border); border-radius:6px; }
+.sam2-instance-list button { padding:5px 8px; color:var(--mc-text); }
+.sam2-instance-list button[aria-pressed="true"] { background:var(--mc-accent-soft); }
+.collect-reasoning-image { display:block; width:100%; height:clamp(200px,30vh,360px); object-fit:contain; background:#111; border-radius:8px; }
+.collect-reasoning-fields { margin-top:12px; }
+.collect-reasoning-fields .collect-label-form { min-width:0; margin:0; }
+.collect-reasoning-decision { order: 1; }
+.collect-reasoning-mission { order: 2; }
+.collect-reasoning-preset { order: 4; grid-column: 1 / -1; }
+.collect-reasoning-reason { order: 5; grid-column: 1 / -1; }

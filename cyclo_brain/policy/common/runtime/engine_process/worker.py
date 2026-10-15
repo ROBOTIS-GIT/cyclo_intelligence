@@ -14,10 +14,13 @@ know about the control loop, command publishing, or external lifecycle service.
 from __future__ import annotations
 
 import importlib
+import json
+import time
 import os
 import sys
 import threading
-from types import SimpleNamespace
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 _ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk")
@@ -55,6 +58,15 @@ except Exception:  # pragma: no cover - local unit tests do not ship SDK.
 logger = get_logger("engine_process")
 
 
+@lru_cache(maxsize=1)
+def local_clock_id() -> str:
+    """Identify the Linux boot owning CLOCK_MONOTONIC; never use a wall-clock ID."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
 class EngineWorker:
     """Internal service handler hosted by the Engine process."""
 
@@ -89,6 +101,7 @@ class EngineWorker:
                 message=str(e),
             )
 
+
     def _load_policy(self, request: EngineCommandRequest) -> EngineCommandResponse:
         result = self._engine.load_policy(request)
         return EngineCommandResponse(
@@ -99,14 +112,25 @@ class EngineWorker:
         )
 
     def _get_action(self, request: EngineCommandRequest) -> EngineCommandResponse:
-        result = self._engine.get_action_chunk(
-            SimpleNamespace(task_instruction=request.task_instruction)
-        )
+        started_at = time.monotonic()
+        result = self._engine.get_action_chunk(request)
+        finished_at = time.monotonic()
+        timing = dict(result.get("timing", {}) or {})
+        timing.update({
+            "version": 1,
+            "seq_id": request.seq_id,
+            "clock_id": local_clock_id(),
+            "engine_received_monotonic_s": started_at,
+            "engine_finished_monotonic_s": finished_at,
+            "engine_duration_s": finished_at - started_at,
+        })
+        timing_json = json.dumps(timing, allow_nan=False)
         if not result.get("success"):
             return EngineCommandResponse(
                 success=False,
                 seq_id=request.seq_id,
                 message=str(result.get("message", "get_action failed")),
+                timing_json=timing_json,
             )
 
         return EngineCommandResponse(
@@ -116,6 +140,7 @@ class EngineWorker:
             chunk_size=int(result.get("chunk_size", 0)),
             action_dim=int(result.get("action_dim", 0)),
             action_list=flatten_action_list(result.get("action_chunk", [])),
+            timing_json=timing_json,
         )
 
     def _unload_policy(self, request: EngineCommandRequest) -> EngineCommandResponse:

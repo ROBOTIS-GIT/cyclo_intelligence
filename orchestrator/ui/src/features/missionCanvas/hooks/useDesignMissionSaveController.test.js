@@ -208,3 +208,18 @@ test.each(["rejected", "partial"])(
     expect(ports.catalog.record).not.toHaveBeenCalled();
   },
 );
+
+
+test.each([false, true])("clears annotation input only on completed save without newer edits (%s)", async (hasNewerEdits) => {
+  const onSaveCompleted = jest.fn();
+  const {view} = setup({content:{applySavedCanonicalSpots:jest.fn(),onSaveCompleted},persist:jest.fn(async()=>saveOutput(hasNewerEdits))});
+  await act(async()=>{await view.result.current.saveMission("mission-a");});
+  expect(onSaveCompleted).toHaveBeenCalledTimes(hasNewerEdits ? 0 : 1);
+});
+
+test("failed save leaves the annotation input intact", async () => {
+  const onSaveCompleted=jest.fn();
+  const {view}=setup({content:{applySavedCanonicalSpots:jest.fn(),onSaveCompleted},persist:jest.fn(async()=>{throw new Error("save failed");})});
+  await act(async()=>{await expect(view.result.current.saveMission("mission-a")).rejects.toThrow("save failed");});
+  expect(onSaveCompleted).not.toHaveBeenCalled();
+});
