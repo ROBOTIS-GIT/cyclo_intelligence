@@ -1,3 +1,19 @@
+// Copyright 2026 ROBOTIS CO., LTD.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Author: Seongwoo Kim
+
 // Structural assertions verify map/bubble ownership and positioning.
 /* eslint-disable testing-library/no-container, testing-library/no-node-access */
 // Copyright 2026 ROBOTIS CO., LTD.
@@ -76,9 +92,9 @@ test("Operate uses the full scene with folded tools instead of a reserved sideba
  const workspace=view.container.querySelector('.operate-experience');
  expect(workspace).toContainElement(screen.getByTestId('scene-surface'));
  expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
- fireEvent.click(screen.getByRole('button',{name:'Status and settings'}));
- expect(screen.getByRole('complementary',{name:'Status and settings'})).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Talk to robot'}));
+ expect(screen.getByRole('complementary',{name:'Talk to robot'})).toBeInTheDocument();
  expect(workspace).toContainElement(screen.getByTestId('scene-surface'));
- fireEvent.click(screen.getByRole('button',{name:'Status and settings'}));
+ fireEvent.click(screen.getByRole('button',{name:'Talk to robot'}));
  expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
 });

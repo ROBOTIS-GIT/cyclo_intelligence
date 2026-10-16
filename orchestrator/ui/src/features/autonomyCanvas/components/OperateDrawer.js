@@ -1,16 +1,30 @@
+// Copyright 2026 ROBOTIS CO., LTD.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Author: Seongwoo Kim
+
 import { useEffect, useRef, useState } from "react";
-import { FiActivity, FiMessageSquare, FiSliders, FiX } from "react-icons/fi";
+import { FiMessageSquare, FiX } from "react-icons/fi";
 import OperateSidebar from "./OperateSidebar";
 import "./OperateExperience.css";
 
 const panels = [
-  { id: "situation", label: "Status and settings", Icon: FiSliders },
-  { id: "activity", label: "Activity", Icon: FiActivity },
   { id: "message", label: "Talk to robot", Icon: FiMessageSquare },
 ];
 export default function OperateDrawer(props) {
   const [open, setOpen] = useState(false);
-  const [panel, setPanel] = useState("situation");
+  const [panel, setPanel] = useState("message");
   const triggers = useRef({});
   const close = () => { setOpen(false); triggers.current[panel]?.focus(); };
   useEffect(() => {
@@ -20,8 +34,8 @@ export default function OperateDrawer(props) {
     return () => window.removeEventListener("keydown", escape);
   }, [open, panel]);
   return <>
-    {[["situation", "activity"], ["message"]].map((ids, index) => <nav key={index}
-      className={`operate-tools${index ? " operate-chat-trigger" : ""}`} aria-label={index ? "Conversation controls" : "Robot controls"}>
+    {[["message"]].map((ids, index) => <nav key={index}
+      className="operate-tools operate-chat-trigger" aria-label="Conversation controls">
       {panels.filter(item => ids.includes(item.id)).map(({ id, label, Icon }) => <button key={id} type="button" title={label} aria-label={label}
         aria-expanded={open && panel === id} aria-controls="operate-detail-drawer"
         ref={el => { triggers.current[id] = el; }}
