@@ -41,6 +41,9 @@ jest.mock('@xyflow/react', () => {
       children,
     ),
     Controls: () => null,
+  Panel: ({ children }) => <div>{children}</div>,
+  useReactFlow: () => ({ fitView: jest.fn() }),
+  useNodesInitialized: () => false,
     Background: () => null,
     addEdge: (edge, edges) => [...edges, edge],
     useNodesState: (initialValue) => {

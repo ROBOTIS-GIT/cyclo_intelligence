@@ -1,3 +1,4 @@
+import BtExecutionFocus from "../../features/btEditor/components/BtExecutionFocus";
 // Copyright 2026 ROBOTIS CO., LTD.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -101,7 +102,8 @@ function ReadOnlyBtFlow({ nodes, edges }) {
       zoomActivationKeyCode={null}
       proOptions={reactFlowProOptions}
     >
-      <Controls showInteractive={false} />
+      <BtExecutionFocus nodes={flowNodes} edges={edges} />
+              <Controls showInteractive={false} />
       <Background color="#dcd7ca" gap={16} />
     </ReactFlow>
   );

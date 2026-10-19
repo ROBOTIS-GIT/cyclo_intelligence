@@ -33,6 +33,9 @@ jest.mock("@xyflow/react", () => ({
     );
   },
   Controls: () => null,
+  Panel: ({ children }) => <div>{children}</div>,
+  useReactFlow: () => ({ fitView: jest.fn() }),
+  useNodesInitialized: () => false,
   Background: () => null,
   useNodesState: (initialNodes) => {
     const React = require("react");

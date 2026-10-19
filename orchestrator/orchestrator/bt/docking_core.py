@@ -68,7 +68,7 @@ def velocity(error, config):
     return (vx, vy, wz), False
 
 
-def obstacle_in_motion(points, command, radius=.43, clearance=.04):
+def obstacle_in_motion(points, command, radius=.43, clearance=.01):
     """Conservative circular footprint plus swept translation corridor, in base frame."""
     vx, vy, wz = command
     speed = math.hypot(vx, vy)

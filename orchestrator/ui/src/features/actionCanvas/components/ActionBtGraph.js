@@ -1,3 +1,4 @@
+import BtExecutionFocus from "../../btEditor/components/BtExecutionFocus";
 // Copyright 2026 ROBOTIS CO., LTD.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -98,6 +99,7 @@ export default function ActionBtGraph({ view, runtime, commands, graph }) {
               zoomActivationKeyCode="Control"
               autoPanOnConnect={false}
             >
+              <BtExecutionFocus nodes={annotatedNodes} edges={edges} />
               <Controls showInteractive={false} />
               <Background color={autonomyStudioVariant ? 'var(--mc-border)' : '#e5e7eb'} gap={16} />
             </ReactFlow>

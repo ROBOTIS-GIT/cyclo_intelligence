@@ -31,9 +31,9 @@ def test_closed_loop_converges(start):
 
 
 def test_obstacle_direction_and_rotation():
-    assert obstacle_in_motion([(0.5,0)],(.1,0,0))
+    assert obstacle_in_motion([(0.48,0)],(.1,0,0))
     assert not obstacle_in_motion([(-.5,0)],(.1,0,0))
-    assert obstacle_in_motion([(0,.46)],(0,0,.1))
+    assert obstacle_in_motion([(0,.435)],(0,0,.1))
 
 
 @pytest.mark.parametrize('marker_id',[10,11,12])
@@ -128,7 +128,13 @@ def test_xml_blank_optional_fields_use_defaults():
 
 def test_close_docking_clearance_keeps_collision_guard():
     assert not obstacle_in_motion([(.55, 0)], (.1, 0, 0))
-    assert obstacle_in_motion([(.51, 0)], (.1, 0, 0))
-    assert obstacle_in_motion([(.48, 0)], (.035, 0, 0))
+    assert obstacle_in_motion([(.48, 0)], (.1, 0, 0))
+    assert obstacle_in_motion([(.45, 0)], (.035, 0, 0))
     assert obstacle_in_motion([(.35, 0)], (.035, 0, 0))
-    assert obstacle_in_motion([(0, .46)], (0, 0, .1))
+    assert obstacle_in_motion([(0, .435)], (0, 0, .1))
+
+
+def test_close_docking_margin_keeps_body_and_motion_guard():
+    assert not obstacle_in_motion([(.48, 0)], (.035, 0, 0))
+    assert obstacle_in_motion([(.45, 0)], (.035, 0, 0))
+    assert obstacle_in_motion([(.42, 0)], (.035, 0, 0))
