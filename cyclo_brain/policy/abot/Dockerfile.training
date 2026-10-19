@@ -19,6 +19,10 @@ RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARC
 # Imported by upstream even with VGGT disabled. Dependencies come only from our lock.
 RUN uv pip install --python /opt/abot-env/bin/python --no-deps --no-build-isolation \
     'git+https://github.com/facebookresearch/vggt.git@a288dd0f14786c93483e45524328726ab7b1b4ce'
+# Expose the managed interpreter to non-root Run users without opening /root.
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+RUN mv /root/.local/share/uv/python /opt/python && \
+    uv venv --offline --allow-existing --python 3.10.18 /opt/abot-env
 COPY cyclo_brain/policy/abot/ABot-Manipulation/ /abot/
 COPY cyclo_brain/policy/abot/abot_engine/ /opt/cyclo-training/abot_engine/
 COPY cyclo_brain/policy/abot/abot_training/ /opt/cyclo-training/abot_training/
