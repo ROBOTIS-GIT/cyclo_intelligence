@@ -1,5 +1,6 @@
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import random
 import shutil
@@ -96,6 +97,9 @@ def test_preflight_preserves_selection_and_rejects_untracked_or_changed_assets(p
     from abot_training import runner
 
     root, profile, _ = prepared
+    monkeypatch.setattr(runner, "Path", lambda path: (
+        tmp_path / "absent-build-receipt.json" if str(path) == "/opt/abot-build/receipt.json" else Path(path)
+    ))
     monkeypatch.setattr(runner, "load_profile", lambda *args, **kwargs: deepcopy(profile))
     config = run_config()
     config["profile"] = {"id": "test-abot", "sha256": "fixture"}
@@ -125,4 +129,24 @@ def test_preflight_preserves_selection_and_rejects_untracked_or_changed_assets(p
     extra.unlink()
     (tmp_path / "vlm/config.json").write_text('{"changed": true}')
     with pytest.raises(ValueError, match="checksum mismatch"):
+        runner.prepare(config)
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("cyclo_commit", "wrong", "cyclo_commit"),
+    ("upstream_commit", "wrong", "upstream_commit"),
+    ("image_id", "not-an-image-digest", "final image ID"),
+])
+def test_preflight_rejects_image_source_mismatch_before_data_loading(tmp_path, monkeypatch, field, value, error):
+    from abot_training import runner
+
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps({"cyclo_commit": "cyclo", "upstream_commit": "upstream"}))
+    monkeypatch.setattr(runner, "Path", lambda path: (
+        receipt if str(path) == "/opt/abot-build/receipt.json" else Path(path)
+    ))
+    config = run_config()
+    config["source"] = {"cyclo_commit": "cyclo", "upstream_commit": "upstream", "image_id": "sha256:" + "0" * 64}
+    config["source"][field] = value
+    with pytest.raises(ValueError, match=error):
         runner.prepare(config)
