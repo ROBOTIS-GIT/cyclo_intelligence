@@ -33,7 +33,7 @@ def validate_tree(xml):
     if not main or len(trees) != 1 or len(trees[0]) != 1:
         raise ValueError('Supervised task requires one valid main BehaviorTree')
     controls = {'Sequence', 'Loop'}
-    leaves = {'Wait', 'Rotate', 'JointControl', 'HomeMeal', 'HomeLaundry', 'HomeTV', 'ArmStateGate', 'SendCommand', 'ArucoDock', 'ReturnToWaypoint'}
+    leaves = {'Wait', 'Rotate', 'JointControl', 'HomeMeal', 'HomeLaundry', 'HomeTV', 'ArmStateGate', 'SendCommand', 'ArucoDock', 'DockRetreat', 'ReturnToWaypoint'}
     inference_loaded = inference_active = False
     backend = None
     for node in trees[0].iter():

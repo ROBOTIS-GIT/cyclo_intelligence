@@ -32,7 +32,7 @@ class ArucoDock(BaseAction):
                  camera_info_topic: str = '/zed/left/camera_info',
                  cmd_vel_topic: str = '/cmd_vel', scan_topic: str = '/scan',
                  odom_topic: str = '/odom', base_frame: str = 'base_link',
-                 image_mode: str = 'raw'):
+                 image_mode: str = 'raw', footprint_profile: str = 'circle'):
         super().__init__(node, name='ArucoDock')
         self.config = DockConfig(*map(float, (target_distance, position_tolerance, yaw_tolerance,
                                               max_speed, max_yaw_rate, timeout, lost_timeout, stable_seconds, min_speed, min_yaw_rate)))
@@ -46,6 +46,9 @@ class ArucoDock(BaseAction):
             raise ValueError('Sensor topics and base_frame must be non-empty')
         from orchestrator.bt.docking_rectification import DockRectifier
         self.image_mode = DockRectifier(str(image_mode).strip().lower()).mode
+        if footprint_profile not in ("circle", "sg2_autonomy_base"):
+            raise ValueError("Unknown footprint_profile")
+        self.footprint_profile = footprint_profile
         self.runtime = None
         self.failure = False
 
@@ -55,7 +58,7 @@ class ArucoDock(BaseAction):
             try:
                 from orchestrator.bt.docking_runtime import DockRuntime
                 self.runtime = DockRuntime(self.node, self.marker_id, self.marker_size,
-                                           self.config, *self.transport, image_mode=self.image_mode)
+                                           self.config, *self.transport, image_mode=self.image_mode, footprint_profile=self.footprint_profile)
                 self.runtime.start()
             except Exception as exc:
                 self.log_error(f'ArucoDock initialization failed: {exc}')

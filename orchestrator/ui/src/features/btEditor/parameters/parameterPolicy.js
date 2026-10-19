@@ -107,6 +107,7 @@ export const ENUM_PARAMS = {
 };
 
 export function enumOptionsFor(nodeType, key, params) {
+  if (['ArucoDock', 'DockRetreat'].includes(nodeType) && key === 'footprint_profile') return ['circle', 'sg2_autonomy_base'];
   if (nodeType === 'ArucoDock' && key === 'image_mode') return ['raw', 'rectified'];
   if (nodeType === 'SendCommand') {
     if (key === 'target') return SEND_COMMAND_TARGETS;

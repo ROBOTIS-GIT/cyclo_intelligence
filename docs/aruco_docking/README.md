@@ -137,3 +137,61 @@ asynchronously after issuing zero velocity. Write errors are logged separately a
 do not change motion behavior. `CYCLO_DOCK_DIAGNOSTICS_DIR` overrides the directory.
 No image is invented for missing camera input; in that case inspect the JSON events.
 No detection thresholds or loss timeout were relaxed by this diagnostic change.
+
+
+### SG2 footprint and post-task retreat
+
+`ArucoDock footprint_profile="sg2_autonomy_base"` opts into the Autonomy Studio
+SG2 base-and-wheel top-view convex envelope, in metres relative to `base_link`.
+Its front is +0.2246 m, rear -0.4029 m and sides ±0.301 m. This is the Studio
+silhouette geometry, **not** Nav2's published circular footprint or a live arm
+envelope. Nav2 settings are unchanged. Other actions default to `circle`.
+The guard checks translation and rotation over 0.5 s with 1 cm clearance;
+sampling adds a motion bound to cover the gaps. Blocking scan coordinates and
+commands are included in failure diagnostics.
+
+After inference STOP and arm retraction, use:
+
+```xml
+<DockRetreat distance="0.20" speed="0.05" timeout="20"
+             footprint_profile="sg2_autonomy_base"/>
+```
+
+Retreat uses initial-heading odometry progress, fresh rear laser coverage,
+obstacle checks, a command watchdog, and stationary confirmation before success.
+It pauses/stops through the same base-ownership lifecycle as docking; stale or
+blocked sensing holds at zero and fails after 3 seconds. It does not execute
+Nav2 or start inference. Distance is measured from retreat start, not the marker.
+The 20 cm distance is a simulation test setting, not a guarantee of clearance
+for arbitrary arm poses or physical robot payloads.
+
+### Departure ownership: explicit BT action
+
+Post-docking departure belongs to the mission's local BT, not the default
+Navigation BT. Add `DockRetreat` from the Action Canvas action catalog after
+arm retraction and before `ReturnToWaypoint` (or before the local BT completes
+and the mission runner advances to its next waypoint). Use a normal Sequence
+so retreat failure prevents navigation. Do not wrap departure in a force-success
+node.
+
+```xml
+<Sequence name="DepartDock">
+  <!-- Stop inference and return the arms to the travel pose first. -->
+  <DockRetreat name="LeaveDock" distance="0.20" speed="0.05"
+               timeout="20" footprint_profile="sg2_autonomy_base"/>
+  <ReturnToWaypoint map_name="house" mission_name="ArUcoDockTest"
+                    waypoint="house_aruco_start_11" timeout="300"/>
+</Sequence>
+```
+
+`house/ArUcoDockTest` already includes separate RetreatAfter10, RetreatAfter11
+and RetreatAfter12 nodes. Tune their distance/speed independently in the canvas.
+No persistent dock-state flag or automatic departure plugin is enabled in Nav2.
+The ordinary Nav2 recovery BackUp is separate and remains available.
+
+Pause/resume preserves the running retreat's origin and progress. Stop/reset
+ends that action; executing it again starts a new relative retreat from the new
+position. This is intentionally not an automatic resume of a previous departure.
+
+The independent near-goal Omni controller selection remains a Navigation
+responsibility; it does not trigger a dock retreat.

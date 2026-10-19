@@ -33,13 +33,17 @@ def stamp_seconds(stamp):
 
 class DockRuntime:
     def __init__(self, node, marker_id, marker_size, config, image_topic, camera_info_topic,
-                 cmd_vel_topic, scan_topic, odom_topic, base_frame, image_mode="raw"):
+                 cmd_vel_topic, scan_topic, odom_topic, base_frame, image_mode="raw", footprint_profile="circle"):
         self.node, self.config, self.base_frame = node, config, base_frame
+        if footprint_profile not in ("circle", "sg2_autonomy_base"):
+            raise ValueError("Unknown footprint_profile")
+        self.footprint_profile = footprint_profile
         self.detector = MarkerDetector(marker_id, marker_size)
         self.rectifier = DockRectifier(image_mode)
         self.diagnostics = DockDiagnostics(marker_id, config, image_mode)
         self.diagnostics.context.update(marker_size_m=marker_size, image_topic=image_topic,
-                                        camera_info_topic=camera_info_topic, base_frame=base_frame)
+                                        camera_info_topic=camera_info_topic, base_frame=base_frame,
+                                        footprint_profile=footprint_profile)
         self.bridge = CvBridge()
         self.lock = threading.RLock()
         self.halt, self.paused = threading.Event(), threading.Event()
@@ -193,8 +197,7 @@ class DockRuntime:
         position, normal = transform_pose(self.tf(frame.header.frame_id, frame.header.stamp), position, normal)
         error = dock_error(position, normal, self.config.distance)
         command, settled = velocity(error, self.config)
-        if obstacle_in_motion(self.scan_points(scan), command):
-            raise ValueError('Obstacle inside docking clearance')
+        self.check_obstacles(scan, command)
         preview = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         cv2.polylines(preview, [pixels.astype(np.int32)], True, (0,255,0), 2)
         cv2.putText(preview, f'ID {self.detector.marker_id}  xy={math.hypot(*error[:2]):.3f}m yaw={error[2]:.3f}',
@@ -202,6 +205,17 @@ class DockRuntime:
         message = self.bridge.cv2_to_imgmsg(preview, encoding='bgr8'); message.header = frame.header
         self.preview_pub.publish(message)
         return error, command, settled
+
+    def check_obstacles(self, scan, command):
+        points = self.scan_points(scan)
+        if self.footprint_profile == 'sg2_autonomy_base':
+            from .docking_footprint import swept_obstacle
+            collision = swept_obstacle(points, command)
+            if collision:
+                self.diagnostics.record({'blocking_obstacle': collision})
+                raise ValueError('Obstacle inside docking clearance: '+json.dumps(collision))
+        elif obstacle_in_motion(points, command):
+            raise ValueError('Obstacle inside docking clearance')
 
     def run(self):
         started = time.monotonic()
