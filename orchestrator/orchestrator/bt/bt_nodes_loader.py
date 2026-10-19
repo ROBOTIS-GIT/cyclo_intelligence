@@ -26,6 +26,7 @@ from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import BTNode
 from orchestrator.bt.controls.base_control import BaseControl
 from orchestrator.bt.node_registry import build_registry
+from orchestrator.bt.waypoint_targets import parse_waypoints
 
 if TYPE_CHECKING:
     from rclpy.node import Node
@@ -43,6 +44,7 @@ class LoaderContext:
     """Runtime dependencies and helpers available to node factories."""
 
     def __init__(self, loader: 'TreeLoader'):
+        self.mission_waypoints = []
         self.node = loader.node
         self.joint_names = loader.joint_names
         self.topic_config = loader.topic_config
@@ -90,6 +92,7 @@ class TreeLoader:
         self, root: ET.Element, main_tree_id: str = None
     ) -> BTNode:
         """Load a behavior tree from a parsed XML root element."""
+        self.context.mission_waypoints = parse_waypoints(root.get('mission_waypoints', ''))
         if main_tree_id is None:
             main_tree_id = root.get('main_tree_to_execute')
             if not main_tree_id:

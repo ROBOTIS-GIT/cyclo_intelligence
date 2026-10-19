@@ -92,6 +92,10 @@ function attrPairs(el) {
 }
 
 function paramsForXml(tag, params = {}) {
+  if (tag === 'ArucoDock') {
+    return Object.fromEntries(Object.entries(params).filter(([, value]) =>
+      value != null && String(value).trim() !== ''));
+  }
   if (tag !== 'SendCommand') return params;
 
   const target = String(params.target || 'INFERENCE').trim().toUpperCase() === 'DOCKER'

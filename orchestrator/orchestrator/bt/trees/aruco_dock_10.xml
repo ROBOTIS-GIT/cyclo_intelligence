@@ -1,0 +1,5 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <ArucoDock name="DockToMarker10" marker_id="10" marker_size="0.30" target_distance="0.85" timeout="120" />
+  </BehaviorTree>
+</root>

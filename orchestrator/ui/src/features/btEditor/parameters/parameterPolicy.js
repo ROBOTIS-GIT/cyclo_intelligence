@@ -30,6 +30,7 @@ export const NUMBER_PARAMS = new Set([
 // Per-param helper text shown beneath the input. Keep these short — they
 // render directly under the field as a small gray hint.
 export const HELP_TEXT = {
+  image_mode: 'raw: rectify internally. rectified: use an already rectified image topic. Detection always uses rectified pixels.',
   initial_pose_sync: 'Align to the first predicted pose before RESUME. Enabled by default for robot output.',
   initial_pose_sync_duration_s: 'Pose alignment duration in seconds (1–60).',
   vla_rail_enabled: 'VLA-RAIL cubic smoothing and dual-quintic transitions for ordinary GR00T Async. Off by default.',
@@ -106,6 +107,7 @@ export const ENUM_PARAMS = {
 };
 
 export function enumOptionsFor(nodeType, key, params) {
+  if (nodeType === 'ArucoDock' && key === 'image_mode') return ['raw', 'rectified'];
   if (nodeType === 'SendCommand') {
     if (key === 'target') return SEND_COMMAND_TARGETS;
     if (key === 'command') {

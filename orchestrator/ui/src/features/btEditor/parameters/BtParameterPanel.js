@@ -21,9 +21,10 @@ import { DEFAULT_PATHS } from '../../../constants/paths';
 import { isFieldDisabled, HELP_TEXT } from './parameterPolicy';
 import useBtParameterDraft from './useBtParameterDraft';
 import BtParameterInput from './BtParameterInput';
+import ReturnWaypointFields from './ReturnWaypointFields';
 
 export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
-  onNameChange, onClose, robotType = '', variant = 'legacy' }) {
+  onNameChange, onClose, robotType = '', variant = 'legacy', allowNameEdit = true }) {
   const { selectedNode, nodeType, label, localName, setLocalName, localParams,
     paramEntries, nameAtFocusRef, suppressNextNameBlurRef, showPolicyBrowser,
     setShowPolicyBrowser, policyBrowserPath, commitName, handleChange,
@@ -41,6 +42,7 @@ export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
           <div className="text-xs text-[var(--mc-text-muted)] mb-1 font-mono">{nodeType}</div>
           <input
             type="text"
+            readOnly={!allowNameEdit}
             value={localName}
             onFocus={() => {
               nameAtFocusRef.current = label;
@@ -76,10 +78,11 @@ export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
 
       {/* Params */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        {nodeType === 'ReturnToWaypoint' && <ReturnWaypointFields key={selectedNodeId} params={localParams} onChange={handleChange} />}
         {paramEntries.length === 0 ? (
           <p className="text-sm text-[var(--mc-text-subtle)]">No parameters</p>
         ) : (
-          paramEntries.map(([key, value]) => {
+          paramEntries.filter(([key]) => nodeType !== 'ReturnToWaypoint' || !['map_name', 'mission_name', 'waypoint', 'odom_topic'].includes(key)).map(([key, value]) => {
             const disabled = isFieldDisabled(nodeType, key, localParams);
             const help = HELP_TEXT[key];
             return (

@@ -16,6 +16,7 @@
 
 import { TopicStatusPanel } from "../../../mapWorkspace/components/mapChrome";
 import RuntimeControlsHud from "../../../mapWorkspace/components/RuntimeControlsHud";
+import RunTaskParameters from "../run/RunTaskParameters";
 import RunSessionPanel from "../run/RunSessionPanel";
 
 export function RunStageHud({ busy, btNodeBusy, runMapBusy, missionMapLoaded, runMapSnapshotInvalid,
@@ -52,6 +53,7 @@ export function RunStageSidebar({
   missionSelectDisabled,
   onMissionChange,
   topicRows,
+  onTaskParametersSaved,
 }) {
   return (
     <>
@@ -64,6 +66,7 @@ export function RunStageSidebar({
         missionNames={missionNames}
         missionSelectDisabled={missionSelectDisabled}
         onMissionChange={onMissionChange}
+        taskParameters={<RunTaskParameters mapName={mapName} missionName={missionName} disabled={missionSelectDisabled} onSaved={onTaskParametersSaved} />}
       />
       <TopicStatusPanel topicRows={topicRows} />
     </>

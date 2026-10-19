@@ -24,7 +24,7 @@ import { localBtPathForSpot } from "../lib/missionBtFiles";
 import useNavigateGoalController from "./useNavigateGoalController";
 
 export default function useWorkspaceMissionRunner({
-  workspace, runMissionBtFiles, callService, running, btNodeIsUp, runRouteView, btStatusRef, btStatusHistoryRef, ensureMissionBtActive, releaseMissionBt, taskDisplayMessage
+  workspace, runSpots, runMissionBtFiles, callService, running, btNodeIsUp, runRouteView, btStatusRef, btStatusHistoryRef, ensureMissionBtActive, releaseMissionBt, taskDisplayMessage
 }) {
   const { setInteractionMode, setMessage, workspaceStage } = workspace;
   const resolveMissionBtXml = useCallback(
@@ -82,6 +82,7 @@ export default function useWorkspaceMissionRunner({
     // as its final execution step. Keep the unique list for badges/editing,
     // but give the runner the full traversal so last -> start is sent to Nav2.
     orderedSpots: runRouteView.executionSpots,
+    missionWaypoints: runSpots,
     pausableNavigation: workspaceStage === STAGE_COLLECT,
     resolveBtXml: resolveMissionBtXml,
     btStatusRef,

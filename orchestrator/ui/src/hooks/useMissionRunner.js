@@ -33,6 +33,7 @@ import {
   navigationBatchFromIndex,
   requiresBackendTaskTimeout,
 } from "./missionRunnerCore";
+import { withMissionWaypointContext } from "../utils/missionWaypointContext";
 import { formatTaskDisplayMessage } from "../utils/taskTerminology";
 
 const normStatus = (value) => String(value || "").trim().toLowerCase();
@@ -68,6 +69,7 @@ function throwIfAborted(signal) {
 
 export function useMissionRunner({
   orderedSpots,
+  missionWaypoints,
   pausableNavigation = false,
   resolveBtXml,
   btStatusRef,
@@ -101,6 +103,7 @@ export function useMissionRunner({
 
   // Everything the loop needs, read live through refs (no stale closures).
   const spotsRef = useRef(orderedSpots || []);
+  const missionWaypointsRef = useRef(missionWaypoints || orderedSpots || []);
   const resolveBtXmlRef = useRef(resolveBtXml);
   const callServiceRef = useRef(callService);
   const sendGoalRef = useRef(sendGoal);
@@ -119,6 +122,7 @@ export function useMissionRunner({
   const btNeedsStopRef = useRef(false);
 
   useEffect(() => { spotsRef.current = orderedSpots || []; }, [orderedSpots]);
+  useEffect(() => { missionWaypointsRef.current = missionWaypoints || orderedSpots || []; }, [missionWaypoints, orderedSpots]);
 
   // Re-seed the observable progress list when the route changes while idle, so
   // the panel reflects the loaded mission before a run begins. Never clobber a
@@ -196,7 +200,7 @@ export function useMissionRunner({
     const loadPromise = Promise.resolve().then(() => callServiceRef.current(
       "/bt/load_and_run",
       "interfaces/srv/LoadAndRunTree",
-      { tree_xml: xml },
+      { tree_xml: withMissionWaypointContext(xml, missionWaypointsRef.current) },
       30000,
     ));
     btNeedsStopRef.current = true;

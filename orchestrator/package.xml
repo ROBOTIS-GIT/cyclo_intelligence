@@ -18,6 +18,13 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>cv_bridge</depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <depend>trajectory_msgs</depend>
   <depend>interfaces</depend>
   <depend>rosbag_recorder</depend>

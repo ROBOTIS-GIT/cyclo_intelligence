@@ -175,7 +175,7 @@ export default function MapWorkspace({
     sendMissionGoal, navGoalPose, navGoalStatus, navGoalDriving, handleSendNavGoal,
     invalidateNavGoal, stopMissionBt, missionRunnerFlags, missionRunner,
   } = useWorkspaceMissionRunner({
-    workspace, runMissionBtFiles, callService, running, btNodeIsUp, runRouteView, btStatusRef, btStatusHistoryRef, ensureMissionBtActive, releaseMissionBt, taskDisplayMessage
+    workspace, runSpots, runMissionBtFiles, callService, running, btNodeIsUp, runRouteView, btStatusRef, btStatusHistoryRef, ensureMissionBtActive, releaseMissionBt, taskDisplayMessage
   });
 
   const { autonomyOperation, recordAuthoringLock, collectObservations, recordMissionStartRef,
@@ -421,6 +421,15 @@ export default function MapWorkspace({
         runFamilyStage, runMapBusy, runMapDialogStage, runMapFiles, runMapName, runMapPath,
         runMapSnapshotInvalid, runMissionName, runMissionNames, runPoseSync, runRuntimeActive,
         runTopicsActive, running, runtimeMapName, scan, setPendingEditMapPath,
+        reloadRunTaskParameters: async () => {
+          try {
+            const result = await loadRunMissionForMap(runMapName, runMissionName, { requireExisting: true, catalogNames: runCatalog.names });
+            if (result?.stale) throw new Error('Run selection changed. Reload the mission before running.');
+          } catch (error) {
+            cancelAndClearRunMissionSnapshot();
+            throw error;
+          }
+        },
         setPendingRunMissionName, showEditMapDialog, showRunMapDialog, stageNavigationTopicsActive,
         teleopDisabled, topicRows, waypointBtLayer, workspaceKind,
       },

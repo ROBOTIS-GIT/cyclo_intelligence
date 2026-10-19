@@ -217,6 +217,10 @@ class AutonomyRepository:
                 if path:
                     bt = missions._resolve_bt_path(map_name, selected['mission_name'], path)
                     wp['xml'] = bt.read_text(encoding='utf-8')
-                    ET.fromstring(wp['xml'])
+                    parsed = ET.fromstring(wp['xml'])
+                    if any(n.tag == 'ReturnToWaypoint' or n.get('ID') == 'ReturnToWaypoint' for n in parsed.iter()):
+                        snapshot = [{k: w[k] for k in ('id', 'label', 'pose')} for w in waypoints.values()]
+                        parsed.set('mission_waypoints', json.dumps(snapshot, allow_nan=False))
+                        wp['xml'] = ET.tostring(parsed, encoding='unicode')
                 result.append(wp)
             return result

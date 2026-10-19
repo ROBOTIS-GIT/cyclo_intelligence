@@ -178,6 +178,7 @@ export default function buildWorkspaceChrome({
         missionNames: runCatalog.names,
         missionSelectDisabled: !!busy || missionRunnerActive || runMapBusy || !missionMapLoaded,
         onMissionChange: handleMissionChange,
+        onTaskParametersSaved: runtime.reloadRunTaskParameters,
         poseReady: runPoseInitialized,
         runner: missionRunner,
         running,
