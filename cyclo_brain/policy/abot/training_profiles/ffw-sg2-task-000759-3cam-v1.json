@@ -1,0 +1,68 @@
+{
+  "version": 2,
+  "profile_id": "ffw-sg2-task-000759-3cam-v1",
+  "model_id": "abot-m0",
+  "policy_id": "abot:m0",
+  "robot_type": "ffw_sg2_rev1",
+  "state_names": [
+    "arm_l_joint1", "arm_l_joint2", "arm_l_joint3", "arm_l_joint4", "arm_l_joint5", "arm_l_joint6", "arm_l_joint7", "gripper_l_joint1",
+    "arm_r_joint1", "arm_r_joint2", "arm_r_joint3", "arm_r_joint4", "arm_r_joint5", "arm_r_joint6", "arm_r_joint7", "gripper_r_joint1",
+    "head_joint1", "head_joint2", "lift_joint", "linear_x", "linear_y", "angular_z"
+  ],
+  "action_names": [
+    "arm_l_joint1", "arm_l_joint2", "arm_l_joint3", "arm_l_joint4", "arm_l_joint5", "arm_l_joint6", "arm_l_joint7", "gripper_l_joint1",
+    "arm_r_joint1", "arm_r_joint2", "arm_r_joint3", "arm_r_joint4", "arm_r_joint5", "arm_r_joint6", "arm_r_joint7", "gripper_r_joint1",
+    "head_joint1", "head_joint2", "lift_joint", "linear_x", "linear_y", "angular_z"
+  ],
+  "cameras": {
+    "head": "observation.images.rgb.cam_left_head",
+    "left_wrist": "observation.images.rgb.cam_left_wrist",
+    "right_wrist": "observation.images.rgb.cam_right_wrist"
+  },
+  "camera_order": ["head", "left_wrist", "right_wrist"],
+  "action_representation": "absolute",
+  "normalization": "min_max",
+  "padding": {"state_dim": "selected", "action_dim": "selected"},
+  "padding_mask": "exclude_padded_channels",
+  "modalities": {
+    "state": {
+      "channels": [
+        "arm_l_joint1", "arm_l_joint2", "arm_l_joint3", "arm_l_joint4", "arm_l_joint5", "arm_l_joint6", "arm_l_joint7", "gripper_l_joint1",
+        "arm_r_joint1", "arm_r_joint2", "arm_r_joint3", "arm_r_joint4", "arm_r_joint5", "arm_r_joint6", "arm_r_joint7", "gripper_r_joint1",
+        "head_joint1", "head_joint2", "lift_joint", "linear_x", "linear_y", "angular_z"
+      ]
+    },
+    "action": {
+      "channels": [
+        "arm_l_joint1", "arm_l_joint2", "arm_l_joint3", "arm_l_joint4", "arm_l_joint5", "arm_l_joint6", "arm_l_joint7", "gripper_l_joint1",
+        "arm_r_joint1", "arm_r_joint2", "arm_r_joint3", "arm_r_joint4", "arm_r_joint5", "arm_r_joint6", "arm_r_joint7", "gripper_r_joint1",
+        "head_joint1", "head_joint2", "lift_joint", "linear_x", "linear_y", "angular_z"
+      ]
+    },
+    "video": {
+      "head": "observation.images.rgb.cam_left_head",
+      "left_wrist": "observation.images.rgb.cam_left_wrist",
+      "right_wrist": "observation.images.rgb.cam_right_wrist"
+    }
+  },
+  "use_vggt": false,
+  "head_initialization": "reinitialize_mismatched",
+  "vocabulary_initialization": "restore_checkpoint",
+  "assets": {
+    "abot_pretrained": {
+      "provider": "modelscope",
+      "repo_id": "amap_cvlab/ABot-M0-Pretrain",
+      "revision": "92026d40d7d03ea54b80eed636e6da1e444170cb",
+      "files": {
+        "config.yaml": "297b0a6255c0936d46ddb42274df6291334c0daf42bc6f9f292c03acfed2bd08",
+        "checkpoints/ABot_M0_Pretrain.pt": "94478682b5c9eecf6f02179ba67ae47ea41257ca059bea6dd20e161716f5e16b"
+      }
+    },
+    "qwen_processor": {
+      "provider": "huggingface",
+      "repo_id": "Qwen/Qwen3-VL-4B-Instruct",
+      "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17"
+    }
+  },
+  "asset_roles": {"base": "abot_pretrained", "processor": "qwen_processor"}
+}
