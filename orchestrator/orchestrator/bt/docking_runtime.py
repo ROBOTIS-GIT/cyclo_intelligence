@@ -33,17 +33,18 @@ def stamp_seconds(stamp):
 
 class DockRuntime:
     def __init__(self, node, marker_id, marker_size, config, image_topic, camera_info_topic,
-                 cmd_vel_topic, scan_topic, odom_topic, base_frame, image_mode="raw", footprint_profile="circle"):
+                 cmd_vel_topic, scan_topic, odom_topic, base_frame, image_mode="raw", footprint_profile="circle", camera_profile=None):
         self.node, self.config, self.base_frame = node, config, base_frame
         if footprint_profile not in ("circle", "sg2_autonomy_base"):
             raise ValueError("Unknown footprint_profile")
         self.footprint_profile = footprint_profile
         self.detector = MarkerDetector(marker_id, marker_size)
         self.rectifier = DockRectifier(image_mode)
+        self.camera_profile = camera_profile
         self.diagnostics = DockDiagnostics(marker_id, config, image_mode)
         self.diagnostics.context.update(marker_size_m=marker_size, image_topic=image_topic,
                                         camera_info_topic=camera_info_topic, base_frame=base_frame,
-                                        footprint_profile=footprint_profile)
+                                        footprint_profile=footprint_profile, camera_profile=camera_profile)
         self.bridge = CvBridge()
         self.lock = threading.RLock()
         self.halt, self.paused = threading.Event(), threading.Event()
@@ -170,6 +171,11 @@ class DockRuntime:
         try:
             raw = self.bridge.imgmsg_to_cv2(frame, desired_encoding='mono8')
             rectified, intrinsic, optical_from_rectified = self.rectifier.prepare(raw, info)
+            if self.camera_profile is not None:
+                from .docking_camera import detection_image
+                rectified, intrinsic = detection_image(rectified, intrinsic, self.camera_profile)
+            details['detection_resolution'] = [rectified.shape[1], rectified.shape[0]]
+            details['detection_K'] = intrinsic.tolist()
             result = self.analyze_rectified(frame, info, scan, rectified, intrinsic, optical_from_rectified)
             details.update(error=list(result[0]), command=list(result[1]), settled=bool(result[2]))
             return result

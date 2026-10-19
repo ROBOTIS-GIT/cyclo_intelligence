@@ -28,11 +28,12 @@ class ArucoDock(BaseAction):
                  max_yaw_rate: float = .18, timeout: float = 120.,
                  lost_timeout: float = 3., stable_seconds: float = .7,
                  min_speed: float = .035, min_yaw_rate: float = .04,
-                 image_topic: str = '/zed/left/image_raw',
-                 camera_info_topic: str = '/zed/left/camera_info',
+                 image_topic: str = '',
+                 camera_info_topic: str = '',
                  cmd_vel_topic: str = '/cmd_vel', scan_topic: str = '/scan',
                  odom_topic: str = '/odom', base_frame: str = 'base_link',
-                 image_mode: str = 'raw', footprint_profile: str = 'circle'):
+                 image_mode: str = 'raw', footprint_profile: str = 'circle',
+                 camera_profile: str = 'VGA'):
         super().__init__(node, name='ArucoDock')
         self.config = DockConfig(*map(float, (target_distance, position_tolerance, yaw_tolerance,
                                               max_speed, max_yaw_rate, timeout, lost_timeout, stable_seconds, min_speed, min_yaw_rate)))
@@ -41,9 +42,13 @@ class ArucoDock(BaseAction):
             raise ValueError('marker_id must be an integer in [0,49]')
         if not .05 <= self.marker_size <= 1.:
             raise ValueError('marker_size must be in [0.05,1] metres')
+        from orchestrator.bt.docking_camera import normalize_profile
+        self.camera_profile = normalize_profile(camera_profile)
+        if bool(image_topic.strip()) != bool(camera_info_topic.strip()):
+            raise ValueError('Set both image_topic and camera_info_topic, or leave both empty for automatic selection')
         self.transport = (image_topic,camera_info_topic,cmd_vel_topic,scan_topic,odom_topic,base_frame)
-        if not all(isinstance(s,str) and s.strip() for s in self.transport):
-            raise ValueError('Sensor topics and base_frame must be non-empty')
+        if not all(isinstance(s,str) and s.strip() for s in self.transport[2:]):
+            raise ValueError('Motion sensor topics and base_frame must be non-empty')
         from orchestrator.bt.docking_rectification import DockRectifier
         self.image_mode = DockRectifier(str(image_mode).strip().lower()).mode
         if footprint_profile not in ("circle", "sg2_autonomy_base"):
@@ -51,14 +56,18 @@ class ArucoDock(BaseAction):
         self.footprint_profile = footprint_profile
         self.runtime = None
         self.failure = False
+        self.outcome = None
 
     def tick(self):
+        if self.outcome is not None: return self.outcome
         if self.failure: return NodeStatus.FAILURE
         if self.runtime is None:
             try:
                 from orchestrator.bt.docking_runtime import DockRuntime
+                from orchestrator.bt.docking_camera import camera_source
+                image, info, mode = camera_source(self.node, *self.transport[:2], self.image_mode)
                 self.runtime = DockRuntime(self.node, self.marker_id, self.marker_size,
-                                           self.config, *self.transport, image_mode=self.image_mode, footprint_profile=self.footprint_profile)
+                                           self.config, image, info, *self.transport[2:], image_mode=mode, footprint_profile=self.footprint_profile, camera_profile=self.camera_profile)
                 self.runtime.start()
             except Exception as exc:
                 self.log_error(f'ArucoDock initialization failed: {exc}')
@@ -66,7 +75,10 @@ class ArucoDock(BaseAction):
                 self.failure = True
                 return NodeStatus.FAILURE
         if self.runtime.result is None: return NodeStatus.RUNNING
-        return NodeStatus.SUCCESS if self.runtime.result else NodeStatus.FAILURE
+        self.outcome = NodeStatus.SUCCESS if self.runtime.result else NodeStatus.FAILURE
+        self.runtime.close()
+        self.runtime = None
+        return self.outcome
 
     def pause(self):
         if self.runtime: self.runtime.pause()
@@ -77,6 +89,7 @@ class ArucoDock(BaseAction):
     def reset(self):
         if self.runtime: self.runtime.close(); self.runtime = None
         self.failure = False
+        self.outcome = None
         super().reset()
 
     def destroy(self):

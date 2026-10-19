@@ -120,7 +120,8 @@ def test_xml_blank_optional_fields_use_defaults():
     assert action.config.distance == .35
     assert action.config.lost_timeout == 3.
     assert action.config.max_yaw_rate == .18
-    assert action.transport[0] == '/zed/left/image_raw'
+    assert action.transport[:2] == ('', '')
+    assert action.camera_profile == 'VGA'
     assert action.transport[4] == '/odom'
     with pytest.raises(ValueError, match='ArucoDock Dock10: distance'):
         ArucoDock.from_xml_params(SimpleNamespace(node=None), 'Dock10', {'target_distance': '.349'})
@@ -138,3 +139,21 @@ def test_close_docking_margin_keeps_body_and_motion_guard():
     assert not obstacle_in_motion([(.48, 0)], (.035, 0, 0))
     assert obstacle_in_motion([(.45, 0)], (.035, 0, 0))
     assert obstacle_in_motion([(.42, 0)], (.035, 0, 0))
+
+
+def test_high_resolution_profile_and_terminal_cleanup():
+    from orchestrator.bt.actions.aruco_dock import ArucoDock
+    from orchestrator.bt.bt_core import NodeStatus
+    from unittest.mock import Mock
+    action = ArucoDock(None, camera_profile='high_resolution')
+    assert action.camera_profile == 'HD720'
+    runtime = Mock(result=True)
+    action.runtime = runtime
+    assert action.tick() == NodeStatus.SUCCESS
+    runtime.close.assert_called_once()
+    assert action.runtime is None
+    assert action.tick() == NodeStatus.SUCCESS
+    action.reset()
+    assert action.outcome is None
+    with pytest.raises(ValueError, match='camera_profile'):
+        ArucoDock(None, camera_profile='invalid')

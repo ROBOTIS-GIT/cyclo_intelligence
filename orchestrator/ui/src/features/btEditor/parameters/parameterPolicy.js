@@ -30,6 +30,7 @@ export const NUMBER_PARAMS = new Set([
 // Per-param helper text shown beneath the input. Keep these short — they
 // render directly under the field as a small gray hint.
 export const HELP_TEXT = {
+  camera_profile: 'VGA: 672x376 (default). HD720: 1280x720. Requires source resolution at least as large; images are never upscaled. Leave both camera topics empty to select Gazebo native or physical ZED left rectified automatically.',
   image_mode: 'raw: rectify internally. rectified: use an already rectified image topic. Detection always uses rectified pixels.',
   initial_pose_sync: 'Align to the first predicted pose before RESUME. Enabled by default for robot output.',
   initial_pose_sync_duration_s: 'Pose alignment duration in seconds (1–60).',
@@ -108,6 +109,7 @@ export const ENUM_PARAMS = {
 
 export function enumOptionsFor(nodeType, key, params) {
   if (['ArucoDock', 'DockRetreat'].includes(nodeType) && key === 'footprint_profile') return ['circle', 'sg2_autonomy_base'];
+  if (nodeType === 'ArucoDock' && key === 'camera_profile') return ['VGA', 'HD720'];
   if (nodeType === 'ArucoDock' && key === 'image_mode') return ['raw', 'rectified'];
   if (nodeType === 'SendCommand') {
     if (key === 'target') return SEND_COMMAND_TARGETS;

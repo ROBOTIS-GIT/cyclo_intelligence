@@ -195,3 +195,37 @@ position. This is intentionally not an automatic resume of a previous departure.
 
 The independent near-goal Omni controller selection remains a Navigation
 responsibility; it does not trigger a dock retreat.
+
+### Docking resolution: VGA / HD720
+
+`ArucoDock camera_profile="VGA"` (default) detects at **672x376**;
+`camera_profile="HD720"` detects at **1280x720**. The UI exposes these two choices.
+The selected size is a detection resolution, not a command to restart the ZED.
+The node never upscales a smaller source. It reports the required/source sizes
+when an insufficient image is supplied. Diagnostics record both source calibration
+and the actual detection resolution/intrinsics.
+
+Leave both `image_topic` and `camera_info_topic` empty for automatic selection:
+- SG2 simulation: the dedicated `/zed/left/high_resolution/image_raw` and
+  `/zed/left/high_resolution/camera_info` pair, rectified internally.
+- Physical ZED: `/zed/zed_node/left/image_rect_color` and
+  `/zed/zed_node/left/camera_info`, already rectified.
+Explicitly setting both topics overrides automatic selection; set `image_mode`
+according to that source. Other ZED namespaces need explicit topic paths.
+
+SG2 Gazebo renders the head at 1280x720; the docking node downsamples to VGA
+with matching scaled intrinsics when selected. `head_camera_resize` keeps legacy
+simulation inference/preview outputs at 320x240. Wrist sensors stay 320x240.
+Gazebo still has synthetic intrinsics/FOV; this does not reproduce ZED optical
+calibration or differences in FOV between its native capture modes.
+
+The physical ZED Mini configuration (`ffw_bringup/config/common/zedm.yaml`)
+remains `general.grab_resolution: VGA`, with NATIVE publication. For HD720 docking,
+set `general.grab_resolution: HD720` and restart the camera driver first. This
+also changes its native published stream for other consumers. Selecting HD720 in
+the action alone cannot recover detail from VGA. No physical device was tested.
+
+Detection and its subscriptions stop on docking completion/failure. Changing
+Gazebo sensor resolution requires restarting Gazebo. Older `standard` and
+`high_resolution` profile names are read as VGA and HD720, respectively, for
+saved-tree compatibility; new trees should use the explicit names above.
