@@ -20,6 +20,7 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from .docking_rectification import DockRectifier
+from .docking_diagnostics import DockDiagnostics
 from .docking_core import dock_error, velocity, obstacle_in_motion
 from .docking_vision import MarkerDetector, transform_pose
 
@@ -36,6 +37,9 @@ class DockRuntime:
         self.node, self.config, self.base_frame = node, config, base_frame
         self.detector = MarkerDetector(marker_id, marker_size)
         self.rectifier = DockRectifier(image_mode)
+        self.diagnostics = DockDiagnostics(marker_id, config, image_mode)
+        self.diagnostics.context.update(marker_size_m=marker_size, image_topic=image_topic,
+                                        camera_info_topic=camera_info_topic, base_frame=base_frame)
         self.bridge = CvBridge()
         self.lock = threading.RLock()
         self.halt, self.paused = threading.Event(), threading.Event()
@@ -153,15 +157,36 @@ class DockRuntime:
         return points[:2].T
 
     def analyze(self, frame, info, scan):
+        raw, rectified = None, None
+        details = {'image_stamp_s': stamp_seconds(frame.header.stamp),
+                   'frame_id': frame.header.frame_id,
+                   'camera': {'width': info.width, 'height': info.height,
+                              'K': list(info.k), 'D': list(info.d), 'R': list(info.r), 'P': list(info.p)}}
+        self.detector.diagnostics = {'reason': 'not_run'}
+        try:
+            raw = self.bridge.imgmsg_to_cv2(frame, desired_encoding='mono8')
+            rectified, intrinsic, optical_from_rectified = self.rectifier.prepare(raw, info)
+            result = self.analyze_rectified(frame, info, scan, rectified, intrinsic, optical_from_rectified)
+            details.update(error=list(result[0]), command=list(result[1]), settled=bool(result[2]))
+            return result
+        except Exception as exc:
+            details['error_message'] = str(exc)
+            raise
+        finally:
+            details['detection'] = self.detector.diagnostics
+            self.diagnostics.record(details, raw, rectified)
+
+    def analyze_rectified(self, frame, info, scan, gray, intrinsic, optical_from_rectified):
         if (frame.width,frame.height) != (info.width,info.height) or frame.header.frame_id != info.header.frame_id:
             raise ValueError('Image and CameraInfo dimensions/frame do not match')
         if not self.source_fresh(frame.header.stamp):
             raise ValueError('Image timestamp is stale')
-        gray = self.bridge.imgmsg_to_cv2(frame, desired_encoding='mono8')
-        gray, intrinsic, optical_from_rectified = self.rectifier.prepare(gray, info)
         detection = self.detector.detect(gray, intrinsic, np.zeros(5))
         if detection is None:
-            raise ValueError(f'Marker {self.detector.marker_id} not visible')
+            detail = self.detector.diagnostics
+            raise ValueError(f"Marker {self.detector.marker_id}: {detail['reason']}; "
+                             f"detected_ids={detail.get('detected_ids', [])}, "
+                             f"min_edge_px={detail.get('min_edge_px')}, rms_px={detail.get('reprojection_rms_px')}")
         position, normal, pixels, rms = detection
         position = optical_from_rectified @ position
         normal = optical_from_rectified @ normal
@@ -233,15 +258,22 @@ class DockRuntime:
                         self.status('settling' if settled else 'docking', error=error); last_status = now
                 except (ValueError, LookupError) as exc:
                     self.message = str(exc); self.publish((0.,0.,0.)); stable_at, stable_count = None, 0
+                    self.diagnostics.record({'feedback_error': self.message, 'sensor_receipt_age_s': ages})
                 except Exception as exc:
                     # TF may arrive after the camera callback; retry only until the loss deadline.
                     self.message = str(exc); self.publish((0.,0.,0.)); stable_at, stable_count = None, 0
+                    self.diagnostics.record({'feedback_error': self.message, 'sensor_receipt_age_s': ages})
                 if now-last_good > self.config.lost_timeout:
                     raise RuntimeError('Docking feedback unavailable: '+self.message)
                 if now-last_status > .5:
                     self.status('holding', self.message); last_status = now
         except Exception as exc:
+            self.publish((0.,0.,0.))
             self.result, self.message = False, str(exc)
+            try:
+                self.diagnostics.save_async(self.message, self.node.get_logger())
+            except Exception as diagnostic_error:
+                self.node.get_logger().error('Diagnostic scheduling failed: '+str(diagnostic_error))
             self.status('failed', self.message)
             self.node.get_logger().error('ArucoDock: '+self.message)
         finally:

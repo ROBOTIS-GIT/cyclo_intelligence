@@ -124,3 +124,16 @@ back using R transpose before the camera-to-base TF. Full-frame left/monocular
 calibration is required; ROI/binning and right stereo P translations are rejected.
 The debug image is now rectified. Close-range docking remains subject to visibility
 and collision checks; rectification does not recover cropped or occluded markers.
+
+## Failure diagnostics
+
+On failure, up to 32 recent frames (sampled at 5 Hz) and 160 bounded diagnostic
+events are saved under `docker/workspace/logs/aruco_docking/<UTC-time>_marker_<ID>_<suffix>/`.
+`report.json` contains sensor image timestamps, camera calibration, marker size,
+detected IDs, target corners, minimum edge pixels, border margin, reprojection RMS,
+pose errors/commands when available, and the final failure reason. Each retained
+frame has raw, rectified and annotated PNGs when available. Image files are written
+asynchronously after issuing zero velocity. Write errors are logged separately and
+do not change motion behavior. `CYCLO_DOCK_DIAGNOSTICS_DIR` overrides the directory.
+No image is invented for missing camera input; in that case inspect the JSON events.
+No detection thresholds or loss timeout were relaxed by this diagnostic change.
