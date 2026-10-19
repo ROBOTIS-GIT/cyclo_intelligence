@@ -31,7 +31,6 @@ import {
   isRunnerActive,
   missionRunnerReducer,
   navigationBatchFromIndex,
-  requiresBackendTaskTimeout,
 } from "./missionRunnerCore";
 import { withMissionWaypointContext } from "../utils/missionWaypointContext";
 import { formatTaskDisplayMessage } from "../utils/taskTerminology";
@@ -165,12 +164,11 @@ export function useMissionRunner({
   // Keep the newly-loaded tree ticking until it reports a FRESH terminal status.
   // The engine latches the previous run's `completed`, so we only accept a
   // terminal once we've seen `running` (or the status object identity changed).
-  const awaitBtTerminal = useCallback(async (signal, timeoutMs, baselineSequence) => {
+  const awaitBtTerminal = useCallback(async (signal, baselineSequence) => {
     const cfg = configRef.current;
     const statusAtLoad = btStatusRef.current;
     let sawRunning = false;
     const startDeadline = Date.now() + cfg.btStartTimeoutMs;
-    const runDeadline = Date.now() + (timeoutMs ?? cfg.btTimeoutMs);
     for (;;) {
       const status = normStatus(btStatusRef.current);
       const history = btStatusHistoryRef?.current;
@@ -183,7 +181,6 @@ export function useMissionRunner({
       if (fresh && status === "completed") return "completed";
       if (fresh && status === "failed") return "failed";
       if (!sawRunning && Date.now() > startDeadline) return "nostart";
-      if (Date.now() > runDeadline) return "timeout";
       await cancellableSleep(cfg.pollMs, signal);
     }
   }, [btStatusRef, btStatusHistoryRef]);
@@ -222,11 +219,8 @@ export function useMissionRunner({
     }
     dispatch({ type: "phase", phase: RunnerPhase.BT_RUNNING });
 
-    const cfg = configRef.current;
-    const timeoutMs = requiresBackendTaskTimeout(xml)
-      ? cfg.backendTaskTimeoutMs
-      : cfg.btTimeoutMs;
-    const outcome = await awaitBtTerminal(signal, timeoutMs, baselineSequence);
+    // Running trees may loop forever; individual actions own their deadlines.
+    const outcome = await awaitBtTerminal(signal, baselineSequence);
     if (outcome === "completed") {
       btNeedsStopRef.current = false;
       dispatch({ type: "finish", index, skipped: false });
@@ -234,12 +228,11 @@ export function useMissionRunner({
     }
     const reasonByOutcome = {
       failed: `Waypoint Task failed at ${label}`,
-      timeout: `Waypoint Task timed out at ${label}`,
       nostart: `Waypoint Task did not start at ${label}`,
     };
     if (outcome === "failed") {
       btNeedsStopRef.current = false;
-    } else if (outcome === "timeout" || outcome === "nostart") {
+    } else if (outcome === "nostart") {
       try { await stopEngagedBt(); } catch (error) { /* best-effort */ }
     }
     dispatch({ type: "fail", reason: reasonByOutcome[outcome] || `Waypoint Task error at ${label}`, index });

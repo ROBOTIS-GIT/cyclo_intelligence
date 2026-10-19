@@ -23,7 +23,6 @@ import {
   isRunnerActive,
   missionRunnerReducer,
   navigationBatchFromIndex,
-  requiresBackendTaskTimeout,
 } from "./missionRunnerCore";
 
 
@@ -66,37 +65,6 @@ describe("isEmptyBt", () => {
 
   test("unparseable XML is treated as non-empty so the error surfaces", () => {
     expect(isEmptyBt("<root><unclosed></root>")).toBe(false);
-  });
-});
-
-describe("requiresBackendTaskTimeout", () => {
-  const treeWith = (attributes) => [
-    '<root BTCPP_format="4" main_tree_to_execute="MainTree">',
-    `  <BehaviorTree ID="MainTree"><SendCommand ${attributes}/></BehaviorTree>`,
-    "</root>",
-  ].join("\n");
-
-  test("extends legacy and explicit inference LOAD tasks", () => {
-    expect(requiresBackendTaskTimeout(treeWith('command="LOAD" model="groot"'))).toBe(true);
-    expect(requiresBackendTaskTimeout(
-      treeWith('target="INFERENCE" command="LOAD" model="lerobot"'),
-    )).toBe(true);
-  });
-
-  test("extends Docker START and RESTART tasks", () => {
-    expect(requiresBackendTaskTimeout(
-      treeWith('target="DOCKER" command="START" model="groot"'),
-    )).toBe(true);
-    expect(requiresBackendTaskTimeout(
-      treeWith('target="docker" command="restart" model="lerobot"'),
-    )).toBe(true);
-  });
-
-  test("keeps regular and non-provisioning tasks on the normal timeout", () => {
-    expect(requiresBackendTaskTimeout(treeWith('target="INFERENCE" command="STOP"'))).toBe(false);
-    expect(requiresBackendTaskTimeout(treeWith('target="DOCKER" command="STOP"'))).toBe(false);
-    expect(requiresBackendTaskTimeout('<root><BehaviorTree ID="MainTree"><Wait/></BehaviorTree></root>')).toBe(false);
-    expect(requiresBackendTaskTimeout("<broken>")).toBe(false);
   });
 });
 
@@ -266,8 +234,6 @@ describe("isRunnerActive", () => {
 test("DEFAULT_RUNNER_CONFIG only contains BT polling timeouts", () => {
   expect(DEFAULT_RUNNER_CONFIG).toEqual({
     btStartTimeoutMs: 5000,
-    btTimeoutMs: 300000,
-    backendTaskTimeoutMs: 23520000,
     pollMs: 250,
   });
 });

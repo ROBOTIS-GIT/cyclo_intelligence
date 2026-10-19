@@ -52,10 +52,6 @@ export const WaypointState = {
 // Only BT execution uses polling; Nav2 completion comes from the action result.
 export const DEFAULT_RUNNER_CONFIG = {
   btStartTimeoutMs: 5000,
-  btTimeoutMs: 300000,
-  // Covers the supervisor's maximum 6 h build + 30 min readiness ceilings,
-  // with one minute for request/transition overhead. Stop remains cancellable.
-  backendTaskTimeoutMs: 23520000,
   pollMs: 250,
 };
 
@@ -83,26 +79,6 @@ export function isEmptyBt(xml) {
     const mainId = root && root.getAttribute("main_tree_to_execute");
     const main = trees.find((tree) => tree.getAttribute("ID") === mainId) || trees[0];
     return !Array.from(main.childNodes).some((node) => node.nodeType === 1);
-  } catch (error) {
-    return false;
-  }
-}
-
-// Image pull/build can legitimately take much longer than an ordinary local
-// task. Extend the mission-side watchdog only for SendCommand operations that
-// may provision a backend; all other trees retain the normal five-minute cap.
-// Legacy SendCommand XML has no target and therefore means INFERENCE.
-export function requiresBackendTaskTimeout(xml) {
-  if (!xml || !xml.trim() || typeof DOMParser === "undefined") return false;
-  try {
-    const doc = new DOMParser().parseFromString(xml, "text/xml");
-    if (doc.getElementsByTagName("parsererror").length) return false;
-    return Array.from(doc.getElementsByTagName("SendCommand")).some((node) => {
-      const target = String(node.getAttribute("target") || "INFERENCE").trim().toUpperCase();
-      const command = String(node.getAttribute("command") || "LOAD").trim().toUpperCase();
-      if (target === "INFERENCE") return command === "LOAD";
-      return target === "DOCKER" && (command === "START" || command === "RESTART");
-    });
   } catch (error) {
     return false;
   }

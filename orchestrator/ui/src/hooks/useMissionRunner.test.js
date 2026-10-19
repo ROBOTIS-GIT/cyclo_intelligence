@@ -299,10 +299,10 @@ test("recognizes a BT that starts and completes before load_and_run replies", as
   expect(h.stopBt).not.toHaveBeenCalled();
 });
 
-test("uses the extended watchdog for a backend-provisioning command", async () => {
+test.each([dockerStartBt, filledBt])("running trees ignore legacy execution deadlines: %s", async (xml) => {
   const h = makeHarness({
     orderedSpots: [SPOTS[0]],
-    resolveBtXml: () => dockerStartBt,
+    resolveBtXml: () => xml,
     config: {
       pollMs: 5,
       btStartTimeoutMs: 100,
