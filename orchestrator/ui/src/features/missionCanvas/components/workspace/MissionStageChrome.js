@@ -46,7 +46,7 @@ export default function MissionStageChrome({
         {stage === STAGE_AUTHORING ? (!waypointBtLayer ? (
           <DesignStageSidebar {...sidebar.design} />
         ) : null) : mappingEditorActive ? null : (
-          <aside className="min-h-0 grid gap-4 overflow-auto p-4 content-start">
+          <aside className={`min-h-0 grid gap-4 overflow-auto p-4 content-start ${stage === STAGE_MAPPING ? "auto-rows-max" : ""}`}>
             {stage === STAGE_MAPPING ? (
               <MappingStageSidebar {...sidebar.mapping} />
             ) : stage === STAGE_NAVIGATE ? (

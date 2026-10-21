@@ -18,8 +18,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MISSION_TEXT_MUTED } from "../lib/theme";
 import { isTextInputTarget } from "../lib/dom";
 import { ActionButton, Panel, SessionRow } from "./primitives";
+import { useNavigationRosTopic } from "../../../hooks/useNavigationRosTopic";
 
-export const TELEOP_TOPIC = "/cmd_vel";
+// The leader merges UI input with its physical joystick, then continuously
+// publishes the existing /cmd_vel recording and follower command stream.
+export const TELEOP_TOPIC = "/leader/mission_canvas_mobile/cmd_vel";
+export const TELEOP_READY_TOPIC = "/leader/mission_canvas_mobile/ready";
 
 export const TELEOP_MESSAGE_TYPE = "geometry_msgs/msg/Twist";
 
@@ -91,12 +95,15 @@ export function TeleopButton({
 }
 
 export default function MappingTeleopPanel({ disabled, onPublish, onMessage, embedded = false }) {
+  const { topicData: readyMessage } = useNavigationRosTopic(
+    TELEOP_READY_TOPIC, { staleMs: 1000, throttleMs: 100 });
+  const effectiveDisabled = disabled || readyMessage?.data?.data !== true;
   const [linearSpeed, setLinearSpeed] = useState(TELEOP_DEFAULT_LINEAR_SPEED);
   const [angularSpeed, setAngularSpeed] = useState(TELEOP_DEFAULT_ANGULAR_SPEED);
   const [activated, setActivated] = useState(false);
   const [activeLabel, setActiveLabel] = useState("");
   const activeMotionRef = useRef(null);
-  const controlsDisabled = disabled || !activated;
+  const controlsDisabled = effectiveDisabled || !activated;
 
   const publishMotion = useCallback((motion) => {
     void onPublish(motion).catch((error) => {
@@ -121,11 +128,11 @@ export default function MappingTeleopPanel({ disabled, onPublish, onMessage, emb
   }, [publishMotion]);
 
   const activateTeleop = useCallback(() => {
-    if (disabled) return;
+    if (effectiveDisabled) return;
     setActivated(true);
     setActiveLabel("");
     onMessage("Mobile teleop activated");
-  }, [disabled, onMessage]);
+  }, [effectiveDisabled, onMessage]);
 
   const startTeleop = useCallback((label, motion) => {
     if (controlsDisabled) return;
@@ -135,7 +142,7 @@ export default function MappingTeleopPanel({ disabled, onPublish, onMessage, emb
   }, [controlsDisabled, publishMotion]);
 
   useEffect(() => {
-    if (disabled) {
+    if (effectiveDisabled) {
       if (activated || activeMotionRef.current) {
         publishMotion(TELEOP_STOP);
       }
@@ -150,13 +157,28 @@ export default function MappingTeleopPanel({ disabled, onPublish, onMessage, emb
       }
     }, TELEOP_REPEAT_MS);
     return () => window.clearInterval(interval);
-  }, [activated, disabled, publishMotion]);
+  }, [activated, effectiveDisabled, publishMotion]);
 
   useEffect(() => () => {
     if (activeMotionRef.current) {
       void onPublish(TELEOP_STOP);
     }
   }, [onPublish]);
+
+  useEffect(() => {
+    const stopOnBlur = () => {
+      if (activeMotionRef.current) stopTeleop();
+    };
+    const stopOnHidden = () => {
+      if (document.hidden) stopOnBlur();
+    };
+    window.addEventListener("blur", stopOnBlur);
+    document.addEventListener("visibilitychange", stopOnHidden);
+    return () => {
+      window.removeEventListener("blur", stopOnBlur);
+      document.removeEventListener("visibilitychange", stopOnHidden);
+    };
+  }, [stopTeleop]);
 
   const commandByKey = useMemo(() => ({
     w: {
@@ -257,11 +279,11 @@ export default function MappingTeleopPanel({ disabled, onPublish, onMessage, emb
       <div className="flex items-center justify-between gap-2">
         {embedded && <strong className="text-xs">Mobile Teleop</strong>}
         <div className="text-xs" style={{ color: MISSION_TEXT_MUTED }}>
-          {disabled ? "Unavailable" : activated ? "Active" : "Inactive"}
+          {disabled ? "Unavailable" : effectiveDisabled ? "Waiting for leader controller" : activated ? "Active" : "Inactive"}
         </div>
         <ActionButton
           active={activated}
-          disabled={disabled}
+          disabled={effectiveDisabled}
           onClick={activated ? deactivateTeleop : activateTeleop}
           variant="secondary"
         >
@@ -355,15 +377,19 @@ export default function MappingTeleopPanel({ disabled, onPublish, onMessage, emb
             <span className="font-mono text-right">{angularSpeed.toFixed(2)}</span>
           </label>
           <div className="grid grid-cols-2 gap-2">
-            <SessionRow label="Topic" value={TELEOP_TOPIC} stacked />
+            <SessionRow label="Input Topic" value={TELEOP_TOPIC} stacked />
+            <SessionRow label="Recorded Topic" value="/cmd_vel" stacked />
             <SessionRow
               label="Command"
-              value={disabled ? "Unavailable" : activated ? activeLabel || "Stop" : "Inactive"}
+              value={effectiveDisabled ? "Unavailable" : activated ? activeLabel || "Stop" : "Inactive"}
               stacked
             />
           </div>
         </div>
       </div>
+      <p className="text-xs m-0" style={{ color: MISSION_TEXT_MUTED }}>
+        Activate arms the controls. Hold W / A / S / D or a direction button to move; release to stop.
+      </p>
     </Container>
   );
 }

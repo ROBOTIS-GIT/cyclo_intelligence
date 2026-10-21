@@ -49,7 +49,7 @@ export default function useMissionBtHistory({ graph, setSelectedNodeId }) {
   }, [setEdges, setNodeDataMap, setNodes, setParseError, setSelectedNodeId]);
 
   const {
-    capture: captureHistory,
+    capture: captureSnapshot,
     undo: undoHistory,
     redo: redoHistory,
     reset: resetHistory,
@@ -59,6 +59,11 @@ export default function useMissionBtHistory({ graph, setSelectedNodeId }) {
     getSnapshot: getHistorySnapshot,
     applySnapshot: applyHistorySnapshot,
   });
+
+  const captureHistory = useCallback(() => {
+    captureSnapshot();
+    coalescedEditRef.current = { key: '', lastChangeAt: 0 };
+  }, [captureSnapshot]);
 
   const captureCoalescedEditHistory = useCallback((key) => {
     const now = Date.now();

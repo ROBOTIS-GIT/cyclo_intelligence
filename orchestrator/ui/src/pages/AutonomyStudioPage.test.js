@@ -1,3 +1,6 @@
+jest.mock("../features/missionCanvas/components/mapping/LiftTeleopPanel", () => () => <div>Lift Teleop</div>);
+// Head transport is covered by HeadTeleopPanel/headTeleop tests with mocked ROS.
+jest.mock("../features/missionCanvas/components/mapping/HeadTeleopPanel", () => () => <div>Head Teleop</div>);
 // Copyright 2026 ROBOTIS CO., LTD.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -247,10 +250,14 @@ jest.mock('../utils/navigationMissionsApi', () => ({
   }),
 }));
 
+const mockTeleopReady = { available: true, data: { data: true } };
+
 jest.mock('../hooks/useNavigationRosTopic', () => ({
   useNavigationRosTopic: (topic, options = {}) => {
     const React = jest.requireActual('react');
-    const data = topic ? mockTopicDataByName[topic] || null : null;
+    const data = topic === '/leader/mission_canvas_mobile/ready'
+      ? mockTeleopReady
+      : (topic ? mockTopicDataByName[topic] || null : null);
     const onMessage = React.useRef(options.onMessage);
     onMessage.current = options.onMessage;
     // Production delivers each receipt before its visual topicData update.
@@ -4338,7 +4345,7 @@ test('publishes keyboard teleop commands without mapping runtime', async () => {
   fireEvent.keyDown(window, { key: 'w' });
 
   await waitFor(() => expect(mockPublishRosTopic).toHaveBeenCalledWith(
-    '/cmd_vel',
+    '/leader/mission_canvas_mobile/cmd_vel',
     'geometry_msgs/msg/Twist',
     {
       linear: { x: 0.4, y: 0, z: 0 },
@@ -4349,7 +4356,7 @@ test('publishes keyboard teleop commands without mapping runtime', async () => {
   fireEvent.keyUp(window, { key: 'w' });
 
   await waitFor(() => expect(mockPublishRosTopic).toHaveBeenCalledWith(
-    '/cmd_vel',
+    '/leader/mission_canvas_mobile/cmd_vel',
     'geometry_msgs/msg/Twist',
     {
       linear: { x: 0, y: 0, z: 0 },

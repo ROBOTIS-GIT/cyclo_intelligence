@@ -166,6 +166,19 @@ export default function useBtGraphCommands({ graph, nodeCatalog, captureHistory,
     );
   }, [captureEditHistory, setNodeDataMap, setNodes]);
 
+  const handleParamsChange = useCallback((nodeId, patch) => {
+    captureHistory();
+    setNodeDataMap((current) => {
+      const next = new Map(current);
+      const entry = next.get(nodeId);
+      if (entry) next.set(nodeId, { ...entry, params: { ...entry.params, ...patch } });
+      return next;
+    });
+    setNodes((current) => current.map((node) => node.id === nodeId
+      ? { ...node, data: { ...node.data, params: { ...node.data.params, ...patch } } }
+      : node));
+  }, [captureHistory, setNodeDataMap, setNodes]);
+
   // ── Param change: update nodeDataMap + nodes state ────────────────────────
   const handleParamChange = useCallback((nodeId, paramName, value) => {
     captureEditHistory(`param:${nodeId}:${paramName}`);
@@ -185,5 +198,5 @@ export default function useBtGraphCommands({ graph, nodeCatalog, captureHistory,
   }, [captureEditHistory, setNodeDataMap, setNodes]);
 
   return { handleCanvasDragOver, handleCanvasDrop, handleConnect,
-    handleAutoLayout, handleToggleCollapse, handleNameChange, handleParamChange };
+    handleAutoLayout, handleToggleCollapse, handleNameChange, handleParamChange, handleParamsChange };
 }

@@ -99,6 +99,7 @@ export default function MissionBtGraph({ commands, options, graph, view, history
             nodes={annotatedNodes}
             selectedNodeId={selectedNodeId}
             onParamChange={handleParamChange}
+            onParamsChange={commands.handleParamsChange}
             onNameChange={handleNameChange}
             onClose={() => setSelectedNodeId(null)}
             variant="autonomy-studio"

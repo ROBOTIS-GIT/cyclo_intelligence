@@ -33,6 +33,7 @@ const TOPIC_TYPES = {
   '/tf_static': 'tf2_msgs/msg/TFMessage',
   '/bt/status': 'std_msgs/msg/String',
   '/bt/active_nodes': 'std_msgs/msg/String',
+  '/leader/mission_canvas_mobile/ready': 'std_msgs/msg/Bool',
 };
 
 const SERVER_GRID_TOPICS = new Set([
@@ -231,14 +232,46 @@ export function useNavigationRosTopic(topic, options = {}) {
 /** Publish a ROS message through the same singleton rosbridge connection. */
 export function useNavigationRosPublisher() {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  const publisherRef = useRef(null);
+  const releaseTimerRef = useRef(null);
 
-  return useCallback(async (topic, messageType, data) => {
-    const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
-    if (!ros || !ros.isConnected) {
-      throw new Error('ROS connection is not available');
+  useEffect(() => () => {
+    if (releaseTimerRef.current) window.clearTimeout(releaseTimerRef.current);
+    if (publisherRef.current?.ros?.isConnected) publisherRef.current.topic.unadvertise();
+    publisherRef.current = null;
+  }, [rosbridgeUrl]);
+
+  return useCallback((topic, messageType, data) => {
+    const ros = rosConnectionManager.url === rosbridgeUrl
+      ? rosConnectionManager.getCurrentConnection() : null;
+    if (!ros?.isConnected) {
+      return Promise.reject(new Error('ROS connection is not available'));
     }
-    const publisher = new ROSLIB.Topic({ ros, name: topic, messageType });
-    publisher.publish(new ROSLIB.Message(data));
-    window.setTimeout(() => publisher.unadvertise(), 250);
+    try {
+      let current = publisherRef.current;
+      if (current && (current.ros !== ros || current.name !== topic || current.messageType !== messageType)) {
+        if (current.ros.isConnected) current.topic.unadvertise();
+        current = null;
+      }
+      if (!current) {
+        const publisher = new ROSLIB.Topic({ ros, name: topic, messageType,
+          reconnect_on_close: false });
+        publisher.callForSubscribeAndAdvertise = (message) => {
+          if (ros.isConnected) ros.callOnConnection(message);
+        };
+        current = { ros, name: topic, messageType, topic: publisher };
+        publisherRef.current = current;
+      }
+      current.topic.publish(new ROSLIB.Message(data));
+      if (releaseTimerRef.current) window.clearTimeout(releaseTimerRef.current);
+      releaseTimerRef.current = window.setTimeout(() => {
+        if (publisherRef.current !== current) return;
+        if (ros.isConnected) current.topic.unadvertise();
+        publisherRef.current = null;
+      }, 1000);
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }, [rosbridgeUrl]);
 }

@@ -17,6 +17,8 @@
 import { TopicStatusPanel } from "../../../mapWorkspace/components/mapChrome";
 import MappingSessionPanel from "../mapping/MappingSessionPanel";
 import MappingTeleopPanel from "../../../mapWorkspace/components/MappingTeleopPanel";
+import HeadTeleopPanel from "../mapping/HeadTeleopPanel";
+import LiftTeleopPanel from "../mapping/LiftTeleopPanel";
 
 export default function MappingStageSidebar({
   teleopDisabled,
@@ -31,6 +33,8 @@ export default function MappingStageSidebar({
         onPublish={onPublishTeleop}
         onMessage={onMessage}
       />
+      <HeadTeleopPanel disabled={teleopDisabled} />
+      <LiftTeleopPanel disabled={teleopDisabled} />
       <MappingSessionPanel />
       <TopicStatusPanel topicRows={topicRows} />
     </>

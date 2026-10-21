@@ -454,3 +454,30 @@ test("changes the runtime default only through Use for Run", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Use for Run" }));
   await waitFor(() => expect(onSetDefaultXml).toHaveBeenCalledWith("locals/b.xml"));
 });
+
+// Exercise the panel's batch commit independently of ROS transport.
+jest.mock('../bt/PoseCaptureButton', () => function MockPoseCapture({ onCapture }) {
+  return <button onClick={() => onCapture({ head_positions: '0.3, -0.2', lift_position: '-0.25' })}>Capture current pose</button>;
+});
+
+test('pose capture updates serialized XML and undoes all captured groups together', async () => {
+  const onXmlChange = jest.fn();
+  const xml = '<root BTCPP_format="4" main_tree_to_execute="MainTree"><BehaviorTree ID="MainTree"><JointControl name="Pose" enable_head="true" head_positions="0.0, 0.0" enable_lift="true" lift_position="0.0"/></BehaviorTree></root>';
+  render(<MissionBtEditor title="A" filePath="locals/a.xml" xml={xml} onXmlChange={onXmlChange} />);
+  fireEvent.click(await screen.findByText('Pose'));
+  fireEvent.click(screen.getByRole('button', { name: 'Capture current pose' }));
+  await waitFor(() => {
+    const serialized = JSON.stringify(onXmlChange.mock.calls.at(-1));
+    expect(serialized).toContain('0.3, -0.2');
+  });
+  expect(JSON.stringify(onXmlChange.mock.calls.at(-1))).toContain('-0.25');
+  fireEvent.click(screen.getByTitle('Undo'));
+  await waitFor(() => expect(screen.getByTitle('Undo')).toBeDisabled());
+  fireEvent.click(screen.getByText('Pose'));
+  expect(screen.getByDisplayValue('0.0, 0.0')).toBeInTheDocument();
+  expect(screen.getByDisplayValue('0.0')).toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('Redo'));
+  fireEvent.click(screen.getByText('Pose'));
+  expect(screen.getByDisplayValue('0.3, -0.2')).toBeInTheDocument();
+  expect(screen.getByDisplayValue('-0.25')).toBeInTheDocument();
+});
