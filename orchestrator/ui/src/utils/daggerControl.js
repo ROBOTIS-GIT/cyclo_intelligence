@@ -13,10 +13,14 @@ export class DaggerClient {
       queue_length: 1, reconnect_on_close: false });
     this.commandTopic = new ROSLIB.Topic({ ros, name: '/dagger/command', messageType: 'std_msgs/String',
       reconnect_on_close: false });
-    // Robot commands must never queue across rosbridge disconnect/reconnect.
-    this.commandTopic.callForSubscribeAndAdvertise = (message) => {
-      if (this.ros.isConnected) this.ros.callOnConnection(message);
-    };
+    // roslib 1.4.1 loses the Ros receiver with reconnect_on_close=false.
+    // Bind both status subscription and command advertisement to this connection;
+    // neither operation should queue across disconnect/reconnect.
+    [this.status, this.commandTopic].forEach((topic) => {
+      topic.callForSubscribeAndAdvertise = (message) => {
+        if (this.ros.isConnected) this.ros.callOnConnection(message);
+      };
+    });
     this.status.subscribe((message) => {
       try {
         const next = JSON.parse(message.data);
