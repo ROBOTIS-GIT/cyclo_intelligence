@@ -118,6 +118,10 @@ backbones, training teachers, dependencies, and datasets under their own license
 
 ## Verification
 
+Native training commands, contracts and the single-GPU two-step qualification
+are tracked in [training/README.md](training/README.md). CPU tests alone do not
+qualify a training image or enable production Bench Runs.
+
 ```bash
 python3 -m pytest cyclo_brain/policy/lingbot_vla/tests
 ```

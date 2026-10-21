@@ -1,0 +1,124 @@
+# Experimental mapping approved for software qualification, not robot deployment.
+# Base remains velocity; lift uses the reserved slot used in the earlier run.
+version: 2
+model_id: lingbot-vla-v2
+policy_id: lingbot_vla:v2
+robot_type: ffw_sg2_rev1
+action_representation: absolute
+normalization: mean_std
+state_names: &names
+  - arm_l_joint1
+  - arm_l_joint2
+  - arm_l_joint3
+  - arm_l_joint4
+  - arm_l_joint5
+  - arm_l_joint6
+  - arm_l_joint7
+  - gripper_l_joint1
+  - arm_r_joint1
+  - arm_r_joint2
+  - arm_r_joint3
+  - arm_r_joint4
+  - arm_r_joint5
+  - arm_r_joint6
+  - arm_r_joint7
+  - gripper_r_joint1
+  - head_joint1
+  - head_joint2
+  - lift_joint
+  - linear_x
+  - linear_y
+  - angular_z
+action_names: *names
+cameras:
+  head: observation.images.rgb.cam_left_head
+  left_wrist: observation.images.rgb.cam_left_wrist
+  right_wrist: observation.images.rgb.cam_right_wrist
+camera_order: [head, left_wrist, right_wrist]
+canonical_mapping:
+  state: &slots
+    arm_l_joint1: 0
+    arm_l_joint2: 1
+    arm_l_joint3: 2
+    arm_l_joint4: 3
+    arm_l_joint5: 4
+    arm_l_joint6: 5
+    arm_l_joint7: 6
+    gripper_l_joint1: 28
+    arm_r_joint1: 7
+    arm_r_joint2: 8
+    arm_r_joint3: 9
+    arm_r_joint4: 10
+    arm_r_joint5: 11
+    arm_r_joint6: 12
+    arm_r_joint7: 13
+    gripper_r_joint1: 29
+    head_joint1: 34
+    head_joint2: 35
+    lift_joint: 51
+    linear_x: 36
+    linear_y: 37
+    angular_z: 38
+  action: *slots
+transforms:
+  state:
+    - &left_arm
+      origin_key: observation.state
+      start: 0
+      end: 7
+      names: [arm_l_joint1, arm_l_joint2, arm_l_joint3, arm_l_joint4, arm_l_joint5, arm_l_joint6, arm_l_joint7]
+      canonical_slots: [0, 1, 2, 3, 4, 5, 6]
+      semantic_role: absolute_joint_position
+      subtract_state: false
+      relative_type: null
+    - &left_gripper
+      <<: *left_arm
+      start: 7
+      end: 8
+      names: [gripper_l_joint1]
+      canonical_slots: [28]
+    - &right_arm
+      <<: *left_arm
+      start: 8
+      end: 15
+      names: [arm_r_joint1, arm_r_joint2, arm_r_joint3, arm_r_joint4, arm_r_joint5, arm_r_joint6, arm_r_joint7]
+      canonical_slots: [7, 8, 9, 10, 11, 12, 13]
+    - &right_gripper
+      <<: *left_arm
+      start: 15
+      end: 16
+      names: [gripper_r_joint1]
+      canonical_slots: [29]
+    - &head
+      <<: *left_arm
+      start: 16
+      end: 18
+      names: [head_joint1, head_joint2]
+      canonical_slots: [34, 35]
+    - &lift
+      <<: *left_arm
+      start: 18
+      end: 19
+      names: [lift_joint]
+      canonical_slots: [51]
+    - &base
+      <<: *left_arm
+      start: 19
+      end: 22
+      names: [linear_x, linear_y, angular_z]
+      canonical_slots: [36, 37, 38]
+      semantic_role: base_velocity
+  action:
+    - {<<: *left_arm, origin_key: action}
+    - {<<: *left_gripper, origin_key: action}
+    - {<<: *right_arm, origin_key: action}
+    - {<<: *right_gripper, origin_key: action}
+    - {<<: *head, origin_key: action}
+    - {<<: *lift, origin_key: action}
+    - {<<: *base, origin_key: action}
+teacher_training:
+  depth: true
+  future_depth: true
+  future_video: true
+  trainable: false
+  episode_boundary: pad_and_mask
