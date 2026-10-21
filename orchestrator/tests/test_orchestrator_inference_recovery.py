@@ -136,6 +136,7 @@ def _bare_node(client):
     node._loaded_inference_chunk_align_window_s = 0.3
     node._loaded_inference_initial_pose_sync = False
     node._loaded_inference_initial_pose_sync_duration_s = 5.0
+    node._loaded_inference_action_chunk_size = 0
     node._initial_pose_sync_status_timer = None
     node._initial_pose_sync_status_generation = 0
     node._initial_pose_sync_hold_pending = False

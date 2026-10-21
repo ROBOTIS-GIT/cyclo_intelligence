@@ -9,6 +9,7 @@ from .protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
+    CMD_RESET_POLICY,
     EngineCommandRequest,
     EngineCommandResponse,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CMD_GET_ACTION",
     "CMD_LOAD_POLICY",
     "CMD_UNLOAD_POLICY",
+    "CMD_RESET_POLICY",
     "EngineCommandRequest",
     "EngineCommandResponse",
     "EngineWorker",

@@ -71,6 +71,7 @@ uint16 inference_hz
 float64 chunk_align_window_s
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+uint16 action_chunk_size
 """
 
 INFERENCE_COMMAND_RESPONSE_DEF = """\
@@ -91,6 +92,7 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+uint16 action_chunk_size
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\

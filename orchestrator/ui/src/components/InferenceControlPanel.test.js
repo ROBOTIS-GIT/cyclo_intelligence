@@ -42,6 +42,7 @@ const renderPanel = ({
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
   sendRecordCommand: sendOverride = null,
+  manualControlBusy = false,
 } = {}) => {
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
     success: true,
@@ -90,13 +91,15 @@ const renderPanel = ({
     },
   });
 
-  render(
+  const result = render(
     <Provider store={store}>
-      <InferenceControlPanel />
+      <InferenceControlPanel manualControlBusy={manualControlBusy} />
     </Provider>
   );
 
-  return { store, sendRecordCommand };
+  return { store, sendRecordCommand, rerenderWithBusy: (busy) => result.rerender(
+    <Provider store={store}><InferenceControlPanel manualControlBusy={busy} /></Provider>
+  ) };
 };
 
 describe('InferenceControlPanel deploy safety', () => {
@@ -111,6 +114,22 @@ describe('InferenceControlPanel deploy safety', () => {
 
     expect(await screen.findByRole('dialog', { name: /real robot deploy/i }))
       .toBeInTheDocument();
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('manual gripper movement blocks the Start button and its global keyboard shortcut', () => {
+    const { sendRecordCommand } = renderPanel({ inferenceMode: 'simulation', manualControlBusy: true });
+    expect(screen.getByRole('button', { name: /Wait for gripper movement/i })).toBeDisabled();
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+    fireEvent.keyUp(window, { key: ' ', code: 'Space' });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('gripper movement beginning during an asynchronous Start check blocks the eventual request', async () => {
+    const { sendRecordCommand, rerenderWithBusy } = renderPanel({ inferenceMode: 'simulation' });
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+    rerenderWithBusy(true);
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/gripper to finish/)));
     expect(sendRecordCommand).not.toHaveBeenCalled();
   });
 

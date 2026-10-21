@@ -27,6 +27,7 @@ import numpy as np
 CMD_LOAD_POLICY = 0
 CMD_GET_ACTION = 1
 CMD_UNLOAD_POLICY = 2
+CMD_RESET_POLICY = 3
 
 
 ENGINE_COMMAND_REQUEST_DEF = """\
@@ -38,6 +39,7 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+uint16 action_chunk_size
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -62,6 +64,7 @@ class EngineCommandRequest:
     task_instruction: str = ""
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
+    action_chunk_size: int = 0
 
 
 @dataclass
@@ -89,6 +92,7 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         acceleration_engine_path=str(
             getattr(message, "acceleration_engine_path", "") or ""
         ),
+        action_chunk_size=getattr(message, "action_chunk_size", 0),
     )
 
 
@@ -133,6 +137,7 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "task_instruction": str(request.task_instruction),
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),
+        "action_chunk_size": int(request.action_chunk_size),
     }
 
 

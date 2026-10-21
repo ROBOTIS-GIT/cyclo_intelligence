@@ -48,10 +48,27 @@ def test_dynamic_inference_command_definition_matches_ros_service() -> None:
     dynamic_fields = _field_lines(_load_request_definition())
 
     assert dynamic_fields == service_fields
-    assert dynamic_fields[-5:] == [
+    assert dynamic_fields[-6:] == [
         "uint16 control_hz",
         "uint16 inference_hz",
         "float64 chunk_align_window_s",
         "bool initial_pose_sync",
         "float64 initial_pose_sync_duration_s",
+        "uint16 action_chunk_size",
     ]
+
+
+def test_dynamic_engine_command_definitions_match_service_and_runtime():
+    import ast
+    source = ast.parse((REPO_ROOT / 'cyclo_brain/policy/common/runtime/engine_process/protocol.py').read_text())
+    runtime_definition = next(ast.literal_eval(node.value) for node in source.body
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+        and target.id == 'ENGINE_COMMAND_REQUEST_DEF' for target in node.targets))
+    spec = importlib.util.spec_from_file_location('chunk_wire_definitions', MESSAGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    service = (REPO_ROOT / 'interfaces/srv/EngineCommand.srv').read_text()
+    fields = _field_lines(service, stop_at_separator=True)
+    assert _field_lines(module.ENGINE_COMMAND_REQUEST_DEF) == fields
+    assert _field_lines(runtime_definition) == fields
+    assert fields[-1] == 'uint16 action_chunk_size'

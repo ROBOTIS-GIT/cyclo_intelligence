@@ -8,6 +8,7 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { MdBuild, MdRefresh } from 'react-icons/md';
 import Tooltip from './Tooltip';
+import { trtStatusUrl } from '../utils/inferenceAcceleration';
 
 const API_BASE = '/api';
 
@@ -19,13 +20,6 @@ async function readJsonResponse(response) {
   } catch {
     return { detail: text };
   }
-}
-
-function buildStatusUrl(modelPath, enginePath) {
-  const params = new URLSearchParams();
-  params.set('model_path', modelPath);
-  if (enginePath) params.set('engine_path', enginePath);
-  return `${API_BASE}/backends/groot/trt/status?${params.toString()}`;
 }
 
 function statusLabel(status) {
@@ -57,6 +51,7 @@ function statusClass(status) {
 }
 
 export default function TrtEngineControl({
+  serviceType = 'groot',
   modelPath,
   enginePath = '',
   robotType = '',
@@ -80,7 +75,7 @@ export default function TrtEngineControl({
     }
     if (!quiet) setIsRefreshing(true);
     try {
-      const response = await fetch(buildStatusUrl(trimmedModelPath, trimmedEnginePath));
+      const response = await fetch(trtStatusUrl(serviceType, trimmedModelPath, trimmedEnginePath));
       const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.detail || data.message || `status failed (${response.status})`);
@@ -98,7 +93,7 @@ export default function TrtEngineControl({
     } finally {
       if (!quiet) setIsRefreshing(false);
     }
-  }, [canQuery, trimmedModelPath, trimmedEnginePath]);
+  }, [canQuery, trimmedModelPath, trimmedEnginePath, serviceType]);
 
   useEffect(() => {
     refreshStatus({ quiet: true });
@@ -122,7 +117,7 @@ export default function TrtEngineControl({
     }
     setIsBuilding(true);
     try {
-      const response = await fetch(`${API_BASE}/backends/groot/trt/build`, {
+      const response = await fetch(`${API_BASE}/backends/${serviceType}/trt/build`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -130,7 +125,7 @@ export default function TrtEngineControl({
           engine_path: trimmedEnginePath,
           robot_type: robotType,
           task_instruction: taskInstruction || 'dummy task',
-          force: status?.status === 'ready',
+          force: Boolean(status?.engine_size_bytes),
         }),
       });
       const data = await readJsonResponse(response);
@@ -146,11 +141,12 @@ export default function TrtEngineControl({
       setIsBuilding(false);
     }
   }, [
+    serviceType,
     trimmedModelPath,
     trimmedEnginePath,
     robotType,
     taskInstruction,
-    status?.status,
+    status?.engine_size_bytes,
     refreshStatus,
   ]);
 

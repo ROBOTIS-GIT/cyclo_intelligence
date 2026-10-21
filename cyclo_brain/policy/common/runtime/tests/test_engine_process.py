@@ -57,6 +57,16 @@ class FakeEngine:
 
 
 class EngineWorkerTests(unittest.TestCase):
+    def test_reset_policy_keeps_weights_and_resets_temporal_history(self):
+        engine = FakeEngine()
+        calls = []
+        engine.reset_policy = lambda: calls.append("reset")
+        response = EngineWorker(engine).handle(EngineCommandRequest(command=3, seq_id=8))
+        self.assertTrue(response.success)
+        self.assertEqual(response.seq_id, 8)
+        self.assertEqual(calls, ["reset"])
+        self.assertFalse(engine.cleaned)
+
     def test_load_policy_delegates_to_engine(self) -> None:
         engine = FakeEngine()
         worker = EngineWorker(engine)

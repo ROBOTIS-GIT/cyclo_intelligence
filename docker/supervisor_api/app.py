@@ -104,6 +104,9 @@ _bt_trees_module = _load_sibling_module("bt_trees", "bt_trees.py")
 bt_trees_router = _bt_trees_module.router
 _bt_readiness_module = _load_sibling_module("bt_readiness", "bt_readiness.py")
 _bt_readiness = _bt_readiness_module.BTReadiness()
+_checkpoint_instructions_module = _load_sibling_module(
+    "checkpoint_instructions", "checkpoint_instructions.py"
+)
 
 
 logger = logging.getLogger("supervisor_api")
@@ -663,18 +666,19 @@ def _container_raw_state(container) -> str:
     return container.attrs.get("State", {}).get("Status", "unknown")
 
 
-def _resolve_groot_trt_paths(
+def _resolve_trt_paths(
     model_path: str,
     engine_path: str = "",
+    backend: str = "groot",
 ) -> tuple[str, str]:
     model = os.path.normpath((model_path or "").strip())
     if not model or not os.path.isabs(model):
         raise HTTPException(400, "model_path must be an absolute path")
-    root = os.path.normpath(_GROOT_MODEL_ROOT)
+    root = os.path.normpath(f"/workspace/model/{backend}")
     if model != root and not model.startswith(root + os.sep):
         raise HTTPException(
             400,
-            f"model_path must be under {_GROOT_MODEL_ROOT}",
+            f"model_path must be under {root}",
         )
 
     engine = (engine_path or "").strip()
@@ -683,11 +687,15 @@ def _resolve_groot_trt_paths(
             engine = os.path.join(model, engine)
         engine = os.path.normpath(engine)
     else:
-        engine = os.path.join(model, "dit_model_bf16.trt")
+        engine = os.path.join(model, "dit_model_bf16.trt" if backend == "groot" else "act_model_fp32.trt")
 
     if engine != model and not engine.startswith(model + os.sep):
         raise HTTPException(400, "engine_path must be inside model_path")
     return model, engine
+
+
+def _resolve_groot_trt_paths(model_path: str, engine_path: str = ""):
+    return _resolve_trt_paths(model_path, engine_path, "groot")
 
 
 def _trt_manifest_path(engine_path: str) -> str:
@@ -780,7 +788,11 @@ def _trt_status(model_path: str, engine_path: str) -> TrtEngineStatus:
 
     manifest = _read_json_file(_trt_manifest_path(engine_path))
     engine_ready = os.path.exists(engine_path) and os.path.getsize(engine_path) > 0
-    if engine_ready:
+    if engine_ready and manifest.get("status", "ready") == "ready" and not manifest.get("checkpoint_identity"):
+        return TrtEngineStatus(model_path=model_path, engine_path=engine_path, status="unknown",
+                               engine_size_bytes=os.path.getsize(engine_path),
+                               message="Engine needs checkpoint/device verification; press Build", log_tail=log_tail)
+    if engine_ready and manifest.get("status", "ready") == "ready":
         return TrtEngineStatus(
             model_path=model_path,
             engine_path=engine_path,
@@ -902,7 +914,9 @@ def _monitor_trt_build_job(job: _TrtBuildJob, cmd: List[str]) -> None:
         job.status = "ready" if rc == 0 and engine_ready else "failed"
         job.message = message
 
-    manifest = {
+    # Preserve the builder's checkpoint/device identity and numerical gate.
+    manifest = _read_json_file(_trt_manifest_path(job.engine_path))
+    manifest.update({
         "status": job.status,
         "model_path": job.model_path,
         "engine_path": job.engine_path,
@@ -911,7 +925,7 @@ def _monitor_trt_build_job(job: _TrtBuildJob, cmd: List[str]) -> None:
         "updated_at": time.time(),
         "finished_at": job.finished_at,
         "returncode": job.returncode,
-    }
+    })
     if engine_ready:
         manifest["engine_size_bytes"] = os.path.getsize(job.engine_path)
     try:
@@ -927,15 +941,16 @@ def _start_trt_build_job(
     task_instruction: str,
     workspace_mb: Optional[int],
     force: bool,
+    backend: str = "groot",
 ) -> _TrtBuildJob:
     log_path = _trt_log_path(engine_path)
     cmd = [
         "docker",
         "exec",
-        _BACKENDS["groot"]["container"],
+        _BACKENDS[backend]["container"],
         "python3",
         "-m",
-        "runtime.prepare_trt_engine",
+        "runtime.prepare_trt_engine" if backend == "groot" else "lerobot_engine.prepare_trt_engine",
         "--model-path",
         model_path,
         "--engine-path",
@@ -960,13 +975,15 @@ def _start_trt_build_job(
         active = _TRT_BUILD_JOBS.get(engine_path)
         if active and active.status == "building":
             return active
+        if any(job.status == "building" for job in _TRT_BUILD_JOBS.values()):
+            raise HTTPException(409, "Another TensorRT engine is building; wait for it to finish")
         _TRT_BUILD_JOBS[engine_path] = job
 
     thread = threading.Thread(
         target=_monitor_trt_build_job,
         args=(job, cmd),
         daemon=True,
-        name="groot-trt-build",
+        name=f"{backend}-trt-build",
     )
     thread.start()
     return job
@@ -1472,12 +1489,81 @@ async def service_stop(name: str) -> ActionResult:
 # the allowlisted registry image first and the allowlisted compose build second.
 
 
+@app.get("/backends/{name}/inference/instructions")
+async def inference_instructions(name: str, model_path: str):
+    """Read portable language metadata; never load models or connect to the robot."""
+    if name not in {"groot", "lerobot"}:
+        raise HTTPException(400, "Unsupported inference backend")
+    try:
+        return await asyncio.to_thread(
+            _checkpoint_instructions_module.read_checkpoint_instructions, model_path, name
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@app.get("/backends/{name}/inference/options")
+async def inference_options(name: str, model_path: str):
+    """Read the trained action horizon; no model load or robot connection."""
+    if name not in {"groot", "lerobot"}:
+        raise HTTPException(400, "Chunk options support ACT and GR00T")
+    model, _ = _resolve_trt_paths(model_path, backend=name)
+    if not os.path.isfile(os.path.join(model, "config.json")):
+        model = os.path.join(model, "pretrained_model")
+    config = _read_json_file(os.path.join(model, "config.json"))
+    if not config:
+        raise HTTPException(404, "Checkpoint config.json missing or invalid")
+    if name == "lerobot":
+        if config.get("type") != "act":
+            raise HTTPException(400, "Chunk options support ACT checkpoints")
+        horizon = int(config.get("chunk_size", 0))
+        ensemble = config.get("temporal_ensemble_coeff") is not None
+    else:
+        processor = _read_json_file(os.path.join(model, "processor_config.json"))
+        modality = processor.get("processor_kwargs", {}).get("modality_configs", {}).get("new_embodiment", {})
+        horizon = len(modality.get("action", {}).get("delta_indices", []))
+        ensemble = False
+    if horizon < 1:
+        raise HTTPException(400, "Checkpoint has no supported action horizon")
+    return {"model_path": model, "max_chunk_size": horizon,
+            "default_chunk_size": 24 if name == "groot" else 100,
+            "temporal_ensemble": ensemble}
+
+
 @app.get("/backends/groot/trt/status", response_model=TrtEngineStatus)
 async def groot_trt_status(
     model_path: str,
     engine_path: str = "",
 ) -> TrtEngineStatus:
     model, engine = _resolve_groot_trt_paths(model_path, engine_path)
+    return _trt_status(model, engine)
+
+
+@app.get("/backends/lerobot/trt/status", response_model=TrtEngineStatus)
+async def lerobot_trt_status(model_path: str, engine_path: str = ""):
+    model, engine = _resolve_trt_paths(model_path, engine_path, "lerobot")
+    return _trt_status(model, engine)
+
+
+@app.post("/backends/lerobot/trt/build", response_model=TrtEngineStatus)
+async def lerobot_trt_build(request: TrtBuildRequest):
+    model, engine = _resolve_trt_paths(request.model_path, request.engine_path, "lerobot")
+    if not os.path.isdir(model):
+        raise HTTPException(404, f"model_path does not exist: {model}")
+    config = _read_json_file(os.path.join(model, "config.json"))
+    if config.get("type", "act") != "act":
+        raise HTTPException(400, "TensorRT adapter currently supports ACT only on the LeRobot backend")
+    if request.workspace_mb is not None and request.workspace_mb <= 0:
+        raise HTTPException(400, "workspace_mb must be positive")
+    spec = _require_known_backend("lerobot")
+    await asyncio.to_thread(_assert_backend_container_running, "lerobot", spec)
+    current = _trt_status(model, engine)
+    if current.status == "ready" and not request.force:
+        return current
+    await asyncio.to_thread(_start_trt_build_job, model, engine, request.robot_type,
+                            request.task_instruction, request.workspace_mb, request.force, "lerobot")
     return _trt_status(model, engine)
 
 

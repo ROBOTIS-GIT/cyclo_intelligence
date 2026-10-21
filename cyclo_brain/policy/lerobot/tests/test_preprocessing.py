@@ -75,6 +75,23 @@ class Preprocessor(PreprocessingMixin):
 
 
 class PreprocessingTest(unittest.TestCase):
+    def test_act_rejects_state_padding_and_truncation(self):
+        for expected in (1, 3):
+            with self.subTest(expected=expected):
+                preprocessor = Preprocessor([1.0, 2.0], expected=expected)
+                preprocessor._policy.config.type = "act"
+                result = preprocessor._build_observation("task")
+                self.assertIn("ACT state dimension mismatch", result["error"])
+
+    def test_act_keeps_exact_state_and_rejects_nan(self):
+        preprocessor = Preprocessor([1.0, 2.0], expected=2)
+        preprocessor._policy.config.type = "act"
+        np.testing.assert_allclose(
+            preprocessor._build_observation("")[STATE_KEY].numpy(), [[1.0, 2.0]]
+        )
+        preprocessor._robot._positions = [1.0, float("nan")]
+        self.assertIn("non-finite", preprocessor._build_observation("")["error"])
+
     def test_pads_short_state_to_policy_shape(self):
         preprocessor = Preprocessor([1.0, 2.0], expected=4)
 

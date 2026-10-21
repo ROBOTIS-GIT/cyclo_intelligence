@@ -9,7 +9,12 @@
 from __future__ import annotations
 
 from typing import List, Optional
+import json
 import threading
+import time
+from pathlib import Path
+from inference_chunks import act_execution_steps, requested_chunk_size
+from checkpoint_instructions import checkpoint_subtask_choices
 
 from .confirmed_hold import HOLD_CAPABILITY
 
@@ -29,6 +34,10 @@ class ServiceHandler:
         self._response_factory = response_factory
         self._lifecycle_lock = threading.RLock()
         self._fault_latched = threading.Event()
+        self._per_step_actions = False
+        self._subtask_choices = []
+        self._loaded_model_path = ''
+        self._instruction_lock = threading.RLock()
 
     def handle(self, request):
         # A reply confirms the lifecycle operation has settled. A late START
@@ -78,12 +87,34 @@ class ServiceHandler:
         if not request.robot_type:
             return self._make_response(False, "robot_type is required")
 
+        root = Path(request.model_path)
+        if not (root / "config.json").is_file() and (root / "pretrained_model/config.json").is_file():
+            root = root / "pretrained_model"
+        config_path = root / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        subtask_choices = checkpoint_subtask_choices(request.model_path)
+        if subtask_choices and not any(
+            (request.task_instruction or "").strip() == prompt.strip()
+            for choices in subtask_choices for prompt in choices
+        ):
+            raise ValueError("Select a trained subtask instruction before LOAD")
+        chunk_size = requested_chunk_size(getattr(request, "action_chunk_size", 0))
+        per_step_actions = config.get("type") == "act" and act_execution_steps(config, chunk_size) == 1
+        if per_step_actions:
+            contract_path = root / "inference_contract.json"
+            contract = json.loads(contract_path.read_text()) if contract_path.is_file() else {}
+            fps = contract.get("fps")
+            if fps is not None and float(getattr(request, "inference_hz", 0)) != float(fps):
+                raise ValueError(f"This ACT checkpoint requires Inference Hz={fps}")
+
         response = self._requester.load_policy(request)
         if not response.success:
             return self._make_response(False, response.message)
 
         action_keys = list(response.action_keys)
         try:
+            if not action_keys:
+                raise ValueError("Model returned no action keys")
             self._control_loop.configure(
                 robot_type=request.robot_type,
                 task_instruction=request.task_instruction or "",
@@ -98,16 +129,22 @@ class ServiceHandler:
                 initial_pose_sync_duration_s=(
                     float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
                 ),
+                **({"per_step_actions": True} if per_step_actions else {}),
             )
         except Exception:
-            self._control_loop.deconfigure()
-            self._requester.unload_policy()
+            try:
+                self._control_loop.deconfigure()
+            finally:
+                self._requester.unload_policy()
             raise
         self._session.mark_loaded(
             robot_type=request.robot_type,
             task_instruction=request.task_instruction or "",
             action_keys=action_keys,
         )
+        self._per_step_actions = per_step_actions
+        self._subtask_choices = subtask_choices
+        self._loaded_model_path = request.model_path
         return self._make_response(True, response.message or "loaded", action_keys)
 
     def _start_control_loop(self, request):
@@ -125,6 +162,7 @@ class ServiceHandler:
     def _start(self, request):
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
+        self._reset_policy_if_needed()
         instruction = str(getattr(request, "task_instruction", "") or "").strip()
         if instruction:
             self._session.task_instruction = instruction
@@ -149,6 +187,7 @@ class ServiceHandler:
             # LOAD prepares an idle session without a speculative START/STOP.
             # Use the same start/hold checks for its first explicit RESUME.
             return self._start(request)
+        self._reset_policy_if_needed()
         task_instruction = request.task_instruction or self._session.task_instruction
         self._control_loop.set_task_instruction(task_instruction)
         syncing = self._start_control_loop(request)
@@ -171,11 +210,38 @@ class ServiceHandler:
         self._control_loop.deconfigure()
         response = self._requester.unload_policy()
         self._session.mark_unloaded()
+        self._per_step_actions = False
+        self._subtask_choices = []
+        self._loaded_model_path = ''
         if not response.success:
             return self._make_response(False, response.message)
         return self._make_response(True, response.message or "unloaded")
 
+    def _reset_policy_if_needed(self):
+        if self._per_step_actions:
+            if not self._control_loop.pause():
+                raise RuntimeError("Current-pose hold failed before ACT reset")
+            response = self._requester.reset_policy()
+            if not response.success:
+                raise RuntimeError(response.message or "policy reset failed")
+
     def _update_instruction(self, request):
+        # UI and automatic completion detectors use the same existing command.
+        with self._instruction_lock:
+            return self._update_instruction_locked(request)
+
+    def subtask_state(self):
+        """Confirmed state for UI observers of manual or external updates."""
+        with self._instruction_lock:
+            instruction = self._session.task_instruction
+            index = next((i for i, prompts in enumerate(self._subtask_choices)
+                          if instruction.strip() in [p.strip() for p in prompts]), -1)
+            return {"available": bool(self._session.loaded and self._subtask_choices),
+                    "model_path": self._loaded_model_path, "instruction": instruction,
+                    "subtask_index": index, "running": self._session.running,
+                    "paused": self._session.paused, "timestamp": time.time()}
+
+    def _update_instruction_locked(self, request):
         if not self._session.loaded:
             return self._make_response(False, "LOAD first")
         if not self._session.running:
@@ -183,8 +249,22 @@ class ServiceHandler:
         new_instruction = (request.task_instruction or "").strip()
         if not new_instruction:
             return self._make_response(False, "task_instruction must be non-empty")
+        if self._subtask_choices:
+            if self._session.paused:
+                raise RuntimeError("RESUME inference before completing a subtask")
+            current = self._session.task_instruction.strip()
+            if new_instruction == current:
+                return self._make_response(True, "subtask instruction already applied")
+            current_stage = next((i for i, prompts in enumerate(self._subtask_choices)
+                                  if any(current == prompt.strip() for prompt in prompts)), -1)
+            if current_stage < 0 or current_stage + 1 >= len(self._subtask_choices):
+                raise ValueError("No next subtask; stop inference after the final subtask")
+            if not any(new_instruction == prompt.strip() for prompt in self._subtask_choices[current_stage + 1]):
+                raise ValueError("Completion must select the next trained subtask instruction")
+            self._control_loop.transition_subtask(new_instruction)
+        else:
+            self._control_loop.set_task_instruction(new_instruction)
         self._session.task_instruction = new_instruction
-        self._control_loop.set_task_instruction(new_instruction)
         return self._make_response(True, f'instruction updated: "{new_instruction}"')
 
     def _make_response(

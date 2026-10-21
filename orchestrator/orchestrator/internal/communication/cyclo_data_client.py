@@ -112,6 +112,10 @@ class CycloDataClient:
         segment_index: int = 0,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
     ) -> CallResult:
+        # START now includes a bounded live preflight plus recorder setup.
+        # Do not let the forwarder time out while a valid start is still pending.
+        if command in (RecordingCommand.Request.START, RecordingCommand.Request.START_SEGMENT):
+            timeout_sec = max(timeout_sec, 15.0) if timeout_sec > 0 else timeout_sec
         req = RecordingCommand.Request()
         req.command = command
         if task_info is not None:

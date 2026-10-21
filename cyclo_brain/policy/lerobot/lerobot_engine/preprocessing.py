@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from .constants import STATE_KEY as _STATE_KEY
-from .image_preprocessing import prepare_policy_image
+from .image_preprocessing import prepare_policy_image, prepare_letterbox_tensor
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -47,6 +47,12 @@ class PreprocessingMixin:
                 return self._fail(f"Missing camera frame: {cam_name}")
             cam_cfg = self._robot._config.get("cameras", {}).get(cam_name, {})
             try:
+                if getattr(self, "_image_preprocessing_mode", "resize") == "letterbox":
+                    batch[policy_key] = prepare_letterbox_tensor(
+                        img, rotation_deg=cam_cfg.get("rotation_deg", 0),
+                        target_size=self._image_resize[policy_key],
+                    ).to(self._device)
+                    continue
                 img = prepare_policy_image(
                     img,
                     rotation_deg=cam_cfg.get("rotation_deg", 0),
@@ -91,6 +97,13 @@ class PreprocessingMixin:
             )
         except Exception:
             expected = flat_state.size
+        if getattr(self._policy.config, "type", "") == "act":
+            if flat_state.size != expected:
+                return self._fail(
+                    f"ACT state dimension mismatch: got {flat_state.size}, expected {expected}"
+                )
+            if not np.isfinite(flat_state).all():
+                return self._fail("ACT state contains non-finite joint positions")
         if flat_state.size < expected:
             pad = np.zeros(expected - flat_state.size, dtype=np.float32)
             logger.warning(

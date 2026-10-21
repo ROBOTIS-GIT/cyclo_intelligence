@@ -24,6 +24,10 @@ publish_to_robot_from_task_info = inference_mode.publish_to_robot_from_task_info
 
 
 class InferenceModeTests(unittest.TestCase):
+    def test_chunk_change_requires_runtime_reload(self):
+        args = ("/models/policy", "tensorrt_act", "", "async", 100, 15, 0.3)
+        self.assertNotEqual(inference_runtime_signature(*args, action_chunk_size=30),
+                            inference_runtime_signature(*args, action_chunk_size=8))
     def test_defaults_to_simulation(self) -> None:
         self.assertFalse(publish_to_robot_from_task_info(SimpleNamespace()))
 

@@ -181,6 +181,7 @@ class RobotClient:
         enable_preview_publisher: bool = False,
     ):
         section = robot_schema.load_robot_section(robot_type)
+        self._urdf_path = robot_schema.get_urdf_path(section)
         # Phase 4: yaml is VLA-semantic (observation.images / state +
         # action.<modality>). _build_runtime_config translates that into
         # the cameras / joint_groups / sensors shape RobotClient and the
@@ -201,10 +202,12 @@ class RobotClient:
         self._lock = threading.Lock()
         self._images: dict[str, np.ndarray] = {}
         self._image_timestamps: dict[str, float] = {}
+        self._image_received_monotonic: dict[str, float] = {}
         self._joint_positions: dict[str, np.ndarray] = {}
         self._joint_velocities: dict[str, np.ndarray] = {}
         self._joint_efforts: dict[str, np.ndarray] = {}
         self._joint_timestamps: dict[str, float] = {}
+        self._joint_received_monotonic: dict[str, float] = {}
         self._joint_positions_by_name: dict[str, float] = {}
         self._joint_position_timestamps_by_name: dict[str, float] = {}
         self._sensors: dict[str, dict] = {}
@@ -365,6 +368,7 @@ class RobotClient:
 
     def _update_image(self, cam_name: str, msg):
         """CompressedImage -> BGR numpy array."""
+        received_monotonic = time.monotonic()
         try:
             data = msg.data
             if isinstance(data, (list, tuple)):
@@ -375,6 +379,7 @@ class RobotClient:
                 with self._lock:
                     self._images[cam_name] = img
                     self._image_timestamps[cam_name] = time.time()
+                    self._image_received_monotonic[cam_name] = received_monotonic
         except Exception as e:
             logger.warning(f"Failed to decode image from {cam_name}: {e}")
 
@@ -388,16 +393,18 @@ class RobotClient:
         like ``get_joint_positions("follower_arm_left")`` see the same
         per-modality surface as before the upper-body collapse.
         """
+        received_monotonic = time.monotonic()
         try:
             msg_names = list(msg.name) if hasattr(msg, 'name') else []
             position = list(msg.position) if hasattr(msg.position, '__iter__') else []
             velocity = list(msg.velocity) if hasattr(msg.velocity, '__iter__') else []
             effort = list(msg.effort) if hasattr(msg.effort, '__iter__') else []
             now = time.time()
-            received_monotonic = time.monotonic()
             with self._lock:
+                received_by_group = self.__dict__.setdefault('_joint_received_monotonic', {})
                 if position:
                     self._joint_positions[group_name] = np.array(position, dtype=np.float32)
+                    received_by_group[group_name] = received_monotonic
                     if msg_names:
                         self._joint_positions_by_name.update(
                             {
@@ -439,6 +446,7 @@ class RobotClient:
                             self._joint_positions[child] = np.array(
                                 [position[i] for i in indices], dtype=np.float32
                             )
+                            received_by_group[child] = received_monotonic
                         if velocity and len(velocity) == len(msg_names):
                             self._joint_velocities[child] = np.array(
                                 [velocity[i] for i in indices], dtype=np.float32
@@ -610,6 +618,11 @@ class RobotClient:
     def action_keys(self) -> list[str]:
         return list(self._action_keys)
 
+    @property
+    def urdf_path(self) -> str:
+        """Robot model resolved relative to the configured robot YAML."""
+        return self._urdf_path
+
     def publish_action(self, action: np.ndarray, action_keys: Optional[list[str]] = None) -> None:
         """Publish one flat action vector to the robot command topics.
 
@@ -644,6 +657,74 @@ class RobotClient:
                     self._command_joint_names.get(publisher_key, []),
                     segment,
                 )
+
+    def publish_action_trajectory(
+        self,
+        positions: np.ndarray,
+        velocities: np.ndarray,
+        accelerations: np.ndarray,
+        times_from_start_s: np.ndarray,
+        action_keys: Optional[list[str]] = None,
+    ) -> None:
+        """Publish a RAIL trajectory with position, velocity and acceleration.
+
+        Each matrix has shape (points, selected action dimensions). Offsets
+        are relative to controller receipt, as indicated by a zero ROS header.
+        All groups and messages are validated before the first publish. This
+        preserves derivatives for controllers using quintic interpolation;
+        gripper derivatives and transition policy remain the caller's choice.
+        """
+        matrices = [np.array(values, dtype=np.float64, copy=True)
+                    for values in (positions, velocities, accelerations)]
+        positions, velocities, accelerations = matrices
+        if (positions.ndim != 2 or not all(positions.shape)
+                or any(values.shape != positions.shape for values in matrices)
+                or any(not np.isfinite(values).all() for values in matrices)):
+            raise ValueError('RAIL trajectory requires matching finite nonempty matrices')
+        offsets = np.asarray(times_from_start_s, dtype=np.float64)
+        if (offsets.ndim != 1 or len(offsets) != len(positions)
+                or not np.isfinite(offsets).all() or offsets[0] < 0
+                or np.any(np.diff(offsets) <= 0) or offsets[-1] >= 2**31):
+            raise ValueError('RAIL trajectory offsets must be finite, nonnegative and strictly increasing')
+        durations_ns = [round(float(offset)*1_000_000_000) for offset in offsets]
+        if (durations_ns[-1] >= 2**31*1_000_000_000
+                or any(right <= left for left, right in zip(durations_ns, durations_ns[1:]))):
+            raise ValueError('RAIL trajectory offsets must be distinct valid ROS durations')
+        keys = list(action_keys) if action_keys is not None else list(self._action_keys)
+        if not keys:
+            raise ValueError('RAIL trajectory requires at least one action group')
+        segments = self._build_action_segments(positions[0], keys)
+        if any(msg_type != 'trajectory_msgs/msg/JointTrajectory'
+               for _, _, _, msg_type in segments):
+            raise ValueError('RAIL trajectory requires JointTrajectory action groups')
+
+        Header = get_message_class('std_msgs/msg/Header')
+        Time = get_message_class('builtin_interfaces/msg/Time')
+        Duration = get_message_class('builtin_interfaces/msg/Duration')
+        JointTrajectoryPoint = get_message_class('trajectory_msgs/msg/JointTrajectoryPoint')
+        planned = []
+        offset = 0
+        for publisher, joint_names, _, _ in segments:
+            width = len(joint_names)
+            columns = slice(offset, offset+width)
+            points = []
+            for index, duration_ns in enumerate(durations_ns):
+                sec, nanosec = divmod(duration_ns, 1_000_000_000)
+                points.append(JointTrajectoryPoint(
+                    positions=positions[index, columns].copy(),
+                    velocities=velocities[index, columns].copy(),
+                    accelerations=accelerations[index, columns].copy(),
+                    effort=np.zeros(0, dtype=np.float64),
+                    time_from_start=Duration(sec=sec, nanosec=nanosec),
+                ))
+            planned.append((publisher, {
+                'header': Header(stamp=Time(sec=0, nanosec=0), frame_id=''),
+                'joint_names': list(joint_names),
+                'points': points,
+            }))
+            offset += width
+        for publisher, message in planned:
+            publisher.publish(**message)
 
     def publish_idle_action(self, action_keys: Optional[list[str]] = None) -> None:
         """Publish safe idle commands for velocity-like action topics.
@@ -734,6 +815,16 @@ class RobotClient:
                           == 'geometry_msgs/msg/Twist' for key in keys),
         }
 
+
+    def get_action_positions(self, action_keys):
+        """Fresh named joint feedback in action order, for limiter initialization."""
+        segments = self._build_current_position_segments(action_keys)
+        if not segments:
+            raise RuntimeError('Current joint positions unavailable')
+        positions = np.concatenate([values for _, _, values in segments])
+        if not np.isfinite(positions).all():
+            raise ValueError('Current joint positions contain nonfinite values')
+        return positions
 
     def current_hold_feedback(self):
         """Snapshot named joint and base feedback for confirmed policy holds."""
@@ -991,6 +1082,62 @@ class RobotClient:
     # ------------------------------------------------------------------ #
     # Observation
     # ------------------------------------------------------------------ #
+
+    def get_observation_snapshot(
+        self,
+        format: str = 'rgb',
+        camera_names: Optional[list[str]] = None,
+        joint_groups: Optional[list[str]] = None,
+    ) -> dict:
+        """Atomically copy selected sensor values and local receive timestamps.
+
+        The reference time is the oldest selected joint-position receipt, or
+        the oldest image receipt when no joints are selected. These timestamps
+        describe local callback receipt, not hardware acquisition or exact
+        synchronization. Missing data or receive timestamps raise RuntimeError.
+        Color conversion runs after copying, outside the callback lock.
+        """
+        if format not in ('rgb', 'bgr'):
+            raise ValueError('Observation image format must be rgb or bgr')
+        with self._lock:
+            cameras = list(self._images) if camera_names is None else list(camera_names)
+            groups = list(self._joint_positions) if joint_groups is None else list(joint_groups)
+            images = {}
+            joints = {}
+            received = {}
+            for names, source, timestamps, result, label in (
+                (cameras, self._images, self._image_received_monotonic, images, 'image'),
+                (groups, self._joint_positions, self._joint_received_monotonic, joints, 'joint'),
+            ):
+                for name in names:
+                    if name not in source or name not in timestamps:
+                        raise RuntimeError(f'Observation {label}:{name} or receive timestamp unavailable')
+                    result[name] = source[name].copy()
+                    received[f'{label}:{name}'] = timestamps[name]
+            read_monotonic = time.monotonic()
+        if not received:
+            raise RuntimeError('Observation snapshot requires at least one received sensor')
+        try:
+            valid_timestamps = (math.isfinite(read_monotonic)
+                                and all(math.isfinite(stamp) and 0 <= stamp <= read_monotonic
+                                        for stamp in received.values()))
+        except (TypeError, ValueError):
+            valid_timestamps = False
+        if not valid_timestamps:
+            raise RuntimeError('Observation receive timestamps are invalid')
+        reference = min(received[f'joint:{name}'] for name in groups) if groups else min(received.values())
+        timing = {
+            'sensor_snapshot_monotonic_s': reference,
+            'snapshot_read_monotonic_s': read_monotonic,
+            'sensor_age_s': {name: read_monotonic-stamp for name, stamp in received.items()},
+            'sensor_skew_s': max(received.values())-min(received.values()),
+            'timestamp_source': 'local_monotonic_receive',
+            'sensor_received_monotonic_s': received,
+        }
+        if format == 'rgb':
+            images = {name: cv2.cvtColor(value, cv2.COLOR_BGR2RGB)
+                      for name, value in images.items()}
+        return {'images': images, 'joints': joints, 'timing': timing}
 
     def get_observation(
         self,

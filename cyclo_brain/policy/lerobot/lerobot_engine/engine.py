@@ -53,6 +53,7 @@ import gc
 import logging
 import os
 import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -69,6 +70,7 @@ if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
 # Import order: engine ABC first (validates /policy_runtime is on PYTHONPATH),
 # then heavy ML deps.
 from engine import InferenceEngine  # noqa: E402
+from inference_chunks import effective_chunk_size, requested_chunk_size  # noqa: E402
 
 import torch  # noqa: E402
 
@@ -106,6 +108,8 @@ class LeRobotEngine(
         self._robot: Optional[RobotClient] = None
         self._device: Optional[torch.device] = None
         self._loaded_model_path: Optional[str] = None
+        self._loaded_acceleration_mode = "pytorch"
+        self._loaded_acceleration_engine_path = ""
 
         # Resolved after load: which cameras / joint groups feed which
         # policy keys. ``_cameras`` maps RobotClient camera name → policy
@@ -126,6 +130,9 @@ class LeRobotEngine(
         # expected size. If config doesn't expose a target shape for a
         # camera, we leave that image at native resolution.
         self._image_resize: Dict[str, tuple[int, int]] = {}
+        self._image_preprocessing_mode = "resize"
+        self._prediction_lock = threading.Lock()
+        self._act_previous_num_threads = None
 
     # ------------------------------------------------------------------ #
     # InferenceEngine API
@@ -149,17 +156,22 @@ class LeRobotEngine(
             # a training-output root containing ``training_state/``
             # alongside (lerobot-train layout).
             model_path = self._resolve_model_dir(model_path)
+            acceleration_mode, acceleration_engine_path = self._resolve_policy_acceleration(model_path, request)
 
             # Skip weights load when a second LOAD arrives before UNLOAD and
             # we're just reattaching the robot client for the same model.
             cache_hit = (
                 self._policy is not None
                 and self._loaded_model_path == model_path
+                and self._loaded_acceleration_mode == acceleration_mode
+                and self._loaded_acceleration_engine_path == acceleration_engine_path
             )
             if cache_hit:
                 logger.info("Reusing cached policy: %s", model_path)
                 self._teardown_robot()
             else:
+                if self._policy is not None:
+                    self.cleanup()
                 logger.info("Loading LeRobot policy from: %s", model_path)
                 self._device = torch.device(
                     "cuda" if torch.cuda.is_available() else "cpu"
@@ -172,10 +184,26 @@ class LeRobotEngine(
                 self._postprocessor = postprocessor
                 self._loaded_model_path = model_path
                 self._apply_policy_optimization(model_path, request)
+                self._loaded_acceleration_mode = acceleration_mode
+                self._loaded_acceleration_engine_path = acceleration_engine_path
 
+            self._runtime_chunk_size = None
+            if getattr(self._policy.config, "type", "") == "act":
+                selected = requested_chunk_size(getattr(request, "action_chunk_size", 0))
+                if selected:
+                    self._runtime_chunk_size = effective_chunk_size(selected, self._policy.config.chunk_size)
+                if self._policy.config.temporal_ensemble_coeff is not None:
+                    # Only the official ensemble's horizon changes. The neural
+                    # network and config.chunk_size retain the trained shapes.
+                    old = self._policy.temporal_ensembler
+                    self._policy.temporal_ensembler = type(old)(
+                        self._policy.config.temporal_ensemble_coeff,
+                        self._runtime_chunk_size or self._policy.config.chunk_size,
+                    )
             self._init_robot(robot_type)
             self._loaded_robot_type = robot_type
             self._image_resize = self._infer_image_resize(self._policy)
+            self.reset_policy()
 
             return {
                 "success": True,
@@ -199,13 +227,19 @@ class LeRobotEngine(
             if "success" in obs:
                 return obs
 
-            with torch.inference_mode():
+            with self._prediction_lock, torch.inference_mode():
                 preprocessed = self._preprocessor(obs)
                 action = self._predict_chunk(preprocessed)
                 action = self._postprocessor(action)
 
             chunk = self._to_numpy_chunk(action)
             T, D = chunk.shape
+            if getattr(self._policy.config, "type", "") == "act":
+                expected = int(self._policy.config.output_features["action"].shape[0])
+                if T < 1 or D != expected or not np.isfinite(chunk).all():
+                    return self._fail(
+                        f"Invalid ACT action chunk: shape={chunk.shape}, expected dimension={expected}"
+                    )
             logger.info("Action chunk: T=%d, D=%d", T, D)
             return {
                 "success": True,
@@ -220,6 +254,12 @@ class LeRobotEngine(
         except Exception as e:
             logger.error("get_action_chunk failed: %s", e, exc_info=True)
             return self._fail(str(e))
+
+    def reset_policy(self) -> None:
+        """Discard ACT ensemble/queue history between execution sessions."""
+        with self._prediction_lock:
+            if self._policy is not None and getattr(self._policy.config, "type", "") == "act":
+                self._policy.reset()
 
     def cleanup(self) -> None:
         """Release robot and policy resources for a true UNLOAD."""
@@ -237,8 +277,15 @@ class LeRobotEngine(
         self._postprocessor = None
         self._device = None
         self._loaded_model_path = None
+        self._loaded_acceleration_mode = "pytorch"
+        self._loaded_acceleration_engine_path = ""
         self._loaded_robot_type = None
         self._image_resize = {}
+        self._image_preprocessing_mode = "resize"
+
+        if self._act_previous_num_threads is not None:
+            torch.set_num_threads(self._act_previous_num_threads)
+            self._act_previous_num_threads = None
 
         self._cameras = {}
         self._state_modalities = []

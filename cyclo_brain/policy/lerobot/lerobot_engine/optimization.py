@@ -4,16 +4,12 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""LeRobot optional policy optimization hook.
-
-LeRobot currently runs through its native PyTorch policy path. This mixin exists
-so optional runtime optimization (TensorRT, ONNX Runtime, torch.compile, etc.)
-has a clear class boundary without changing the engine lifecycle.
-"""
+"""LeRobot policy optimization: optional ACT TensorRT and FastWAM offload."""
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -25,11 +21,37 @@ logger = logging.getLogger("lerobot_engine")
 class OptimizationMixin:
     """Optional policy optimization extension point."""
 
+    @staticmethod
+    def _resolve_policy_acceleration(model_path: str, request: Any):
+        mode = str(getattr(request, "acceleration_mode", "") or "pytorch").strip().lower()
+        if mode in {"pytorch", "eager", "none", "off", "false"}:
+            return "pytorch", ""
+        if mode not in {"trt", "tensorrt", "tensorrt_act"}:
+            raise RuntimeError(f"Unsupported LeRobot acceleration_mode={mode!r}; ACT uses tensorrt_act")
+        path = str(getattr(request, "acceleration_engine_path", "") or "act_model_fp32.trt").strip()
+        if not os.path.isabs(path):
+            path = os.path.join(model_path, path)
+        return "tensorrt_act", os.path.normpath(path)
+
     def _apply_policy_optimization(self, model_path: str, request: Any) -> None:
         """Attach optional optimizers after policy load.
 
-        No-op except for FastWAM, which needs CPU offload to fit on a 24GB GPU.
+        ACT bounds CPU thread contention; FastWAM offloads its text encoder.
         """
+        mode, engine_path = self._resolve_policy_acceleration(model_path, request)
+        policy_type = getattr(getattr(self._policy, "config", None), "type", "")
+        if mode != "pytorch" and policy_type != "act":
+            raise RuntimeError(f"TensorRT adapter unavailable for {policy_type!r}; no PyTorch fallback was applied")
+        if policy_type == "act":
+            threads = max(1, int(os.environ.get("CYCLO_ACT_CPU_THREADS", "2")))
+            self._act_previous_num_threads = torch.get_num_threads()
+            torch.set_num_threads(threads)
+            logger.info("ACT CPU threads=%d (previously %d)", threads, self._act_previous_num_threads)
+            if mode == "tensorrt_act":
+                from .tensorrt_act import enable_tensorrt
+                enable_tensorrt(self._policy, model_path, engine_path)
+                logger.info("ACT neural network accelerated with TensorRT: %s", engine_path)
+            return
         if getattr(getattr(self._policy, "config", None), "type", "") == "fastwam":
             self._offload_fastwam(request)
             return

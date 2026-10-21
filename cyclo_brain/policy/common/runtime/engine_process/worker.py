@@ -31,6 +31,7 @@ from .protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
+    CMD_RESET_POLICY,
     ENGINE_COMMAND_REQUEST_DEF,
     ENGINE_COMMAND_RESPONSE_DEF,
     EngineCommandRequest,
@@ -82,6 +83,12 @@ class EngineWorker:
             else request_from_message(request)
         )
         try:
+            if req.command == CMD_RESET_POLICY:
+                reset = getattr(self._engine, "reset_policy", None)
+                if reset is None:
+                    raise RuntimeError("Engine does not support policy reset")
+                reset()
+                return EngineCommandResponse(success=True, seq_id=req.seq_id, message="reset")
             if req.command == CMD_LOAD_POLICY:
                 return self._load_policy(req)
             if req.command == CMD_GET_ACTION:

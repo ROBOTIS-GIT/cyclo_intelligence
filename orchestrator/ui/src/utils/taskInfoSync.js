@@ -15,6 +15,7 @@
 // Author: Seongwoo Kim
 
 import PageType from '../constants/pageType';
+import { defaultInferenceChunkSize } from './inferenceChunks';
 
 const stringArray = (items) => (
   Array.isArray(items) ? items.map((item) => String(item ?? '')) : []
@@ -60,6 +61,8 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
   controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
   inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+  actionChunkSize: editableNumberOrDefault(taskInfo.actionChunkSize,
+    defaultInferenceChunkSize(taskInfo.serviceType || 'lerobot', taskInfo.policyType || 'act')),
   chunkAlignWindowS: editableNumberOrDefault(
     taskInfo.chunkAlignWindowS ?? 0.3,
     0.3
@@ -104,6 +107,7 @@ export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
   userId: taskInfo.user_id || '',
   controlHz: taskInfo.control_hz || 100,
   inferenceHz: taskInfo.inference_hz || 15,
+  actionChunkSize: taskInfo.action_chunk_size || defaultInferenceChunkSize(taskInfo.service_type || 'lerobot', 'act'),
   chunkAlignWindowS: taskInfo.chunk_align_window_s || 0.3,
   includeRobotisLicense: Boolean(taskInfo.include_robotis_license),
   warmupTime: taskInfo.warmup_time_s || 0,

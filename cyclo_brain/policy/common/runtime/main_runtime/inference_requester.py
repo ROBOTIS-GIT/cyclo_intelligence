@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any
 
 from engine_process.protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
+    CMD_RESET_POLICY,
     EngineCommandRequest,
     EngineCommandResponse,
     response_from_message,
@@ -58,6 +60,7 @@ class InferenceRequester:
             acceleration_engine_path=str(
                 getattr(request, "acceleration_engine_path", "") or ""
             ),
+            action_chunk_size=getattr(request, "action_chunk_size", 0),
         )
         return self._call(
             engine_request,
@@ -96,6 +99,17 @@ class InferenceRequester:
         return self._call(
             request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
+        )
+
+    def reset_policy(self) -> EngineCommandResponse:
+        deadline = time.monotonic() + self._get_action_timeout_s
+        while self.has_pending_get_action():
+            if time.monotonic() >= deadline:
+                return EngineCommandResponse(success=False, message="Wait for pending inference before reset")
+            time.sleep(0.01)
+        return self._call(
+            EngineCommandRequest(command=CMD_RESET_POLICY, seq_id=self._next_seq_id()),
+            self._get_action_timeout_s,
         )
 
     def _next_seq_id(self) -> int:

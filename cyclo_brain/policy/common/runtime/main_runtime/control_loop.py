@@ -37,6 +37,8 @@ from robot_client import RobotClient  # noqa: E402
 from .confirmed_hold import hold_current_pose
 from .latency_trace import AsyncLatencyTrace, BufferedActionTrace
 from .rail_execution import RailExecution
+from .rail_kinematics import RailKinematics
+from .latest_preview import LatestPreview
 from .rail_trajectory import validate_rail_keys
 
 
@@ -90,10 +92,16 @@ class ControlLoop:
         max_refill_latency_s: Optional[float] = 2.0,
         action_request_mode: str = ACTION_REQUEST_MODE_ASYNC,
         trace_path: Optional[str] = None,
+        rail_interpolation_hz: Optional[float] = None,
     ) -> None:
         self._requester = requester
         self._default_inference_hz = positive_finite_or_default(inference_hz, 15.0)
         self._default_control_hz = positive_finite_or_default(control_hz, 100.0)
+        if rail_interpolation_hz is not None:
+            rail_interpolation_hz = float(rail_interpolation_hz)
+            if not math.isfinite(rail_interpolation_hz) or rail_interpolation_hz <= 0:
+                raise ValueError('VLA-RAIL interpolation frequency must be positive and finite')
+        self._rail_interpolation_hz = rail_interpolation_hz
         self._default_chunk_align_window_s = positive_finite_or_default(
             chunk_align_window_s, 0.3
         )
@@ -125,6 +133,8 @@ class ControlLoop:
         self._task_instruction = ""
         self._action_keys: list[str] = []
         self._publish_to_robot = False
+        self._per_step_actions = False
+        self._reset_policy_before_request = False
         self._running = False
         self._initial_pose_sync_enabled = False
         self._initial_pose_sync_duration_s = 5.0
@@ -133,6 +143,7 @@ class ControlLoop:
         self._initial_pose_sync_deadline: Optional[float] = None
         self._initial_pose_sync_hold_pending = False
         self._generation = 0
+        self._subtask_transition_pending = False
         self._shutdown = threading.Event()
         self._request_thread: Optional[threading.Thread] = None
         self._thread: Optional[threading.Thread] = None
@@ -140,6 +151,7 @@ class ControlLoop:
         self._buffer_trace = BufferedActionTrace(self._trace)
         self._trace_request_count = 0
         self._rail = None
+        self._preview = LatestPreview()
 
     def configure(
         self,
@@ -154,7 +166,10 @@ class ControlLoop:
         chunk_align_window_s: Optional[float] = None,
         initial_pose_sync: bool = False,
         initial_pose_sync_duration_s: float = 5.0,
+        per_step_actions: bool = False,
     ) -> None:
+        if action_keys is not None and not action_keys:
+            raise ValueError("Model returned no action keys")
         duration_s = float(initial_pose_sync_duration_s)
         if not math.isfinite(duration_s) or not 1.0 <= duration_s <= 60.0:
             raise ValueError(
@@ -183,7 +198,8 @@ class ControlLoop:
                 if self._target_chunk_size is not None:
                     raise ValueError("VLA-RAIL requires the original policy horizon")
                 self._rail = RailExecution(
-                    self._requester, self._lock, self._trace, self._inference_hz
+                    self._requester, self._lock, self._trace, self._inference_hz,
+                    interpolation_hz=self._rail_interpolation_hz
                 )
             self._robot = RobotClient(
                 robot_type,
@@ -196,18 +212,30 @@ class ControlLoop:
                 chunk_align_window_s=self._chunk_align_window_s,
                 # Async executes the unmodified model sequence at the policy rate.
                 # Legacy smoothing options apply only to the sync path.
-                postprocess=self._postprocess_actions if self._action_request_mode == ACTION_REQUEST_MODE_SYNC else False,
+                postprocess=self._postprocess_actions if not per_step_actions and self._action_request_mode == ACTION_REQUEST_MODE_SYNC else False,
                 target_chunk_size=self._target_chunk_size if self._action_request_mode == ACTION_REQUEST_MODE_SYNC else None,
                 alignment_mode=self._alignment_mode if self._action_request_mode == ACTION_REQUEST_MODE_SYNC else "none",
             )
             self._task_instruction = task_instruction or ""
-            self._action_keys = list(action_keys or self._robot.action_keys)
+            self._per_step_actions = bool(per_step_actions)
+            self._reset_policy_before_request = False
+            self._action_keys = list(self._robot.action_keys if action_keys is None else action_keys)
             if self._rail:
                 try:
                     validate_rail_keys(self._action_keys)
-                except ValueError:
+                    kinematics = RailKinematics.from_urdf(self._robot.urdf_path, self._action_keys)
+                    self._rail.tcp_positions = kinematics.tcp_positions
+                    self._trace.emit('rail_kinematics_configured',
+                                     urdf_path=self._robot.urdf_path,
+                                     urdf_sha256=kinematics.urdf_sha256,
+                                     tcp_links=list(kinematics.tcp_links),
+                                     frame=kinematics.frame,
+                                     fixed_lift_position=kinematics.fixed_lift_position,
+                                     action_keys=self._action_keys)
+                except (ValueError, OSError):
                     self._robot.close()
                     self._robot = None
+                    self._rail = None
                     raise
             self._publish_to_robot = bool(publish_to_robot)
             self._initial_pose_sync_enabled = bool(initial_pose_sync)
@@ -218,12 +246,13 @@ class ControlLoop:
             self._initial_pose_sync_hold_pending = False
             self._reset_request_latency_locked()
             self._generation += 1
+            self._preview.reset()
             if self._rail:
                 self._rail.reset(self._inference_hz)
             config_message = (
                 "configured RobotClient command path for %s "
                 "(publish_to_robot=%s action_request_mode=%s vla_rail=%s "
-                "control_hz=%g inference_hz=%g chunk_align_window_s=%g "
+                "control_hz=%g inference_hz=%g chunk_align_window_s=%g output_hz=%g "
                 "initial_pose_sync=%s initial_pose_sync_duration_s=%g)"
                 % (
                     robot_type,
@@ -233,6 +262,7 @@ class ControlLoop:
                     self._control_hz,
                     self._inference_hz,
                     self._chunk_align_window_s,
+                    self._rail.output_hz if self._rail else self._processor.output_hz,
                     self._initial_pose_sync_enabled,
                     self._initial_pose_sync_duration_s,
                 )
@@ -242,10 +272,13 @@ class ControlLoop:
 
     def deconfigure(self) -> None:
         with self._lock:
+            self._subtask_transition_pending = False
             self._running = False
             self._task_instruction = ""
             self._action_keys = []
             self._publish_to_robot = False
+            self._per_step_actions = False
+            self._reset_policy_before_request = False
             self._action_request_mode = self._default_action_request_mode
             self._inference_hz = self._default_inference_hz
             self._control_hz = self._default_control_hz
@@ -258,6 +291,7 @@ class ControlLoop:
             self._initial_pose_sync_hold_pending = False
             self._processor = None
             self._generation += 1
+            self._preview.reset()
             if self._rail:
                 self._rail.reset(self._inference_hz)
             if self._robot is not None:
@@ -269,6 +303,8 @@ class ControlLoop:
               initial_pose_sync: Optional[bool] = None,
               initial_pose_sync_duration_s: float = 5.0) -> bool:
         with self._lock:
+            if self._subtask_transition_pending:
+                raise RuntimeError("subtask hold is still pending - retry instruction update or STOP")
             if self._initial_pose_sync_hold_pending:
                 raise RuntimeError(
                     "initial pose sync hold is still pending - STOP again first"
@@ -286,8 +322,13 @@ class ControlLoop:
                 self._initial_pose_sync_enabled
                 and self._publish_to_robot
                 and not self._initial_pose_sync_completed
+                and self._rail is None
             )
             if not should_sync:
+                if self._rail:
+                    # RAIL starts from fresh feedback before constructing its first trajectory.
+                    # A separate one-point pose-sync command would bypass it.
+                    self._initial_pose_sync_completed = True
                 self._running = True
                 return False
             if self._robot is None or self._processor is None:
@@ -383,11 +424,13 @@ class ControlLoop:
                 robot = self._robot
                 action_keys = list(self._action_keys)
             self._running = False
+            subtask_hold_pending = self._subtask_transition_pending
             if self._processor is not None:
                 self._processor.clear()
                 self._buffer_trace.reset(time.monotonic())
             self._initial_pose_sync_deadline = None
             self._generation += 1
+            self._preview.reset()
             if self._rail:
                 self._rail.reset(self._inference_hz)
             if should_hold:
@@ -411,6 +454,10 @@ class ControlLoop:
                     return False
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_hold_pending = False
+                self._subtask_transition_pending = False
+        elif subtask_hold_pending:
+            with self._lock:
+                self._subtask_transition_pending = False
         return True
 
     def stop(self) -> bool:
@@ -421,6 +468,7 @@ class ControlLoop:
             return (
                 self._initial_pose_sync_in_progress
                 or self._initial_pose_sync_hold_pending
+                or self._subtask_transition_pending
             )
 
     def set_publish_to_robot(self, publish_to_robot: bool) -> None:
@@ -435,6 +483,7 @@ class ControlLoop:
             self._processor.clear()
             self._buffer_trace.reset(time.monotonic())
         self._generation += 1
+        self._preview.reset()
         if self._rail:
             self._rail.reset(self._inference_hz)
 
@@ -443,8 +492,38 @@ class ControlLoop:
             updated = task_instruction or ""
             if self._rail and updated != self._task_instruction:
                 self._generation += 1
+                self._preview.reset()
                 self._rail.reset(self._inference_hz)
             self._task_instruction = updated
+
+    def transition_subtask(self, task_instruction: str) -> None:
+        """Atomic boundary shared by manual and detector-issued updates.
+
+        This lock excludes command publishing and response buffering. The
+        generation invalidates requests already running in Engine: computation
+        may finish, but its old-stage actions can never be published.
+        """
+        with self._hold_lock, self._lock:
+            if not self._running or self._robot is None or self._processor is None:
+                raise RuntimeError("START or RESUME inference before completing a subtask")
+            if self._initial_pose_sync_in_progress or self._initial_pose_sync_hold_pending:
+                raise RuntimeError("Wait for initial pose synchronization before completing a subtask")
+            self._subtask_transition_pending = True
+            self._generation += 1
+            self._preview.reset()
+            self._processor.clear()
+            self._buffer_trace.reset(time.monotonic())
+            if self._rail:
+                self._rail.reset(self._inference_hz)
+            self._reset_request_latency_locked()
+            if self._publish_to_robot:
+                try:
+                    hold_current_pose(self._robot, self._action_keys)
+                except Exception as error:
+                    raise RuntimeError("Subtask hold failed; retry completion or STOP: " + str(error)) from error
+            self._task_instruction = task_instruction
+            self._subtask_transition_pending = False
+            logger.info("subtask changed; pending actions and old responses discarded")
 
     def run_background(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -468,12 +547,15 @@ class ControlLoop:
         self._shutdown.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        self._preview.close()
         self.deconfigure()
         self._trace.close()
 
     def tick(self) -> None:
+        rail_preview = None
         with self._lock:
-            if not self._running or self._robot is None or self._processor is None:
+            if (not self._running or self._robot is None or self._processor is None
+                    or self._subtask_transition_pending):
                 return
             robot = self._robot
             processor = self._processor
@@ -500,6 +582,7 @@ class ControlLoop:
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_completed = True
                 self._initial_pose_sync_deadline = None
+                self._reset_policy_before_request = getattr(self, "_per_step_actions", False)
                 logger.info(
                     "initial pose sync complete; requesting a fresh action chunk"
                 )
@@ -507,20 +590,58 @@ class ControlLoop:
             executor = self._rail
             if executor:
                 action_sample_time = time.monotonic()
-                action = executor.tick(action_sample_time, task_instruction, action_keys, generation)
+                try:
+                    initial = None
+                    if executor.pending is not None:
+                        if executor.output_guard.positions is None:
+                            initial = robot.get_action_positions(action_keys)
+                        else:
+                            # Observe tracking at handoff without resetting the
+                            # command boundary to delayed physical feedback.
+                            try:
+                                initial = robot.get_action_positions(action_keys)
+                            except Exception as exc:
+                                self._trace.emit('rail_tracking_unavailable', generation=generation,
+                                                 error=str(exc))
+                    action = executor.tick(action_sample_time, task_instruction, action_keys, generation,
+                                           enforce_envelope=False, initial_positions=initial)
+                    if action is not None:
+                        # Planning can take part of a control interval. Sample
+                        # again for the actual command, after the planning work.
+                        action_sample_time = time.monotonic()
+                        action = executor.trajectory.action(action_sample_time, enforce_envelope=False)
+                        if initial is None and executor.output_guard.positions is None:
+                            initial = robot.get_action_positions(action_keys)
+                        action = executor.prepare_action(action, action_sample_time, generation,
+                                                       initial_positions=initial)
+                except Exception as exc:
+                    # Nonfinite targets, stale initialization or command stalls
+                    # must never pass the output checks into robot commands.
+                    self._running = False
+                    self._initial_pose_sync_hold_pending = True
+                    self._trace.emit('rail_output_rejected', generation=generation, error=str(exc))
+                    logger.error('VLA-RAIL output rejected; stopping: %s', exc)
+                    threading.Thread(target=self.pause, kwargs={'expected_generation': generation}, daemon=True).start()
+                    return
             else:
                 action = processor.pop_action()
                 self._buffer_trace.popped(action is not None, time.monotonic(), generation)
             if action is not None:
                 preview = getattr(robot, "publish_action_preview", None)
-                if callable(preview):
+                if executor:
+                    rail_preview = (preview, action.copy(), action_keys)
+                elif callable(preview):
                     try:
                         preview(action, action_keys)
                     except Exception as e:
                         logger.warning("failed to publish action preview: %s", e)
                 if publish_to_robot:
                     try:
-                        robot.publish_action(action, action_keys)
+                        if executor:
+                            positions, velocities, accelerations, offsets = executor.command_window(action_sample_time, action)
+                            robot.publish_action_trajectory(positions, velocities, accelerations, offsets, action_keys)
+                        else:
+                            robot.publish_action(action, action_keys)
                         if executor:
                             executor.record_command(action_sample_time, generation,
                                                        published_at=time.monotonic(), action=action)
@@ -544,13 +665,46 @@ class ControlLoop:
 
             should_request = not executor and self._should_request_actions(processor)
 
+            # One worker keeps only the latest preview. Slow UI serialization
+            # cannot delay the next hardware command or accumulate old poses.
+            if rail_preview is not None:
+                preview, preview_action, preview_keys = rail_preview
+                if callable(preview):
+                    self._preview.submit(preview, preview_action, preview_keys)
+
         if should_request:
+            if getattr(self, "_per_step_actions", False):
+                # ACT select_action is an observation -> single-action loop.
+                # Publish its result immediately, rather than quantizing a
+                # worker completion to the next 15 Hz chunk-buffer tick.
+                self._request_and_buffer(task_instruction, generation, ACTION_REQUEST_MODE_SYNC)
+                with self._lock:
+                    if generation != self._generation or not self._running:
+                        return
+                    action = processor.pop_action()
+                    if action is not None:
+                        self._publish_action(robot, action, action_keys, self._publish_to_robot)
+                return
             self._request_thread = threading.Thread(
                 target=self._request_and_buffer,
                 args=(task_instruction, generation, action_request_mode),
                 daemon=True,
             )
             self._request_thread.start()
+
+    @staticmethod
+    def _publish_action(robot, action, action_keys, publish_to_robot):
+        preview = getattr(robot, "publish_action_preview", None)
+        if callable(preview):
+            try:
+                preview(action, action_keys)
+            except Exception as e:
+                logger.warning("failed to publish action preview: %s", e)
+        if publish_to_robot:
+            try:
+                robot.publish_action(action, action_keys)
+            except Exception as e:
+                logger.error("failed to publish robot action: %s", e)
 
     def _request_and_buffer(
         self,
@@ -565,6 +719,17 @@ class ControlLoop:
         self._trace_request_count += 1
         self._trace.emit("request_started", request_id=request_id, generation=generation)
         try:
+            with self._lock:
+                if generation != self._generation:
+                    return
+                reset_policy = getattr(self, "_reset_policy_before_request", False)
+            if reset_policy:
+                reset_response = self._requester.reset_policy()
+                if not reset_response.success:
+                    raise RuntimeError(reset_response.message)
+                with self._lock:
+                    if generation == self._generation:
+                        self._reset_policy_before_request = False
             response = self._requester.get_action(task_instruction)
         except Exception as e:
             latency_s = time.monotonic() - started_at
@@ -651,7 +816,8 @@ class ControlLoop:
     def _should_request_actions(self, processor: ActionChunkProcessor) -> bool:
         if self._request_thread is not None and self._request_thread.is_alive():
             return False
-        if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
+        if (self._action_request_mode == ACTION_REQUEST_MODE_SYNC
+                or getattr(self, "_per_step_actions", False)):
             return processor.buffer_size <= 0
         return processor.buffer_size < self._refill_threshold(processor)
 
@@ -694,7 +860,9 @@ class ControlLoop:
 
     def _tick_period(self) -> float:
         with self._lock:
-            if self._processor is None or self._rail is not None:
+            if self._rail is not None:
+                return self._rail.output_dt
+            elif self._processor is None:
                 hz = self._control_hz
             else:
                 hz = self._processor.output_hz

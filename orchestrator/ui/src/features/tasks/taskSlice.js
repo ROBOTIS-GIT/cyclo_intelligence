@@ -17,6 +17,7 @@
  */
 
 import { createSelector, createSlice } from '@reduxjs/toolkit';
+import { defaultInferenceChunkSize } from '../../utils/inferenceChunks';
 import { RecordPhase, InferencePhase } from '../../constants/taskPhases';
 import {
   getInferenceTaskInfoKey,
@@ -109,10 +110,13 @@ const recordTaskInfoInitialState = {
 
 const inferenceTaskInfoInitialState = {
   taskType: 'inference',
+  checkpointTaskInstruction: null,
+  checkpointInstructionKey: '',
   policyPath: '',
   recordInferenceMode: false,
   controlHz: 100,
   inferenceHz: 15,
+  actionChunkSize: 100,
   chunkAlignWindowS: 0.3,
   serviceType: 'lerobot',
   policyType: 'act',
@@ -143,6 +147,9 @@ const copyInferenceTaskInfo = (
 ) => ({
   ...inferenceTaskInfoInitialState,
   ...inferenceTaskInfo,
+  actionChunkSize: inferenceTaskInfo.actionChunkSize ?? defaultInferenceChunkSize(
+    inferenceTaskInfo.serviceType || 'lerobot', inferenceTaskInfo.policyType || 'act'
+  ),
   actionRequestMode:
     String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
@@ -175,7 +182,8 @@ const buildInferenceTaskInfo = (tasks) => {
   return {
     ...inference,
     taskType: 'inference',
-    taskInstruction: shared.taskInstruction,
+    taskInstruction: Array.isArray(inference.checkpointTaskInstruction)
+      ? inference.checkpointTaskInstruction : shared.taskInstruction,
     subtaskInstruction: [],
   };
 };
@@ -219,7 +227,8 @@ const buildLegacyTaskInfo = (state, source = 'record') => {
     taskNum: record.taskNum,
     taskName: record.taskName,
     taskType: source === 'inference' ? 'inference' : record.taskType,
-    taskInstruction: stringArray(state.sharedTaskInfo.taskInstruction),
+    taskInstruction: source === 'inference'
+      ? inference.taskInstruction : stringArray(state.sharedTaskInfo.taskInstruction),
     subtaskInstruction: record.subtaskInstruction,
     includeRobotisLicense: record.includeRobotisLicense,
   };
@@ -278,7 +287,22 @@ const applyRecordTaskInfo = (state, taskInfo = {}, options = {}) => {
 };
 
 const applyInferenceTaskInfo = (state, taskInfo = {}) => {
-  applySharedTaskInfo(state, taskInfo);
+  const checkpointChanged = ['policyPath', 'serviceType'].some((field) => (
+    taskInfo[field] != null && taskInfo[field] !== state.inferenceTaskInfo[field]
+  ));
+  // Once a checkpoint supplies its prompt, inference owns subsequent edits and
+  // server echoes. Recording keeps its original instruction and segment plan.
+  if (Array.isArray(state.inferenceTaskInfo.checkpointTaskInstruction)) {
+    if (checkpointChanged) {
+      state.inferenceTaskInfo.checkpointTaskInstruction = [];
+      state.inferenceTaskInfo.checkpointInstructionKey = '';
+    }
+    if (Object.prototype.hasOwnProperty.call(taskInfo, 'taskInstruction')) {
+      state.inferenceTaskInfo.checkpointTaskInstruction = stringArray(taskInfo.taskInstruction);
+    }
+  } else {
+    applySharedTaskInfo(state, taskInfo);
+  }
   state.inferenceTaskInfo = {
     ...state.inferenceTaskInfo,
     taskType: 'inference',
@@ -288,6 +312,13 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
       : Boolean(state.inferenceTaskInfo.recordInferenceMode),
     controlHz: taskInfo.controlHz ?? state.inferenceTaskInfo.controlHz ?? 100,
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
+    actionChunkSize: taskInfo.actionChunkSize ?? (
+      (taskInfo.serviceType != null && taskInfo.serviceType !== state.inferenceTaskInfo.serviceType) ||
+      (taskInfo.policyType != null && taskInfo.policyType !== state.inferenceTaskInfo.policyType)
+        ? defaultInferenceChunkSize(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType,
+            taskInfo.policyType ?? state.inferenceTaskInfo.policyType)
+        : state.inferenceTaskInfo.actionChunkSize ?? 100
+    ),
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
     serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
@@ -411,6 +442,14 @@ const taskSlice = createSlice({
     },
     setInferenceTaskInfo: (state, action) => {
       applyInferenceTaskInfo(state, action.payload || {});
+    },
+    setInferenceCheckpointInstruction: (state, action) => {
+      const { policyPath, serviceType, instruction } = action.payload || {};
+      if (String(policyPath || '').trim() !== String(state.inferenceTaskInfo.policyPath || '').trim()
+        || serviceType !== state.inferenceTaskInfo.serviceType) return;
+      state.inferenceTaskInfo.checkpointTaskInstruction = stringArray([instruction]);
+      state.inferenceTaskInfo.checkpointInstructionKey = JSON.stringify([serviceType, policyPath.trim()]);
+      syncLegacyTaskInfo(state, 'inference');
     },
     setSharedTaskInstruction: (state, action) => {
       state.sharedTaskInfo.taskInstruction = stringArray(action.payload);
@@ -639,6 +678,7 @@ const taskSlice = createSlice({
         const currentRecordTaskKey = getRecordTaskInfoKey(currentRecordTaskInfo);
         const hasLocalRecordEdit = hasLocalRecordTaskInfoEdit(state);
         const protectRecordSharedInstruction = Boolean(
+          !Array.isArray(state.inferenceTaskInfo.checkpointTaskInstruction) &&
           hasLocalRecordEdit &&
           Object.prototype.hasOwnProperty.call(serverTaskInfo, 'taskInstruction') &&
           getInstructionKey(serverTaskInfo) !== getInstructionKey(currentInferenceTaskInfo)
@@ -695,6 +735,7 @@ const taskSlice = createSlice({
 
       const currentRecordTaskInfo = buildRecordTaskInfo(state);
       const protectSharedInstruction = Boolean(
+        !Array.isArray(state.inferenceTaskInfo.checkpointTaskInstruction) &&
         hasLocalInferenceTaskInfoEdit(state) &&
         Object.prototype.hasOwnProperty.call(serverTaskInfo, 'taskInstruction') &&
         getInstructionKey(serverTaskInfo) !== getInstructionKey(currentRecordTaskInfo)
@@ -781,6 +822,7 @@ export const {
   setTaskInfo,
   setRecordTaskInfo,
   setInferenceTaskInfo,
+  setInferenceCheckpointInstruction,
   setSharedTaskInstruction,
   resetTaskInfo,
   setRecordStatus,

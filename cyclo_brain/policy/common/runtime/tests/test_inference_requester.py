@@ -29,6 +29,13 @@ class FakeEngineClient:
 
 
 class InferenceRequesterTests(unittest.TestCase):
+    def test_reset_policy_round_trip_preserves_sequence_guard(self):
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=1)])
+        response = InferenceRequester(client).reset_policy()
+        self.assertTrue(response.success)
+        self.assertEqual(client.calls[0][0].command, 3)
+        self.assertEqual(client.calls[0][0].seq_id, 1)
+
     def test_get_action_default_timeout_is_five_seconds(self) -> None:
         client = FakeEngineClient(
             [EngineCommandResponse(success=True, seq_id=1)]
@@ -49,10 +56,12 @@ class InferenceRequesterTests(unittest.TestCase):
             "model_path": "/models/policy",
             "acceleration_mode": "tensorrt_dit",
             "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
+            "action_chunk_size": 8,
         })())
 
         self.assertEqual(client.calls[0][1], 7200.0)
         self.assertEqual(client.calls[0][0].acceleration_mode, "tensorrt_dit")
+        self.assertEqual(client.calls[0][0].action_chunk_size, 8)
         self.assertEqual(
             client.calls[0][0].acceleration_engine_path,
             "/models/policy/dit_model_bf16.trt",

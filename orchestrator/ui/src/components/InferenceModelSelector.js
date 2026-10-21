@@ -9,6 +9,8 @@
 import React from 'react';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
+import { tensorRtMode, isTensorRtMode } from '../utils/inferenceAcceleration';
+import { defaultInferenceChunkSize } from '../utils/inferenceChunks';
 import {
   markLocalTaskInfoEdited,
   selectInferenceTaskInfo,
@@ -97,12 +99,10 @@ const InferenceModelSelector = ({ readonly = false }) => {
       setInferenceTaskInfo({
         serviceType: sel.serviceType,
         policyType: sel.policyType,
-        accelerationMode: sel.serviceType === 'groot'
-          ? (info.accelerationMode || 'pytorch')
-          : 'pytorch',
-        accelerationEnginePath: sel.serviceType === 'groot'
-          ? (info.accelerationEnginePath || '')
-          : '',
+        actionChunkSize: defaultInferenceChunkSize(sel.serviceType, sel.policyType),
+        accelerationMode: isTensorRtMode(info.accelerationMode)
+          ? (tensorRtMode(sel.serviceType, sel.policyType) || 'pytorch') : 'pytorch',
+        accelerationEnginePath: '',
       })
     );
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));

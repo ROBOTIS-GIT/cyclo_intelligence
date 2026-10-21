@@ -122,6 +122,17 @@ export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
   };
 }
 
+export function buildInferenceChunkTaskInfo(taskInfo = {}) {
+  const supportsAcceleration = ['groot', 'lerobot'].includes(taskInfo.serviceType);
+  return {
+    action_chunk_size: Number(taskInfo.actionChunkSize || 0),
+    acceleration_mode: supportsAcceleration
+      ? String(taskInfo.accelerationMode || 'pytorch').trim() : 'pytorch',
+    acceleration_engine_path: supportsAcceleration
+      ? String(taskInfo.accelerationEnginePath || '').trim() : '',
+  };
+}
+
 export function useRosServiceCaller() {
   const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -332,7 +343,7 @@ export function useRosServiceCaller() {
         // empty instead of being replaced by a generated task name.
         const autofillEmptyTaskFields = options.autofillEmptyTaskFields !== false;
         let taskName = taskInfo.taskName || '';
-        let taskInstruction = (taskInfo.taskInstruction || []).filter(
+        let taskInstruction = (options.taskInstruction ?? taskInfo.taskInstruction ?? []).filter(
           (instruction) => instruction.trim() !== ''
         );
         const subtaskInstructionSource =
@@ -371,12 +382,6 @@ export function useRosServiceCaller() {
         const imageResize = options.imageResize || null;
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
         const policyPath = String(taskInfo.policyPath || '').trim();
-        const accelerationMode = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationMode || 'pytorch').trim()
-          : 'pytorch';
-        const accelerationEnginePath = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationEnginePath || '').trim()
-          : '';
         const actionRequestMode = (
           String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
             ? 'sync'
@@ -403,8 +408,7 @@ export function useRosServiceCaller() {
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             action_request_mode: actionRequestMode,
-            acceleration_mode: accelerationMode || 'pytorch',
-            acceleration_engine_path: accelerationEnginePath,
+            ...buildInferenceChunkTaskInfo(taskInfo),
             ...buildInitialPoseSyncTaskInfo(taskInfo),
           },
           command: Number(command_enum),

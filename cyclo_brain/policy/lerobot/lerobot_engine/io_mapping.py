@@ -24,7 +24,9 @@ Owns:
 from __future__ import annotations
 
 import logging
+import json
 import re
+from pathlib import Path
 from typing import Dict, Iterable
 
 from .constants import IMAGE_KEY_PREFIX as _IMAGE_KEY_PREFIX
@@ -96,6 +98,8 @@ class IoMappingMixin:
 
         self._state_modalities = modalities
         self._action_keys = list(modalities)
+        if getattr(self._policy.config, "type", "") == "act":
+            self._configure_act_io(robot_type)
 
         # Block until at least one frame from each sensor lands. 10 s is
         # generous — typical hardware comes up in <2 s.
@@ -105,6 +109,62 @@ class IoMappingMixin:
             list(self._cameras.keys()),
             self._state_modalities,
         )
+
+    def _configure_act_io(self, robot_type: str) -> None:
+        """Validate ACT's exact state/action layout before enabling inference.
+
+        A vector width cannot distinguish left and right arms. Subset policies
+        must provide an explicit, ordered mapping in cyclo_inference.json next
+        to config.json; never infer the commanded arm from a repository name.
+        """
+        path = Path(self._loaded_model_path) / "cyclo_inference.json"
+        mapping = json.loads(path.read_text()) if path.is_file() else {}
+        if not isinstance(mapping, dict):
+            raise ValueError("cyclo_inference.json must contain an object")
+        if mapping.get("robot_type", robot_type) != robot_type:
+            raise ValueError("cyclo_inference.json robot_type does not match the selected robot")
+        self._image_preprocessing_mode = mapping.get("image_preprocessing", "resize")
+        if self._image_preprocessing_mode not in {"resize", "letterbox"}:
+            raise ValueError("Unknown image_preprocessing in cyclo_inference.json")
+
+        groups = self._robot._config.get("joint_groups", {})
+        state_widths = {
+            name.removeprefix("follower_"): len(cfg.get("joint_names", []))
+            for name, cfg in groups.items()
+            if name.startswith("follower_") and cfg.get("role") == "follower"
+        }
+        if self._has_mobile_state:
+            state_widths["mobile"] = 3
+        action_widths = {
+            name: 3 if cfg["msg_type"] == "geometry_msgs/msg/Twist"
+            else len(cfg["joint_names"])
+            for name, cfg in self._robot._action_groups.items()
+        }
+        for field, default, widths, features, feature_key in (
+            ("state_modalities", self._state_modalities, state_widths,
+             self._policy.config.input_features, "observation.state"),
+            ("action_keys", self._action_keys, action_widths,
+             self._policy.config.output_features, "action"),
+        ):
+            keys = mapping.get(field, default)
+            if (not isinstance(keys, list) or not keys
+                    or not all(isinstance(key, str) for key in keys)
+                    or len(set(keys)) != len(keys)):
+                raise ValueError(f"{field} must be a nonempty list of unique modality names")
+            unknown = [key for key in keys if key not in widths]
+            if unknown:
+                raise ValueError(f"Unknown {field}: {unknown}")
+            feature = features[feature_key]
+            expected = int(feature.shape[0])
+            actual = sum(widths[key] for key in keys)
+            if actual != expected:
+                raise ValueError(
+                    f"ACT {feature_key} dimension mismatch: mapped {keys} has {actual}, "
+                    f"checkpoint expects {expected}. Provide the training-time ordered "
+                    f"{field} in {path}; automatic padding/truncation is not valid for ACT."
+                )
+            setattr(self, "_" + field, list(keys))
+        logger.info("ACT I/O mapping: state=%s action=%s", self._state_modalities, self._action_keys)
 
     def _teardown_robot(self) -> None:
         if self._robot is not None:

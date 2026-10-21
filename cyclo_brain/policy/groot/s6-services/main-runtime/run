@@ -17,5 +17,10 @@ echo "[main-runtime] RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
 echo "[main-runtime] ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE}"
 
 export PYTHONPATH="/app:/policy_runtime:${ZENOH_SDK_PATH:-/zenoh_sdk}:${ROBOT_CLIENT_SDK_PATH:-/robot_client_sdk}:${ACTION_CHUNK_PROCESSING_SDK_PATH:-/action_chunk_processing_sdk}${PYTHONPATH:+:${PYTHONPATH}}"
+if [ -f /workspace/audit/vla_rail/record.enabled ]; then
+    export INFERENCE_TRACE_PATH="/workspace/audit/vla_rail/trace_$(date -u +%Y%m%dT%H%M%S)_$$.jsonl"
+    export VLA_RAIL_CAPTURE_ACTIONS=1
+    echo "[main-runtime] RAIL recording: ${INFERENCE_TRACE_PATH}"
+fi
 exec python3 -m main_runtime
 '

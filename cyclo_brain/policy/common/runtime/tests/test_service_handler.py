@@ -5,6 +5,9 @@ from __future__ import annotations
 import sys
 import threading
 import unittest
+import json
+import tempfile
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +26,7 @@ from main_runtime.service_handler import (  # noqa: E402
     CMD_START,
     CMD_STOP,
     CMD_UNLOAD,
+    CMD_UPDATE_INSTRUCTION,
     ServiceHandler,
 )
 from main_runtime.session_state import SessionState  # noqa: E402
@@ -86,6 +90,96 @@ def make_response(success, message="", action_keys=None):
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_manual_and_detector_updates_share_idempotent_ordered_transition(self):
+        handler, session, loop = self._handler()
+        session.mark_loaded('ffw', 'phase 1', ['arm'])
+        session.mark_running()
+        handler._subtask_choices = [['phase 1'], ['phase 2'], ['phase 3']]
+        loop.transition_subtask = mock.Mock()
+        request = SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction='phase 2')
+        self.assertTrue(handler.handle(request).success)
+        self.assertEqual(session.task_instruction, 'phase 2')
+        self.assertEqual(handler.subtask_state()['subtask_index'], 1)
+        self.assertTrue(handler.handle(request).success)
+        loop.transition_subtask.assert_called_once_with('phase 2')
+        response = handler.handle(SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction='phase 1'))
+        self.assertFalse(response.success)
+        self.assertEqual(session.task_instruction, 'phase 2')
+        self.assertEqual(loop.task_instructions, [])
+
+    def test_failed_transition_keeps_confirmed_instruction(self):
+        handler, session, loop = self._handler()
+        session.mark_loaded('ffw', 'phase 1', ['arm'])
+        session.mark_running()
+        handler._subtask_choices = [['phase 1'], ['phase 2']]
+        loop.transition_subtask = mock.Mock(side_effect=RuntimeError('hold failed'))
+        result = handler.handle(SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction='phase 2'))
+        self.assertFalse(result.success)
+        self.assertEqual(session.task_instruction, 'phase 1')
+        self.assertEqual(handler.subtask_state()['instruction'], 'phase 1')
+
+    def test_regular_checkpoint_uses_legacy_instruction_update(self):
+        handler, session, loop = self._handler()
+        session.mark_loaded('ffw', 'whole task', ['arm'])
+        session.mark_running()
+        result = handler.handle(SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction='new whole task'))
+        self.assertTrue(result.success)
+        self.assertEqual(loop.task_instructions, ['new whole task'])
+
+    def test_subtask_load_validates_prompt_before_loading_weights(self):
+        handler, session, loop = self._handler()
+        handler._requester.load_policy = mock.Mock()
+        with mock.patch('main_runtime.service_handler.checkpoint_subtask_choices', return_value=[['phase 1'], ['phase 2']]):
+            response = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path='/workspace/model/groot/example',
+                                                     robot_type='ffw', task_instruction='whole task'))
+        self.assertFalse(response.success)
+        handler._requester.load_policy.assert_not_called()
+
+    def test_chunk_override_selects_chunk_control_instead_of_saved_single_step(self):
+        handler, session, loop = self._handler()
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "config.json").write_text(json.dumps({"type": "act", "chunk_size": 30,
+                "n_action_steps": 1, "temporal_ensemble_coeff": None}))
+            response = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path=root,
+                robot_type="ffw", task_instruction="", inference_hz=15, action_chunk_size=100))
+        self.assertTrue(response.success, response.message)
+        self.assertFalse(loop.configures[-1].get("per_step_actions", False))
+
+    def test_temporal_ensemble_keeps_per_step_control_with_chunk_override(self):
+        handler, session, loop = self._handler()
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "config.json").write_text(json.dumps({"type": "act", "chunk_size": 30,
+                "n_action_steps": 1, "temporal_ensemble_coeff": 0.01}))
+            response = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path=root,
+                robot_type="ffw", task_instruction="", inference_hz=15, action_chunk_size=8))
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(loop.configures[-1]["per_step_actions"])
+
+    def test_single_step_act_disables_chunk_processing_and_resets_on_start(self):
+        handler, session, loop = self._handler()
+        handler._requester.reset_policy = mock.Mock(return_value=SimpleNamespace(success=True))
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "config.json").write_text(json.dumps({"type": "act", "n_action_steps": 1}))
+            Path(root, "inference_contract.json").write_text(json.dumps({"fps": 15}))
+            response = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path=root,
+                                      robot_type="ffw", task_instruction="", inference_hz=15))
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(loop.configures[-1]["per_step_actions"])
+        response = handler.handle(SimpleNamespace(command=CMD_START))
+        self.assertTrue(response.success, response.message)
+        handler._requester.reset_policy.assert_called_once()
+
+    def test_single_step_act_rejects_wrong_dataset_cadence(self):
+        handler, session, loop = self._handler()
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "config.json").write_text(json.dumps({"type": "act", "n_action_steps": 1}))
+            Path(root, "inference_contract.json").write_text(json.dumps({"fps": 15}))
+            response = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path=root,
+                                      robot_type="ffw", task_instruction="", inference_hz=100))
+        self.assertFalse(response.success)
+        self.assertIn("Inference Hz=15", response.message)
+        self.assertFalse(loop.configures)
+
     def _handler(self):
         session = SessionState()
         loop = FakeControlLoop()
@@ -278,6 +372,37 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertFalse(session.loaded)
         self.assertFalse(handler.handle(resume).success)
         self.assertEqual(loop.starts, [True])
+    def test_failed_configuration_keeps_session_unloaded_and_releases_engine(self):
+        handler, session, loop = self._handler()
+        loop.configure = mock.Mock(side_effect=ValueError("incompatible action layout"))
+        handler._requester.unload_policy = mock.Mock(
+            return_value=SimpleNamespace(success=True)
+        )
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="place",
+        ))
+        self.assertFalse(response.success)
+        self.assertFalse(session.loaded)
+        self.assertEqual(loop.deconfigure_count, 1)
+        handler._requester.unload_policy.assert_called_once()
+
+    def test_empty_model_action_keys_are_rejected_before_configuration(self):
+        handler, session, loop = self._handler()
+        handler._requester.load_policy = mock.Mock(return_value=SimpleNamespace(
+            success=True, action_keys=[], message="loaded"
+        ))
+        handler._requester.unload_policy = mock.Mock(
+            return_value=SimpleNamespace(success=True)
+        )
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="place",
+        ))
+        self.assertFalse(response.success)
+        self.assertFalse(session.loaded)
+        self.assertEqual(loop.configures, [])
+        handler._requester.unload_policy.assert_called_once()
 
     def test_load_configures_dry_run_by_default(self) -> None:
         handler, _session, loop = self._handler()

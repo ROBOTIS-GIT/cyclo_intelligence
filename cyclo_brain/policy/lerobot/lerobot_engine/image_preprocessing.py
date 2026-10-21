@@ -71,3 +71,24 @@ def prepare_policy_image(
 ) -> np.ndarray:
     """Rotate first, then resize to the policy feature's expected shape."""
     return resize_image(apply_rotation(image, rotation_deg), target_size)
+
+
+def prepare_letterbox_tensor(image, *, rotation_deg=0, target_size):
+    """RGB uint8 -> BCHW float, bilinear antialiased resize + centered zero pad.
+
+    Padding is applied before the policy's normalization, matching the published
+    ACT training contract. Round resized dimensions rather than truncating them.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    image = apply_rotation(image, rotation_deg)
+    tensor = torch.from_numpy(image.copy()).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+    width, height = target_size
+    source_h, source_w = image.shape[:2]
+    scale = min(height / source_h, width / source_w)
+    resized_h, resized_w = round(source_h * scale), round(source_w * scale)
+    tensor = F.interpolate(tensor, size=(resized_h, resized_w), mode="bilinear",
+                           align_corners=False, antialias=True)
+    left, top = (width - resized_w) // 2, (height - resized_h) // 2
+    return F.pad(tensor, (left, width - resized_w - left, top, height - resized_h - top))

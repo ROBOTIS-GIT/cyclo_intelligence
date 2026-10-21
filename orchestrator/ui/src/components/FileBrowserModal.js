@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park, Seongwoo Kim
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import clsx from 'clsx';
 import { MdClose, MdFolderOpen } from 'react-icons/md';
 import FileBrowser from './FileBrowser';
@@ -36,10 +36,15 @@ export default function FileBrowserModal({
   defaultPath = null,
   multiSelect = false,
   variant = 'legacy',
+  shortcuts = [],
 }) {
   const [selectedItem, setSelectedItem] = useState(null);
   const [multiSelectedItems, setMultiSelectedItems] = useState([]);
   const [currentPath, setCurrentPath] = useState(initialPath);
+  const [browserStartPath, setBrowserStartPath] = useState(initialPath);
+  useEffect(() => {
+    if (isOpen) { setBrowserStartPath(initialPath); setCurrentPath(initialPath); setSelectedItem(null); setMultiSelectedItems([]); }
+  }, [isOpen, initialPath]);
   const autonomyStudioVariant = variant === 'autonomy-studio';
 
   const handleFileSelect = useCallback((item) => {
@@ -211,11 +216,20 @@ export default function FileBrowserModal({
             </button>
           </div>
 
+          {shortcuts.length > 0 && <div className="flex flex-wrap gap-2 border-b border-gray-200 px-6 py-3" aria-label="Checkpoint workspaces">
+            {shortcuts.map((shortcut) => <button key={shortcut.path} type="button" disabled={shortcut.disabled}
+              className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700 hover:bg-blue-100 disabled:opacity-40"
+              title={shortcut.description || shortcut.path}
+              onClick={() => { setBrowserStartPath(shortcut.path); setCurrentPath(shortcut.path); setSelectedItem(null); setMultiSelectedItems([]); }}>
+              <MdFolderOpen className="mr-1 inline" />{shortcut.label}
+            </button>)}
+          </div>}
           <div className={classBrowserContent}>
             <FileBrowser
+              key={browserStartPath}
               onFileSelect={handleFileSelect}
               onPathChange={handlePathChange}
-              initialPath={initialPath}
+              initialPath={browserStartPath}
               fileFilter={fileFilter}
               className={classBrowserStyles}
               title=""

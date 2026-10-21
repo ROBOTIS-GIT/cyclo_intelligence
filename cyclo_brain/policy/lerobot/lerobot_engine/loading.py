@@ -76,10 +76,21 @@ class LoadingMixin:
         logger.info("Policy type: %s", policy_type)
         PolicyClass = get_policy_class(policy_type)
 
+        if policy_type == "act":
+            policy_config = PreTrainedConfig.from_pretrained(model_path)
+            from .legacy_act import load_legacy_act
+            legacy = load_legacy_act(model_path, policy_config, PolicyClass, device)
+            if legacy is not None:
+                logger.info("Loaded legacy ACT weights with embedded normalization buffers")
+                return legacy
+
         # FastWAM's text encoder must stay on the CPU. Its default config can
         # auto-select CUDA inside ``from_pretrained`` and exhaust VRAM before
         # the offload hook runs, so pin only this policy's initial load to CPU.
-        if policy_type == "fastwam":
+        if policy_type == "act":
+            policy_config.device = str(device)
+            policy = PolicyClass.from_pretrained(model_path, config=policy_config)
+        elif policy_type == "fastwam":
             policy_config = PreTrainedConfig.from_pretrained(model_path)
             policy_config.device = "cpu"
             policy = PolicyClass.from_pretrained(model_path, config=policy_config)

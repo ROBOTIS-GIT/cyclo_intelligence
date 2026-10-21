@@ -15,6 +15,8 @@
 // Author: Seongwoo Kim
 
 import React from 'react';
+import PoseLibrary from '../../../components/bt/PoseLibrary';
+import { JOINT_SELECTOR_NODE_TYPES } from './jointParams';
 import { MdClose } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import { DEFAULT_PATHS } from '../../../constants/paths';
@@ -24,8 +26,8 @@ import BtParameterInput from './BtParameterInput';
 import ReturnWaypointFields from './ReturnWaypointFields';
 
 export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
-  onNameChange, onClose, robotType = '', variant = 'legacy', allowNameEdit = true }) {
-  const { selectedNode, nodeType, label, localName, setLocalName, localParams,
+  onParamsChange, onNameChange, onClose, robotType = '', variant = 'legacy', allowNameEdit = true }) {
+  const { selectedNode, nodeType, label, localName, setLocalName, localParams, setLocalParams,
     paramEntries, nameAtFocusRef, suppressNextNameBlurRef, showPolicyBrowser,
     setShowPolicyBrowser, policyBrowserPath, commitName, handleChange,
     handlePolicyFolderSelect, commitTargetJointSelection } = useBtParameterDraft({
@@ -76,6 +78,14 @@ export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
         </button>
       </div>
 
+      {JOINT_SELECTOR_NODE_TYPES.has(nodeType) && /^ffw_sg2(?:_rev1)?$/i.test(robotType) && (
+        <PoseLibrary key={`${selectedNodeId}:${robotType}`} nodeType={nodeType}
+          params={localParams} onApply={(patch) => {
+            setLocalParams((prev) => ({ ...prev, ...patch }));
+            if (onParamsChange) onParamsChange(selectedNodeId, patch);
+            else Object.entries(patch).forEach(([key, value]) => onParamChange(selectedNodeId, key, value));
+          }} />
+      )}
       {/* Params */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {nodeType === 'ReturnToWaypoint' && <ReturnWaypointFields key={selectedNodeId} params={localParams} onChange={handleChange} />}
@@ -98,7 +108,7 @@ export default function BtParameterPanel({ nodes, selectedNodeId, onParamChange,
                   nodeType={nodeType} localParams={localParams} robotType={robotType}
                   handleChange={handleChange} commitTargetJointSelection={commitTargetJointSelection}
                   setShowPolicyBrowser={setShowPolicyBrowser} />
-                {help && !disabled && (
+                {help && (!disabled || (nodeType === 'SendCommand' && key === 'control_hz')) && (
                   <div className="mt-1 text-xs text-[var(--mc-text-subtle)]">{help}</div>
                 )}
               </div>

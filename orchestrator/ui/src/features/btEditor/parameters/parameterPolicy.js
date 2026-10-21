@@ -35,6 +35,7 @@ export const HELP_TEXT = {
   initial_pose_sync: 'Align to the first predicted pose before RESUME. Enabled by default for robot output.',
   initial_pose_sync_duration_s: 'Pose alignment duration in seconds (1–60).',
   vla_rail_enabled: 'VLA-RAIL cubic smoothing and dual-quintic transitions for ordinary GR00T Async. Off by default.',
+  control_hz: 'Sync only. Async and VLA-RAIL publish at inference_hz.',
   max_iterations: '0 = loop forever',
 };
 
@@ -104,7 +105,7 @@ export const ENUM_PARAMS = {
   ],
   inference_mode: ['simulation', 'robot'],
   action_request_mode: ['async', 'sync'],
-  acceleration_mode: ['pytorch', 'tensorrt_dit'],
+  acceleration_mode: ['pytorch', 'tensorrt_dit', 'tensorrt_act'],
 };
 
 export function enumOptionsFor(nodeType, key, params) {
@@ -150,6 +151,7 @@ export function isSendCommandFieldDisabled(nodeType, key, params) {
   if (normalizeSendCommandTarget(params.target) === 'DOCKER') {
     return !SEND_COMMAND_DOCKER_ACTIVE_FIELDS.has(key);
   }
+  if (key === 'control_hz' && String(params.action_request_mode || 'async') === 'async') return true;
   if (key === 'vla_rail_enabled' && (!String(params.model || '').startsWith('groot')
     || String(params.action_request_mode || 'async') !== 'async')) return true;
   const cmd = String(params.command || 'LOAD').toUpperCase();

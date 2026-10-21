@@ -91,7 +91,11 @@ class FakeConfigLoader:
 
     @classmethod
     def from_pretrained(cls, model_path):
-        config = types.SimpleNamespace(type="fastwam", device="cuda")
+        raw = json.loads(Path(model_path, "config.json").read_text())
+        config = types.SimpleNamespace(
+            type=raw["type"], device="cuda",
+            temporal_ensemble_coeff=raw.get("temporal_ensemble_coeff"),
+        )
         cls.loaded.append((model_path, config))
         return config
 
@@ -131,7 +135,7 @@ class FastWamLoadingTest(unittest.TestCase):
 
     def test_other_policies_keep_the_existing_runtime_device_move(self):
         with tempfile.TemporaryDirectory() as model_path:
-            self.write_config(model_path, "act")
+            self.write_config(model_path, "diffusion")
             policy, _, _ = loading.LoadingMixin._load_policy_assets(
                 model_path, torch.device("cuda")
             )
@@ -140,6 +144,24 @@ class FastWamLoadingTest(unittest.TestCase):
         self.assertEqual(FakePolicy.from_pretrained_calls[0][1], {})
         self.assertEqual(policy.to_calls, ["cuda"])
         self.assertEqual(policy.eval_calls, 1)
+
+    def test_act_loads_on_requested_device_with_stored_processors(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            self.write_config(model_path, "act")
+            policy, pre, post = loading.LoadingMixin._load_policy_assets(
+                model_path, torch.device("cpu")
+            )
+        self.assertEqual(policy.config.device, "cpu")
+        self.assertEqual(policy.to_calls, ["cpu"])
+        self.assertEqual((pre, post), ("pre", "post"))
+
+    def test_act_temporal_ensemble_setting_is_preserved(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            Path(model_path, "config.json").write_text(json.dumps(
+                {"type": "act", "temporal_ensemble_coeff": 0.01}
+            ))
+            policy, _, _ = loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        self.assertEqual(policy.config.temporal_ensemble_coeff, 0.01)
 
 
 class FakeChild:

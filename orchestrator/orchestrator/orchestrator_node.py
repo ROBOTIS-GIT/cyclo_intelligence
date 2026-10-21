@@ -208,6 +208,7 @@ class OrchestratorNode(Node):
         self._loaded_inference_control_hz: int = 100
         self._loaded_inference_inference_hz: int = 15
         self._loaded_inference_chunk_align_window_s: float = 0.3
+        self._loaded_inference_action_chunk_size: int = 0
         self._loaded_inference_initial_pose_sync: bool = False
         self._loaded_inference_initial_pose_sync_duration_s: float = 5.0
         self._initial_pose_sync_status_timer: Optional[threading.Timer] = None
@@ -414,6 +415,7 @@ class OrchestratorNode(Node):
             'acceleration_engine_path',
             'initial_pose_sync',
             'initial_pose_sync_duration_s',
+            'action_chunk_size',
         ):
             value = getattr(task_info, field_name)
             if isinstance(value, list):
@@ -539,6 +541,15 @@ class OrchestratorNode(Node):
 
     def _init_ros_publisher(self):
         self.get_logger().info('Initializing ROS publishers...')
+        # A late subscriber must receive the authoritative current phase even
+        # before the first task initializes Communicator.
+        self._inference_status_lock = threading.Lock()
+        self._inference_status_snapshot = InferenceStatus()
+        self._inference_status_snapshot.inference_phase = InferenceStatus.READY
+        self._inference_status_publisher = self.create_publisher(
+            InferenceStatus, '/task/inference_status', self.PUB_QOS_SIZE)
+        self._inference_status_timer = self.create_timer(
+            0.5, self._republish_inference_phase)
         pub_qos_size = 100
         self.training_status_publisher = self.create_publisher(
             TrainingStatus,
@@ -901,20 +912,33 @@ class OrchestratorNode(Node):
             self.handle_joystick_trigger(joystick_mode=mode)
 
     def _publish_inference_phase(self, phase: int, error: str = '') -> None:
-        """Publish a one-shot InferenceStatus on /task/inference_status.
+        """Update and publish the current InferenceStatus snapshot.
 
         The container owns the 100 Hz control loop (§5.5); orchestrator
         only signals LOADING / SYNCING / INFERENCING / PAUSED / READY on commands.
         Record-side phase lives on /data/recording/status (D18).
         """
+        robot_type = getattr(self, 'robot_type', '') or ''
+        if getattr(self, '_inference_status_publisher', None) is not None:
+            msg = InferenceStatus()
+            msg.inference_phase = phase
+            msg.robot_type = robot_type
+            msg.error = error
+            with self._inference_status_lock:
+                self._inference_status_snapshot = msg
+                self._inference_status_publisher.publish(msg)
+            return
         if self.communicator is None:
             return
-        robot_type = getattr(self, 'robot_type', '') or ''
         self.communicator.publish_inference_status(
             phase=phase,
             robot_type=robot_type,
             error=error,
         )
+
+    def _republish_inference_phase(self) -> None:
+        with self._inference_status_lock:
+            self._inference_status_publisher.publish(self._inference_status_snapshot)
 
     def _begin_initial_pose_sync_status(
         self,
@@ -1491,6 +1515,7 @@ class OrchestratorNode(Node):
                 requested_action_request_mode = (
                     self._action_request_mode_from_task_info(task_info)
                 )
+                requested_action_chunk_size = int(getattr(task_info, 'action_chunk_size', 0))
                 (
                     requested_control_hz,
                     requested_inference_hz,
@@ -1541,6 +1566,7 @@ class OrchestratorNode(Node):
                     loaded_initial_pose_sync_duration_s = (
                         self._loaded_inference_initial_pose_sync_duration_s
                     )
+                    loaded_action_chunk_size = self._loaded_inference_action_chunk_size
                 start_handled = False
                 if (
                     not load_only
@@ -1557,6 +1583,7 @@ class OrchestratorNode(Node):
                         loaded_chunk_align_window_s,
                         loaded_initial_pose_sync,
                         loaded_initial_pose_sync_duration_s,
+                        action_chunk_size=loaded_action_chunk_size,
                         vla_rail_enabled=loaded_vla_rail_enabled,
                     )
                     requested_signature = inference_runtime_signature(
@@ -1569,6 +1596,7 @@ class OrchestratorNode(Node):
                         requested_chunk_align_window_s,
                         requested_initial_pose_sync,
                         requested_initial_pose_sync_duration_s,
+                        action_chunk_size=requested_action_chunk_size,
                         vla_rail_enabled=requested_vla_rail_enabled,
                     )
                     if (
@@ -1722,6 +1750,7 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     ),
                                     action_request_mode=requested_action_request_mode,
+                                    action_chunk_size=requested_action_chunk_size,
                                     vla_rail_enabled=requested_vla_rail_enabled,
                                     control_hz=requested_control_hz,
                                     inference_hz=requested_inference_hz,
@@ -1857,6 +1886,7 @@ class OrchestratorNode(Node):
                                     self._loaded_inference_control_hz = (
                                         requested_control_hz
                                     )
+                                    self._loaded_inference_action_chunk_size = requested_action_chunk_size
                                     self._loaded_inference_inference_hz = (
                                         requested_inference_hz
                                     )
@@ -2972,6 +3002,7 @@ class OrchestratorNode(Node):
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
+            self._loaded_inference_action_chunk_size = 0
             self._loaded_inference_initial_pose_sync = False
             self._loaded_inference_initial_pose_sync_duration_s = 5.0
             self._initial_pose_sync_hold_pending = False
@@ -3068,6 +3099,7 @@ class OrchestratorNode(Node):
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
+            self._loaded_inference_action_chunk_size = 0
             self._loaded_inference_initial_pose_sync = False
             self._loaded_inference_initial_pose_sync_duration_s = 5.0
             self._initial_pose_sync_hold_pending = False
@@ -3315,9 +3347,10 @@ class OrchestratorNode(Node):
 
     def handle_joystick_trigger(self, joystick_mode: str):
         """
-        Handle leader tact triggers as backend-owned recording controls.
+        Handle leader tact and left gripper ring triggers as recording controls.
 
-        ``right`` toggles start/save. ``left`` cancels the active recording.
+        ``right`` and ``left_gripper_out`` toggle start/save.
+        ``left`` cancels the active recording.
         """
         self.get_logger().info(f'Joystick trigger: {joystick_mode}')
 
@@ -3326,11 +3359,13 @@ class OrchestratorNode(Node):
                 f'Joystick trigger ignored without communicator: {joystick_mode}')
             return
 
-        if joystick_mode in ('right', 'left'):
+        if joystick_mode in ('right', 'left', 'left_gripper_out'):
             snapshot_on_recording, snapshot_on_inference = (
                 self._snapshot_session_state()
             )
             if snapshot_on_inference:
+                if joystick_mode == 'left_gripper_out':
+                    return
                 if self._get_inference_record_task_info() is None:
                     self.get_logger().warning(
                         'Inference trigger ignored: no inference task info available')
@@ -3348,7 +3383,7 @@ class OrchestratorNode(Node):
                 self.get_logger().warning(
                     'Record trigger ignored: prepare the Record session first')
                 return
-            if joystick_mode == 'right':
+            if joystick_mode in ('right', 'left_gripper_out'):
                 if snapshot_on_recording:
                     self._stop_record_trigger_segment()
                 else:

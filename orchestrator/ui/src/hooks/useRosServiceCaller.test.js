@@ -1,8 +1,48 @@
 import {
+  useRosServiceCaller,
   buildInitialPoseSyncTaskInfo,
   getRecordCommandServiceTimeoutMs,
   transformReplayDataResult,
 } from './useRosServiceCaller';
+import { act, renderHook } from '@testing-library/react';
+import { configureStore } from '@reduxjs/toolkit';
+import { Provider } from 'react-redux';
+import taskReducer from '../features/tasks/taskSlice';
+import rosConnectionManager from '../utils/rosConnectionManager';
+
+jest.mock('../utils/rosConnectionManager', () => ({
+  __esModule: true, default: { getConnection: jest.fn() },
+}));
+
+test('completion sends the next instruction without first changing Redux or recording slots', async () => {
+  const tasks = taskReducer(undefined, { type: '@@INIT' });
+  const state = { tasks: { ...tasks, sharedTaskInfo: { taskInstruction: ['Record overall.'] },
+    inferenceTaskInfo: { ...tasks.inferenceTaskInfo, serviceType: 'groot',
+      policyPath: '/workspace/model/groot/example', checkpointTaskInstruction: ['phase 1'] } },
+    training: { trainingInfo: {} }, editDataset: {}, ui: { currentPage: 'inference' },
+    ros: { rosbridgeUrl: 'ws://test' } };
+  const store = configureStore({ reducer: (value = state) => value });
+  let callback, sent;
+  rosConnectionManager.getConnection.mockResolvedValue({ isConnected: true, idCounter: 0,
+    once: (_id, handler) => { callback = handler; },
+    callOnConnection: (request) => { sent = request; callback({ result: true, values: { success: true } }); },
+  });
+  const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    const { result } = renderHook(() => useRosServiceCaller(), {
+      wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+    });
+    await act(async () => result.current.sendRecordCommand('update_instruction', {
+      taskInstruction: ['phase 2'], autofillEmptyTaskFields: false,
+    }));
+    expect(sent.service).toBe('/task/command');
+    expect(sent.args.command).toBe(16);
+    expect(sent.args.task_info.task_instruction).toEqual(['phase 2']);
+    expect(sent.args.task_info.subtask_instruction).toEqual([]);
+    expect(store.getState().tasks.inferenceTaskInfo.checkpointTaskInstruction).toEqual(['phase 1']);
+    expect(store.getState().tasks.sharedTaskInfo.taskInstruction).toEqual(['Record overall.']);
+  } finally { log.mockRestore(); }
+});
 
 describe('buildInitialPoseSyncTaskInfo', () => {
   test('converts UI settings to ROS task info fields', () => {

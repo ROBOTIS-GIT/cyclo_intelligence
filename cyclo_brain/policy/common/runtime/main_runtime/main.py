@@ -13,6 +13,7 @@ loop. Heavy policy imports and sensor reads stay isolated in the Engine process.
 from __future__ import annotations
 
 import os
+import json
 import sys
 import threading
 import time
@@ -29,7 +30,7 @@ _ROBOT_CLIENT_PATH = os.environ.get("ROBOT_CLIENT_SDK_PATH", _default_rc)
 if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
     sys.path.insert(0, _ROBOT_CLIENT_PATH)
 
-from zenoh_ros2_sdk import ROS2ServiceServer, get_logger  # noqa: E402
+from zenoh_ros2_sdk import ROS2ServiceServer, ROS2Publisher, get_message_class, get_logger  # noqa: E402
 from robot_client.messages import (  # noqa: E402
     INFERENCE_COMMAND_REQUEST_DEF,
     INFERENCE_COMMAND_RESPONSE_DEF,
@@ -83,10 +84,12 @@ class MainRuntime:
             ),
         )
         self._session = SessionState()
+        rail_interpolation_hz = os.environ.get("VLA_RAIL_INTERPOLATION_HZ", "").strip()
         self._control_loop = ControlLoop(
             self._requester,
             inference_hz=float(os.environ.get("INFERENCE_HZ", "15.0")),
             control_hz=float(os.environ.get("CONTROL_HZ", "100.0")),
+            rail_interpolation_hz=float(rail_interpolation_hz) if rail_interpolation_hz else None,
             chunk_align_window_s=float(os.environ.get("CHUNK_ALIGN_WINDOW_S", "0.3")),
             target_chunk_size=self._target_chunk_size_from_env(),
             postprocess_actions=self._bool_env("POSTPROCESS_ACTIONS", True),
@@ -103,6 +106,7 @@ class MainRuntime:
         )
         self._engine_client = engine_client
         self._command_srv = None
+        self._subtask_status_pub = None
         self._shutdown = threading.Event()
 
     def start(self) -> None:
@@ -134,6 +138,20 @@ class MainRuntime:
         logger.info("InferenceCommand service up at /%s/inference_command", self._backend)
         logger.info("ZENOH_SUB_READY")
         while not self._shutdown.is_set():
+            if self._backend == 'groot':
+                state = handler.subtask_state()
+                if state['available'] or self._subtask_status_pub is not None:
+                    try:
+                        if self._subtask_status_pub is None:
+                            self._subtask_status_pub = ROS2Publisher(
+                                topic='/groot/subtask_state', msg_type='std_msgs/msg/String',
+                                router_ip=self._router_ip, router_port=self._router_port,
+                                domain_id=self._domain_id,
+                            )
+                        self._subtask_status_pub.publish(get_message_class('std_msgs/msg/String')(
+                            data=json.dumps(state)))
+                    except Exception as error:
+                        logger.warning('subtask state publish failed: %s', error)
             self._shutdown.wait(timeout=1.0)
 
     def _wait_for_engine_ready(self) -> None:
@@ -163,6 +181,9 @@ class MainRuntime:
     def shutdown(self) -> None:
         self._shutdown.set()
         self._control_loop.shutdown()
+        if self._subtask_status_pub is not None:
+            self._subtask_status_pub.close()
+            self._subtask_status_pub = None
         if self._command_srv is not None:
             try:
                 self._command_srv.close()

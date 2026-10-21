@@ -31,6 +31,10 @@ import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
+import InferenceChunkControl from './InferenceChunkControl';
+import CheckpointInstructionControl from './CheckpointInstructionControl';
+import { inferenceChunkSizeError } from '../utils/inferenceChunks';
+import { tensorRtMode, isTensorRtMode } from '../utils/inferenceAcceleration';
 import Tooltip from './Tooltip';
 import { InferencePhase } from '../constants/taskPhases';
 import { DEFAULT_PATHS } from '../constants/paths';
@@ -43,8 +47,10 @@ import {
   selectInferenceTaskInfo,
   setInferenceMode,
   setInferenceTaskInfo,
+  setInferenceCheckpointInstruction,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { useInferenceSubtaskState } from '../hooks/useInferenceSubtaskState';
 import { requiresInstruction } from '../constants/policyCapabilities';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
 import {
@@ -66,6 +72,15 @@ const InferencePanel = () => {
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
   const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
   const [showPolicyBrowser, setShowPolicyBrowser] = useState(false);
+  const [checkpointProfile, setCheckpointProfile] = useState(null);
+  const checkpointKey = JSON.stringify([info.serviceType, (info.policyPath || '').trim()]);
+  const isSubtaskCheckpoint = checkpointProfile?.key === checkpointKey
+    && info.serviceType === 'groot' && checkpointProfile.data?.conditioning === 'subtask'
+    && (checkpointProfile.data?.subtask_instruction_choices?.length || 0) > 1;
+  const checkpointKeyRef = useRef(checkpointKey);
+  checkpointKeyRef.current = checkpointKey;
+  const confirmedInstructionRef = useRef(info.taskInstruction?.[0] || '');
+  confirmedInstructionRef.current = info.taskInstruction?.[0] || '';
 
   // InferencePage's lock — only the inference-side phase matters here.
   // Record phase is the InfoPanel's concern (D18, plan record-zippy-sunrise).
@@ -78,10 +93,10 @@ const InferencePanel = () => {
     String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
       : 'async';
-  const isGrootModel = info.serviceType === 'groot';
-  const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
+  const supportedTrtMode = tensorRtMode(info.serviceType, info.policyType);
+  const isTensorRtEnabled = isTensorRtMode(info.accelerationMode);
   const initialPoseSyncEnabled = Boolean(info.initialPoseSync);
-  const timingInputIncomplete = hasIncompleteInferenceTiming(info);
+  const timingInputIncomplete = hasIncompleteInferenceTiming(info) || Boolean(inferenceChunkSizeError(info));
   const timingWarnings = getInferenceTimingWarnings({
     inferenceHz: info.inferenceHz,
     controlHz: info.controlHz,
@@ -108,7 +123,9 @@ const InferencePanel = () => {
       // multi-task language-conditioned policy can be re-conditioned via
       // the "Update Task Instruction" button below.
       if (field !== 'taskInstruction' && !isEditable) return;
-      dispatch(setInferenceTaskInfo({ [field]: value }));
+      dispatch(setInferenceTaskInfo({ [field]: value,
+        ...(field === 'policyPath' ? { accelerationEnginePath: '' } : {}),
+      }));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
     [isEditable, dispatch]
@@ -118,6 +135,32 @@ const InferencePanel = () => {
     () => getInferenceTaskInfoKey(info),
     [info]
   );
+
+  const handleCheckpointInstruction = useCallback((instruction) => {
+    const stages = checkpointProfile?.data?.subtask_instruction_choices || [];
+    if (isTaskRunning && isSubtaskCheckpoint) {
+      const currentIndex = stages.findIndex((stage) => stage.includes(confirmedInstructionRef.current));
+      const targetIndex = stages.findIndex((stage) => stage.includes(instruction));
+      // An automatic transition may advance again before the manual RPC's
+      // acknowledgement reaches the UI. Never let that older ack go backwards.
+      if (currentIndex > targetIndex) return;
+    }
+    confirmedInstructionRef.current = instruction;
+    dispatch(setInferenceCheckpointInstruction({
+      policyPath: info.policyPath, serviceType: info.serviceType, instruction,
+    }));
+    dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+  }, [dispatch, info.policyPath, info.serviceType, checkpointProfile, isTaskRunning, isSubtaskCheckpoint]);
+
+  useInferenceSubtaskState({ enabled: isSubtaskCheckpoint && isTaskRunning,
+    modelPath: (info.policyPath || '').trim(), instruction: info.taskInstruction?.[0] || '',
+    stages: checkpointProfile?.data?.subtask_instruction_choices,
+    onInstruction: (instruction) => {
+      if (checkpointProfile?.data?.subtask_instruction_choices?.flat().includes(instruction)) {
+        handleCheckpointInstruction(instruction);
+      }
+    },
+  });
 
   useEffect(
     () => () => {
@@ -243,6 +286,27 @@ const InferencePanel = () => {
       setIsUpdatingInstruction(false);
     }
   }, [canUpdateInstruction, sendRecordCommand, currentInstruction]);
+
+  const handleCompleteSubtask = useCallback(async (nextInstruction) => {
+    if (!isSubtaskCheckpoint || !isInferencing || isUpdatingInstruction) return;
+    const submittedKey = checkpointKey;
+    setIsUpdatingInstruction(true);
+    try {
+      const result = await sendRecordCommand('update_instruction', {
+        taskInstruction: [nextInstruction], autofillEmptyTaskFields: false,
+      });
+      if (!result?.success) throw new Error(result?.message || 'Subtask transition failed');
+      if (checkpointKeyRef.current === submittedKey) {
+        handleCheckpointInstruction(nextInstruction);
+        toast.success('Subtask completed; inference continues with the next instruction');
+      }
+    } catch (error) {
+      toast.error(error.message || 'Subtask transition failed');
+    } finally {
+      setIsUpdatingInstruction(false);
+    }
+  }, [isSubtaskCheckpoint, isInferencing, isUpdatingInstruction, checkpointKey,
+    sendRecordCommand, handleCheckpointInstruction]);
 
   const handlePolicyFolderSelect = useCallback((item) => {
     if (!isEditable) return;
@@ -477,6 +541,15 @@ const InferencePanel = () => {
         )}
       </div>
 
+      <CheckpointInstructionControl info={info}
+        readonly={isTaskRunning && !isInferencing}
+        autoApply={!isTaskRunning}
+        running={isTaskRunning} inferencing={isInferencing}
+        transitioning={isUpdatingInstruction}
+        languageConditioned={showInstruction}
+        onSelect={handleCheckpointInstruction} onComplete={handleCompleteSubtask}
+        onProfile={setCheckpointProfile} />
+
       {/* Task Instruction — only shown for language-conditioned policies.
           Whitelist lives in constants/policyCapabilities.js. */}
       {showInstruction && (
@@ -485,12 +558,13 @@ const InferencePanel = () => {
             <span className={clsx(classLabel, 'pt-2')}>Task Instruction</span>
             <textarea
               className={classTaskInstructionTextarea}
+              readOnly={Boolean(isSubtaskCheckpoint && isTaskRunning)}
               value={(info.taskInstruction && info.taskInstruction[0]) || ''}
               onChange={(e) => handleChange('taskInstruction', [e.target.value])}
               placeholder="Enter Task Instruction"
             />
           </div>
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+          {!isSubtaskCheckpoint && <div className={clsx('flex', 'items-center', 'mb-2.5')}>
             <span className={classLabel} />
             <button
               type="button"
@@ -510,7 +584,7 @@ const InferencePanel = () => {
             >
               {isUpdatingInstruction ? 'Updating…' : 'Update Task Instruction'}
             </button>
-          </div>
+          </div>}
         </>
       )}
 
@@ -537,11 +611,13 @@ const InferencePanel = () => {
         </div>
       </div>
 
-      {isGrootModel && (
+      {supportedTrtMode && (
         <>
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
             <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-              <Tooltip content="Run GR00T with DiT TensorRT acceleration." position="bottom">
+              <Tooltip content={info.serviceType === 'groot'
+                ? 'Accelerate GR00T DiT with a checkpoint-specific TensorRT engine.'
+                : 'Accelerate the ACT network with TensorRT; keep stored processors and temporal ensemble.'} position="bottom">
                 <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
               </Tooltip>
               <span>TensorRT</span>
@@ -549,6 +625,7 @@ const InferencePanel = () => {
             <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
               <input
                 type="checkbox"
+                aria-label="Enable TensorRT"
                 className={clsx('w-4 h-4', {
                   'cursor-not-allowed opacity-50': !isEditable,
                   'cursor-pointer': isEditable,
@@ -556,7 +633,7 @@ const InferencePanel = () => {
                 checked={isTensorRtEnabled}
                 onChange={(e) => handleChange(
                   'accelerationMode',
-                  e.target.checked ? 'tensorrt_dit' : 'pytorch'
+                  e.target.checked ? supportedTrtMode : 'pytorch'
                 )}
                 disabled={!isEditable}
               />
@@ -565,6 +642,7 @@ const InferencePanel = () => {
           </div>
           {isTensorRtEnabled && (
             <TrtEngineControl
+              serviceType={info.serviceType}
               modelPath={info.policyPath}
               enginePath={info.accelerationEnginePath}
               robotType={robotType}
@@ -662,6 +740,8 @@ const InferencePanel = () => {
         </div>
       )}
 
+      <InferenceChunkControl info={info} onChange={handleChange} readonly={!isEditable} />
+
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
           <Tooltip
@@ -731,9 +811,16 @@ const InferencePanel = () => {
         selectButtonText="Select"
         allowDirectorySelect={true}
         allowFileSelect={false}
+        targetFileName="config.json"
+        targetFileLabel="Model configuration"
         initialPath={policyBrowserPath}
         defaultPath={policyBrowserPath}
         homePath={DEFAULT_PATHS.POLICY_CHECKPOINTS_PATH}
+        shortcuts={info.serviceType === 'groot'
+          ? [{ label: 'hero_groot_inference', path: '/workspace/model/groot/hero_groot_inference',
+            description: 'GR00T checkpoints from hero_groot_inference' }]
+          : [{ label: 'hero_act_inference', path: '/workspace/model/lerobot/hero_act_inference',
+            description: 'ACT checkpoints: 741/742/748/750/752/753 and 754/760/761/762/773' }]}
       />
     </div>
   );

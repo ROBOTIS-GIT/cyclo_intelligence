@@ -29,6 +29,9 @@ import InlineSystemStatus from '../components/InlineSystemStatus';
 import ImageGrid from '../components/ImageGrid';
 import RobotViewer3D from '../components/RobotViewer3D';
 import InferencePanel from '../components/InferencePanel';
+import InferenceGripperPanel from '../components/InferenceGripperPanel';
+import InferencePosePanel from '../components/InferencePosePanel';
+import InferenceDaggerPanel from '../components/InferenceDaggerPanel';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
 import { selectInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
@@ -48,6 +51,10 @@ export default function InferencePage({ isActive = true }) {
 
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [show3DViewer, setShow3DViewer] = useState(true);
+  const [rightPanelTab, setRightPanelTab] = useState('settings');
+  const [gripperBusy, setGripperBusy] = useState(false);
+  const [poseBusy, setPoseBusy] = useState(false);
+  const [daggerBusy, setDaggerBusy] = useState(false);
 
   const isFirstLoad = useSelector((state) => state.ui.isFirstLoad.inference);
 
@@ -186,7 +193,7 @@ export default function InferencePage({ isActive = true }) {
               )}
               <InlineSystemStatus />
               <div className="flex-grow" />
-              <InferenceControlPanel />
+              <InferenceControlPanel manualControlBusy={gripperBusy || poseBusy || daggerBusy} />
             </div>
             <div className={classHeartbeatStatus}>
               <HeartbeatStatus />
@@ -236,7 +243,47 @@ export default function InferencePage({ isActive = true }) {
           </button>
           <div className={classRightPanel}>
             <div className="w-full min-h-10"></div>
-            <InferencePanel />
+            <div role="tablist" aria-label="Inference tools" className="flex w-full shrink-0 border-b border-gray-200 px-5 pt-3"
+              onKeyDown={(event) => { if (event.key === ' ' || event.key === 'Enter') event.stopPropagation(); }}
+              onKeyUp={(event) => { if (event.key === ' ' || event.key === 'Enter') event.stopPropagation(); }}>
+              {[['settings', 'Settings'], ['gripper', 'Gripper'], ['pose', 'Pose'], ['dagger', 'DAgger']].map(([key, label], index) => (
+                <button key={key} id={`inference-${key}-tab`} type="button" role="tab"
+                  aria-selected={rightPanelTab === key} aria-controls={`inference-${key}-panel`}
+                  tabIndex={rightPanelTab === key ? 0 : -1}
+                  className={clsx('flex-1 border-b-2 px-2 py-3 text-sm font-medium', rightPanelTab === key
+                    ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700')}
+                  onClick={() => setRightPanelTab(key)}
+                  onKeyDown={(event) => {
+                    const keys = ['settings', 'gripper', 'pose', 'dagger'];
+                    let next;
+                    if (event.key === 'ArrowRight') next = keys[(index + 1) % keys.length];
+                    else if (event.key === 'ArrowLeft') next = keys[(index + keys.length - 1) % keys.length];
+                    else if (event.key === 'Home') next = keys[0];
+                    else if (event.key === 'End') next = keys[keys.length - 1];
+                    if (next) {
+                      event.preventDefault();
+                      setRightPanelTab(next);
+                      document.getElementById(`inference-${next}-tab`)?.focus();
+                    }
+                  }}>{label}</button>
+              ))}
+            </div>
+            <div id="inference-settings-panel" role="tabpanel" aria-labelledby="inference-settings-tab"
+              hidden={rightPanelTab !== 'settings'} className="w-full min-h-0 overflow-y-auto">
+              <InferencePanel />
+            </div>
+            <div id="inference-gripper-panel" role="tabpanel" aria-labelledby="inference-gripper-tab"
+              hidden={rightPanelTab !== 'gripper'} className="w-full min-h-0 overflow-y-auto">
+              <InferenceGripperPanel isActive={isActive && rightPanelTab === 'gripper'} externalBusy={poseBusy || daggerBusy} onBusyChange={setGripperBusy} />
+            </div>
+            <div id="inference-pose-panel" role="tabpanel" aria-labelledby="inference-pose-tab"
+              hidden={rightPanelTab !== 'pose'} className="w-full min-h-0 overflow-y-auto">
+              <InferencePosePanel isActive={isActive && rightPanelTab === 'pose'} externalBusy={gripperBusy || daggerBusy} onBusyChange={setPoseBusy} />
+            </div>
+            <div id="inference-dagger-panel" role="tabpanel" aria-labelledby="inference-dagger-tab"
+              hidden={rightPanelTab !== 'dagger'} className="w-full min-h-0 overflow-y-auto">
+              <InferenceDaggerPanel isActive={isActive} externalBusy={gripperBusy || poseBusy} onBusyChange={setDaggerBusy} />
+            </div>
           </div>
         </div>
       </div>

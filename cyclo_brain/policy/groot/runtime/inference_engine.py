@@ -28,6 +28,7 @@ Original Step 1 location: cyclo_brain/policy/groot/inference.py.
 Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
 """
 import logging
+import json
 import os
 import sys
 import tempfile
@@ -38,6 +39,8 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+from inference_chunks import effective_chunk_size, requested_chunk_size
+from checkpoint_instructions import checkpoint_subtask_choices
 
 
 # -- robot_client import shim --------------------------------------------------
@@ -83,6 +86,22 @@ def _env_int(name: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _env_positive_float(name: str, default: Optional[float]) -> Optional[float]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+        if np.isfinite(parsed) and parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+    logging.getLogger("groot_inference").warning(
+        "Ignoring invalid %s=%r; using %s", name, value, default,
+    )
+    return default
+
+
 ACCELERATION_PYTORCH = "pytorch"
 ACCELERATION_TENSORRT_DIT = "tensorrt_dit"
 ACCELERATION_TENSORRT_FULL_PIPELINE = "tensorrt_full_pipeline"
@@ -110,6 +129,7 @@ if _groot_path and _groot_path not in sys.path:
 
 # TensorRT DiT acceleration - reuse existing GR00T deployment code
 from scripts.deployment.standalone_inference_script import (  # noqa: E402
+    TensorRTDiTWrapper,
     replace_dit_with_tensorrt,
 )
 try:  # GR00T N1.7
@@ -124,6 +144,30 @@ except ImportError:  # GR00T N1.6 / N1.6.1
     )
 
 
+def validate_dit_outputs(reference: np.ndarray, accelerated: np.ndarray) -> dict:
+    """Check a captured DiT forward pass before publishing a built engine."""
+    if reference.shape != accelerated.shape:
+        raise RuntimeError(
+            f"TensorRT DiT output shape mismatch: {reference.shape} vs {accelerated.shape}"
+        )
+    if not np.isfinite(reference).all() or not np.isfinite(accelerated).all():
+        raise RuntimeError("TensorRT DiT verification produced nonfinite values")
+    ref = reference.astype(np.float64).reshape(-1)
+    pred = accelerated.astype(np.float64).reshape(-1)
+    denominator = float(np.linalg.norm(ref) * np.linalg.norm(pred))
+    cosine = float(np.dot(ref, pred) / denominator) if denominator else 0.0
+    max_abs_error = float(np.max(np.abs(ref - pred)))
+    # The upstream pipeline uses cosine > 0.99 for its verification gate.
+    # Handle the zero-vector case separately, where cosine is undefined.
+    passed = cosine > 0.99 if denominator else max_abs_error <= 1e-5
+    if not passed:
+        raise RuntimeError(
+            f"TensorRT DiT verification failed: cosine={cosine:.6f}, "
+            f"max_abs_error={max_abs_error:.6g}"
+        )
+    return {"cosine_similarity": cosine, "max_abs_error": max_abs_error}
+
+
 def build_trt_engine(
     policy: Gr00tPolicy,
     observation: dict,
@@ -134,7 +178,7 @@ def build_trt_engine(
 
     Uses DiTInputCapture and export_dit_to_onnx from GR00T deployment scripts,
     then builds the TRT engine via build_tensorrt_engine.build_engine().
-    Takes ~3-5 min on Orin.
+    Verifies a captured forward pass and atomically installs the engine.
     """
     from scripts.deployment.build_tensorrt_engine import (
         build_engine,
@@ -152,9 +196,11 @@ def build_trt_engine(
     hook = policy.model.action_head.model.register_forward_pre_hook(
         capture.hook_fn, with_kwargs=True
     )
-    with torch.inference_mode():
-        policy.get_action(observation)
-    hook.remove()
+    try:
+        with torch.inference_mode():
+            policy.get_action(observation)
+    finally:
+        hook.remove()
 
     if not capture.captured:
         raise RuntimeError("Failed to capture DiT inputs")
@@ -167,6 +213,7 @@ def build_trt_engine(
     # mistaken for temporary external data.
     with tempfile.TemporaryDirectory(prefix=".trt_export_", dir=engine_dir) as export_dir:
         onnx_path = os.path.join(export_dir, "dit_model_bf16.onnx")
+        staged_engine_path = os.path.join(export_dir, "dit_model_bf16.trt")
 
         # Patch torch.onnx.export to force dynamo=False (avoids torch.export
         # failures with DiT's dynamic shapes, without modifying upstream GR00T).
@@ -210,7 +257,7 @@ def build_trt_engine(
 
         build_engine(
             onnx_path=onnx_path,
-            engine_path=engine_path,
+            engine_path=staged_engine_path,
             precision="bf16",
             workspace_mb=workspace_mb,
             min_shapes=min_shapes,
@@ -218,7 +265,35 @@ def build_trt_engine(
             max_shapes=max_shapes,
         )
 
+        inputs = {
+            name: value.to("cuda") if value is not None else None
+            for name, value in {
+                "hidden_states": capture.sa_embs,
+                "encoder_hidden_states": capture.vl_embs,
+                "timestep": capture.timestep,
+                "image_mask": capture.image_mask,
+                "backbone_attention_mask": capture.backbone_attention_mask,
+            }.items()
+        }
+        with torch.inference_mode():
+            reference = policy.model.action_head.model(**inputs)
+            trt_dit = TensorRTDiTWrapper(staged_engine_path)
+            accelerated = trt_dit(
+                sa_embs=inputs["hidden_states"],
+                vl_embs=inputs["encoder_hidden_states"],
+                timestep=inputs["timestep"],
+                image_mask=inputs["image_mask"],
+                backbone_attention_mask=inputs["backbone_attention_mask"],
+            )
+            verification = validate_dit_outputs(
+                reference.float().cpu().numpy(),
+                accelerated.float().cpu().numpy(),
+            )
+        logger.info("TensorRT DiT verification: %s", verification)
+        os.replace(staged_engine_path, engine_path)
+
     logger.info("Cleaned up temporary ONNX export directory")
+    return verification
 
 
 class GR00TInference:
@@ -236,6 +311,10 @@ class GR00TInference:
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
         self._loaded_model_path: Optional[str] = None  # track cached policy path
+        self._subtask_choices = []
+        self._last_subtask_observation_instruction = None
+        self._sensor_max_age_s = _env_positive_float("GROOT_SENSOR_MAX_AGE_S", 1.0)
+        self._sensor_max_skew_s = _env_positive_float("GROOT_SENSOR_MAX_SKEW_S", None)
         self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
         self._loaded_acceleration_engine_path: str = ""
         self.policy_info: dict = {
@@ -265,6 +344,9 @@ class GR00TInference:
         robot_type = request.robot_type
 
         try:
+            self._subtask_choices = checkpoint_subtask_choices(model_path)
+            self._last_subtask_observation_instruction = None
+            self._requested_chunk_size = requested_chunk_size(getattr(request, "action_chunk_size", 0))
             acceleration_mode, acceleration_engine_path, strict_acceleration = (
                 self._resolve_acceleration_request(request, model_path)
             )
@@ -290,9 +372,10 @@ class GR00TInference:
                 if self.robot is not None:
                     self.robot.close()
                     self.robot = None
-                self.init_policy_info()
+                self.init_policy_info(model_path)
                 self.init_robot_info(robot_type)
-                self.robot.wait_for_ready(timeout=10.0)
+                self._validate_robot_contract()
+                self._wait_for_model_observation(timeout=10.0)
                 return {
                     "success": True,
                     "message": "GR00T inference restarted (policy cached)",
@@ -330,9 +413,10 @@ class GR00TInference:
                     device="cuda",
                 )
 
-            self.init_policy_info()
+            self.init_policy_info(model_path)
             self.init_robot_info(robot_type)
-            self.robot.wait_for_ready(timeout=10.0)
+            self._validate_robot_contract()
+            self._wait_for_model_observation(timeout=10.0)
 
             if acceleration_mode == ACCELERATION_TENSORRT_DIT:
                 trt_applied = self._enable_dit_tensorrt(
@@ -439,6 +523,9 @@ class GR00TInference:
             if os.path.getsize(engine_path) <= 0:
                 raise RuntimeError(f"TRT engine is empty: {engine_path}")
 
+            from tensorrt_assets import validate_manifest
+            validate_manifest(request.model_path, engine_path, "groot_dit")
+
             replace_dit_with_tensorrt(self.policy, engine_path)
             self.logger.info("DiT accelerated with TensorRT: %s", engine_path)
             return True
@@ -484,8 +571,7 @@ class GR00TInference:
 
     def _build_dummy_observation(self, task_instruction: str = "") -> dict:
         """Build a real observation from robot sensors for TRT engine building."""
-        images = self.robot.get_images(format="rgb")
-        joints = self.robot.get_joint_positions()
+        images, joints = self._read_sensor_observation({})
         return self.preprocess(images, joints, task_instruction)
 
     def build_synthetic_observation(self, task_instruction: str = "") -> dict:
@@ -626,29 +712,35 @@ class GR00TInference:
             "TRT observation without hardcoded image channels"
         )
 
-    def _state_norm_params(self, key: str) -> dict:
+    def _modality_norm_params(self, modality: str, key: str) -> dict:
         processor = getattr(self.policy, "processor", None)
         state_action_processor = getattr(processor, "state_action_processor", None)
         norm_params = getattr(state_action_processor, "norm_params", None)
         tag = self._embodiment_tag_value()
         try:
-            return norm_params[tag]["state"][key]
+            return norm_params[tag][modality][key]
         except (TypeError, KeyError) as e:
             raise RuntimeError(
-                f"Model statistics are missing state dimension for '{key}' "
+                f"Model statistics are missing {modality} dimension for '{key}' "
                 f"under embodiment '{tag}'"
             ) from e
 
-    def _model_state_dim(self, key: str) -> int:
-        params = self._state_norm_params(key)
+    def _state_norm_params(self, key: str) -> dict:
+        return self._modality_norm_params("state", key)
+
+    def _model_modality_dim(self, modality: str, key: str) -> int:
+        params = self._modality_norm_params(modality, key)
         dim = params.get("dim")
         try:
             result = int(np.asarray(dim).item())
         except (TypeError, ValueError) as e:
-            raise RuntimeError(f"Invalid state dimension for '{key}': {dim!r}") from e
+            raise RuntimeError(f"Invalid {modality} dimension for '{key}': {dim!r}") from e
         if result <= 0:
-            raise RuntimeError(f"Invalid state dimension for '{key}': {result}")
+            raise RuntimeError(f"Invalid {modality} dimension for '{key}': {result}")
         return result
+
+    def _model_state_dim(self, key: str) -> int:
+        return self._model_modality_dim("state", key)
 
     def _model_state_vector(self, key: str) -> np.ndarray:
         params = self._state_norm_params(key)
@@ -665,7 +757,7 @@ class GR00TInference:
             )
         return vector.reshape(dim)
 
-    def init_policy_info(self) -> None:
+    def init_policy_info(self, model_path: Optional[str] = None) -> None:
         """Read video/state/action/language keys from the loaded policy."""
         mc = getattr(self.policy, "modality_configs", None)
         if mc is None:
@@ -684,6 +776,28 @@ class GR00TInference:
                 [],
             )
 
+        if not self.policy_info["action"]:
+            raise RuntimeError("Model has no action keys")
+        if model_path is not None:
+            config_path = os.path.join(model_path, "inference_config.json")
+            if os.path.isfile(config_path):
+                with open(config_path, encoding="utf-8") as config_file:
+                    config = json.load(config_file)
+                if not isinstance(config, dict):
+                    raise ValueError("inference_config.json must contain an object")
+                if "output_action_keys" in config:
+                    keys = config["output_action_keys"]
+                    if (not isinstance(keys, list) or not keys
+                            or any(not isinstance(key, str) for key in keys)
+                            or len(set(keys)) != len(keys)
+                            or any(key not in self.policy_info["action"] for key in keys)):
+                        raise ValueError(
+                            "output_action_keys must be a non-empty, unique subset "
+                            f"of the model action keys: {self.policy_info['action']}"
+                        )
+                    # Filter only the runtime output. The processor must retain
+                    # its trained order to decode the correct joint slices.
+                    self.policy_info["action"] = list(keys)
         self.logger.info("Policy info: %s", self.policy_info)
 
     def init_robot_info(self, robot_type: str) -> None:
@@ -728,6 +842,66 @@ class GR00TInference:
 
         self.logger.info("Robot info: %s", self.robot_info)
 
+    def _validate_robot_contract(self) -> None:
+        """Reject incomplete sensor mappings and incompatible action layouts."""
+        mapped_states = set(self.robot_info["joints"]) | set(
+            self.robot_info.get("sensor_states", {})
+        )
+        missing = set(self.policy_info["state"]) - mapped_states
+        if missing:
+            raise RuntimeError(f"Missing robot state mappings: {sorted(missing)}")
+
+        # The live adapter reads the current frame/state. Historical inputs
+        # require a buffer rather than repeating the latest observation.
+        for modality in ("video", "state", "language"):
+            if self._modality_horizon(modality) != 1:
+                raise RuntimeError(
+                    f"Live GR00T adapter requires one {modality} timestep"
+                )
+
+        for key in self.policy_info["state"]:
+            expected = self._model_state_dim(key)
+            if key in self.robot_info["joints"]:
+                width = len(self.robot.get_joint_names(self.robot_info["joints"][key]))
+            else:
+                width = 3  # mobile/odometry velocity state
+            if expected != width:
+                raise RuntimeError(
+                    f"State '{key}' expects {expected} values; robot provides {width}"
+                )
+
+        for key in self.policy_info["action"]:
+            robot_key = self.robot._resolve_action_key(key)
+            cfg = self.robot._action_groups.get(robot_key)
+            if cfg is None:
+                raise RuntimeError(f"Missing robot action mapping: {key}")
+            width = (
+                3 if cfg["msg_type"] == "geometry_msgs/msg/Twist"
+                else len(cfg["joint_names"])
+            )
+            expected = self._model_modality_dim("action", key)
+            if expected != width:
+                raise RuntimeError(
+                    f"Action '{key}' expects {expected} values; robot provides {width}"
+                )
+
+    def _wait_for_model_observation(self, timeout: float = 10.0) -> None:
+        """Wait for the model's inputs, without requiring unused YAML cameras."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                images, joints = self._read_sensor_observation({})
+                observation = self.preprocess(images, joints, "")
+            except RuntimeError as error:
+                observation = self.fail(str(error))
+            if observation.get("success") is not False:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Model sensors not ready: {observation['message']}"
+                )
+            time.sleep(min(0.1, remaining))
 
     def get_action_chunk(self, request) -> dict:
         """Build the sensor observation and run standard GR00T inference."""
@@ -737,9 +911,9 @@ class GR00TInference:
         timing = {}
         try:
             task = request.task_instruction
+            self._wait_for_subtask_observation(task)
             preprocess_started = time.monotonic()
-            images = self.robot.get_images(format="rgb")
-            joints = self.robot.get_joint_positions()
+            images, joints = self._read_sensor_observation(timing)
             observation = self.preprocess(images, joints, task)
             timing["observation_preprocess_duration_s"] = time.monotonic() - preprocess_started
             if "success" in observation:
@@ -754,6 +928,8 @@ class GR00TInference:
             self.logger.info("GR00T inference completed in %.3fs", timing["policy_duration_s"])
             result = self.postprocess_action(action)
             result["timing"] = timing
+            if result.get("success"):
+                self._last_subtask_observation_instruction = task
             return result
 
         except Exception as e:
@@ -762,9 +938,94 @@ class GR00TInference:
             result["timing"] = timing
             return result
 
-    def preprocess(
-        self, images: dict, joints: dict, task: str
-    ) -> dict:
+    def _read_sensor_observation(self, timing: dict) -> tuple[dict, dict]:
+        """Read required images/joints with their matching receive timestamps.
+
+        Receipt time includes cache age in RAIL alignment. It is not hardware
+        acquisition time. Older RobotClient implementations retain the cache
+        read fallback, with explicit provenance instead of invented sensor age.
+        """
+        snapshot_reader = getattr(self.robot, "get_observation_snapshot", None)
+        if not callable(snapshot_reader):
+            timing.update({
+                "sensor_snapshot_monotonic_s": time.monotonic(),
+                "timestamp_source": "cache_read_fallback",
+            })
+            return self.robot.get_images(format="rgb"), self.robot.get_joint_positions()
+
+        sources = self.robot_info.get("camera_sources", {})
+        cameras = list(dict.fromkeys(
+            sources.get(key, key) for key in self.robot_info["cameras"]
+        ))
+        groups = list(dict.fromkeys(self.robot_info["joints"].values()))
+        snapshot = snapshot_reader(format="rgb", camera_names=cameras, joint_groups=groups)
+        if (not isinstance(snapshot, dict)
+                or not all(isinstance(snapshot.get(key), dict) for key in ("images", "joints", "timing"))):
+            raise RuntimeError("Invalid atomic sensor observation snapshot")
+        timing.update(snapshot["timing"])
+        self._validate_sensor_timing(timing, cameras, groups)
+        return snapshot["images"], snapshot["joints"]
+
+    def _validate_sensor_timing(self, timing: dict, cameras: list, groups: list) -> None:
+        def finite_time(value):
+            return (not isinstance(value, bool) and isinstance(value, (int, float))
+                    and np.isfinite(value) and value >= 0)
+
+        snapshot_time = timing.get("sensor_snapshot_monotonic_s")
+        read_time = timing.get("snapshot_read_monotonic_s")
+        skew = timing.get("sensor_skew_s")
+        received = timing.get("sensor_received_monotonic_s")
+        ages = timing.get("sensor_age_s")
+        if (timing.get("timestamp_source") != "local_monotonic_receive"
+                or not all(finite_time(value) for value in (snapshot_time, read_time, skew))
+                or snapshot_time > read_time or read_time > time.monotonic()
+                or not isinstance(received, dict) or not isinstance(ages, dict)):
+            raise RuntimeError("Invalid atomic sensor observation timestamps")
+        required = ["image:" + name for name in cameras] + ["joint:" + name for name in groups]
+        for name in required:
+            stamp, age = received.get(name), ages.get(name)
+            if (not finite_time(stamp) or stamp > read_time or not finite_time(age)
+                    or not np.isclose(age, read_time-stamp, rtol=0, atol=1e-6)):
+                raise RuntimeError(f"Invalid sensor observation timestamp: {name}")
+            if age > self._sensor_max_age_s:
+                raise RuntimeError(
+                    f"Stale sensor observation: {name} age {age:.3f}s exceeds "
+                    f"GROOT_SENSOR_MAX_AGE_S={self._sensor_max_age_s:g}"
+                )
+        if self._sensor_max_skew_s is not None and skew > self._sensor_max_skew_s:
+            raise RuntimeError(
+                f"Sensor observation skew {skew:.3f}s exceeds "
+                f"GROOT_SENSOR_MAX_SKEW_S={self._sensor_max_skew_s:g}"
+            )
+
+    def _wait_for_subtask_observation(self, task: str, timeout: float = 2.0) -> None:
+        """On a new stage, require sensor updates received after this request.
+
+        Main waits for an old in-flight request to finish and discards it. This
+        check then prevents Engine from reusing cached observations from the
+        completed stage. Normal whole-task checkpoints skip this gate.
+        """
+        if not self._subtask_choices or task == self._last_subtask_observation_instruction:
+            return
+        after = time.time()
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            timestamps = [self.robot.get_image_timestamp(
+                self.robot_info.get("camera_sources", {}).get(key, key)
+            ) for key in self.robot_info["cameras"]]
+            timestamps += [self.robot.get_joint_timestamp(group)
+                           for group in self.robot_info["joints"].values()]
+            sensors = list(self.robot_info.get("sensor_states", {}).values())
+            if sensors:
+                status = self.robot.get_status().get("sensors", {})
+                timestamps += [status.get(name, {}).get("timestamp") for name in sensors]
+            if timestamps and all(stamp is not None and stamp > after for stamp in timestamps):
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Fresh camera/joint observations unavailable for the new subtask")
+            time.sleep(0.01)
+
+    def preprocess(self, images: dict, joints: dict, task: str) -> dict:
         """Build observation dict from raw sensor data. Returns fail dict on error."""
         if not images or not joints:
             return self.fail("No recent observations from sensors")
@@ -775,6 +1036,12 @@ class GR00TInference:
             img = images.get(source_key)
             if img is None:
                 return self.fail(f"Missing camera: {source_key} for {cam_key}")
+            if (
+                not isinstance(img, np.ndarray) or img.dtype != np.uint8
+                or img.ndim != 3 or img.shape[2] != 3
+                or img.shape[0] == 0 or img.shape[1] == 0
+            ):
+                return self.fail(f"Invalid RGB image: {source_key} for {cam_key}")
             rotation = self.robot_info["camera_rotations"].get(source_key)
             if rotation and rotation in self.ROTATE_MAP:
                 img = cv2.rotate(img, self.ROTATE_MAP[rotation])
@@ -785,7 +1052,9 @@ class GR00TInference:
             positions = joints.get(yaml_group)
             if positions is None or len(positions) == 0:
                 return self.fail(f"Missing joint group: {modality_key}")
-            state_obs[modality_key] = positions[np.newaxis, np.newaxis, :]  # (1,1,D)
+            state_obs[modality_key] = np.asarray(positions, dtype=np.float32)[
+                np.newaxis, np.newaxis, :
+            ]  # (1,1,D)
 
         # Sensor-backed state modalities (e.g. mobile ← odom).
         for modality_key, sensor_name in self.robot_info.get("sensor_states", {}).items():
@@ -802,6 +1071,17 @@ class GR00TInference:
             else:
                 return self.fail(f"Unsupported sensor modality: {sensor_name}")
 
+        for key in self.policy_info["state"]:
+            values = state_obs.get(key)
+            if values is None:
+                return self.fail(f"Missing state modality: {key}")
+            expected_shape = (1, 1, self._model_state_dim(key))
+            if values.shape != expected_shape or not np.isfinite(values).all():
+                return self.fail(
+                    f"Invalid state '{key}': expected finite values of shape "
+                    f"{expected_shape}, got {values.shape}"
+                )
+
         language_obs = {key: [[task]] for key in self.policy_info["language"]}
 
         return {
@@ -811,15 +1091,28 @@ class GR00TInference:
         }
 
     def postprocess_action(self, action: dict) -> dict:
-        chunks = [
-            action[key][0]  # remove batch dim
-            for key in self.policy_info["action"]
-            if key in action and isinstance(action[key], np.ndarray)
-        ]
-        if not chunks:
+        if not self.policy_info["action"] or not isinstance(action, dict):
             return self.fail("No action output from policy")
 
+        chunks = []
+        horizon = self._modality_horizon("action")
+        for key in self.policy_info["action"]:
+            values = action.get(key)
+            expected_shape = (1, horizon, self._model_modality_dim("action", key))
+            if (
+                not isinstance(values, np.ndarray)
+                or values.shape != expected_shape
+                or not np.issubdtype(values.dtype, np.floating)
+                or not np.isfinite(values).all()
+            ):
+                return self.fail(
+                    f"Invalid action '{key}': expected finite array of shape "
+                    f"{expected_shape}, got {getattr(values, 'shape', None)}"
+                )
+            chunks.append(values[0])
+
         chunk = np.concatenate(chunks, axis=1)  # (T, D_total)
+        chunk = chunk[:effective_chunk_size(getattr(self, "_requested_chunk_size", 0), horizon)]
         T, D = chunk.shape
         self.logger.info("Action chunk: T=%d, D=%d", T, D)
         return {

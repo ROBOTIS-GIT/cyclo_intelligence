@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sys
 import threading
+import asyncio
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +87,31 @@ bt_support = sys.modules["supervisor_api.bt_support"]
 bt_trees = sys.modules["supervisor_api.bt_trees"]
 _GROOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["groot"]
 _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
+
+
+@pytest.mark.parametrize("ensemble", [None, 0.01])
+def test_act_options_distinguish_official_default_from_trained_horizon(tmp_path, monkeypatch, ensemble):
+    (tmp_path / 'config.json').write_text(json.dumps({'type':'act', 'chunk_size':30, 'temporal_ensemble_coeff':ensemble}))
+    monkeypatch.setattr(app, '_resolve_trt_paths', lambda *_args, **_kwargs:(str(tmp_path), ''))
+    result = asyncio.run(app.inference_options('lerobot', '/workspace/model/lerobot/test'))
+    assert result['max_chunk_size'] == 30
+    assert result['default_chunk_size'] == 100
+    assert result['temporal_ensemble'] == (ensemble is not None)
+
+
+def test_groot_options_use_embodiment_horizon_instead_of_network_maximum(tmp_path, monkeypatch):
+    (tmp_path / 'config.json').write_text('{"action_horizon":40}')
+    (tmp_path / 'processor_config.json').write_text(json.dumps({'processor_kwargs': {'modality_configs':
+        {'new_embodiment': {'action': {'delta_indices':list(range(24))}}}}}))
+    monkeypatch.setattr(app, '_resolve_trt_paths', lambda *_args, **_kwargs:(str(tmp_path), ''))
+    result = asyncio.run(app.inference_options('groot', '/workspace/model/groot/test'))
+    assert result['max_chunk_size'] == 24
+    assert result['default_chunk_size'] == 24
+
+
+def test_inference_options_reject_cross_backend_paths():
+    with pytest.raises(app.HTTPException):
+        asyncio.run(app.inference_options('groot', '/workspace/model/lerobot/test'))
 
 
 def test_navigation_grid_cache_starts_with_supervisor_lifespan(monkeypatch):
@@ -3055,11 +3081,46 @@ def test_resolve_groot_trt_paths_defaults_engine_inside_model():
     assert engine == "/workspace/model/groot/example/dit_model_bf16.trt"
 
 
+def test_resolve_act_trt_paths_keeps_backend_and_engine_bound():
+    model, engine = app._resolve_trt_paths("/workspace/model/lerobot/example", backend="lerobot")
+    assert engine == model + "/act_model_fp32.trt"
+    for path in ("/workspace/model/groot/example", "/workspace/model/lerobot/../groot/example"):
+        with pytest.raises(app.HTTPException):
+            app._resolve_trt_paths(path, backend="lerobot")
+    with pytest.raises(app.HTTPException):
+        app._resolve_trt_paths(model, "../other/act.trt", "lerobot")
+
+
+def test_trt_status_does_not_accept_a_failed_rebuild_as_ready(tmp_path):
+    engine = tmp_path / "act_model_fp32.trt"
+    engine.write_bytes(b"previous engine")
+    (tmp_path / "act_model_fp32.trt.json").write_text('{"status":"failed","message":"numerical gate failed"}')
+    status = _trt_status(str(tmp_path), str(engine))
+    assert status.status == "failed"
+    assert status.message == "numerical gate failed"
+
+
+def test_trt_monitor_preserves_verified_checkpoint_manifest(tmp_path, monkeypatch):
+    engine = tmp_path / "act_model_fp32.trt"
+    engine.write_bytes(b"engine")
+    original = {"status": "ready", "adapter": "lerobot_act", "checkpoint_identity": {"weights": "sha"},
+                "runtime_identity": {"gpu": "Orin"}, "verification": [{"max_abs_error": 1e-5}]}
+    (tmp_path / "act_model_fp32.trt.json").write_text(json.dumps(original))
+    job = app._TrtBuildJob(str(tmp_path), str(engine), str(tmp_path / "build.log"), 1.0)
+    monkeypatch.setattr(app.subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 0))
+    app._monitor_trt_build_job(job, ["dummy-builder"])
+    manifest = json.loads((tmp_path / "act_model_fp32.trt.json").read_text())
+    for key in ("adapter", "checkpoint_identity", "runtime_identity", "verification"):
+        assert manifest[key] == original[key]
+    assert manifest["status"] == "ready"
+
+
 def test_trt_status_reports_ready_engine(tmp_path):
     model = tmp_path / "workspace" / "model" / "groot" / "example"
     model.mkdir(parents=True)
     engine = model / "dit_model_bf16.trt"
     engine.write_bytes(b"engine")
+    (model / "dit_model_bf16.trt.json").write_text(json.dumps({"status": "ready", "checkpoint_identity": {"weights": "sha"}}))
 
     status = _trt_status(str(model), str(engine))
 
@@ -3075,6 +3136,14 @@ def test_trt_status_reports_missing_engine(tmp_path):
     status = _trt_status(str(model), str(engine))
 
     assert status.status == "missing"
+
+
+def test_trt_status_requires_checkpoint_identity_for_existing_plan(tmp_path):
+    engine = tmp_path / "act_model_fp32.trt"
+    engine.write_bytes(b"unverified engine")
+    status = _trt_status(str(tmp_path), str(engine))
+    assert status.status == "unknown"
+    assert status.engine_size_bytes == len(b"unverified engine")
 
 
 def test_trt_status_reports_stale_oom_build_from_log(tmp_path):

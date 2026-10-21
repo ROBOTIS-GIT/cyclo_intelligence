@@ -18,7 +18,9 @@ uint8 STOP               = 4   # Stop loop; keep model in GPU memory.
 uint8 UNLOAD             = 5   # Free GPU memory.
 uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
                                # Requires LOAD + START already issued. Touches
-                               # task_instruction only — no lifecycle change.
+                               # No lifecycle change. Known multi-subtask GR00T
+                               # models also discard prior-stage actions and
+                               # late responses before reconditioning.
 
 # Runtime extensions, sent as numeric command values without changing ROSIDL:
 # 7: CAPABILITIES, read-only; confirmed_pose_hold_v2 advertises confirmed STOP
@@ -58,6 +60,8 @@ float64 chunk_align_window_s
 # publish_to_robot is true.
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+# LOAD-time action horizon limit. 0 preserves checkpoint behavior.
+uint16 action_chunk_size
 ---
 bool success
 string message

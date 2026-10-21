@@ -4,6 +4,9 @@ import sys
 import types
 import unittest
 import importlib.util
+import json
+import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -89,6 +92,71 @@ class IoMappingCameraAliasTest(unittest.TestCase):
                 "cam_right_wrist": "observation.images.cam_wrist_right",
             },
         )
+
+
+class ActIoMappingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.engine = IoMappingMixin()
+        self.engine._loaded_model_path = self.tmp.name
+        self.engine._has_mobile_state = False
+        self.engine._state_modalities = ["arm_left", "arm_right"]
+        self.engine._action_keys = ["arm_left", "arm_right"]
+        self.engine._policy = SimpleNamespace(config=SimpleNamespace(
+            input_features={"observation.state": SimpleNamespace(shape=(16,))},
+            output_features={"action": SimpleNamespace(shape=(8,))},
+        ))
+        self.engine._robot = SimpleNamespace(
+            _config={"joint_groups": {
+                "follower_" + side: {"role": "follower", "joint_names": list(range(8))}
+                for side in ("arm_left", "arm_right")
+            }},
+            _action_groups={
+                side: {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": list(range(8))}
+                for side in ("arm_left", "arm_right")
+            },
+        )
+
+    def write_mapping(self, **overrides):
+        mapping = {"robot_type": "ffw_sg2_rev1",
+                   "state_modalities": ["arm_left", "arm_right"],
+                   "action_keys": ["arm_right"]}
+        mapping.update(overrides)
+        (Path(self.tmp.name) / "cyclo_inference.json").write_text(json.dumps(mapping))
+
+    def test_subset_action_requires_explicit_mapping(self):
+        with self.assertRaisesRegex(ValueError, "action dimension mismatch"):
+            self.engine._configure_act_io("ffw_sg2_rev1")
+
+    def test_right_only_action_keeps_both_state_arms(self):
+        self.write_mapping()
+        self.engine._configure_act_io("ffw_sg2_rev1")
+        self.assertEqual(self.engine._state_modalities, ["arm_left", "arm_right"])
+        self.assertEqual(self.engine._action_keys, ["arm_right"])
+
+    def test_right_only_state_is_not_left_prefix(self):
+        self.engine._policy.config.input_features["observation.state"].shape = (8,)
+        self.write_mapping(state_modalities=["arm_right"])
+        self.engine._configure_act_io("ffw_sg2_rev1")
+        self.assertEqual(self.engine._state_modalities, ["arm_right"])
+
+    def test_preserves_explicit_training_order(self):
+        self.write_mapping(state_modalities=["arm_right", "arm_left"])
+        self.engine._configure_act_io("ffw_sg2_rev1")
+        self.assertEqual(self.engine._state_modalities, ["arm_right", "arm_left"])
+
+    def test_rejects_unknown_duplicate_or_wrong_size_mapping(self):
+        for values in (["missing"], ["arm_right", "arm_right"], ["arm_left", "arm_right"]):
+            with self.subTest(values=values):
+                self.write_mapping(action_keys=values)
+                with self.assertRaises(ValueError):
+                    self.engine._configure_act_io("ffw_sg2_rev1")
+
+    def test_rejects_wrong_robot(self):
+        self.write_mapping(robot_type="another_robot")
+        with self.assertRaisesRegex(ValueError, "robot_type"):
+            self.engine._configure_act_io("ffw_sg2_rev1")
 
 
 if __name__ == "__main__":

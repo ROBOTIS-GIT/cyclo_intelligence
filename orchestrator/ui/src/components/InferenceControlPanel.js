@@ -41,6 +41,7 @@ import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
 import { getInferenceTimingWarnings } from '../utils/inferenceTiming';
+import { inferenceChunkSizeError } from '../utils/inferenceChunks';
 
 const phaseGuideMessages = {
   [InferencePhase.READY]: 'Ready to start',
@@ -75,14 +76,14 @@ async function readJsonResponse(response) {
   }
 }
 
-function buildTrtStatusUrl(modelPath, enginePath) {
+function buildTrtStatusUrl(modelPath, enginePath, serviceType) {
   const params = new URLSearchParams();
   params.set('model_path', modelPath);
   if (enginePath) params.set('engine_path', enginePath);
-  return `${API_BASE}/backends/groot/trt/status?${params.toString()}`;
+  return `${API_BASE}/backends/${serviceType}/trt/status?${params.toString()}`;
 }
 
-export default function InferenceControlPanel() {
+export default function InferenceControlPanel({ manualControlBusy = false }) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
@@ -93,6 +94,8 @@ export default function InferenceControlPanel() {
   const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
+  const manualControlBusyRef = useRef(manualControlBusy);
+  manualControlBusyRef.current = manualControlBusy;
 
   const { sendRecordCommand } = useRosServiceCaller();
 
@@ -176,13 +179,13 @@ export default function InferenceControlPanel() {
         missingFields.push(field.label);
       }
     }
+    if (inferenceChunkSizeError(taskInfo)) missingFields.push('Chunk Size');
     return { isValid: missingFields.length === 0, missingFields };
   }, [taskInfo]);
 
   const ensureTensorRtReady = useCallback(async () => {
     if (
-      taskInfo.serviceType !== 'groot' ||
-      taskInfo.accelerationMode !== 'tensorrt_dit'
+      !['tensorrt_dit', 'tensorrt_act'].includes(taskInfo.accelerationMode)
     ) {
       return true;
     }
@@ -191,7 +194,8 @@ export default function InferenceControlPanel() {
     try {
       const response = await fetch(buildTrtStatusUrl(
         policyPath,
-        String(taskInfo.accelerationEnginePath || '').trim()
+        String(taskInfo.accelerationEnginePath || '').trim(),
+        taskInfo.serviceType
       ));
       const data = await readJsonResponse(response);
       if (!response.ok) {
@@ -280,6 +284,10 @@ export default function InferenceControlPanel() {
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {
     if (!intent) return;
+    if (manualControlBusyRef.current) {
+      toast.error('Wait for the gripper to finish moving before starting inference');
+      return;
+    }
     if (intent.policyPath) {
       setLastPolicyPath(intent.policyPath);
     }
@@ -289,6 +297,7 @@ export default function InferenceControlPanel() {
   }, [executeCommand]);
 
   const handleStart = useCallback(async () => {
+    if (manualControlBusyRef.current) return;
     let readiness = backendReadiness;
     if (!readiness.ready) {
       const refreshedStatus = await refreshBackendStatus({ quiet: true });
@@ -405,15 +414,19 @@ export default function InferenceControlPanel() {
     }
   }, [executeCommand]);
 
-  const startEnabled = shouldCheckBackend && backendReadiness.ready;
+  const startEnabled = shouldCheckBackend && backendReadiness.ready && !manualControlBusy;
   const stopEnabled = isInferencing || isSyncing;
   const clearEnabled = isModelLoaded;
-  const startDescription = isBackendStartBlocked
+  const startDescription = manualControlBusy
+    ? 'Wait for gripper movement to finish'
+    : isBackendStartBlocked
     ? backendReadiness.message
     : isPaused
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = isBackendStartBlocked
+  const guideMessage = manualControlBusy
+    ? 'Gripper moving...'
+    : isBackendStartBlocked
     ? backendReadiness.message
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner =

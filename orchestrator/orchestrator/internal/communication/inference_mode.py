@@ -55,6 +55,7 @@ def inference_runtime_signature(
     initial_pose_sync: bool = False,
     initial_pose_sync_duration_s: float = 5.0,
     vla_rail_enabled: bool = False,
+    action_chunk_size: int = 0,
 ) -> tuple:
     """Return the LOAD-only values that determine policy runtime reuse."""
     return (
@@ -68,6 +69,7 @@ def inference_runtime_signature(
         initial_pose_sync,
         initial_pose_sync_duration_s if initial_pose_sync else 0.0,
         vla_rail_enabled,
+        action_chunk_size,
     )
 
 

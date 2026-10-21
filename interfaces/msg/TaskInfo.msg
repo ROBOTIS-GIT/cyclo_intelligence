@@ -46,3 +46,7 @@ string acceleration_engine_path
 # action of the first chunk as a slow initial pose target before normal control.
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
+
+# Runtime action horizon limit. 0 keeps the checkpoint's inference settings.
+# Positive values are capped at the trained horizon; no model shape changes.
+uint16 action_chunk_size

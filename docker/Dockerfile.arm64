@@ -74,6 +74,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     ros-${ROS_DISTRO}-rmw-zenoh-cpp \
     ros-${ROS_DISTRO}-rosbridge-server \
+    ros-${ROS_DISTRO}-controller-manager-msgs \
+    ros-${ROS_DISTRO}-control-msgs \
     ros-${ROS_DISTRO}-web-video-server \
     && rm -rf /var/lib/apt/lists/*
 

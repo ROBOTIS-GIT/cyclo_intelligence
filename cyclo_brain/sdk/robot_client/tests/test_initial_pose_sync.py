@@ -51,6 +51,27 @@ RobotClient = robot_client_impl.RobotClient
 
 
 class InitialPoseSyncCommandTest(unittest.TestCase):
+    def test_limiter_feedback_is_fresh_and_preserves_selected_action_order(self):
+        client = self._make_client('ffw_sg2_rev1')
+        now = time.monotonic()
+        for side, base in [('arm_left', -1.), ('arm_right', 1.)]:
+            for i, name in enumerate(client._action_groups[side]['joint_names']):
+                client._joint_positions_by_name[name] = base+i*.01
+                client._joint_position_timestamps_by_name[name] = now
+        right = np.arange(8)*.01+1.
+        left = np.arange(8)*.01-1.
+        np.testing.assert_allclose(client.get_action_positions(['arm_right']), right)
+        np.testing.assert_allclose(client.get_action_positions(['arm_right', 'arm_left']),
+                                   np.r_[right, left])
+        name = client._action_groups['arm_right']['joint_names'][0]
+        client._joint_position_timestamps_by_name[name] = now-5.
+        with self.assertRaisesRegex(RuntimeError, 'stale'):
+            client.get_action_positions(['arm_right'])
+        client._joint_position_timestamps_by_name[name] = time.monotonic()
+        client._joint_positions_by_name[name] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'nonfinite'):
+            client.get_action_positions(['arm_right'])
+
     def _make_client(self, robot_type: str) -> RobotClient:
         section = robot_client_impl.robot_schema.load_robot_section(robot_type)
         action_groups = robot_client_impl.robot_schema.get_action_groups(section)

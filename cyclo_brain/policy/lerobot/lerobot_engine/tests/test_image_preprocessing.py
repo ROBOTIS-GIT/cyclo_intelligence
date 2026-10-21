@@ -41,6 +41,24 @@ class ImagePreprocessingTest(unittest.TestCase):
 
         self.assertEqual(rotated.shape, (640, 480, 3))
 
+    def test_letterbox_head_preserves_aspect_ratio_and_zero_padding(self):
+        tensor = image_preprocessing.prepare_letterbox_tensor(
+            np.full((720, 1280, 3), 255, dtype=np.uint8), target_size=(384, 384)
+        ).numpy()
+        self.assertEqual(tensor.shape, (1, 3, 384, 384))
+        np.testing.assert_allclose(tensor[:, :, :84], 0)
+        np.testing.assert_allclose(tensor[:, :, 84:300], 1, atol=3e-7)
+        np.testing.assert_allclose(tensor[:, :, 300:], 0)
+
+    def test_letterbox_rotated_wrist_is_padded_horizontally(self):
+        tensor = image_preprocessing.prepare_letterbox_tensor(
+            np.full((480, 640, 3), 255, dtype=np.uint8),
+            rotation_deg=270, target_size=(384, 384),
+        ).numpy()
+        np.testing.assert_allclose(tensor[:, :, :, :48], 0)
+        np.testing.assert_allclose(tensor[:, :, :, 48:336], 1, atol=3e-7)
+        np.testing.assert_allclose(tensor[:, :, :, 336:], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

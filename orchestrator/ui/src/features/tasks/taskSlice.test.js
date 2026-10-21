@@ -15,6 +15,7 @@ import reducer, {
   setCameraRecordingMonitor,
   setInferenceMode,
   setInferenceTaskInfo,
+  setInferenceCheckpointInstruction,
   setRecordTaskInfo,
   setRecordingMonitor,
 } from './taskSlice';
@@ -40,6 +41,30 @@ const makeStorage = (initial = {}) => {
 };
 
 describe('taskSlice task ownership', () => {
+  test('checkpoint phase edits and server echoes preserve recording instructions and slots', () => {
+    let state = reducer(undefined, receiveServerRecordTaskInfo({
+      taskType: 'record', taskNum: '7', taskName: 'Recording',
+      taskInstruction: ['Record overall.'], subtaskInstruction: ['Record step 1.', 'Record step 2.'],
+    }));
+    state = reducer(state, setInferenceTaskInfo({ policyPath: '/workspace/model/groot/example', serviceType: 'groot' }));
+    state = reducer(state, setInferenceCheckpointInstruction({
+      policyPath: '/workspace/model/groot/example', serviceType: 'groot', instruction: 'Infer step 1.',
+    }));
+    state = reducer(state, setInferenceTaskInfo({ taskInstruction: ['Infer step 2.'] }));
+    state = reducer(state, receiveServerRecordTaskInfo({ taskType: 'inference', taskInstruction: ['Infer step 2.'] }));
+    expect(selectInferenceTaskInfo({ tasks: state }).taskInstruction).toEqual(['Infer step 2.']);
+    expect(selectRecordTaskInfo({ tasks: state }).taskInstruction).toEqual(['Record overall.']);
+    expect(selectRecordTaskInfo({ tasks: state }).subtaskInstruction).toEqual(['Record step 1.', 'Record step 2.']);
+    expect(state.plannedSubTasks).toEqual(['Record step 1.', 'Record step 2.']);
+    expect(selectInferenceTaskInfo({ tasks: state }).subtaskInstruction).toEqual([]);
+    state = reducer(state, setInferenceTaskInfo({ policyPath: '/workspace/model/groot/next' }));
+    expect(selectInferenceTaskInfo({ tasks: state }).taskInstruction).toEqual([]);
+    expect(selectRecordTaskInfo({ tasks: state }).taskInstruction).toEqual(['Record overall.']);
+    const stale = reducer(state, setInferenceCheckpointInstruction({
+      policyPath: '/workspace/model/groot/example', serviceType: 'groot', instruction: 'Stale.',
+    }));
+    expect(selectInferenceTaskInfo({ tasks: stale }).taskInstruction).toEqual([]);
+  });
   test('defaults inference to simulation mode', () => {
     const state = reducer(undefined, { type: '@@INIT' });
     const inferenceInfo = selectInferenceTaskInfo({ tasks: state });

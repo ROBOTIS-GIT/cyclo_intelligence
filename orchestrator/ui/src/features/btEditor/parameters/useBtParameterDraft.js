@@ -142,7 +142,7 @@ export default function useBtParameterDraft({ nodes, selectedNodeId, onParamChan
     onParamChange(selectedNodeId, positionsParam, positionsValue);
   };
 
-  return { selectedNode, nodeType, label, localName, setLocalName, localParams,
+  return { selectedNode, nodeType, label, localName, setLocalName, localParams, setLocalParams,
     paramEntries, nameAtFocusRef, suppressNextNameBlurRef, showPolicyBrowser,
     setShowPolicyBrowser, policyBrowserPath, commitName, handleChange,
     handlePolicyFolderSelect, commitTargetJointSelection };

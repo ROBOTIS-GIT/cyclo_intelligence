@@ -131,6 +131,53 @@ ROS/Zenoh block near the top of `/root/.bashrc`, and choose either the local
 recreating or updating the container resets `/root/.bashrc` to the image
 default.
 
+## ACT checkpoints with a subset of robot joints
+
+ACT input state and output actions must match the training layout exactly.
+For a subset policy, put `cyclo_inference.json` beside the downloaded
+`config.json`. State modalities and action keys are independent, ordered
+lists of names from the selected robot configuration. For example, **only
+when training used both arms as state and the right arm as action**:
+
+```json
+{
+  "robot_type": "ffw_sg2_rev1",
+  "state_modalities": ["arm_left", "arm_right"],
+  "action_keys": ["arm_right"]
+}
+```
+
+For this robot the example requires 16 state dimensions and 8 action
+dimensions. A policy trained with only right-arm state must instead use
+`"state_modalities": ["arm_right"]` and have 8 state dimensions. Confirm
+the layout from training metadata; dimensions alone cannot identify the arm.
+ACT rejects mismatched dimensions instead of padding or truncating state.
+
+Modern LeRobot checkpoints require their stored pre/postprocessor files and
+normalization tensors. LeRobot 0.3 ACT checkpoints instead carry these buffers
+inside `model.safetensors`; the compatibility loader restores every model
+tensor strictly and supplies the embedded statistics to the official ACT
+processor factory. Neither format re-estimates statistics from live sensors.
+
+The runtime honors ACT's `n_action_steps`. With temporal ensembling enabled,
+it calls the official `select_action` once per fresh observation and returns
+one action. Main disables chunk interpolation, alignment and blending for
+single-step ACT, limits its buffer to one action, and uses `Inference Hz` as
+the loop rate. Start/resume and completion of initial pose synchronization
+reset the policy's ensemble history. Actual throughput still depends on
+hardware latency and must be measured before robot execution.
+
+For models trained with bilinear antialiased, aspect-preserving resize and
+centered zero padding, add `"image_preprocessing": "letterbox"` to the mapping.
+This applies the configured camera rotation before resizing/padding, and
+applies the saved image normalization once afterward. The default remains
+the existing direct resize for other models. An `inference_contract.json`
+with `fps` is enforced at LOAD for single-step ACT.
+Set the UI's `Inference Hz` to the training dataset FPS; it determines the
+time spacing of predicted actions. Cyclo may interpolate them at `Control Hz`.
+Validate first with the UI's simulation mode, which still reads live cameras
+and joints but publishes only the action preview.
+
 ## Testing
 
 ### Unit Tests
@@ -188,3 +235,10 @@ export PYTHONPATH="/app/lerobot:$PYTHONPATH"
 - [LeRobot Documentation](https://huggingface.co/lerobot)
 - [Zenoh ROS2 SDK](https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk)
 - [Cyclo Intelligence Workflow](../../ai_system_agents/opensource_integration_workflow/)
+# ACT TensorRT
+
+Cyclo supports optional `acceleration_mode=tensorrt_act` with a verified,
+checkpoint-specific `act_model_fp32.trt`. Native pre/post processing and ACT
+temporal ensembling remain unchanged. See
+[TensorRT inference setup](../../../docker/TENSORRT_INFERENCE.md) for UI and
+offline preparation. Other LeRobot families require their own adapters.

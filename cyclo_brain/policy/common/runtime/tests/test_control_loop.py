@@ -7,6 +7,7 @@ import threading
 import time
 import types
 import unittest
+import threading
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,8 +58,15 @@ class FakeProcessor:
 
 
 class FakeRobot:
+    urdf_path = str(RUNTIME_ROOT.parents[3] / 'shared' / 'shared' / 'robot_configs' /
+                    'urdf' / 'ffw_sg2_follower.urdf')
+
+    def get_action_positions(self, action_keys):
+        return np.zeros(8*len(action_keys))
+
     def __init__(self) -> None:
         self.commands = []
+        self.trajectories = []
         self.previews = []
         self.idles = []
         self.sync_targets = []
@@ -68,6 +76,11 @@ class FakeRobot:
 
     def publish_action(self, action, action_keys) -> None:
         self.commands.append((np.asarray(action).copy(), list(action_keys)))
+
+    def publish_action_trajectory(self, positions, velocities, accelerations, times_from_start_s, action_keys):
+        self.trajectories.append(tuple(np.asarray(x).copy() for x in
+                                       (positions, velocities, accelerations, times_from_start_s)))
+        self.commands.append((np.asarray(positions[0]).copy(), list(action_keys)))
 
     def publish_action_preview(self, action, action_keys) -> None:
         self.previews.append((np.asarray(action).copy(), list(action_keys)))
@@ -120,6 +133,177 @@ class SequenceRequester:
 
 
 class ControlLoopSafetyTests(unittest.TestCase):
+    def _stage_loop(self, requester=None):
+        loop = ControlLoop(requester=requester or object())
+        loop._robot = FakeRobot()
+        loop._processor = FakeProcessor()
+        loop._action_keys = ['arm']
+        loop._task_instruction = 'phase 1'
+        loop._running = True
+        return loop
+
+    def test_subtask_transition_discards_buffer_and_holds_current_pose(self):
+        loop = self._stage_loop()
+        loop._publish_to_robot = True
+        loop._processor._actions = [np.array([9., 9.])]
+        loop._processor.buffer_size = 1
+        generation = loop._generation
+        loop.transition_subtask('phase 2')
+        self.assertEqual(loop._generation, generation + 1)
+        self.assertEqual(loop._processor.buffer_size, 0)
+        self.assertEqual(loop._processor._actions, [])
+        self.assertEqual(loop._robot.holds, [(['arm'], 0.1)])
+        self.assertEqual(loop._task_instruction, 'phase 2')
+
+    def test_inflight_old_phase_response_is_discarded_before_fresh_request(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def infer(instruction):
+            calls.append(instruction)
+            if instruction == 'phase 1':
+                entered.set()
+                self.assertTrue(release.wait(1.0))
+            return SimpleNamespace(success=True, chunk_size=1, action_dim=2,
+                                   action_list=[9., 9.] if instruction == 'phase 1' else [0.2, 0.3])
+        loop = self._stage_loop(SimpleNamespace(get_action=infer))
+        loop._request_thread = threading.Thread(target=loop._request_and_buffer,
+                                                args=('phase 1', loop._generation))
+        loop._request_thread.start()
+        self.assertTrue(entered.wait(1.0))
+        loop.transition_subtask('phase 2')
+        loop.tick()
+        self.assertEqual(calls, ['phase 1'])
+        release.set()
+        loop._request_thread.join(1.0)
+        self.assertEqual(loop._processor.pushed_chunks, [])
+        self.assertEqual(loop._robot.commands, [])
+        self.assertEqual(loop._robot.previews, [])
+        loop.tick()
+        loop._request_thread.join(1.0)
+        self.assertEqual(calls, ['phase 1', 'phase 2'])
+        np.testing.assert_array_equal(loop._processor.pushed_chunks[0], [[0.2, 0.3]])
+
+    def test_subtask_transition_invalidates_rail_trajectory_and_pending_response(self):
+        from main_runtime.rail_execution import RailExecution
+        loop = self._stage_loop()
+        loop._rail = RailExecution(loop._requester, loop._lock, loop._trace)
+        rail = loop._rail
+        rail.trajectory = object()
+        rail.pending = object()
+        old_epoch = rail.epoch
+        loop.transition_subtask('phase 2')
+        self.assertGreater(rail.epoch, old_epoch)
+        self.assertIsNone(rail.trajectory)
+        self.assertIsNone(rail.pending)
+
+    def test_subtask_transition_requires_confirmed_hold_before_switching_instruction(self):
+        loop = self._stage_loop()
+        loop._publish_to_robot = True
+        with mock.patch.object(control_loop_module, 'hold_current_pose',
+                               side_effect=RuntimeError('feedback unavailable')) as hold:
+            with self.assertRaisesRegex(RuntimeError, 'feedback unavailable'):
+                loop.transition_subtask('phase 2')
+        hold.assert_called_once_with(loop._robot, ['arm'])
+        self.assertEqual(loop._task_instruction, 'phase 1')
+        self.assertTrue(loop._subtask_transition_pending)
+        loop.tick()
+        self.assertEqual(loop._robot.commands, [])
+
+    def test_hold_failure_blocks_actions_until_completion_is_retried(self):
+        loop = self._stage_loop()
+        loop._publish_to_robot = True
+        loop._robot.hold_failures_remaining = 1
+        with self.assertRaisesRegex(RuntimeError, 'hold failed'):
+            loop.transition_subtask('phase 2')
+        self.assertEqual(loop._task_instruction, 'phase 1')
+        self.assertTrue(loop.initial_pose_sync_hold_required())
+        loop.tick()
+        self.assertIsNone(loop._request_thread)
+        loop.transition_subtask('phase 2')
+        self.assertFalse(loop._subtask_transition_pending)
+        self.assertEqual(loop._task_instruction, 'phase 2')
+
+    def test_regular_instruction_update_preserves_buffer(self):
+        loop = self._stage_loop()
+        loop._processor.buffer_size = 3
+        generation = loop._generation
+        loop.set_task_instruction('updated whole task')
+        self.assertEqual(loop._generation, generation)
+        self.assertEqual(loop._processor.buffer_size, 3)
+        self.assertEqual(loop._robot.holds, [])
+
+    def test_subtask_transition_during_initial_sync_is_rejected(self):
+        loop = self._stage_loop()
+        loop._initial_pose_sync_in_progress = True
+        with self.assertRaisesRegex(RuntimeError, 'synchronization'):
+            loop.transition_subtask('phase 2')
+        self.assertEqual(loop._task_instruction, 'phase 1')
+
+    def test_per_step_tick_publishes_new_result_without_an_extra_buffer_tick(self):
+        response = SimpleNamespace(success=True, chunk_size=1, action_dim=2,
+                                   action_list=[0.2, 0.8])
+        loop = ControlLoop(requester=FakeRequester(response))
+        robot = FakeRobot()
+        with mock.patch.object(control_loop_module, "RobotClient", return_value=robot):
+            loop.configure(robot_type="ffw", action_keys=["arm"], inference_hz=15,
+                           per_step_actions=True, publish_to_robot=False)
+        loop.start()
+        loop.tick()
+        self.assertEqual(len(robot.previews), 1)
+        np.testing.assert_array_equal(robot.previews[0][0], [0.2, 0.8])
+        self.assertEqual(robot.commands, [])
+        self.assertEqual(loop._processor.buffer_size, 0)
+
+    def test_per_step_late_result_after_pause_never_publishes(self):
+        response = SimpleNamespace(success=True, chunk_size=1, action_dim=2,
+                                   action_list=[0.2, 0.8])
+        requester = FakeRequester(response)
+        loop = ControlLoop(requester=requester)
+        robot = FakeRobot()
+        with mock.patch.object(control_loop_module, "RobotClient", return_value=robot):
+            loop.configure(robot_type="ffw", action_keys=["arm"], inference_hz=15,
+                           per_step_actions=True, publish_to_robot=True)
+        def pause_during_inference(_instruction):
+            loop.pause()
+            return response
+        requester.get_action = pause_during_inference
+        loop.start()
+        loop.tick()
+        self.assertEqual(robot.previews, [])
+        self.assertEqual(robot.commands, [])
+
+    def test_per_step_actions_preserve_ensemble_output_at_inference_rate(self):
+        loop = ControlLoop(requester=object())
+        with mock.patch.object(control_loop_module, "RobotClient", return_value=FakeRobot()):
+            loop.configure(robot_type="ffw", action_keys=["arm"], control_hz=100,
+                           inference_hz=15, per_step_actions=True)
+        processor = loop._processor
+        self.assertAlmostEqual(loop._tick_period(), 1 / 15)
+        processor.push_actions(np.array([[1., 2.]]))
+        self.assertFalse(loop._should_request_actions(processor))
+        np.testing.assert_array_equal(processor.pop_action(), [1., 2.])
+        processor.push_actions(np.array([[9., 8.]]))
+        np.testing.assert_array_equal(processor.pop_action(), [9., 8.])
+        self.assertTrue(loop._should_request_actions(processor))
+
+    def test_explicit_empty_model_action_keys_do_not_expand_to_all_robot_groups(self):
+        loop = ControlLoop(requester=object())
+        with mock.patch.object(control_loop_module, "RobotClient") as robot_factory:
+            with self.assertRaisesRegex(ValueError, "action keys"):
+                loop.configure(robot_type="ffw", action_keys=[])
+        robot_factory.assert_not_called()
+
+    def test_right_arm_only_keys_are_preserved(self):
+        loop = ControlLoop(requester=object())
+        robot = FakeRobot()
+        robot.action_keys = ["arm_left", "arm_right", "head", "lift", "mobile"]
+        with (
+            mock.patch.object(control_loop_module, "RobotClient", return_value=robot),
+            mock.patch.object(control_loop_module, "ActionChunkProcessor", return_value=FakeProcessor()),
+        ):
+            loop.configure(robot_type="ffw", action_keys=["arm_right"])
+        self.assertEqual(loop._action_keys, ["arm_right"])
+
     def _make_loop(self, processor: FakeProcessor, robot: FakeRobot) -> ControlLoop:
         loop = ControlLoop(requester=object())
         loop._running = True

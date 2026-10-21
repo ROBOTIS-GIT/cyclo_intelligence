@@ -383,6 +383,7 @@ class ContainerServiceClient:
         initial_pose_sync: bool = False,
         initial_pose_sync_duration_s: float = 5.0,
         timeout_sec: Optional[float] = None,
+        action_chunk_size: int = 0,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
 
@@ -417,6 +418,10 @@ class ContainerServiceClient:
         request.embodiment_tag = embodiment_tag
         request.robot_type = robot_type
         request.task_instruction = task_instruction
+        if hasattr(request, "action_chunk_size"):
+            request.action_chunk_size = _uint16_or_zero(action_chunk_size)
+        elif action_chunk_size:
+            raise RuntimeError("Rebuild interfaces to enable action_chunk_size")
         if hasattr(request, "publish_to_robot"):
             request.publish_to_robot = bool(publish_to_robot)
         if hasattr(request, "action_request_mode"):
