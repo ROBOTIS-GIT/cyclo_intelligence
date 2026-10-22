@@ -3087,8 +3087,8 @@ def test_compose_uses_repo_local_workspace_mounts():
 
     assert "CYCLO_WORKSPACE_DIR" not in compose
     assert "CYCLO_HUGGINGFACE_DIR" not in compose
-    assert compose.count("./workspace:/workspace") == 3
-    assert compose.count("./huggingface:/root/.cache/huggingface") == 3
+    assert compose.count("./workspace:/workspace") == 4
+    assert compose.count("./huggingface:/root/.cache/huggingface") == 4
 
 
 def test_container_helper_does_not_export_workspace_mount_overrides():
@@ -3215,13 +3215,13 @@ def test_backend_status_model_exposes_stale_image_status():
     assert status.image_status == "stale"
 
 
-def _backend_lifecycle_client(*, image_present=False, pull_error=""):
+def _backend_lifecycle_client(*, image_present=False, pull_error="", backend="groot"):
     state = {
         "image_present": image_present,
         "pull_error": pull_error,
         "pull_calls": [],
     }
-    spec = _BACKENDS["groot"]
+    spec = _BACKENDS[backend]
 
     class FakeImages:
         def get(self, image):
@@ -3990,3 +3990,52 @@ def test_bt_trees_seed_from_the_pre_1_4_source_directory(monkeypatch, tmp_path):
     ))
     assert (legacy / "user_task.xml").read_text() == "<root user='1'/>"
     assert asyncio.run(bt_trees.read_tree("user_task.xml")).content == "<root user='2'/>"
+
+
+def test_vitacformer_requires_shared_runtime_and_tactile_definitions():
+    spec = _BACKENDS["vitacformer"]
+    assert spec["container"] == "vitacformer_server"
+    assert spec["image"] == f"robotis/vitacformer-zenoh:1.0.0-{app._BACKEND_ARCH}"
+    required = app._REQUIRED_BACKEND_MOUNTS["vitacformer"]
+    assert _missing_required_mounts("vitacformer", _container_with_mounts(*required)) == []
+    # Reject the former image-only experimental deployment as stale.
+    missing = _missing_required_mounts(
+        "vitacformer", _container_with_mounts("/workspace", "/orchestrator_config")
+    )
+    assert "/policy_runtime" in missing
+    assert "/app/vitacformer_engine" in missing
+    assert "/zenoh_sdk/messages" in missing
+
+
+def test_vitacformer_builds_when_release_image_is_unpublished(monkeypatch):
+    client, state = _backend_lifecycle_client(
+        backend="vitacformer",
+        image_present=False,
+        pull_error="registry unavailable",
+    )
+    commands = []
+
+    async def fake_run(*cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        if cmd[-2:] == ("build", "vitacformer"):
+            state["image_present"] = True
+            return SimpleNamespace(rc=0, stdout="image built", stderr="")
+        return SimpleNamespace(rc=0, stdout="container started", stderr="")
+
+    monkeypatch.setattr(app, "_docker_client", lambda: client)
+    _patch_backend_compose(monkeypatch, fake_run)
+
+    result = asyncio.run(app._ensure_backend_running(
+        "vitacformer",
+        _BACKENDS["vitacformer"],
+        auto_provision=True,
+    ))
+
+    assert result.ok is True
+    assert "using local build after registry pull failed" in result.message
+    assert [command[0][-2:] for command in commands] == [
+        ("build", "vitacformer"),
+        ("--no-build", "vitacformer"),
+    ]
+    assert commands[0][1]["timeout"] == app._BACKEND_BUILD_TIMEOUT_SEC
+    assert commands[1][1]["timeout"] == 60.0

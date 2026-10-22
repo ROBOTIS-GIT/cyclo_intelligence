@@ -2841,22 +2841,52 @@ class OrchestratorNode(Node):
     def _determine_service_prefix(self, task_info) -> str:
         """Determine inference service prefix from task_info or policy config.
 
-        1. If task_info has service_type field, use it directly.
-        2. Otherwise, read policy_path/config.json to detect policy type.
-        3. LeRobot policy types -> "/lerobot", default -> "/groot".
+        ViTacFormer model metadata is authoritative because older UI bundles
+        advertised ViTacFormer as a LeRobot policy and therefore sent
+        ``service_type=lerobot``.  For all other models, an explicit
+        ``service_type`` remains authoritative before the normal config-based
+        fallback is used.
         """
-        # Check for explicit service_type in task_info
-        service_type = getattr(task_info, 'service_type', None)
-        if service_type:
-            prefix = f'/{service_type.strip("/")}'
-            self.get_logger().info(f'Service prefix from task_info: {prefix}')
-            return prefix
-
         # Detect from policy config. LeRobot training output nests the
         # checkpoint under <root>/pretrained_model/ — try that path too
         # so users who paste the training root still get the right routing.
+        service_type = str(
+            getattr(task_info, 'service_type', '') or ''
+        ).strip('/')
         policy_path = getattr(task_info, 'policy_path', '')
+        detected_policy_type = ''
         if policy_path:
+            selected = Path(policy_path)
+            root = selected.parent if selected.is_file() else selected
+            train_config_path = next(
+                (
+                    candidate / 'train_config.json'
+                    for candidate in (root, *list(root.parents)[:3])
+                    if (candidate / 'train_config.json').exists()
+                ),
+                None,
+            )
+            if train_config_path is not None:
+                try:
+                    with open(train_config_path) as f:
+                        train_config = json.load(f)
+                    architecture = str(
+                        train_config.get('architecture', '')
+                    ).lower()
+                    if 'vitacformer' in architecture:
+                        if service_type and service_type != 'vitacformer':
+                            self.get_logger().warning(
+                                'ViTacFormer model metadata overrides '
+                                f'conflicting service_type={service_type!r}'
+                            )
+                        self.get_logger().info(
+                            'Detected dedicated ViTacFormer training output'
+                        )
+                        return '/vitacformer'
+                except Exception as e:
+                    self.get_logger().warning(
+                        f'Failed to read ViTacFormer train config: {e}'
+                    )
             root = Path(policy_path)
             config_path = root / 'config.json'
             if not config_path.exists() and (root / 'pretrained_model' / 'config.json').exists():
@@ -2865,16 +2895,32 @@ class OrchestratorNode(Node):
                 try:
                     with open(config_path) as f:
                         config = json.load(f)
-                    policy_type = config.get('type', '')
-                    if policy_type in self.LEROBOT_POLICIES:
+                    detected_policy_type = str(config.get('type', '')).lower()
+                    if detected_policy_type == 'vitacformer':
+                        if service_type and service_type != 'vitacformer':
+                            self.get_logger().warning(
+                                'ViTacFormer policy metadata overrides '
+                                f'conflicting service_type={service_type!r}'
+                            )
                         self.get_logger().info(
-                            f'Detected LeRobot policy type: {policy_type}'
+                            'Detected dedicated ViTacFormer policy type'
                         )
-                        return '/lerobot'
+                        return '/vitacformer'
                 except Exception as e:
                     self.get_logger().warning(
                         f'Failed to read policy config: {e}'
                     )
+
+        if service_type:
+            prefix = f'/{service_type}'
+            self.get_logger().info(f'Service prefix from task_info: {prefix}')
+            return prefix
+
+        if detected_policy_type in self.LEROBOT_POLICIES:
+            self.get_logger().info(
+                f'Detected LeRobot policy type: {detected_policy_type}'
+            )
+            return '/lerobot'
 
         # Default to groot for backward compatibility
         return '/groot'
