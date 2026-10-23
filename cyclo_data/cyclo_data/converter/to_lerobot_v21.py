@@ -116,7 +116,7 @@ _V21_DIRECT_VIDEO_CACHE_DISABLE_ENV = "CYCLO_V21_DIRECT_VIDEO_CACHE_DISABLE"
 _V21_DIRECT_VIDEO_VALIDATE_ENV = "CYCLO_V21_VALIDATE_DIRECT_VIDEO"
 _V21_CONCAT_DECODER_DISABLE_ENV = "CYCLO_V21_CONCAT_DECODER_DISABLE"
 _V21_EPISODE_PARQUET_CACHE_DISABLE_ENV = "CYCLO_V21_EPISODE_PARQUET_CACHE_DISABLE"
-_V21_EPISODE_PARQUET_CACHE_VERSION = 1
+_V21_EPISODE_PARQUET_CACHE_VERSION = 2
 _V21_SUBTASKS_PARQUET_CACHE_DISABLE_ENV = "CYCLO_V21_SUBTASKS_PARQUET_CACHE_DISABLE"
 _V21_SUBTASKS_PARQUET_CACHE_VERSION = 1
 # Keep v2.1 segment batches large enough to amortize ffmpeg startup while
@@ -2088,6 +2088,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         # Build schema with fixed_size_list for HuggingFace compatibility
         schema_fields = [
             pa.field("index", pa.int64()),
+            pa.field("frame_index", pa.int64()),
             pa.field("episode_index", pa.int64()),
             pa.field("task_index", pa.int64()),
             pa.field("timestamp", pa.float64()),
@@ -2110,6 +2111,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
                 list(range(self._total_frames, self._total_frames + num_frames)),
                 type=pa.int64(),
             ),
+            pa.array(np.arange(num_frames, dtype=np.int64), type=pa.int64()),
             pa.array([episode.episode_index] * num_frames, type=pa.int64()),
         ]
 
@@ -2151,6 +2153,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         # Build HuggingFace metadata
         hf_features = {
             "index": {"dtype": "int64", "_type": "Value"},
+            "frame_index": {"dtype": "int64", "_type": "Value"},
             "episode_index": {"dtype": "int64", "_type": "Value"},
             "task_index": {"dtype": "int64", "_type": "Value"},
             "timestamp": {"dtype": "float64", "_type": "Value"},
@@ -2192,7 +2195,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         for key in self._features:
             if key.startswith("observation.images."):
                 ordered[key] = self._features[key]
-        for key in ("timestamp", "episode_index", "index", "task_index", "subtask_index"):
+        for key in ("timestamp", "frame_index", "episode_index", "index", "task_index", "subtask_index"):
             if key in self._features:
                 value = dict(self._features[key])
                 if key == "timestamp":
