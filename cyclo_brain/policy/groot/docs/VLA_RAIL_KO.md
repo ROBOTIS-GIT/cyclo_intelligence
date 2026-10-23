@@ -1,5 +1,364 @@
 # 일반 Async용 VLA-RAIL
 
+## 구현 수식과 실행 경로 — 2026-10-21 소스 기준
+
+이 절은 `/home/robotis-ai/cyclo_intelligence`의 현재 작업 트리를 직접 읽어 작성했다. 확인 시 HEAD는 `2091ad06d176ed8d533e51cfe05117d1c5e8b5c3`이다. HEAD만으로 커밋되지 않은 파일 상태까지 재현할 수는 없다. 뒤쪽의 과거 테스트·배포 기록은 기존 기록이며, 이번 문서 작성에서 실기 테스트나 서버 재시작을 다시 수행했다는 뜻이 아니다.
+
+**현재 Async용 VLA-RAIL은 일반 GR00T가 예측한 청크를 전역 cubic으로 근사하고, 현재 명령 상태와 TCP 경로가 가까운 지점을 찾아 C² 연결 곡선으로 교체하는 실행기다.** 별도 RAIL 학습, TTRTC prefix conditioning, MLP/RL 잔차 보정, 속도·가속도 clipping을 수행하지 않는다. 아래의 비용 함수는 학습 loss가 아니라 매 청크 도착 시 후보 곡선을 선택하는 런타임 점수다.
+
+### 1. 모듈별 책임과 데이터 흐름
+
+경로는 저장소 루트 기준이다.
+
+| 소스 | 실제 역할 |
+|---|---|
+| `cyclo_brain/policy/common/runtime/main_runtime/control_loop.py` | Async/RAIL 선택, URDF FK 초기화, tick·피드백·발행·오류 정지 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_execution.py` | 비동기 요청 하나 유지, 센서 시간 검증, 청크 수용, 미래 명령 창 생성 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_trajectory.py` | cubic 최소제곱, quintic/dual-quintic, head/body/tail과 그리퍼 샘플링 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_alignment.py` | 현재 명령 TCP에 가까운 새 cubic의 연속 위상 탐색 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_handoff.py` | 연결 후보 생성, 비용 계산, TCP 후퇴·관절 왕복 검사, 수용/거부 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_kinematics.py` | 로봇 URDF에서 양팔 또는 단팔 FK 계산 |
+| `cyclo_brain/policy/common/runtime/main_runtime/rail_output_guard.py` | 수치·차원·초기 피드백·명령 간격 검증; 목표를 제한하지 않음 |
+| `cyclo_brain/policy/groot/runtime/inference_engine.py` | 센서 snapshot → 일반 `policy.get_action()` → 원본 청크와 timing 반환 |
+| `cyclo_brain/sdk/robot_client/robot_client/robot_client.py` | 센서 원자적 복사, q/v/a JointTrajectory 전송 |
+
+```text
+LOAD(async, vla_rail_enabled=true)
+  → action_keys·원본 horizon 검증 → URDF FK 준비
+RESUME
+  → 별도 요청 스레드: snapshot → GR00T → 원본 청크 → cubic fit → pending
+  → 정책 tick: pending의 최신성 검사 → TCP 위상 탐색 → 연결 후보 평가
+       수용: 기존 참조를 새 head/body/tail로 교체
+       거부: 기존 참조 계속 실행 → 유효 구간 끝에서 정지·유지
+  → 계획 계산 뒤 현재 시각으로 다시 샘플링
+  → q/v/a 미래 창 발행 → 다음 tick 반복
+  → 완료된 요청 뒤에는 다음 추론 요청 계속 진행
+```
+
+추론 스레드와 명령 발행은 분리하지만 동시 추론 요청을 여러 개 쌓지는 않는다. cubic fitting은 발행 잠금 밖에서 수행한다. handoff 계획은 tick 경로에서 수행하므로 계산 시간이 발행 지터에 영향을 줄 수 있다. 결과를 수용한 시각과 실제 명령 샘플 시각도 구분한다.
+
+### 2. 기호·차원·서로 다른 시간축
+
+| 기호 | 의미 / 코드 |
+|---|---|
+| \(N\) | 원본 청크의 액션 수, 최소 4 |
+| \(f_p\), \(\Delta=1/f_p\) | `inference_hz`, 정책 샘플 간격 |
+| \(H=(N-1)\Delta\) | cubic의 정책 시간 horizon |
+| \(f_o=f_p\) | 실제 명령 갱신 목표 주파수 `output_hz` |
+| \(B\) | 기본 연결 시간 `blend_s=0.2`초 |
+| \(\alpha=f_o/f_{interp}\) | 설정 재생 배율; `interpolation_hz` 미지정이면 1 |
+| \(t_s,t_r,t_a,t_0\) | 센서 기준 수신 시각, 요청 시작, 응답 도착, 교체 판단 시각 |
+| \(\tau\) | 새 청크 안의 정책 시각, \(0\le\tau\le H\) |
+| \(\tau_*\), \(\beta\) | 선택된 팔 offset과 실제 재생 배율 |
+| \(s=t-t_0\) | 새 실행 궤적 시작 이후 실제 경과 시간 |
+
+선택된 팔 하나당 액션은 8차원이다. 앞 7개가 팔 관절, 마지막 1개가 그리퍼다. 양팔이면 16차원 중 팔 14차원만 다항식/FK/연결 비용에 들어간다. `arm_left`, `arm_right`의 입력 순서를 보존하며 중복이나 다른 그룹은 허용하지 않는다. 이하 \(q\)는 그리퍼를 제외한 관절각 벡터이고 단위는 rad이다.
+
+예를 들어 \(N=16,f_p=15\)이면 \(H=1\)초다. 마지막 샘플의 시각이 15/15초이므로 16/15초가 아니다. `inference_hz=15`는 GPU가 초당 15번 추론한다는 뜻이 아니며, 일반 `control_hz`는 RAIL의 발행 주기와 재생 배율을 바꾸지 않는다.
+
+### 3. 전체 청크를 cubic으로 근사
+
+원본 관절 액션을 \(q_i\), 정규화 시간을 \(u_i=i/(N-1)\)라 두면:
+
+\[
+V_{i,:}=[1,u_i,u_i^2,u_i^3],\qquad
+C=V^+Q=\underset{C}{\operatorname{argmin}}\;\|VC-Q\|_F^2.
+\]
+
+`CubicChunk`는 `np.linalg.pinv`를 사용한다. 역행렬 \((V^TV)^{-1}\)을 직접 계산하지 않으며, 같은 N의 fit 행렬은 캐시한다. 모든 원본 샘플을 사용하고 fitting 전에 오래된 prefix를 잘라내지 않는다.
+
+\[
+p(\tau)=c_0+c_1u+c_2u^2+c_3u^3,\qquad u=\tau/H,
+\]
+\[
+p'(\tau)=\frac{c_1+2c_2u+3c_3u^2}{H},\quad
+p''(\tau)=\frac{2c_2+6c_3u}{H^2},\quad
+p'''(\tau)=\frac{6c_3}{H^3}.
+\]
+
+이는 원본 점을 모두 통과하는 보간이 아니라 **최소제곱 근사**다. 고주파 왕복이 줄어들 수 있지만 세밀한 작업 동작도 사라질 수 있다. 처음/마지막 원본 값의 정확한 보존, 원본 min/max 안에 머무름, 절대 jerk 상한은 보장하지 않는다. production은 `enforce_envelope=False`이며 위치 clipping을 하지 않는다.
+
+### 4. 관측 지연은 고정 상수가 아니라 수신 시각으로 계산
+
+\[
+A=\max(0,t_0-t_s),\qquad \tau_{nom}=\alpha A.
+\]
+
+`get_observation_snapshot()`은 선택된 이미지·관절과 콜백 수신 monotonic 시각을 같은 잠금에서 복사한다. \(t_s\)는 선택 관절 중 가장 오래된 수신 시각이다. 관절을 선택하지 않았다면 선택 이미지의 가장 오래된 시각을 쓴다. 이미지의 더 오래된 시각이 있더라도 관절이 있으면 관절 기준이며, 각 이미지 age/skew 검사는 별도로 수행한다.
+
+`clock_id`(Linux boot ID)가 같고 시각/출처가 유효하면 그 센서 시각을 사용한다. 없거나 잘못되면 요청 시작 \(t_r\)로 대체한다. 그러면 \(A=t_0-t_r\)가 되어 요청 전 센서 캐시 나이는 포함하지 못한다. 이 fallback도 매번 실측 시각 차를 계산하며 지연을 하드코딩하는 방식이 아니다.
+
+유효한 시각을 사용할 때 다음 분해가 가능하다.
+
+\[
+t_0-t_s=(t_r-t_s)+(t_a-t_r)+(t_0-t_a).
+\]
+
+첫 항은 시간 순서에 따라 음수일 수도 있다. 센서 snapshot이 요청 후 갱신될 수 있기 때문이다. 따라서 이를 항상 양수인 세 개의 독립 지연 측정치로 해석하면 안 된다. 전체 \(A\)에는 전처리·추론·전송·응답 이후 대기 등이 포함될 수 있으나 카메라 노출→콜백 수신 지연은 직접 측정하지 않는다. 즉 완전한 물리 센서 지연 \(\Delta t_o\)를 측정한 것은 아니다.
+
+\[
+\tau_{nom}\ge H \quad\Longrightarrow\quad \texttt{expired\_horizon}:\ \text{새 청크 거부}.
+\]
+
+유효한 \(\tau_{nom}\)은 **팔 정렬 offset의 하한이 아니다**. 팔은 공간 위상으로, 그리퍼는 관측 시간 기준으로 정렬한다.
+
+### 5. 현재 명령과 가까운 TCP 위상 탐색
+
+교체 시점의 이전 명령 궤적을 \(r_{old}\)라 하면:
+
+\[
+(q_0,v_0,a_0)=\big(r_{old}(t_0),\dot r_{old}(t_0),\ddot r_{old}(t_0)\big).
+\]
+
+현재 명령 상태를 기준으로 연결하므로 매번 지연된 실측 q로 명령을 되돌리지 않는다. 최초 시작만 최신 피드백 q와 \(v_0=a_0=0\)을 쓴다. 이는 실제 팔이 반드시 정지했다는 측정 결과가 아니라 bootstrap 경계 조건이다.
+
+선택된 팔 \(a\)의 TCP FK를 \(F_a\)라 할 때:
+
+\[
+\tau_{near}\approx\underset{0\le\tau\le H}{\operatorname{argmin}}
+\sum_a\|F_a(p(\tau))-F_a(q_0)\|_2^2.
+\]
+
+URDF의 `base_link`→`end_effector_l_link`/`end_effector_r_link`를 사용한다. lift는 0으로 두며 비교되는 두 자세에서 동일한 lift 평행 이동이 상쇄된다는 가정이다. 실제 world TCP/접촉/충돌을 추정하지 않는다. 자세 방향은 이 거리식에 직접 포함하지 않고, 뒤의 관절 공간 비용으로 간접 고려한다.
+
+구현은 65개 coarse 시점, 비용이 낮은 내부 국소 최소 최대 8개와 양끝 구간을 대상으로 25회 golden-section 탐색을 수행한다. 전역 최적해의 엄밀한 증명은 아니다. TCP 비용이 수치적으로 같은 경우에만 다음 작은 관절 tie-break를 더한다.
+
+\[
+C_{order}=C_{TCP}+10^{-14}\frac{J}{1+J},\qquad J=\|p(\tau)-q_0\|^2.
+\]
+
+가장 가까운 시점 외에 \(\pm\Delta,\pm\Delta/2\), 다른 basin, \(H-\Delta\)에서 제한된 대안을 구성한다. 원본 cubic의 coarse TCP 경로 길이를 \(L_a\)라 하면 production에서 사용하는 근접 허용량은:
+
+\[
+\sqrt{C_{TCP}(\tau)}\le\sqrt{C_{TCP}(\tau_{near})}
++\sqrt{\sum_a(0.005+0.02L_a)^2}.
+\]
+
+가까운 대안 최대 3개를 남긴다. `nearest_tcp_phases()`의 독립 기본 인자는 0.003m이지만 **production `select_handoff()`는 0.005m을 전달한다**. 최근접이 끝점이면 미래가 없다는 사실을 유지하고 가까운 대안을 검사한다. 나이 기반 먼 offset으로 강제 점프하는 fallback은 없다.
+
+### 6. 다음 응답까지 경로가 유지되도록 시간 재조정
+
+요청 왕복 시간 \(R_k=t_a-t_r\)에 대해 유효 horizon 응답만 다음 budget을 갱신한다.
+
+\[
+b_k=\max(R_k,0.9b_{k-1}),\qquad
+T_{min}=\max(2B,b_k+B+2/f_o).
+\]
+
+이는 최근 지연 증가에는 즉시 반응하고 감소에는 완만히 반응하는 실행 시간 확보 값이다. 실시간 deadline 보장은 아니다. 후보 offset \(\tau_*\)마다:
+
+\[
+\beta=\min\left(\alpha,\frac{H-\tau_*}{T_{min}}\right),\quad
+T=\frac{H-\tau_*}{\beta},\quad \tau(s)=\tau_*+\beta s.
+\]
+\[
+q_{ref}(s)=p(\tau(s)),\quad
+v_{ref}(s)=\beta p'(\tau(s)),\quad
+a_{ref}(s)=\beta^2p''(\tau(s)).
+\]
+
+body의 jerk는 \(\beta^3p'''\)로 바뀐다. 이 감속은 다음 청크를 기다리는 시간을 확보하기 위한 retiming이며 관절별 속도 제한이 아니다. 이전 연결 경계의 \(v_0,a_0\)에는 새 \(\beta\)를 다시 곱하지 않는다.
+
+예를 들어 B=0.2초, 15Hz, budget=0.65초라면 \(T_{min}\simeq0.9833\)초다. H=1초, 선택 offset=0.2초, α=1이면 β≈0.8136으로 남은 0.8 정책초를 약 0.9833 실제초에 실행한다.
+
+### 7. C² head/body/tail 곡선
+
+production 후보는 head 시간 \(D_h\in\{B,1.25B,1.5B,2B,2.5B\}\), tail 시간 \(D_t\in\{B,B/2\}\)를 조합한다. \(T\ge D_h+D_t\)인 후보만 평가한다. 기본값이면 head 0.2/0.25/0.3/0.4/0.5초, tail 0.2/0.1초다.
+
+구간 길이 D의 quintic을 \(h(s)=\sum_{k=0}^5 b_k(s/D)^k\)로 두고 시작/끝 q/v/a를 각각 \((q_s,v_s,a_s),(q_e,v_e,a_e)\)라 하면:
+
+\[
+b_0=q_s,\quad b_1=Dv_s,\quad b_2=\tfrac12D^2a_s,
+\]
+\[
+d=q_e-b_0-b_1-b_2,\quad e=Dv_e-b_1-2b_2,\quad f=D^2a_e-2b_2,
+\]
+\[
+b_3=10d-4e+\tfrac12f,\quad b_4=-15d+7e-f,\quad b_5=6d-3e+\tfrac12f.
+\]
+
+물리 시간 미분은 각각 \(1/D,1/D^2,1/D^3\)을 곱한다. head는 이전 명령 q/v/a에서 \(q_{ref}(D_h),v_{ref}(D_h),a_{ref}(D_h)\)로 연결한다. tail은 \(T-D_t\)의 새 참조 상태에서 \((p(H),0,0)\)으로 연결한다.
+
+\[
+r(s)=\begin{cases}
+h_{head}(s),&0\le s<D_h,\\
+p(\tau_*+\beta s),&D_h\le s<T-D_t,\\
+h_{tail}(s-(T-D_t)),&T-D_t\le s<T,\\
+p(H),&s\ge T.
+\end{cases}
+\]
+
+head/body/tail 경계는 위치·속도·가속도가 이어지는 **C²**다. jerk가 경계에서 연속인 C³는 아니며, C²만으로 jerk 크기·후퇴·오버슈트를 억제하지 못한다. 새 청크가 없으면 유한 tail을 마친 후 최종 위치와 0 속도·가속도를 유지한다. 끝점 이후 cubic 외삽은 하지 않는다.
+
+`DualQuintic`도 코드에 남아 있지만 production의 TCP planner는 `head_mode='single'`로 head와 tail 모두 단일 quintic을 쓴다. dual 방식은 중간 q/v를 양끝 평균, 중간 a를 0으로 놓고 길이 D/2 두 구간을 붙인다. 이것을 현재 실행 방식이라고 설명하면 잘못이다.
+
+### 8. 실제 런타임 비용 함수
+
+각 후보에서 head 17점, body 8점, tail 16점, 합계 41개 시각으로 곡선을 평가한다. 같은 시각이 생길 수 있으므로 jerk 계산 시 1ns 이하 간격은 제외한다. 아래 평균은 **시간 적분이 아닌 샘플 산술평균**이다. 구간별 샘플 간격이 달라 head/tail의 비중이 상대적으로 높다.
+
+관절 j의 원본 범위 \(R_j=\max_i q_{ij}-\min_i q_{ij}\), 최근접 위상 \(\tau_n\)을 사용해:
+
+\[
+m_j=\max\{R_j,|v_{0j}|B,\tfrac12|a_{0j}|B^2,0.1|p_j(\tau_n)-q_{0j}|\},
+\]
+\[
+M=\max(\max_jm_j,10^{-12}),\quad S_j=\max(m_j,0.05M),
+\quad w_j=\frac{m_j^2/(m_j^2+(0.05M)^2)}{\sum_lm_l^2/(m_l^2+(0.05M)^2)}.
+\]
+
+구현은 분모를 최소 \(10^{-12}\)로 보호한다. 움직임이 모두 0이면 가중치도 0이다. \(S_j\)는 정규화 척도이고 이동 한도가 아니다.
+
+\(\lambda(s)=\min(1,s/D_h)\)라 두고 이전 참조와 새 cubic을 섞은 비교 목표를 만든다.
+
+\[
+q_d=(1-\lambda)q_{old}+\lambda q_{ref},\qquad
+v_d=(1-\lambda)v_{old}+\lambda v_{ref}.
+\]
+
+이 \(v_d\)는 \(q_d\)를 미분한 값이 아니라 **비용 비교용 속도 혼합값**이다. 실제 명령은 혼합값이 아니라 위 quintic/cubic이다. bootstrap의 비교 참조는 \(q_0+sv_0+\tfrac12s^2a_0\)와 \(v_0+sa_0\)다.
+
+\[
+J_q=\sum_jw_j\operatorname{mean}_i\left(\frac{r_{ij}-q_{d,ij}}{S_j}\right)^2,
+\quad J_v=\sum_jw_j\operatorname{mean}_i\left(\frac{B(\dot r_{ij}-v_{d,ij})}{S_j}\right)^2,
+\]
+\[
+\hat j_{ij}=\frac{\ddot r_{i+1,j}-\ddot r_{ij}}{s_{i+1}-s_i},\qquad
+J_{jerk}=\sum_jw_j\operatorname{mean}_i\left(\frac{B^3\hat j_{ij}}{S_j}\right)^2.
+\]
+
+따라서 jerk 항은 analytic jerk 적분이 아니라 가속도 차분 기반 점수다.
+
+관절별 누적 절대 이동량에서 원본 참조의 이동량과 새 경로로 합류하는 데 필요한 거리를 빼고 추가 왕복을 계산한다.
+
+\[
+E_{ij}=\frac{\left[\sum_{k<i}|r_{k+1,j}-r_{kj}|-
+\sum_{k<i}|q_{ref,k+1,j}-q_{ref,kj}|-|q_{ref,0j}-q_{0j}|\right]_+}{S_j},
+\quad E=\max_i\sqrt{\sum_jw_jE_{ij}^2}.
+\]
+
+\(E>0.5\)이면 후보를 거부한다. 기본 점수는:
+
+\[
+J_{base}=J_q+0.3J_v+0.001J_{jerk}+2E^2
++0.4\left(\frac{\tau_*-\tau_n}{\max(H-\tau_n,\Delta)}\right)^2
++0.015\left(\frac{D_h}{B}-1\right)^2.
+\]
+
+이는 위치/속도 충실도, jerk, 추가 왕복, 가까운 위상 유지, 과도한 연결 시간의 절충이다. jerk만 최소화하는 최적제어기는 아니다.
+
+### 9. TCP 추가 후퇴 검사와 최종 후보 선택
+
+이전 TCP 속도를 유한차분으로 계산한다(ε=\(10^{-5}\)).
+
+\[
+v_a^{TCP}\approx\frac{F_a(q_0+\epsilon v_0)-F_a(q_0-\epsilon v_0)}{2\epsilon},
+\quad d_a=\frac{v_a^{TCP}}{\max(\|v_a^{TCP}\|,10^{-15})}.
+\]
+
+이 방향에 대한 음의 이동량을 각 prefix까지 누적한다. 실제 후보 TCP를 \(x_{ia}=F_a(r_i)\), 비교 참조를 \(x^{ref}_{ia}=F_a(q_{ref,i})\)라 하면:
+
+\[
+B_{ia}=\sum_{k<i}[-(x_{k+1,a}-x_{ka})\cdot d_a]_+,\quad
+B^{ref}_{ia}=\sum_{k<i}[-(x^{ref}_{k+1,a}-x^{ref}_{ka})\cdot d_a]_+,
+\]
+\[
+X_{ia}=[B_{ia}-B^{ref}_{ia}]_+,\quad
+L^{ref}_{ia}=\sum_{k<i}\|x^{ref}_{k+1,a}-x^{ref}_{ka}\|,
+\quad \eta_{ia}=0.005+0.02L^{ref}_{ia}.
+\]
+
+유의하게 이동하는 TCP에서 어느 prefix든 \(X_{ia}>\eta_{ia}+10^{-10}\)이면 거부한다. 이동 여부는 \(\|v_a^{TCP}\|B>\max(10^{-10},0.01L^{ref}_{final,a})\)로 판정한다. 거의 정지한 TCP의 수치 잡음을 의도된 진행 방향으로 간주하지 않는다.
+
+원본 예측에 있는 정상적인 후퇴는 \(B^{ref}\)로 허용한다. 이후의 정상 후퇴가 앞부분의 불필요한 후퇴를 상쇄하지 못하도록 최종 합계만이 아니라 **모든 prefix**를 비교한다. 5mm는 추가 후퇴 허용량이지 위치 도킹 오차나 관절 속도 제한이 아니다.
+
+최종 점수에는 다음이 추가된다.
+
+\[
+J=J_{base}+5\operatorname{mean}_a
+\left(\frac{\max_iX_{ia}}{\max(0.005+0.02L^{ref}_{final,a},10^{-9})}\right)^2.
+\]
+
+비유한 수치, 관절 추가 왕복, TCP 추가 후퇴로 먼저 후보를 걸러낸다. 이후 **위상 후보 순위 우선, 같은 위상 안에서 J가 작은 순서**로 검사한다. 즉 더 먼 위상이 점수가 낮아도 가까운 위상보다 먼저 선택하지 않는다.
+
+각 위상에서 상위 최대 4개 후보만 전체 구간 193점 + head 65점 + tail 65점의 합집합으로 TCP 후퇴를 재검사한다. 통과한 첫 후보를 수용한다. 이 dense 재검사는 TCP 검사를 강화하는 것이며 모든 관절 제약을 연속 시간에서 증명하는 절차가 아니다. 통과 후보가 없으면 `incompatible_bridge`로 거부한다.
+
+### 10. 그리퍼와 팔을 같은 시간축으로 묶지 않는 이유
+
+팔은 공간 최근접 위상으로 정렬하기 때문에 그 offset을 그대로 그리퍼에 쓰면 이미 닫아야 할 그리퍼가 과거 열림 상태로 되돌아갈 수 있다. 따라서:
+
+\[
+\tau_g=\begin{cases}0&\text{bootstrap}\\\tau_{nom}&\text{그 이후}\end{cases},\quad
+\beta_g=\min\left(\alpha,\frac{H-\tau_g}{T_{min}}\right),
+\]
+\[
+i_g(s)=\operatorname{clip}\left(\left\lfloor\frac{\min(H,\tau_g+\beta_gs)}{\Delta}+10^{-9}\right\rfloor,0,N-1\right),
+\quad g(s)=g^{raw}_{i_g(s)}.
+\]
+
+그리퍼는 cubic/quintic으로 근사하지 않는다. 팔과 독립된 이산 시간 선택이므로 팔·그리퍼의 실제 작업 타이밍 일치까지 보장하지는 않는다. 미래 전송 창 안에는 현재 g를 동일하게 반복하고 v/a를 0으로 넣어 다음 grasp를 미리 보간하지 않게 한다.
+
+### 11. ROS에 보내는 것은 단일 q가 아닌 짧은 q/v/a 창
+
+출력 주기 \(\Delta_o=1/f_o\)마다:
+
+\[
+\mathcal T=\{0,\Delta_o,2\Delta_o,3\Delta_o\}
+\cup\{\text{창 안의 head/tail 경계 시각}\}
+\]
+
+에 대해 \((r(t+\delta),\dot r(t+\delta),\ddot r(t+\delta))\)를 JointTrajectory로 전송한다. 15Hz에서는 0/66.7/133.3/200ms다. dual-quintic 호환성을 위해 반구간 경계도 포함하며, 단일 quintic에서 그 추가 지점은 곡선을 바꾸지 않는다. 나노초로 반올림한 뒤 너무 가까운 knot를 병합해 짧은 구간의 수치 미분 증폭을 방지한다.
+
+`header.stamp=0`이므로 수신 즉시 시작하는 상대 시각이다. 따라서 **내부 참조의 C² 연속성**, **ROS 메시지의 q/v/a**, **실제 하드웨어 추종의 부드러움**은 구분해야 한다. 전송 지연·제어기 trajectory 교체·모터 설정·기구 유격 때문에 실측 jerk는 달라질 수 있다. 모든 그룹 메시지를 검증한 뒤 발행하지만 양팔에 대한 물리적 원자 전송까지 보장하는 것은 아니다.
+
+### 12. 거부·정지·진단의 해석
+
+| 상황 | 동작 |
+|---|---|
+| 만료/미래 없음/시간 부족/연결 후보 부적합 | 새 청크만 거부, 기존 유한 참조와 종단 hold 유지, 다음 요청 지속 |
+| 추론 요청 오류 | 현재 참조 유지, 약 0.1초 뒤 재요청 가능 |
+| 비유한 명령/차원 오류/출력 간격 이상/초기 피드백 실패 | 출력 오류 경로로 추론 중지 및 hold 처리 |
+| STOP·CLEAR·설정/지시 변경 | epoch/reset으로 이전 pending과 늦게 온 응답 폐기 |
+
+출력 간격 검사는 \(0<\Delta t\le\max(0.1,3/f_o)\)이다. 15Hz면 0.2초다. 이것은 **속도 제한이 아니라 오래 멈춘 출력 루프 탐지**다.
+
+추종 진단은 \(e=q_{ref}-q_{measured}\)에서 최대 절대값/RMS와 다음 값을 기록한다.
+
+\[
+\hat\ell=\frac{e^Tv_{ref}}{v_{ref}^Tv_{ref}}.
+\]
+
+\(\hat\ell\)는 국소 진행 방향으로 투영한 오차의 시간 환산값이며 실제 통신 지연 측정치가 아니다. 참조 속도가 거의 0이면 생략한다. 이 값으로 매 청크 offset이나 속도를 직접 수정하지 않는다.
+
+### 13. 논문 비교 코드와 현재 운영 경로의 경계
+
+| 요소 | 현재 production |
+|---|---|
+| 전체 청크 cubic 최소제곱 | 사용 |
+| `alignment_offset()`의 부호 점수 정렬 | 비교용 구현에 남음; TCP 경로에서는 호출하지 않음 |
+| `DualQuintic` | 비교/API 호환용; TCP planner는 single quintic 선택 |
+| TCP 최근접 위상 + 제한된 대안 | 사용 |
+| head/body/tail 후보 비용 및 후퇴 검사 | 사용 |
+| 응답 budget 기반 retiming | 사용 |
+| TCP provider가 없을 때 `_select_joint_handoff()` | 독립 호출 fallback; production LOAD는 FK 필수라 조용히 이 경로로 우회하지 않음 |
+| RL/TTRTC/속도·가속도 limiter | 이 경로에는 없음 |
+
+따라서 현재 코드를 논문의 원식을 그대로 실행하는 구현으로 소개하지 않는다. 원형의 곡선 근사·연결 아이디어에 현재 실행기의 공간 정렬, 수용 검사, 유한 종단과 ROS 전송 방식을 결합한 구현이다. 수식의 가중치·허용량은 현재 코드 상수이지 논문에서 증명된 최적값이라고 볼 수 없다.
+
+### 14. 검증과 튜닝 시 확인할 항목
+
+관련 테스트는 `cyclo_brain/policy/common/runtime/tests/test_rail*.py`, SDK의 `tests/test_rail_transport.py`에 있다. 최근접 위상, 그리퍼 독립 시간축, C² 연결, 정상 방향 전환, 추가 후퇴 거부, 지연·종단 유지, epoch 초기화, q/v/a 전송 등을 나눠 확인한다.
+
+성능 비교는 같은 모델·초기 자세·정책 주기·작업으로 진행하고, 다음을 함께 본다.
+
+- 원본 청크 대비 명령 참조와 실측 관절 각각의 jerk RMS/피크. 샘플 간격과 미분/필터 조건을 동일하게 유지한다.
+- 청크 수용률, 거부 사유, 끝점 hold 비율, 계획 시간 및 실제 발행 간격.
+- TCP 추가 후퇴, 관절 왕복, 실측 추종 오차.
+- 집기·놓기 성공률, 그리퍼 타이밍, 작업 완료 시간.
+
+Cubic 근사와 retiming으로 jerk가 낮아져도 동작이 지나치게 느려지거나 필요한 작업 모션이 없어질 수 있다. 공간 정렬이 좋아도 물체 인식 오류나 충돌을 해결하지는 못한다. 현재 검사는 명령 경로의 샘플 기반 수용 검사이며, 로봇 전체 안전 감독기나 장애물 회피의 대체 수단이 아니다.
+
+---
+
 ## 사용
 
 Action Canvas와 Mission Canvas의 SendCommand LOAD에서 다음과 같이 설정한다.
@@ -109,7 +468,7 @@ STOP·CLEAR·지시 변경은 실행 세대를 갱신하여 이전 응답을 폐
 | `rail_sample`, `rail_output_sample` | 참조 q/v/a와 검사 후 액션 |
 | `command_published` | sample-to-publish 지연·실제 발행 간격·미래 구간 길이·output_hz |
 
-## 검증 범위
+## 기존 검증·배포 이력 (이번 문서 작업의 재측정 결과가 아님)
 
 최근접 정렬 v3는 **2026-10-21 13:57 KST**에 `groot_server` Main만 재시작해 반영했다. Main PID는 **10166**, Engine PID는 기존 **110**이며 서비스 응답·Engine ping·테스트한 코드 해시 일치를 확인했다. 공통 런타임 **365개 테스트와 16개 subtest**가 통과했다. `output_hz = inference_hz`는 유지하며 2초 액션 간격 설정은 사용하지 않는다.
 
