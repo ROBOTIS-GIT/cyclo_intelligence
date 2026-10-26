@@ -2,8 +2,8 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import pytest
-from orchestrator.bt.docking_camera import camera_source, detection_image, normalize_profile
-from orchestrator.bt.docking_vision import MarkerDetector
+from orchestrator.bt.docking.camera import camera_source, detection_image, normalize_profile
+from orchestrator.bt.docking.vision import MarkerDetector
 
 
 def test_source_selection_and_explicit_override():

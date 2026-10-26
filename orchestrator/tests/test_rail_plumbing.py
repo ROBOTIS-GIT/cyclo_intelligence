@@ -84,7 +84,7 @@ class RailLoadPlumbingTests(unittest.TestCase):
         )
         namespace = dict(InferenceCommand=SimpleNamespace(Request=request_type),
                          LOAD=0, START=1, STOP=4, UNLOAD=5, CAPABILITIES=7)
-        submit = method('bt/inference_supervisor.py', 'InferenceSupervisor', 'submit', namespace)
+        submit = method('bt/inference/supervisor.py', 'InferenceSupervisor', 'submit', namespace)
         return supervisor, owner, submit, requests
 
     def test_supervised_bt_load_forwards_rail_and_checks_old_interfaces(self):

@@ -7,9 +7,9 @@ stationary odometry has been observed.
 import math
 import time
 import numpy as np
-from .docking_runtime import DockRuntime, _LEASE
-from .docking_core import DockConfig
-from .docking_vision import rotation_matrix
+from .runtime import DockRuntime, _LEASE
+from .core import DockConfig
+from .vision import rotation_matrix
 
 
 def retreat_progress(start, current):

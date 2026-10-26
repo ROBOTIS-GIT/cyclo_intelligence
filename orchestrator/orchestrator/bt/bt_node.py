@@ -36,7 +36,7 @@ from shared.robot_configs.schema import is_bt_supported
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
-from orchestrator.bt.execution_pause import ExecutionPause, serialized, nonblocking_tick
+from orchestrator.bt.execution.node_pause import ExecutionPause, serialized, nonblocking_tick
 from orchestrator.bt.blackboard import Blackboard  # noqa: I100
 from orchestrator.bt.bt_core import NodeStatus  # noqa: I100
 from orchestrator.bt.bt_nodes_loader import TreeLoader  # noqa: I100
@@ -381,7 +381,7 @@ class BehaviorTreeNode(ExecutionPause, Node):
             xml_root = ET.fromstring(request.tree_xml)
             self.inference_supervisor = None
             if xml_root.get('autonomy_supervised') == 'true':
-                from .inference_supervisor import InferenceSupervisor
+                from .inference.supervisor import InferenceSupervisor
                 self.inference_supervisor = InferenceSupervisor(self)
             # Load new tree from XML string
             self.root = self.tree_loader.load_tree_from_string(

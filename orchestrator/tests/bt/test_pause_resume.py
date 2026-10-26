@@ -7,12 +7,12 @@ import time
 
 import pytest
 from orchestrator.bt.actions.home_meal import HomeMeal
-from orchestrator.bt.actions.motion_pause import JointPause, RotatePause
+from orchestrator.bt.execution.motion_pause import JointPause, RotatePause
 from orchestrator.bt.actions.wait import Wait
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.controls.sequence import Sequence
-from orchestrator.bt.execution_pause import ExecutionPause
-from orchestrator.bt.pause_control import pause_tree, resume_tree
+from orchestrator.bt.execution.node_pause import ExecutionPause
+from orchestrator.bt.execution.tree_pause import pause_tree, resume_tree
 
 
 class Node:
@@ -42,8 +42,8 @@ def test_sequence_pause_preserves_cursor_and_atomic_prop_action():
 def test_wait_does_not_consume_paused_duration():
     wait = Wait(Node(), duration=5)
     with patch('orchestrator.bt.actions.wait.time.monotonic', return_value=100): wait.tick()
-    with patch('orchestrator.bt.pause_control.time.monotonic', return_value=102): wait.pause()
-    with patch('orchestrator.bt.pause_control.time.monotonic', return_value=122): wait.resume()
+    with patch('orchestrator.bt.execution.tree_pause.time.monotonic', return_value=102): wait.pause()
+    with patch('orchestrator.bt.execution.tree_pause.time.monotonic', return_value=122): wait.resume()
     with patch('orchestrator.bt.actions.wait.time.monotonic', return_value=124):
         assert wait.tick() == NodeStatus.RUNNING
     with patch('orchestrator.bt.actions.wait.time.monotonic', return_value=126):

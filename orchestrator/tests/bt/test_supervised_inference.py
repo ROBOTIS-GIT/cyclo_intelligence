@@ -8,8 +8,8 @@ import time
 import sys
 
 import pytest
-from orchestrator.bt.actions.supervised_command import SupervisedCommand
-from orchestrator.bt.inference_supervisor import InferenceSupervisor, HOLD_CAPABILITY
+from orchestrator.bt.inference.supervised_command import SupervisedCommand
+from orchestrator.bt.inference.supervisor import InferenceSupervisor, HOLD_CAPABILITY
 from orchestrator.bt.bt_core import NodeStatus
 sys.path.insert(0, str(Path(__file__).parents[3] / 'docker'))
 from supervisor_api.autonomy_runtime_control import validate_tree
@@ -158,7 +158,7 @@ def test_unbounded_or_docker_policy_actions_rejected_before_execution():
 
 
 def test_timed_out_start_requests_remote_fault_hold_and_cannot_restart(monkeypatch):
-    from orchestrator.bt import inference_supervisor as module
+    from orchestrator.bt.inference import supervisor as module
     node, supervisor = loaded()
     pending = Future(); node.client.pending[1] = pending
     action = SupervisedCommand(Owner('RESUME'), supervisor); action.tick()
@@ -180,7 +180,7 @@ def test_timed_out_start_requests_remote_fault_hold_and_cannot_restart(monkeypat
 
 
 def test_timed_out_pause_requires_restart_after_confirmed_fault_hold(monkeypatch):
-    from orchestrator.bt import inference_supervisor as module
+    from orchestrator.bt.inference import supervisor as module
     node, supervisor = loaded()
     pending = Future(); node.client.pending[1] = pending
     SupervisedCommand(Owner('RESUME'), supervisor).tick()
@@ -195,7 +195,7 @@ def test_timed_out_pause_requires_restart_after_confirmed_fault_hold(monkeypatch
 
 
 def test_unconfirmed_fault_stop_retains_request_and_retries_ack(monkeypatch):
-    from orchestrator.bt import inference_supervisor as module
+    from orchestrator.bt.inference import supervisor as module
     node, supervisor = loaded()
     start, fault = Future(), Future()
     node.client.pending.update({1: start, 8: fault})

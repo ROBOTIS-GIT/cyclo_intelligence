@@ -4,8 +4,8 @@ from unittest.mock import Mock,patch
 import json,threading,time
 import pytest
 
-from orchestrator.bt.waypoint_targets import parse_waypoints,select_waypoint,resolve_waypoint
-from orchestrator.bt import waypoint_navigation as nav
+from orchestrator.bt.navigation.targets import parse_waypoints,select_waypoint,resolve_waypoint
+from orchestrator.bt.navigation import navigator as nav
 
 TARGET={'id':'start','label':'DockingStart','pose':{'frame_id':'map','x':1.5,'y':-1.6,'yaw':3.14}}
 
@@ -28,7 +28,7 @@ def test_rejects_invalid_context_and_missing_mission():
 def test_explicit_saved_mission_lookup_uses_only_pose():
     response=Mock();response.read.return_value=json.dumps({'exists':True,'waypoints':[{**TARGET,'local_bt':'never-execute.xml'}]}).encode()
     context=Mock();context.__enter__=Mock(return_value=response);context.__exit__=Mock(return_value=False)
-    with patch('orchestrator.bt.waypoint_targets.urlopen',return_value=context) as open_url:
+    with patch('orchestrator.bt.navigation.targets.urlopen',return_value=context) as open_url:
         result=resolve_waypoint([], 'DockingStart','house','Test')
     assert result==TARGET and 'local_bt' not in result
     assert 'mission_name=Test' in open_url.call_args.args[0]
@@ -57,8 +57,9 @@ class Client:
 @pytest.fixture
 def runtime(monkeypatch):
     monkeypatch.setattr(nav,'ActionClient',Client)
-    node=NS(create_subscription=lambda *a,**kw:object(),destroy_subscription=lambda sub:None)
+    node=NS(create_subscription=Mock(side_effect=lambda *a,**kw:object()),destroy_subscription=Mock())
     rt=nav.WaypointNavigator(node,TARGET);rt.started-=1
+    rt.on_odom(NS(twist=NS(twist=NS(linear=NS(x=0.,y=0.),angular=NS(z=0.)))))
     monkeypatch.setattr(rt,'slow',lambda after=0.:True)
     yield rt
     for index,future in enumerate(rt.client.futures):
@@ -109,6 +110,57 @@ def test_external_navigation_is_not_preempted(runtime):
 def test_timeout_cancels_owned_goal(runtime):
     rt=runtime;rt.poll();goal=rt.client.accept();rt.started-=200
     assert rt.poll() is False and goal.cancels==1
+
+
+def test_missing_odometry_retries_before_sending_any_goal(runtime, monkeypatch):
+    rt = runtime
+    rt.odom, rt.odom_at = None, 0.
+    now = rt.started + 2.
+    monkeypatch.setattr(nav.time, 'monotonic', lambda: now)
+    for _ in range(3):
+        assert rt.poll() is None
+        now += 1.
+    assert rt.client.requests == []
+    assert rt.odom_retries == 2
+    assert rt.node.create_subscription.call_count == 4  # odom + status + two retries
+    assert rt.node.destroy_subscription.call_count == 2
+    assert rt.poll() is False
+    assert 'No odometry received on /odom' in rt.message
+    rt.close()  # No goal was sent, so stop needs no odometry acknowledgment.
+
+
+def test_odometry_recovery_allows_goal_after_subscription_retry(runtime, monkeypatch):
+    rt = runtime
+    rt.odom, rt.odom_at = None, 0.
+    now = rt.started + 2.
+    monkeypatch.setattr(nav.time, 'monotonic', lambda: now)
+    assert rt.poll() is None and rt.client.requests == []
+    assert rt.odom_retries == 1
+    rt.on_odom(NS(twist=NS(twist=NS(linear=NS(x=0.,y=0.),angular=NS(z=0.)))))
+    assert rt.poll() is None
+    assert len(rt.client.requests) == 1
+
+
+def test_stale_odometry_prevents_goal_dispatch(runtime):
+    rt = runtime
+    rt.odom_at -= 1.
+    assert rt.poll() is None and rt.client.requests == []
+    assert 'Stale odometry on /odom' in rt.odometry_status()
+
+
+def test_arrival_error_keeps_missing_feedback_cause_after_timeout(runtime):
+    rt = runtime
+    rt.poll()
+    goal = rt.client.accept()
+    goal.finish()
+    rt.odom, rt.odom_at = None, 0.
+    rt.finished_at = time.monotonic() - 6.
+    rt.poll()
+    assert 'No odometry received on /odom' in rt.error
+    rt.started -= 200.
+    assert rt.poll() is False
+    assert 'Waypoint arrival was not confirmed' in rt.message
+    assert 'No odometry received on /odom' in rt.message
 
 
 def test_failed_initialization_releases_navigation_lease(monkeypatch):

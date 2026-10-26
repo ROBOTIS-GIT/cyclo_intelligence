@@ -2,8 +2,8 @@
 import time
 
 from orchestrator.bt.bt_core import NodeStatus
-from orchestrator.bt.inference_supervisor import LOAD, START, STOP, UNLOAD, CAPABILITIES
-from orchestrator.bt.pause_control import TimerPause
+from orchestrator.bt.inference.supervisor import LOAD, START, STOP, UNLOAD, CAPABILITIES
+from orchestrator.bt.execution.tree_pause import TimerPause
 
 
 class SupervisedCommand(TimerPause):

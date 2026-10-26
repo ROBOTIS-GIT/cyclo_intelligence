@@ -39,6 +39,10 @@ orchestrator/
 │     ├── constants.py         Runtime defaults for BT actions.
 │     ├── actions/             Built-in and user-defined action nodes.
 │     ├── controls/            loop / sequence / base_control.
+│     ├── docking/             Camera, marker detection, docking and retreat.
+│     ├── navigation/          Waypoint lookup and Nav2 goal management.
+│     ├── inference/           VLA supervision and supervised commands.
+│     ├── execution/           Tree/node pause and motion pause handling.
 │     ├── templates/           Copy-and-edit templates for custom
 │     │                        Action / Control BT nodes.
 │     └── trees/               Example behavior tree XML, installed under
@@ -77,6 +81,12 @@ orchestrator/
                                Manual rosbridge smoke test.
                                Data-side CLIs live in cyclo_data.
 ```
+
+BT node classes exposed as XML tags stay in `bt/actions/` and `bt/controls/`.
+Their supporting implementations live in the feature packages `bt/docking/`,
+`bt/navigation/`, and `bt/inference/`; shared pause/resume handling lives in
+`bt/execution/`. Tree loading, registration, and core types remain directly
+under `bt/`.
 
 ## Responsibilities — what stays here vs moves to cyclo_data
 

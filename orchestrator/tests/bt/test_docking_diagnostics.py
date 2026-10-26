@@ -2,9 +2,9 @@ from types import SimpleNamespace as S
 import json
 import numpy as np
 import pytest
-from orchestrator.bt.docking_vision import MarkerDetector
-from orchestrator.bt.docking_diagnostics import DockDiagnostics
-from orchestrator.bt.docking_core import DockConfig
+from orchestrator.bt.docking.vision import MarkerDetector
+from orchestrator.bt.docking.diagnostics import DockDiagnostics
+from orchestrator.bt.docking.core import DockConfig
 
 
 def test_detection_failure_categories():

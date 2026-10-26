@@ -36,7 +36,7 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
-from orchestrator.bt.actions.motion_pause import JointPause
+from orchestrator.bt.execution.motion_pause import JointPause
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.constants import *  # noqa: F403
 from rclpy.callback_groups import ReentrantCallbackGroup

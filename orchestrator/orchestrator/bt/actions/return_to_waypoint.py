@@ -6,7 +6,7 @@ import threading
 
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import NodeStatus
-from orchestrator.bt.waypoint_targets import resolve_waypoint
+from orchestrator.bt.navigation.targets import resolve_waypoint
 
 
 class ReturnToWaypoint(BaseAction):
@@ -49,7 +49,7 @@ class ReturnToWaypoint(BaseAction):
         try:
             if not self.resolution.done(): return NodeStatus.RUNNING
             if self.runtime is None:
-                from orchestrator.bt.waypoint_navigation import WaypointNavigator
+                from orchestrator.bt.navigation.navigator import WaypointNavigator
                 self.runtime = WaypointNavigator(self.node,self.resolution.result(),self.timeout,self.odom_topic)
             outcome = self.runtime.poll()
             if outcome is None: return NodeStatus.RUNNING

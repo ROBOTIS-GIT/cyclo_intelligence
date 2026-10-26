@@ -5,7 +5,7 @@ is measured from base_frame to the marker face; marker_size excludes white margi
 """
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import NodeStatus
-from orchestrator.bt.docking_core import DockConfig
+from orchestrator.bt.docking.core import DockConfig
 
 
 class ArucoDock(BaseAction):
@@ -42,14 +42,14 @@ class ArucoDock(BaseAction):
             raise ValueError('marker_id must be an integer in [0,49]')
         if not .05 <= self.marker_size <= 1.:
             raise ValueError('marker_size must be in [0.05,1] metres')
-        from orchestrator.bt.docking_camera import normalize_profile
+        from orchestrator.bt.docking.camera import normalize_profile
         self.camera_profile = normalize_profile(camera_profile)
         if bool(image_topic.strip()) != bool(camera_info_topic.strip()):
             raise ValueError('Set both image_topic and camera_info_topic, or leave both empty for automatic selection')
         self.transport = (image_topic,camera_info_topic,cmd_vel_topic,scan_topic,odom_topic,base_frame)
         if not all(isinstance(s,str) and s.strip() for s in self.transport[2:]):
             raise ValueError('Motion sensor topics and base_frame must be non-empty')
-        from orchestrator.bt.docking_rectification import DockRectifier
+        from orchestrator.bt.docking.rectification import DockRectifier
         self.image_mode = DockRectifier(str(image_mode).strip().lower()).mode
         if footprint_profile not in ("circle", "sg2_autonomy_base"):
             raise ValueError("Unknown footprint_profile")
@@ -63,8 +63,8 @@ class ArucoDock(BaseAction):
         if self.failure: return NodeStatus.FAILURE
         if self.runtime is None:
             try:
-                from orchestrator.bt.docking_runtime import DockRuntime
-                from orchestrator.bt.docking_camera import camera_source
+                from orchestrator.bt.docking.runtime import DockRuntime
+                from orchestrator.bt.docking.camera import camera_source
                 image, info, mode = camera_source(self.node, *self.transport[:2], self.image_mode)
                 self.runtime = DockRuntime(self.node, self.marker_id, self.marker_size,
                                            self.config, image, info, *self.transport[2:], image_mode=mode, footprint_profile=self.footprint_profile, camera_profile=self.camera_profile)

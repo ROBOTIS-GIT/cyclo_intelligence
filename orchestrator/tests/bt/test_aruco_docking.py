@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import pytest
-from orchestrator.bt.docking_core import DockConfig, dock_error, velocity, obstacle_in_motion
-from orchestrator.bt.docking_vision import MarkerDetector, transform_pose
+from orchestrator.bt.docking.core import DockConfig, dock_error, velocity, obstacle_in_motion
+from orchestrator.bt.docking.vision import MarkerDetector, transform_pose
 
 
 def test_front_and_side_offsets():
@@ -65,7 +65,7 @@ def test_invalid_configuration(kwargs):
 
 def test_stop_pause_and_navigation_cannot_publish_motion():
     import threading
-    from orchestrator.bt.docking_runtime import DockRuntime
+    from orchestrator.bt.docking.runtime import DockRuntime
     rt=DockRuntime.__new__(DockRuntime)
     rt.lock=threading.RLock();rt.halt=threading.Event();rt.paused=threading.Event()
     rt.leased=True;rt.nav_active=False
@@ -79,7 +79,7 @@ def test_stop_pause_and_navigation_cannot_publish_motion():
 
 def test_simulation_stale_and_future_frames():
     import time
-    from orchestrator.bt.docking_runtime import DockRuntime
+    from orchestrator.bt.docking.runtime import DockRuntime
     rt=DockRuntime.__new__(DockRuntime);rt.clock=100.;rt.clock_at=time.monotonic()
     assert rt.source_fresh(SimpleNamespace(sec=99,nanosec=800000000))
     assert not rt.source_fresh(SimpleNamespace(sec=98,nanosec=0))

@@ -2,7 +2,7 @@ from types import SimpleNamespace as S
 import cv2
 import numpy as np
 import pytest
-from orchestrator.bt.docking_rectification import DockRectifier
+from orchestrator.bt.docking.rectification import DockRectifier
 
 
 def calibration():

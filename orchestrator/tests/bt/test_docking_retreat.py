@@ -2,8 +2,8 @@ import threading
 from types import SimpleNamespace as S
 import pytest
 from orchestrator.bt.actions.dock_retreat import DockRetreat
-from orchestrator.bt.docking_retreat import DockRetreatRuntime,retreat_progress
-from orchestrator.bt.docking_runtime import DockRuntime
+from orchestrator.bt.docking.retreat import DockRetreatRuntime,retreat_progress
+from orchestrator.bt.docking.runtime import DockRuntime
 
 def test_progress_tracks_initial_heading():
     assert retreat_progress((0,0,0),(-.2,0,0))==(.2,0,0)
@@ -13,12 +13,12 @@ def test_progress_tracks_initial_heading():
 def test_retreat_watchdog_does_not_require_images(monkeypatch):
     r=DockRetreatRuntime.__new__(DockRetreatRuntime);r.lock=threading.RLock();r.leased=True
     r.last_command=r.scan_at=r.odom_at=10;r.nav_active=False;sent=[];r.publish=sent.append
-    monkeypatch.setattr('orchestrator.bt.docking_retreat.time.monotonic',lambda:10.1)
+    monkeypatch.setattr('orchestrator.bt.docking.retreat.time.monotonic',lambda:10.1)
     r.watch();assert sent==[]
     r.scan_at=9;r.watch();assert sent==[(0.,0.,0.)]
 
 def harness(monkeypatch,block=False,stale=False):
-    now=[100.];monkeypatch.setattr('orchestrator.bt.docking_retreat.time.monotonic',lambda:now[0])
+    now=[100.];monkeypatch.setattr('orchestrator.bt.docking.retreat.time.monotonic',lambda:now[0])
     r=DockRetreatRuntime.__new__(DockRetreatRuntime);r.lock=threading.RLock();r.leased=False;r.distance=.2;r.speed=.05;r.config=S(timeout=20)
     r.paused=threading.Event();r.nav_active=False;r.nav_received=True;r.message='';r.result=None
     r.node=S(count_publishers=lambda _:0,get_logger=lambda:S(error=lambda _:None));r.diagnostics=S(save_async=lambda *args:None)

@@ -1,7 +1,7 @@
 """ROS service adapter for BT pause; progress lives in existing tree objects."""
 from functools import wraps
 
-from .pause_control import pause_tree, resume_tree
+from .tree_pause import pause_tree, resume_tree
 
 
 def serialized(method):

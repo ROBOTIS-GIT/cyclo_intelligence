@@ -19,10 +19,10 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
-from .docking_rectification import DockRectifier
-from .docking_diagnostics import DockDiagnostics
-from .docking_core import dock_error, velocity, obstacle_in_motion
-from .docking_vision import MarkerDetector, transform_pose
+from .rectification import DockRectifier
+from .diagnostics import DockDiagnostics
+from .core import dock_error, velocity, obstacle_in_motion
+from .vision import MarkerDetector, transform_pose
 
 _LEASE = threading.Lock()
 
@@ -154,7 +154,7 @@ class DockRuntime:
         if not np.any(valid) and not np.any(np.isposinf(distances)):
             raise ValueError('No valid laser returns')
         angles = scan.angle_min + np.arange(len(distances))*scan.angle_increment
-        from .docking_vision import rotation_matrix
+        from .vision import rotation_matrix
         points = np.vstack((distances[valid]*np.cos(angles[valid]),
                             distances[valid]*np.sin(angles[valid]), np.zeros(valid.sum())))
         p = transform.translation
@@ -172,7 +172,7 @@ class DockRuntime:
             raw = self.bridge.imgmsg_to_cv2(frame, desired_encoding='mono8')
             rectified, intrinsic, optical_from_rectified = self.rectifier.prepare(raw, info)
             if self.camera_profile is not None:
-                from .docking_camera import detection_image
+                from .camera import detection_image
                 rectified, intrinsic = detection_image(rectified, intrinsic, self.camera_profile)
             details['detection_resolution'] = [rectified.shape[1], rectified.shape[0]]
             details['detection_K'] = intrinsic.tolist()
@@ -215,7 +215,7 @@ class DockRuntime:
     def check_obstacles(self, scan, command):
         points = self.scan_points(scan)
         if self.footprint_profile == 'sg2_autonomy_base':
-            from .docking_footprint import swept_obstacle
+            from .footprint import swept_obstacle
             collision = swept_obstacle(points, command)
             if collision:
                 self.diagnostics.record({'blocking_obstacle': collision})

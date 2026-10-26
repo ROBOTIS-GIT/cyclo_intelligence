@@ -2,7 +2,7 @@ import json,re
 from pathlib import Path
 import numpy as np
 import pytest
-from orchestrator.bt.docking_footprint import SG2_BASE_OUTLINE, SG2_BASE_FOOTPRINT, swept_obstacle
+from orchestrator.bt.docking.footprint import SG2_BASE_OUTLINE, SG2_BASE_FOOTPRINT, swept_obstacle
 
 def test_exact_studio_geometry_and_wheel_coverage():
     s=(Path(__file__).resolve().parents[2] / 'ui/src/components/navigation/sg2TopDownGeometry.js').read_text()

@@ -491,7 +491,7 @@ class SendCommand(BaseAction):
         self._supervised = None
         supervisor = getattr(self.node, 'inference_supervisor', None)
         if supervisor is not None:
-            from .supervised_command import SupervisedCommand
+            from orchestrator.bt.inference.supervised_command import SupervisedCommand
             self._supervised = SupervisedCommand(self, supervisor)
 
     def _status_callback(self, msg: InferenceStatus):

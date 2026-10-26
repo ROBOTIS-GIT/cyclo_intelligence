@@ -27,6 +27,9 @@ class WaypointNavigator:
         self.error = None
         self.odom = None
         self.odom_at = 0.
+        self.odom_topic = odom_topic
+        self.odom_retries = 0
+        self.odom_retry_at = self.started + 1.
         self.stationary_count = 0
         self.last_stationary_sample = 0.
         self.finished_at = None
@@ -37,12 +40,11 @@ class WaypointNavigator:
         self.leased = True
         self.client = self.odom_sub = self.status_sub = None
         try:
-            group = ReentrantCallbackGroup()
-            self.client = ActionClient(node, NavigateToPose, '/navigate_to_pose', callback_group=group)
-            self.odom_sub = node.create_subscription(Odometry, odom_topic, self.on_odom,
-                                                      qos_profile_sensor_data, callback_group=group)
+            self.group = ReentrantCallbackGroup()
+            self.client = ActionClient(node, NavigateToPose, '/navigate_to_pose', callback_group=self.group)
+            self.odom_sub = self.subscribe_odom()
             self.status_sub = node.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status',
-                self.on_status, QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL), callback_group=group)
+                self.on_status, QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL), callback_group=self.group)
         except Exception:
             for sub in (self.odom_sub, self.status_sub):
                 if sub is not None: node.destroy_subscription(sub)
@@ -56,6 +58,38 @@ class WaypointNavigator:
 
     def on_status(self, message):
         with self.lock: self.nav_active = any(s.status in (1,2,3) for s in message.status_list)
+
+    def subscribe_odom(self):
+        return self.node.create_subscription(
+            Odometry, self.odom_topic, self.on_odom,
+            qos_profile_sensor_data, callback_group=self.group,
+        )
+
+    def odometry_status(self):
+        if self.odom is None:
+            return f'No odometry received on {self.odom_topic}'
+        age = time.monotonic() - self.odom_at
+        if age > .5:
+            return f'Stale odometry on {self.odom_topic} (last sample {age:.2f}s ago)'
+        v = self.odom.twist.twist
+        return (f'Odometry on {self.odom_topic}: '
+                f'vx={v.linear.x:.3f}, vy={v.linear.y:.3f}, wz={v.angular.z:.3f}')
+
+    def odometry_ready(self, now):
+        if self.odom is not None and now-self.odom_at <= .5:
+            return True
+        # Do not send a goal whose arrival/stop cannot be verified. Recreate a
+        # silent subscription a bounded number of times before any goal is sent.
+        if now >= self.odom_retry_at:
+            if self.odom_retries >= 2:
+                self.error = 'Waypoint navigation cannot start: ' + self.odometry_status()
+            else:
+                replacement = self.subscribe_odom()
+                self.node.destroy_subscription(self.odom_sub)
+                self.odom_sub = replacement
+                self.odom_retries += 1
+                self.odom_retry_at = now + 1.
+        return False
 
     def slow(self, after=0.):
         if self.odom is None or self.odom_at <= after or time.monotonic()-self.odom_at > .5:
@@ -114,7 +148,7 @@ class WaypointNavigator:
         with self.lock:
             now = time.monotonic()
             if self.paused_at is not None: return None
-            if now-self.started > self.timeout:
+            if self.error is None and now-self.started > self.timeout:
                 self.error = 'ReturnToWaypoint timed out'
             if self.error or self.stopped:
                 self.stopped = True
@@ -129,6 +163,7 @@ class WaypointNavigator:
                 if self.nav_active:
                     self.error = 'Another Navigation goal is active; stop it before ReturnToWaypoint'
                     return None
+                if not self.odometry_ready(now): return None
                 self.send()
                 return None
             if not self.accept_done:
@@ -149,7 +184,9 @@ class WaypointNavigator:
             if self.stationary_count >= 3:
                 self.message = 'Arrived at '+self.target['label']
                 return True
-            if now-self.finished_at > 5.: self.error = 'Waypoint arrival was not confirmed by stationary odometry'
+            if now-self.finished_at > 5.:
+                self.error = ('Waypoint arrival was not confirmed by stationary odometry: '
+                              + self.odometry_status())
             return None
 
     def quiesce(self):
@@ -167,7 +204,8 @@ class WaypointNavigator:
                     if self.slow(after=started): return
                 self.request_cancel()
             time.sleep(.025)
-        raise RuntimeError('Waypoint Navigation stop was not confirmed; keep the action for Stop retry')
+        raise RuntimeError('Waypoint Navigation stop was not confirmed; '
+                           'keep the action for Stop retry: ' + self.odometry_status())
 
     def pause(self):
         with self.lock:

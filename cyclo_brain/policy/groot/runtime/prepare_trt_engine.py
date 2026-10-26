@@ -116,11 +116,14 @@ def main() -> int:
     try:
         LOGGER.info("Loading GR00T policy from: %s", args.model_path)
         inference._sync_hf_token_for_gated_backbones()
-        inference.policy = Gr00tPolicy(
-            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
-            model_path=args.model_path,
-            device="cuda",
-        )
+        from runtime.cached_cosmos_processor import cached_cosmos_processor
+
+        with cached_cosmos_processor():
+            inference.policy = Gr00tPolicy(
+                embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+                model_path=args.model_path,
+                device="cuda",
+            )
         inference.init_policy_info()
 
         LOGGER.info("Building model-schema synthetic observation")

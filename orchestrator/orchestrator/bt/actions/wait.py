@@ -22,7 +22,7 @@ import time
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
-from orchestrator.bt.pause_control import TimerPause
+from orchestrator.bt.execution.tree_pause import TimerPause
 from orchestrator.bt.bt_core import NodeStatus
 
 if TYPE_CHECKING:

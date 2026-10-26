@@ -152,8 +152,8 @@ Record → **Data Collection**의 지도 좌측 상단에서 **On Map / At Robot
 | `execution_state.py` | 실행 상태의 정규화된 버전 스냅샷 (`schema_version`, `lifecycle`/`activity`/`control`) 생성 |
 | `autonomy_runtime*.py` | ROS 연결, 동작, 일시중지·재개·취소 |
 | `bt_readiness.py` | Task Engine BT 서비스(`/bt/nodes/catalog` 등)의 ROS 준비 상태 조회용 독립 라우터(`/bt/readiness`). `AutonomyController` 시작/감독 흐름과는 분리되어 있음 |
-| `bt/pause_control.py`, `bt/execution_pause.py` | BT 서비스와 트리 커서 보존 |
-| `bt/inference_supervisor.py`, `bt/actions/supervised_command.py` | VLA 수명주기와 감독용 SendCommand |
+| `bt/execution/tree_pause.py`, `bt/execution/node_pause.py` | BT 서비스와 트리 커서 보존 |
+| `bt/inference/supervisor.py`, `bt/inference/supervised_command.py` | VLA 수명주기와 감독용 SendCommand |
 | `policy/common/runtime/main_runtime/confirmed_hold.py` | 관절·주행 피드백에 따른 VLA 정지 확인 |
 | `mission_decisions.py` | 선택·감독의 공통 입력·출력 계약 |
 | `reasoning_contract.py`, `reasoning_capture_context.py` | 요청과 프레임 문맥 검증 |

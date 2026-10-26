@@ -26,7 +26,7 @@ from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import BTNode
 from orchestrator.bt.controls.base_control import BaseControl
 from orchestrator.bt.node_registry import build_registry
-from orchestrator.bt.waypoint_targets import parse_waypoints
+from orchestrator.bt.navigation.targets import parse_waypoints
 
 if TYPE_CHECKING:
     from rclpy.node import Node
