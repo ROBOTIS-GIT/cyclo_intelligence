@@ -42,6 +42,12 @@ const MODEL_GROUPS = [
     ],
   },
   {
+    label: 'ViTacFormer',
+    options: [
+      { value: 'vitacformer:vitacformer', label: 'ViTacFormer (SH5)', serviceType: 'vitacformer', policyType: 'vitacformer' },
+    ],
+  },
+  {
     label: 'GR00T',
     options: [
       { value: 'groot:n17', label: 'N1.7', serviceType: 'groot', policyType: 'n17' },
@@ -97,6 +103,11 @@ const InferenceModelSelector = ({ readonly = false }) => {
       setInferenceTaskInfo({
         serviceType: sel.serviceType,
         policyType: sel.policyType,
+        ...(sel.serviceType === 'vitacformer'
+          ? { inferenceHz: 30, actionRequestMode: 'async' }
+          : serviceType === 'vitacformer'
+            ? { inferenceHz: 15, actionRequestMode: 'async' }
+            : {}),
         accelerationMode: sel.serviceType === 'groot'
           ? (info.accelerationMode || 'pytorch')
           : 'pytorch',

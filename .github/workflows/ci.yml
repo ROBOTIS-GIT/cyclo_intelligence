@@ -157,7 +157,7 @@ jobs:
             pyarrow \
             pytest \
             pyyaml
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
 
       - name: Run cyclo_data tests
         env:
@@ -181,6 +181,7 @@ jobs:
             orchestrator/tests/bt/test_package_boundary.py \
             orchestrator/tests/bt/test_review_fixes.py \
             orchestrator/tests/test_inference_mode.py \
+            orchestrator/tests/test_vitacformer_routing.py \
             orchestrator/tests/data_processing/test_metadata_manager.py \
             orchestrator/tests/data_processing/test_video_metadata_extractor.py \
             orchestrator/tests/data_processing/test_episode_editor.py \
@@ -197,6 +198,14 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONPATH: cyclo_brain/policy/groot
         run: python -m pytest cyclo_brain/policy/groot/tests
+
+      - name: Run ViTacFormer policy tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_brain/policy/vitacformer:cyclo_brain/policy/common/runtime:cyclo_brain/sdk/robot_client:shared/shared/robot_configs
+        run: |
+          python -m pip install opencv-python-headless==4.11.0.86
+          python -m pytest cyclo_brain/policy/vitacformer/tests
 
       - name: Run LeRobot policy tests
         env:

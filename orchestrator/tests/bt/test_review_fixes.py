@@ -344,7 +344,10 @@ def test_send_command_catalog_exposes_default_target_port():
     }
 
 
-def test_docker_start_waits_for_all_declared_services(monkeypatch):
+@pytest.mark.parametrize('backend,model', [
+    ('groot', 'groot:n17'), ('vitacformer', 'vitacformer:vitacformer'),
+])
+def test_docker_start_waits_for_all_declared_services(monkeypatch, backend, model):
     calls = []
     status_calls = 0
 
@@ -354,7 +357,7 @@ def test_docker_start_waits_for_all_declared_services(monkeypatch):
         if method == 'POST':
             return {'ok': True, 'message': 'start accepted'}
         status_calls += 1
-        status = _ready_backend_status()
+        status = _ready_backend_status(backend)
         if status_calls == 1:
             status['services'] = [
                 {'name': 'main-runtime', 'state': 'up'},
@@ -368,18 +371,18 @@ def test_docker_start_waits_for_all_declared_services(monkeypatch):
         _DummyNode(),
         target='DOCKER',
         command='START',
-        model='groot:n17',
+        model=model,
     )
 
     assert _tick_until_terminal(action) == NodeStatus.SUCCESS
     assert status_calls == 2
     assert calls[0][0:2] == (
         'POST',
-        'http://127.0.0.1:7100/backends/groot/start?auto_provision=true',
+        f'http://127.0.0.1:7100/backends/{backend}/start?auto_provision=true',
     )
     assert calls[-1][0:2] == (
         'GET',
-        'http://127.0.0.1:7100/backends/groot/status',
+        f'http://127.0.0.1:7100/backends/{backend}/status',
     )
 
 
@@ -942,3 +945,11 @@ def test_load_send_command_sets_action_processing_timing():
     assert task_info.control_hz == 80
     assert task_info.inference_hz == 20
     assert task_info.chunk_align_window_s == 0.25
+
+
+def test_vitacformer_models_route_to_dedicated_backend():
+    for model in ('vitacformer', 'vitacformer:vitacformer', 'lerobot:vitacformer'):
+        assert send_command_module._service_type_from_model(model) == 'vitacformer'
+        action = SendCommand(_DummyNode(), model=model, command='LOAD', inference_hz=30)
+        assert action._configuration_error() == ''
+        assert action._backend_service_name == '/vitacformer/inference_command'

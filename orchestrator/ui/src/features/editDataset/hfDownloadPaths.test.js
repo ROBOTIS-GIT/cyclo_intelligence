@@ -13,6 +13,9 @@ describe('hfDownloadPaths', () => {
     expect(getDefaultDownloadPath('model', 'groot')).toBe(
       DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
     );
+    expect(getDefaultDownloadPath('model', 'vitacformer')).toBe(
+      DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH
+    );
   });
 
   test('keeps dataset downloads under the rosbag2 root', () => {
@@ -34,6 +37,9 @@ describe('hfDownloadPaths', () => {
       true
     );
     expect(isManagedDownloadPath(`${DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH}/repo_a/`)).toBe(
+      true
+    );
+    expect(isManagedDownloadPath(`${DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH}/repo_a`)).toBe(
       true
     );
     expect(isManagedDownloadPath(' /workspace/model ')).toBe(true);

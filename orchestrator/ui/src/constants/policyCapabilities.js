@@ -17,6 +17,7 @@
 export const POLICY_REQUIRES_INSTRUCTION = {
   'groot:n17': true,
   'lerobot:act': false,
+  'vitacformer:vitacformer': false,
   'lerobot:diffusion': false,
   'lerobot:smolvla': true,
   'lerobot:xvla': true,

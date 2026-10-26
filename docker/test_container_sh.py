@@ -319,3 +319,30 @@ def test_start_lerobot_removes_stale_workspace_mount(tmp_path):
         call == "rm -f lerobot_server"
         for call in docker_calls
     )
+
+
+def test_start_vitacformer_builds_only_its_backend(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log_path = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "start-vitacformer", "--build"],
+        cwd=tmp_path, env=_stub_env(tmp_path, log_path),
+        check=True, text=True, capture_output=True,
+    )
+    commands = log_path.read_text()
+    assert "up -d --build vitacformer" in commands
+    assert "pull --ignore-pull-failures vitacformer" not in commands
+    assert "up -d --build lerobot" not in commands
+    assert (docker_dir / "workspace/model/vitacformer").is_dir()
+    assert "Starting vitacformer" in result.stdout
+
+
+def test_enter_vitacformer_uses_dedicated_container(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log_path = _write_enter_stub(tmp_path, "vitacformer_server")
+    subprocess.run(
+        [str(docker_dir / "container.sh"), "enter-vitacformer"],
+        cwd=tmp_path, env=_stub_env(tmp_path, log_path),
+        check=True, text=True, capture_output=True,
+    )
+    assert "vitacformer_server bash" in log_path.read_text()

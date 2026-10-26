@@ -20,6 +20,7 @@ import Tooltip from './Tooltip';
 import TokenInputPopup from './TokenInputPopup';
 import {
   getPolicyBackendReadiness,
+  getPolicyBackendName,
   getPolicyBackendServiceLabel,
   getPolicyBackendServices,
   getPolicyBackendStaleReason,
@@ -42,6 +43,7 @@ const stateLabels = {
 
 const getBackendLabel = (serviceType) => {
   if (serviceType === 'groot') return 'GR00T Docker';
+  if (serviceType === 'vitacformer') return 'ViTacFormer Docker';
   if (serviceType === 'lerobot') return 'LeRobot Docker';
   return 'Policy Docker';
 };
@@ -116,7 +118,7 @@ async function readPullStream(response, onProgress) {
 }
 
 export default function PolicyBackendControl({ serviceType }) {
-  const backend = serviceType === 'groot' ? 'groot' : 'lerobot';
+  const backend = getPolicyBackendName(serviceType);
   const label = useMemo(
     () => getBackendLabel(serviceType),
     [serviceType]
