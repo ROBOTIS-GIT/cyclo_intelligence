@@ -130,7 +130,7 @@ _V30_PARQUET_COMPRESSION_ENV = "CYCLO_V30_PARQUET_COMPRESSION"
 _V30_PARQUET_USE_DICTIONARY_ENV = "CYCLO_V30_PARQUET_USE_DICTIONARY"
 _V30_DATA_AGGREGATE_CACHE_VERSION = 1
 _V30_EPISODES_PARQUET_CACHE_VERSION = 1
-_V30_TASKS_PARQUET_CACHE_VERSION = 1
+_V30_TASKS_PARQUET_CACHE_VERSION = 2
 _V30_SUBTASKS_PARQUET_CACHE_VERSION = 1
 _FICLONE_IOCTL = 0x40049409
 _REFLINK_UNSUPPORTED_DEV_PAIRS: set[Tuple[int, int]] = set()
@@ -4094,6 +4094,12 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             return
 
         table = pa.Table.from_pylist(tasks_data)
+        # LeRobot resolves task instructions from the pandas row index.
+        table = pa.Table.from_pandas(
+            table.to_pandas().set_index("task"),
+            schema=table.schema,
+            preserve_index=True,
+        )
         pq.write_table(table, file_path, **_v30_parquet_write_kwargs())
         if cache_key is not None:
             self._store_small_parquet_cache(

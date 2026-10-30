@@ -2,6 +2,18 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.3 (2026-10-29)
+------------------
+* None
+
+1.4.2 (2026-10-28)
+------------------
+* None
+
+1.4.1 (2026-10-27)
+------------------
+* None
+
 1.4.0 (2026-08-31)
 ------------------
 * Added Autonomy Studio with the Mission Canvas and the Action Canvas; removed the Navigation and BT Manager pages.

@@ -2,6 +2,28 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.3 (2026-10-29)
+------------------
+* None
+
+1.4.2 (2026-10-28)
+------------------
+* Fixed merged actions freezing when one recorded command topic stops publishing; each topic now holds its latest command independently.
+* Updated merged actions at the union of command timestamps without using future samples or backfilling before every participating topic has its first command.
+* Asynchronous command streams can now become ready earlier, shifting the resampling start and selected state/video samples during reconversion.
+* Invalidated extraction and prepared-episode caches so reconversion rebuilds affected actions for LeRobot v2.1 and v3.0.
+* Command holding also applies to recorded base velocity; it does not infer controller timeouts or unrecorded stop commands.
+* Removed the incomplete global PyArrow test fallback and added dropout, reconnection, mixed-rate, duplicate-timestamp, and joint-order regression coverage.
+* Contributors: DanielFH1, Taehyeong Kim
+
+1.4.1 (2026-10-27)
+------------------
+* Added episode-local int64 ``frame_index`` values and matching feature metadata to LeRobot v2.1 exports.
+* Preserved task instruction strings as the pandas index in LeRobot v3.0 task metadata so dataset readers return the correct instruction.
+* Invalidated legacy v2.1 episode Parquet and v3.0 task metadata caches so reconversion rebuilds the affected files.
+* Kept the LeRobot dataset format versions at ``v2.1`` and ``v3.0``.
+* Contributors: DanielFH1, Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Removed the BT process and tree-file handlers from the video file server; the supervisor API owns them.

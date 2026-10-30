@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 
 # Mock ROS2 modules that are not available outside Docker
 for mod_name in [
@@ -67,15 +68,6 @@ from cyclo_data.converter.to_lerobot_v21 import (
 from cyclo_data.converter import to_lerobot_v21 as v21
 from cyclo_data.converter import base_converter
 from cyclo_data.converter.base_converter import RosbagToLerobotConverterBase
-
-# The host test environment may carry a pandas/numpy ABI mismatch. The v3.0
-# converter only needs pandas for parquet aggregation, not for the video concat
-# tests below, so provide a tiny import stub before loading it.
-if "pandas" not in sys.modules:
-    pandas_stub = types.ModuleType("pandas")
-    pandas_stub.DataFrame = MagicMock
-    pandas_stub.__version__ = "0.0.0"
-    sys.modules["pandas"] = pandas_stub
 
 from cyclo_data.converter import to_lerobot_v30 as v30
 from cyclo_data.converter.to_lerobot_v30 import (
@@ -1439,7 +1431,10 @@ class TestEpisodeExtractCache(unittest.TestCase):
             )
 
             first = converter._episode_extract_cache_path(bag, None, [])
+            before = mcap.stat()
             mcap.write_bytes(b"two")
+            # Equal-sized writes can share an mtime on coarse-resolution filesystems.
+            os.utime(mcap, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
             second = converter._episode_extract_cache_path(bag, None, [])
 
             self.assertIsNotNone(first)
@@ -2479,7 +2474,7 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
                 )
             )
 
-    def test_v21_parquet_omits_frame_index(self):
+    def test_v21_parquet_includes_int64_frame_index(self):
         episode = EpisodeData(
             episode_index=0,
             timestamps=[0.0, 1.0 / 15.0],
@@ -2510,6 +2505,7 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
             table.column_names,
             [
                 "index",
+                "frame_index",
                 "episode_index",
                 "task_index",
                 "timestamp",
@@ -2518,8 +2514,102 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
                 "subtask_index",
             ],
         )
-        self.assertNotIn("frame_index", table.column_names)
+        self.assertEqual(table.column("frame_index").to_pylist(), [0, 1])
+        self.assertEqual(str(table.schema.field("frame_index").type), "int64")
+        hf_features = json.loads(table.schema.metadata[b"huggingface"])["info"]["features"]
+        self.assertEqual(hf_features["frame_index"], {"dtype": "int64", "_type": "Value"})
         self.assertEqual(str(table.schema.field("timestamp").type), "double")
+
+    def test_v21_frame_indices_agree_with_metadata_and_stats_across_episodes(self):
+        import pyarrow.parquet as pq
+
+        for include_subtasks in (False, True):
+            with self.subTest(include_subtasks=include_subtasks):
+                output = Path(self.temp_dir) / str(include_subtasks)
+                converter = RosbagToLerobotConverter(ConversionConfig(
+                    repo_id="test/frame-index", output_dir=output, use_videos=False,
+                ))
+                episodes = [EpisodeData(
+                    episode_index=i, length=length,
+                    timestamps=[j / converter.config.fps for j in range(length)],
+                    observation_state=[np.array([j, j + 1], dtype=np.float32) for j in range(length)],
+                    action=[np.array([j * 0.1], dtype=np.float32) for j in range(length)],
+                    tasks=[f"task-{i}"],
+                    subtask_indices=[j % 2 for j in range(length)] if include_subtasks else [],
+                ) for i, length in enumerate((1, 3, 2))]
+                self.assertTrue(converter.write_from_episodes(episodes))
+                info = json.loads((output / "meta/info.json").read_text())
+                self.assertEqual(info["features"]["frame_index"], {
+                    "dtype": "int64", "shape": [1], "names": None,
+                })
+                stats = [json.loads(line)["stats"] for line in
+                         (output / "meta/episodes_stats.jsonl").read_text().splitlines()]
+                self.assertEqual(len(stats), len(episodes))
+                offset = 0
+                for episode, ep_stats in zip(episodes, stats):
+                    path = output / f"data/chunk-000/episode_{episode.episode_index:06d}.parquet"
+                    table = pq.read_table(path)
+                    columns = table.to_pydict()
+                    self.assertEqual(columns["frame_index"], list(range(episode.length)))
+                    self.assertEqual(str(table.schema.field("frame_index").type), "int64")
+                    self.assertEqual(columns["index"], list(range(offset, offset + episode.length)))
+                    self.assertEqual(columns["episode_index"], [episode.episode_index] * episode.length)
+                    self.assertEqual(columns["task_index"], [episode.episode_index] * episode.length)
+                    np.testing.assert_allclose(columns["timestamp"], episode.timestamps)
+                    np.testing.assert_allclose(columns["observation.state"], episode.observation_state)
+                    np.testing.assert_allclose(columns["action"], episode.action)
+                    if include_subtasks:
+                        self.assertEqual(columns["subtask_index"], episode.subtask_indices)
+                    hf = json.loads(table.schema.metadata[b"huggingface"])["info"]["features"]
+                    self.assertEqual(hf["frame_index"], {"dtype": "int64", "_type": "Value"})
+                    self.assertEqual(ep_stats["frame_index"]["min"], [0])
+                    self.assertEqual(ep_stats["frame_index"]["max"], [episode.length - 1])
+                    self.assertEqual(ep_stats["frame_index"]["count"], [episode.length])
+                    offset += episode.length
+                self.assertEqual(info["total_frames"], offset)
+                self.assertEqual(info["total_episodes"], len(episodes))
+
+    def test_v21_legacy_parquet_cache_is_rebuilt_and_corrected_cache_reused(self):
+        import pyarrow.parquet as pq
+
+        source = Path(self.temp_dir) / "source_episode"
+        source.mkdir()
+        episode = EpisodeData(
+            episode_index=0, length=2, timestamps=[0.0, 1.0 / self.config.fps],
+            observation_state=[np.array([1.0], dtype=np.float32)] * 2,
+            action=[np.array([2.0], dtype=np.float32)] * 2,
+            tasks=["task"], source_path=source,
+        )
+        self.converter._task_to_index = {"task": 0}
+        key = self.converter._v21_episode_parquet_cache_key(
+            episode, global_start_index=0, has_subtask_feature=False,
+        )
+        self.assertGreater(key["version"], 1)
+        legacy_key = {**key, "version": 1}
+        legacy_path = Path(self.temp_dir) / "legacy.parquet"
+        self.converter._write_parquet(episode, legacy_path)
+        legacy = pq.read_table(legacy_path).drop(["frame_index"])
+        hf = json.loads(legacy.schema.metadata[b"huggingface"])
+        del hf["info"]["features"]["frame_index"]
+        legacy = legacy.replace_schema_metadata({b"huggingface": json.dumps(hf).encode()})
+        pq.write_table(legacy, legacy_path)
+        self.converter._store_v21_episode_parquet_cache(episode, legacy_path, legacy_key)
+
+        with patch.object(self.converter, "_write_parquet", wraps=self.converter._write_parquet) as write:
+            self.converter._write_episode(episode)
+            write.assert_called_once()
+        output = Path(self.temp_dir) / "data/chunk-000/episode_000000.parquet"
+        self.assertEqual(pq.read_table(output).column("frame_index").to_pylist(), [0, 1])
+
+        converter = RosbagToLerobotConverter(ConversionConfig(
+            repo_id=self.config.repo_id, output_dir=Path(self.temp_dir) / "second_output",
+            fps=self.config.fps,
+        ))
+        converter._task_to_index = {"task": 0}
+        with patch.object(converter, "_write_parquet", side_effect=AssertionError("cache miss")):
+            converter._write_episode(episode)
+        reused = converter.config.output_dir / "data/chunk-000/episode_000000.parquet"
+        self.assertEqual(reused.read_bytes(), output.read_bytes())
 
     def test_v21_episode_parquet_reuses_source_cache_on_repeat(self):
         source_dir = Path(self.temp_dir) / "source_episode"
@@ -3037,7 +3127,9 @@ class TestInfoJsonGeneration(unittest.TestCase):
             info["video_path"],
             "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         )
-        self.assertNotIn("frame_index", info["features"])
+        self.assertEqual(info["features"]["frame_index"], {
+            "dtype": "int64", "shape": [1], "names": None,
+        })
         self.assertEqual(info["features"]["timestamp"]["dtype"], "float64")
 
     def test_write_root_info_json_uses_robot_config_rotations(self):
@@ -3415,6 +3507,7 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
         self.converter._write_tasks_parquet([episode])
 
         tasks_path = Path(self.temp_dir) / "meta/tasks.parquet"
+        self.assertEqual(pd.read_parquet(tasks_path).iloc[0].name, "task")
         original_bytes = tasks_path.read_bytes()
         self.assertTrue(
             list(

@@ -2,6 +2,29 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.3 (2026-10-29)
+------------------
+* Fixed ARM64 LeRobot CUDA initialization failing with error 801 when the inherited compatibility driver shadows the host driver after a JetPack update.
+* Updated Cyclo release metadata and default image tags to ``robotis/cyclo-intelligence:1.4.3`` and ``robotis/lerobot-zenoh:1.4.2``.
+* Contributors: Taehyeong Kim
+
+1.4.2 (2026-10-28)
+------------------
+* Fixed LeRobot conversion so a stopped action topic no longer freezes other command groups.
+* Extended converter CI coverage and invalidated affected caches; existing exported datasets require reconversion to receive corrected actions.
+* Updated Cyclo release metadata and the default Cyclo image tag to ``robotis/cyclo-intelligence:1.4.2``.
+* Kept LeRobot dataset format versions and LeRobot/GR00T policy image versions unchanged.
+* Contributors: DanielFH1, Taehyeong Kim
+
+1.4.1 (2026-10-27)
+------------------
+* Fixed LeRobot v2.1 frame indices and v3.0 task instruction metadata in dataset conversion.
+* Added CI regression coverage for exported metadata, episode frame indices, and cache invalidation/reuse.
+* Aligned CI PyArrow with the Cyclo image's 24.0.0 pin and installed NumPy 1.x-compatible OpenCV for converter tests.
+* Updated Cyclo release metadata and the default Cyclo image tag to ``robotis/cyclo-intelligence:1.4.1``.
+* Kept the LeRobot and GR00T policy image versions unchanged.
+* Contributors: DanielFH1, Taehyeong Kim
+
 1.4.0 (2026-08-31)
 ------------------
 * Added Autonomy Studio: Mission Canvas and Action Canvas replace the Navigation and BT Manager pages.

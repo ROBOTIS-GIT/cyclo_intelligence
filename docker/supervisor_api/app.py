@@ -328,7 +328,7 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
     "lerobot": {
         "service": "lerobot",
         "container": "lerobot_server",
-        "image": f"robotis/lerobot-zenoh:1.4.1-{_BACKEND_ARCH}",
+        "image": f"robotis/lerobot-zenoh:1.4.2-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
     "groot": {
@@ -1164,7 +1164,7 @@ async def _app_lifespan(_app: FastAPI):
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.4.0",
+    version="1.4.3",
     lifespan=_app_lifespan,
 )
 

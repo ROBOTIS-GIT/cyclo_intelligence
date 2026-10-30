@@ -12,6 +12,8 @@ import threading
 import types
 
 import pytest
+import pyarrow  # noqa: F401
+import pyarrow.parquet  # noqa: F401
 
 
 for mod_name in [
@@ -41,22 +43,6 @@ class _QoSProfile:
 
 sys.modules["rclpy.qos"].QoSProfile = _QoSProfile
 sys.modules["sensor_msgs.msg"].CompressedImage = object
-
-try:
-    import pyarrow  # noqa: F401
-    import pyarrow.parquet  # noqa: F401
-except ImportError:
-    pyarrow_stub = types.ModuleType("pyarrow")
-    pyarrow_stub.int32 = lambda: "int32"
-    pyarrow_stub.int64 = lambda: "int64"
-    pyarrow_stub.array = lambda values, type=None: list(values)
-    pyarrow_stub.schema = lambda fields: fields
-    pyarrow_stub.table = lambda data, schema=None: {"data": data, "schema": schema}
-    sys.modules["pyarrow"] = pyarrow_stub
-    parquet_stub = types.ModuleType("pyarrow.parquet")
-    parquet_stub.ParquetWriter = object
-    sys.modules["pyarrow.parquet"] = parquet_stub
-
 
 from cyclo_data.recorder.video_recorder import (  # noqa: E402
     _DEFAULT_QUEUE_MAX,

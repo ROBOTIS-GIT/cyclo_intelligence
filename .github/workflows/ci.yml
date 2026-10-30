@@ -87,9 +87,11 @@ jobs:
             pandas \
             pillow \
             psutil \
-            pyarrow \
+            'pyarrow==24.0.0' \
             pytest \
             pyyaml
+          # Match the NumPy 1.x-compatible PyArrow version in both Cyclo images.
+          python3 -c 'import numpy, pandas, pyarrow; print(numpy.__version__, pandas.__version__, pyarrow.__version__)'
 
       - name: Build ROS packages
         run: |
@@ -147,6 +149,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             'numpy<2' \
+            'opencv-python-headless==4.11.0.86' \
             huggingface_hub \
             matplotlib \
             mcap \
@@ -154,10 +157,12 @@ jobs:
             pandas \
             pillow \
             psutil \
-            pyarrow \
+            'pyarrow==24.0.0' \
             pytest \
             pyyaml
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          # Catch binary compatibility errors before collecting the test suites.
+          python -c 'import cv2, numpy, pandas, pyarrow; print(cv2.__version__, numpy.__version__, pandas.__version__, pyarrow.__version__)'
 
       - name: Run cyclo_data tests
         env:
@@ -185,6 +190,15 @@ jobs:
             orchestrator/tests/data_processing/test_video_metadata_extractor.py \
             orchestrator/tests/data_processing/test_episode_editor.py \
             orchestrator/tests/data_processing/test_replay_handler.py
+
+      - name: Run LeRobot converter metadata tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_data:orchestrator:shared
+        run: |
+          set -euo pipefail
+          python -m pytest cyclo_data/tests/converter
+          python -m pytest orchestrator/tests/data_processing/test_rosbag_to_lerobot_converter.py
 
       - name: Run shared policy runtime tests
         env:

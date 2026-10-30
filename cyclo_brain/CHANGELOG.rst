@@ -2,6 +2,20 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.3 (2026-10-29)
+------------------
+* Removed the inherited CUDA compatibility-library directory from the ARM64 LeRobot image library search path so the NVIDIA runtime can supply the host driver.
+* Updated LeRobot image support to ``robotis/lerobot-zenoh:1.4.2``; GR00T remains at ``robotis/groot-zenoh:1.3.5``.
+* Contributors: Taehyeong Kim
+
+1.4.2 (2026-10-28)
+------------------
+* None
+
+1.4.1 (2026-10-27)
+------------------
+* None
+
 1.4.0 (2026-08-31)
 ------------------
 * None
