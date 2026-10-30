@@ -5,6 +5,7 @@ orchestrator:
       urdf_path: urdf/ffw_sh5_follower.urdf
       joystick:
         trigger_topic: /leader/joystick_controller/tact_trigger
+        mode_topic: /reference/joystick/mode
 
       # part of the default SH5 recording layout.
       observation:

@@ -60,6 +60,15 @@ def generate_launch_description():
         }],
     )
 
+    # The UI discovers optional robot controls without calling motion services.
+    # Starting only rosbridge_websocket does not start these graph queries.
+    rosapi_node = Node(
+        package='rosapi',
+        executable='rosapi_node',
+        name='rosapi',
+        output='screen',
+    )
+
     # Include rosbag_recorder service_bag_recorder node
     rosbag_recorder_node = Node(
         package='rosbag_recorder',
@@ -80,6 +89,7 @@ def generate_launch_description():
     return LaunchDescription([
         orchestrator_launch,
         rosbridge_websocket_node,
+        rosapi_node,
         rosbag_recorder_node,
         web_video_server_node
     ])

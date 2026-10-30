@@ -511,7 +511,7 @@ function App() {
         </div>
         </aside>
       )}
-      <main className="flex-1 flex flex-col h-screen bg-white dark:bg-slate-950">
+      <main className="flex-1 min-w-0 flex flex-col h-screen bg-white dark:bg-slate-950">
         {page === PageType.HOME ? (
           <HomePage />
         ) : page === PageType.RECORD ? (

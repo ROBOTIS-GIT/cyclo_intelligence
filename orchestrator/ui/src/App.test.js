@@ -99,6 +99,7 @@ jest.mock('./utils/rosConnectionManager', () => ({
   default: {
     setOnConnected: jest.fn(),
     disconnect: jest.fn(),
+    getCurrentConnection: jest.fn(() => null),
   },
 }));
 
