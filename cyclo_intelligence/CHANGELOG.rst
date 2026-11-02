@@ -2,6 +2,10 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.4 (2026-11-02)
+------------------
+* Added the leader joystick trigger topic to the F1 and F2 robot configurations.
+
 1.4.3 (2026-10-29)
 ------------------
 * Fixed ARM64 LeRobot CUDA initialization failing with error 801 when the inherited compatibility driver shadows the host driver after a JetPack update.
