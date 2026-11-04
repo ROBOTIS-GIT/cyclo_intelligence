@@ -149,6 +149,26 @@ def prediction(model, sample, seed):
     return result.astype(np.float32)
 
 
+def validate_and_clip_gradients(model, max_norm):
+    import torch
+
+    gradients = {"qwen_vl_interface": 0, "action_model": 0}
+    missing = []
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            missing.append(name)
+        else:
+            group = name.split(".")[0]
+            if group in gradients:
+                gradients[group] += parameter.numel()
+    if not all(gradients.values()):
+        raise ValueError("Backbone and action expert must both receive gradients")
+    # The aggregate norm checks every gradient without a host sync per parameter.
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm,
+                                         error_if_nonfinite=True, foreach=False)
+    return gradients, missing, norm
+
+
 def train(config):
     import torch
     from .native import initialize
@@ -198,21 +218,7 @@ def train(config):
                 raise ValueError("Nonfinite action loss")
             (loss / p["gradient_accumulation_steps"]).backward()
             losses.append(loss.detach().item())
-        gradients = {"qwen_vl_interface": 0, "action_model": 0}
-        missing = []
-        for name, parameter in model.named_parameters():
-            if parameter.grad is None:
-                missing.append(name)
-            else:
-                if not torch.isfinite(parameter.grad).all():
-                    raise ValueError(f"Nonfinite gradient: {name}")
-                group = name.split(".")[0]
-                if group in gradients:
-                    gradients[group] += parameter.numel()
-        if not all(gradients.values()):
-            raise ValueError("Backbone and action expert must both receive gradients")
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), p["max_grad_norm"],
-                                             error_if_nonfinite=True, foreach=False)
+        gradients, missing, norm = validate_and_clip_gradients(model, p["max_grad_norm"])
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         print("CYCLO_TRAINING_PROGRESS " + json.dumps({"version": 1, "optimizer_step": step,

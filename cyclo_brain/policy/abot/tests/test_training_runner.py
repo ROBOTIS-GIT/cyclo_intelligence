@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from abot_training.runner import prediction, validate_config
+from abot_training.runner import prediction, validate_config, validate_and_clip_gradients
 from abot_training.checkpoint import file_hash
 from test_training_data import prepared
 
@@ -31,6 +31,57 @@ def test_explicit_training_config_and_no_mutation():
     result = validate_config(config)
     result["parameters"]["steps"] = 9
     assert config == before
+
+
+@pytest.fixture
+def gradient_model():
+    torch = pytest.importorskip("torch")
+    model = torch.nn.ModuleDict({
+        "qwen_vl_interface": torch.nn.Linear(2, 2),
+        "action_model": torch.nn.Linear(2, 2),
+        "other": torch.nn.Linear(2, 2),
+    })
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    return model
+
+
+def test_gradient_clipping_preserves_metadata_and_matches_torch(gradient_model):
+    import torch
+
+    gradient_model["qwen_vl_interface"].bias.grad = None
+    reference = deepcopy(gradient_model)
+    for original, copied in zip(gradient_model.parameters(), reference.parameters()):
+        copied.grad = None if original.grad is None else original.grad.clone()
+    expected_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), 1.0,
+                                                  error_if_nonfinite=True, foreach=False)
+    groups, missing, norm = validate_and_clip_gradients(gradient_model, 1.0)
+    assert groups == {"qwen_vl_interface": 4, "action_model": 6}
+    assert missing == ["qwen_vl_interface.bias"]
+    torch.testing.assert_close(norm, expected_norm)
+    for actual, expected in zip(gradient_model.parameters(), reference.parameters()):
+        if actual.grad is not None:
+            torch.testing.assert_close(actual.grad, expected.grad)
+
+
+@pytest.mark.parametrize("group", ["qwen_vl_interface", "action_model", "other"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_gradients_in_any_group_are_rejected_before_an_update(gradient_model, group, value):
+    gradient_model[group].weight.grad[0, 0] = value
+    before = {key: value.detach().clone() for key, value in gradient_model.named_parameters()}
+    with pytest.raises(RuntimeError, match="non-finite"):
+        validate_and_clip_gradients(gradient_model, 1.0)
+    import torch
+    for key, parameter in gradient_model.named_parameters():
+        torch.testing.assert_close(parameter, before[key])
+
+
+@pytest.mark.parametrize("group", ["qwen_vl_interface", "action_model"])
+def test_missing_model_group_gradients_are_rejected(gradient_model, group):
+    for parameter in gradient_model[group].parameters():
+        parameter.grad = None
+    with pytest.raises(ValueError, match="both receive gradients"):
+        validate_and_clip_gradients(gradient_model, 1.0)
 
 
 @pytest.mark.parametrize("key,value", [
