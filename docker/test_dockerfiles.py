@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 
 import yaml
 
@@ -92,7 +93,9 @@ def test_lerobot_external_training_adapter_is_installed_and_mounted():
         contents = (REPO_ROOT / f"cyclo_brain/policy/lerobot/Dockerfile.{arch}").read_text()
         assert f"COPY {source}/ /app/extensions/" in contents
         assert "pip install --no-deps --no-build-isolation -e /app/extensions" in contents
-        assert '".[training,' in contents
+        assert "install.py --profile inference" in contents
+    profile = tomllib.loads((REPO_ROOT / "cyclo_brain/policy/lerobot/dependency_profile/dependencies.toml").read_text())
+    assert "training" in profile["profiles"]["inference"]["features"]
     services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
     assert f"../{source}:/app/extensions:ro" in services["lerobot"]["volumes"]
     assert not any("/app/extensions" in mount for mount in services["groot"]["volumes"])
@@ -508,24 +511,21 @@ def test_worker_dependency_constraints_reach_the_package_manager():
             assert not list(Path(directory).iterdir()), "Version constraints became shell output files"
 
 
-def test_lerobot_images_install_new_policy_inference_extras():
+def test_lerobot_images_use_the_shared_inference_dependency_profile():
     dockerfiles = (
         REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.arm64",
         REPO_ROOT / "cyclo_brain" / "policy" / "lerobot" / "Dockerfile.amd64",
     )
 
     for dockerfile in dockerfiles:
-        install_lines = [
-            line
-            for line in dockerfile.read_text().splitlines()
-            if "pip install" in line and '".[' in line
-        ]
-        assert len(install_lines) == 1, f"Could not identify LeRobot extras in {dockerfile}"
-        install_line = install_lines[0]
-        for extra in ("molmoact2", "vla_jepa", "fastwam", "wallx", "pi", "groot"):
-            assert extra in install_line, f"{dockerfile} is missing inference extra {extra}"
-        extras = install_line.split('".[', 1)[1].split(']', 1)[0].split(',')
-        assert not {"eo1", "evo1", "multi_task_dit"}.intersection(extras)
+        contents = dockerfile.read_text()
+        assert "COPY cyclo_brain/policy/lerobot/dependency_profile/ /opt/cyclo-lerobot-profile/" in contents
+        assert contents.count("install.py --profile inference --project /lerobot --manager ") == 1
+        manager = "uv" if dockerfile.name.endswith("amd64") else "pip"
+        assert f"--manager {manager}" in contents
+        assert '--expected-profile-sha256 "$CYCLO_PROFILE_SHA256"' in contents
+        assert '--expected-lock-sha256 "$LEROBOT_LOCK_SHA256"' in contents
+        assert not any('".[' in line and "pip install" in line for line in contents.splitlines())
 
 
 def test_policy_build_contexts_use_runtime_specific_ignore_files():

@@ -47,6 +47,29 @@ def _write_start_stub(tmp_path):
     return log_path
 
 
+def _init_lerobot_build_sources(tmp_path):
+    """Provide real Git provenance without fetching the model submodule."""
+    policy = tmp_path / "cyclo_brain/policy/lerobot"
+    source = policy / "lerobot"
+    source.mkdir()
+    (source / "uv.lock").write_text("version = 1\n")
+    shutil.copytree(REPO_ROOT / "cyclo_brain/policy/lerobot/dependency_profile",
+                    policy / "dependency_profile")
+
+    def git(root, *args):
+        return subprocess.run(
+            ["git", "-C", str(root), "-c", "user.name=Test", "-c",
+             "user.email=test@example.invalid", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    for root in (source, tmp_path):
+        git(root, "init", "-q")
+        git(root, "add", ".")
+        git(root, "commit", "-qm", "Build fixture")
+    return source, git
+
+
 def _write_enter_stub(tmp_path, running_container):
     log_path = tmp_path / "docker.log"
     bin_dir = tmp_path / "bin"
@@ -252,6 +275,7 @@ def test_start_groot_build_skips_prebuilt_pull(tmp_path):
 
 def test_start_policy_uses_manifest_backed_runtime(tmp_path):
     docker_dir = _copy_container_script(tmp_path)
+    _init_lerobot_build_sources(tmp_path)
     log_path = _write_start_stub(tmp_path)
 
     subprocess.run(
@@ -267,6 +291,20 @@ def test_start_policy_uses_manifest_backed_runtime(tmp_path):
         "up -d --build lerobot" in call
         for call in log_path.read_text().splitlines()
     )
+
+
+def test_lerobot_build_rejects_a_checkout_different_from_the_parent_commit(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    source, git = _init_lerobot_build_sources(tmp_path)
+    git(source, "commit", "--allow-empty", "-qm", "Unrecorded model revision")
+    log_path = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "start-policy", "lerobot", "--build"],
+        cwd=tmp_path, env=_stub_env(tmp_path, log_path), capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "LeRobot checkout differs from the Cyclo submodule commit" in result.stderr
+    assert not any("up -d --build" in call for call in log_path.read_text().splitlines())
 
 
 def test_start_does_not_remove_policy_container_with_stale_workspace_mount(tmp_path):
