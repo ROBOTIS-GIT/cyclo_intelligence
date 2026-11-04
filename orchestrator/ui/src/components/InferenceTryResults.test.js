@@ -184,22 +184,89 @@ test('old model write completion cannot release a newer pending write', async ()
   expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled();
 });
 
-test('reports stale edit conflict and reloads on remount without retrying the edit', async () => {
+test('reloads a stale edit conflict without retrying and uses the new revision on the next edit', async () => {
   const row = { try: '1', result: 'success', created_at: '2026-09-18T00:00:00Z' };
   fetch.mockResolvedValueOnce(response([row]))
     .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ detail: 'Trial history changed. Refresh and try again.' }) })
-    .mockResolvedValueOnce(response([{ ...row, result: 'fail' }], 'v2'));
-  const { unmount } = render(<InferenceTryResults />);
+    .mockResolvedValueOnce(response([{ ...row, result: 'fail' }], 'v2'))
+    .mockResolvedValueOnce(response([row], 'v3'));
+  render(<InferenceTryResults />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'Toggle try results' }));
   fireEvent.change(screen.getByLabelText('Try 1 result'), { target: { value: 'fail' } });
   expect(await screen.findByRole('alert')).toHaveTextContent('Trial history changed');
-  expect(screen.getByLabelText('Try 1 result')).toHaveValue('success');
-  unmount();
-  render(<InferenceTryResults />);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
-  fireEvent.click(screen.getByRole('button', { name: 'Toggle try results' }));
   await waitFor(() => expect(screen.getByLabelText('Try 1 result')).toHaveValue('fail'));
   expect(fetch).toHaveBeenCalledTimes(3);
   expect(fetch.mock.calls[2][1].method).toBeUndefined();
+  fireEvent.change(screen.getByLabelText('Try 1 result'), { target: { value: 'success' } });
+  await waitFor(() => expect(screen.getByLabelText('Try 1 result')).toHaveValue('success'));
+  expect(JSON.parse(fetch.mock.calls[3][1].body).revision).toBe('v2');
+});
+
+const staleHistory = () => ({ ok: false, status: 409, json: async () => ({ detail: 'Trial history changed.' }) });
+const trial = { try: '1', result: 'success', created_at: '2026-10-02T05:00:00Z' };
+
+test('stale deletion clears selection and blocks duplicate requests until refreshed', async () => {
+  let finishRefresh;
+  jest.spyOn(window, 'confirm').mockReturnValue(true);
+  fetch.mockResolvedValueOnce(response([trial]))
+    .mockResolvedValueOnce(staleHistory())
+    .mockReturnValueOnce(new Promise(resolve => { finishRefresh = resolve; }));
+  render(<InferenceTryResults />);
+  await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
+  fireEvent.click(screen.getByLabelText('Toggle try results'));
+  fireEvent.click(screen.getByLabelText('Select try 1'));
+  fireEvent.click(screen.getByLabelText('Delete selected trials'));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+  fireEvent.click(screen.getByText('Success'));
+  expect(fetch).toHaveBeenCalledTimes(3);
+  await act(async () => finishRefresh(response([{ ...trial, result: 'fail' }], 'v2')));
+  expect(screen.getByLabelText('Try 1 result')).toHaveValue('fail');
+  expect(screen.getByLabelText('Select try 1')).not.toBeChecked();
+  expect(screen.getByLabelText('Delete selected trials')).toBeDisabled();
+  expect(fetch.mock.calls.filter(([, options]) => options.method === 'DELETE')).toHaveLength(1);
+});
+
+test.each(['model', 'robot', 'unmount'])('ignores conflict refresh after %s changes', async change => {
+  let finishRefresh;
+  fetch.mockResolvedValueOnce(response([trial]))
+    .mockResolvedValueOnce(staleHistory())
+    .mockReturnValueOnce(new Promise(resolve => { finishRefresh = resolve; }))
+    .mockResolvedValueOnce(response([], 'new'));
+  const { rerender, unmount } = render(<InferenceTryResults />);
+  await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
+  fireEvent.click(screen.getByLabelText('Toggle try results'));
+  fireEvent.change(screen.getByLabelText('Try 1 result'), { target: { value: 'fail' } });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+  if (change === 'unmount') unmount();
+  else {
+    if (change === 'model') {
+      mockState.info.policyPath = '/models/new';
+      mockState.tasks.inferenceStatus.loadedModelPath = '/models/new';
+    } else mockState.tasks.robotType = 'f2';
+    rerender(<InferenceTryResults />);
+    await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
+  }
+  await act(async () => finishRefresh(response([{ ...trial, try: '99' }], 'old')));
+  expect(screen.queryByLabelText('Try 99 result')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  if (change !== 'unmount') {
+    if (change === 'model') fireEvent.click(screen.getByLabelText('Toggle try results'));
+    expect(screen.getByText('0 trials · 0 success / 0 fail · 0%')).toBeInTheDocument();
+  }
+});
+
+test('a failed conflict refresh disables further mutations instead of retaining a stale revision', async () => {
+  fetch.mockResolvedValueOnce(response([trial]))
+    .mockResolvedValueOnce(staleHistory())
+    .mockRejectedValueOnce(new Error('Network unavailable'));
+  render(<InferenceTryResults />);
+  await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
+  fireEvent.click(screen.getByLabelText('Toggle try results'));
+  fireEvent.change(screen.getByLabelText('Try 1 result'), { target: { value: 'fail' } });
+  expect(await screen.findByRole('alert')).toHaveTextContent('Network unavailable');
+  expect(screen.getByText('Success')).toBeDisabled();
+  expect(screen.getByText('Fail')).toBeDisabled();
+  expect(screen.queryByLabelText('Try 1 result')).not.toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(3);
 });

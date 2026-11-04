@@ -148,6 +148,8 @@ const InferencePanel = () => {
     () => getInferenceTaskInfoKey(info),
     [info]
   );
+  const taskInfoRef = useRef(info);
+  useEffect(() => { taskInfoRef.current = info; }, [info]);
 
   useEffect(
     () => () => {
@@ -182,6 +184,8 @@ const InferencePanel = () => {
     const generation = syncGenerationRef.current + 1;
     syncGenerationRef.current = generation;
     const submittedTaskKey = taskSyncKey;
+    // Status updates rebuild the selector result but must not restart the debounce.
+    const submittedTaskInfo = taskInfoRef.current;
     dispatch(markInferenceTaskInfoSyncPending());
 
     syncTimerRef.current = setTimeout(async () => {
@@ -193,7 +197,7 @@ const InferencePanel = () => {
         if (syncGenerationRef.current !== generation) return;
         if (result && result.success) {
           dispatch(markInferenceTaskInfoSyncSuccess({
-            taskKey: submittedTaskKey, taskInfo: info,
+            taskKey: submittedTaskKey, taskInfo: submittedTaskInfo,
           }));
         } else {
           dispatch(markInferenceTaskInfoSyncFailed(

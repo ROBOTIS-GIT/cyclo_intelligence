@@ -9,9 +9,17 @@ const emptyHistory = () => ({ rows: [], file: '', revision: '' });
 async function readResponse(response) {
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(typeof data.detail === 'string' ? data.detail : 'Trial history request failed.');
+    const error = new Error(typeof data.detail === 'string' ? data.detail : 'Trial history request failed.');
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+function readHistory(model, robotType, signal) {
+  return fetch(`/api/try-results?model=${encodeURIComponent(model)}&robot_type=${encodeURIComponent(robotType || '')}`, {
+    signal, cache: 'no-store',
+  }).then(readResponse);
 }
 
 export default function InferenceTryResults() {
@@ -49,9 +57,7 @@ export default function InferenceTryResults() {
     setSelected([]);
     setError('');
     if (model) {
-      fetch(`/api/try-results?model=${encodeURIComponent(model)}&robot_type=${encodeURIComponent(robotType || '')}`, {
-        signal: controller.signal, cache: 'no-store',
-      }).then(readResponse).then(history => {
+      readHistory(model, robotType, controller.signal).then(history => {
         if (generation.current === id) { setData(history); setReadyKey(historyKey); setReady(true); }
       }).catch(failure => {
         if (failure.name !== 'AbortError' && generation.current === id) setError(failure.message);
@@ -82,7 +88,24 @@ export default function InferenceTryResults() {
         setSelected([]);
       }
     } catch (failure) {
-      if (generation.current === id) setError(failure.message);
+      if (generation.current !== id) return;
+      setError(failure.message);
+      if (failure.status === 409) {
+        // Deletion can renumber trials. Refresh, but never replay a stale edit.
+        setReady(false);
+        setSelected([]);
+        try {
+          const history = await readHistory(model, robotType);
+          if (generation.current === id) {
+            setData(history);
+            setReadyKey(historyKey);
+            setReady(true);
+            setError('Trial history changed. Latest results loaded; review before editing again.');
+          }
+        } catch (refreshFailure) {
+          if (generation.current === id) setError(refreshFailure.message);
+        }
+      }
     } finally {
       if (generation.current === id) { pending.current = false; setBusy(false); }
     }

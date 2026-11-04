@@ -322,6 +322,33 @@ describe('InferencePanel initial pose sync settings', () => {
     jest.useRealTimers();
   });
 
+  test('syncs one edit once despite status updates and does not acknowledge a newer edit', async () => {
+    jest.useFakeTimers();
+    try {
+      const { store, sendRecordCommand } = renderPanel({ inferenceMode: 'robot' });
+      let finishFirst;
+      sendRecordCommand.mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve; }));
+      const input = screen.getByRole('spinbutton', { name: 'Dataset FPS' });
+      fireEvent.change(input, { target: { value: '20' } });
+      await act(async () => jest.advanceTimersByTime(400));
+      act(() => store.dispatch(setInferenceStatus({ observedChunkSize: 15 })));
+      await act(async () => jest.advanceTimersByTime(300));
+      expect(sendRecordCommand).toHaveBeenCalledTimes(1);
+      fireEvent.change(input, { target: { value: '25' } });
+      await act(async () => finishFirst({ success: true }));
+      expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(true);
+      expect(input).toHaveValue(25);
+      await act(async () => jest.advanceTimersByTime(700));
+      expect(sendRecordCommand).toHaveBeenCalledTimes(2);
+      expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(false);
+      expect(store.getState().tasks.inferenceTaskInfoSync.serverTaskInfo.inferenceHz).toBe(25);
+      await act(async () => jest.advanceTimersByTime(3000));
+      expect(sendRecordCommand).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('shows a non-blocking warning for unusual Dataset FPS', () => {
     renderPanel({ inferenceMode: 'robot', inferenceHz: 1515, controlHz: 200 });
 
