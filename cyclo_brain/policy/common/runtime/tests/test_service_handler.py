@@ -23,6 +23,7 @@ from main_runtime.service_handler import (  # noqa: E402
     CMD_STATUS,
     CMD_STOP,
     CMD_UNLOAD,
+    CMD_UPDATE_INSTRUCTION,
     ServiceHandler,
 )
 from main_runtime.session_state import SessionState  # noqa: E402
@@ -170,6 +171,32 @@ def make_response(
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_rejected_instruction_update_preserves_session_and_retry_can_succeed(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        self.assertTrue(handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="test",
+            task_instruction="pick",
+        )).success)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_START)).success)
+        setter = loop.set_task_instruction
+        previous_updates = list(loop.task_instructions)
+
+        def reject(_instruction):
+            raise RuntimeError("stop pose sync before changing a contextual instruction")
+
+        loop.set_task_instruction = reject
+        request = SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction="place")
+        for _ in range(3):
+            failed = handler.handle(request)
+            self.assertFalse(failed.success)
+            self.assertIn("stop pose sync", failed.message)
+            self.assertEqual(session.task_instruction, "pick")
+            self.assertEqual(loop.task_instructions, previous_updates)
+        loop.set_task_instruction = setter
+        self.assertTrue(handler.handle(request).success)
+        self.assertEqual(session.task_instruction, "place")
+        self.assertEqual(loop.task_instructions[-1], "place")
+
     def test_status_reports_observation_without_worker_rpc_or_setting_mutation(self):
         handler, session, loop = self._handler(backend="lerobot")
         loaded = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",

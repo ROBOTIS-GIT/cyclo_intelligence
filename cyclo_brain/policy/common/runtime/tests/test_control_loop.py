@@ -341,6 +341,101 @@ class ControlLoopSafetyTests(unittest.TestCase):
         loop.tick()
 
         self.assertEqual(len(robot.previews), 1)
+        self.assertFalse(loop._running)
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_stop_and_pause_hold_even_without_execution_feedback(self):
+        for command in ("stop", "pause"):
+            with self.subTest(command=command):
+                robot = FakeRobot()
+                loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+                loop._publish_to_robot = True
+                loop.tick()
+                self.assertTrue(getattr(loop, command)())
+                for _ in range(10):
+                    loop.tick()
+                self.assertFalse(loop._running)
+                self.assertEqual(len(robot.commands), 1)
+                self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_ordinary_stop_hold_failure_blocks_restart_until_retry_succeeds(self):
+        robot = FakeRobot()
+        robot.hold_failures_remaining = 2
+        loop = self._make_loop(FakeProcessor(actions=[[1.0]]), robot)
+        loop._publish_to_robot = True
+        for _ in range(2):
+            self.assertFalse(loop.stop())
+            self.assertFalse(loop._running)
+            self.assertTrue(loop.initial_pose_sync_hold_required())
+            with self.assertRaisesRegex(RuntimeError, "hold is still pending"):
+                loop.start()
+        self.assertTrue(loop.stop())
+        self.assertFalse(loop.initial_pose_sync_hold_required())
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_publish_failures_stop_clear_and_report_even_without_feedback(self):
+        for kind in ("action", "idle", "sync_idle"):
+            for hold_fails in (False, True):
+                with self.subTest(kind=kind, hold_fails=hold_fails):
+                    robot = FakeRobot()
+                    robot.hold_failures_remaining = int(hold_fails)
+                    processor = FakeProcessor(actions=[[1.0], [2.0]] if kind == "action" else [])
+                    loop = self._make_loop(processor, robot)
+                    loop._publish_to_robot = True
+                    callback = mock.Mock()
+                    loop.set_fault_callback(callback)
+                    if kind == "sync_idle":
+                        loop._initial_pose_sync_in_progress = True
+                        loop._initial_pose_sync_deadline = float('inf')
+                    publisher = mock.Mock(side_effect=RuntimeError("injected failure"))
+                    if kind == "action":
+                        robot.publish_action = publisher
+                    else:
+                        robot.publish_idle_action = publisher
+                    loop.tick()
+                    self.assertFalse(loop._running)
+                    self.assertGreater(processor.clear_count, 0)
+                    callback.assert_called_once()
+                    self.assertIn("injected failure", callback.call_args.args[0])
+                    self.assertEqual(callback.call_args.args[1], not hold_fails)
+                    for _ in range(10):
+                        loop.tick()
+                    publisher.assert_called_once()
+                    self.assertEqual(loop.initial_pose_sync_hold_required(), hold_fails)
+                    if hold_fails:
+                        with self.assertRaisesRegex(RuntimeError, "hold is still pending"):
+                            loop.start()
+                        self.assertTrue(loop.stop())
+                        self.assertFalse(loop.initial_pose_sync_hold_required())
+
+    def test_partial_publication_failure_stops_remaining_buffered_actions(self):
+        robot = FakeRobot()
+        emitted = []
+
+        def partial_publish(action, keys):
+            emitted.append("first group")
+            raise RuntimeError("second group publication failed")
+
+        robot.publish_action = partial_publish
+        loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+        loop._publish_to_robot = True
+        loop.tick()
+        loop.tick()
+        self.assertEqual(emitted, ["first group"])
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+        self.assertFalse(loop._running)
+
+    def test_preview_failure_does_not_trigger_a_robot_command_or_hold(self):
+        robot = FakeRobot()
+        robot.publish_action_preview = mock.Mock(side_effect=RuntimeError("preview unavailable"))
+        loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+        loop._publish_to_robot = False
+        loop.tick()
+        loop.tick()
+        self.assertTrue(loop._running)
+        self.assertTrue(loop.stop())
+        self.assertEqual(robot.commands, [])
+        self.assertEqual(robot.holds, [])
 
     def test_robot_mode_publishes_idle_when_action_buffer_is_empty(self) -> None:
         processor = FakeProcessor(actions=[], buffer_size=100)

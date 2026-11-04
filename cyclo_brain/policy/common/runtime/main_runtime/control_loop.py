@@ -456,12 +456,7 @@ class ControlLoop:
         action_keys: list[str] = []
         with self._lock:
             should_hold = (
-                (
-                    self._initial_pose_sync_in_progress
-                    or self._initial_pose_sync_hold_pending
-                    or self._feedback is not None
-                )
-                and self._publish_to_robot
+                self._publish_to_robot
                 and self._robot is not None
             )
             if should_hold:
@@ -480,13 +475,13 @@ class ControlLoop:
         if robot is not None:
             try:
                 robot.publish_current_pose_hold(action_keys, duration_s=0.1)
-                logger.info("initial pose sync interrupted; current pose hold published")
+                logger.info("%s requested; current pose hold published", reason)
             except Exception as e:
                 with self._lock:
                     if robot is self._robot:
                         self._initial_pose_sync_in_progress = True
                         self._initial_pose_sync_hold_pending = True
-                logger.error("failed to hold current pose during sync pause: %s", e)
+                logger.error("failed to hold current pose during %s: %s", reason, e)
                 self._schedule_feedback_update()
                 return False
             with self._lock:
@@ -674,9 +669,8 @@ class ControlLoop:
                                     "failed to publish idle action during pose sync: %s",
                                     e,
                                 )
-                                if self._feedback:
-                                    self._running = False
-                                    return f"failed to publish sync idle action: {e}", generation
+                                self._running = False
+                                return f"failed to publish sync idle action: {e}", generation
                     return
                 self._initial_pose_sync_in_progress = False
                 self._initial_pose_sync_completed = True
@@ -718,8 +712,8 @@ class ControlLoop:
                         logger.error("failed to publish robot action: %s", e)
                         if self._feedback:
                             processor.finish(command.command_id, status="failed", reason=str(e)[:1024])
-                            self._running = False
-                            fault = f"failed to publish robot action: {e}"
+                        self._running = False
+                        fault = f"failed to publish robot action: {e}"
                 elif self._feedback:
                     processor.finish(command.command_id, status="discarded", reason="preview-only")
             elif publish_to_robot:
@@ -729,9 +723,8 @@ class ControlLoop:
                         idle(action_keys)
                     except Exception as e:
                         logger.error("failed to publish idle robot action: %s", e)
-                        if self._feedback:
-                            self._running = False
-                            fault = f"failed to publish idle robot action: {e}"
+                        self._running = False
+                        fault = f"failed to publish idle robot action: {e}"
 
             try:
                 should_request = fault is None and self._should_request_actions(processor)

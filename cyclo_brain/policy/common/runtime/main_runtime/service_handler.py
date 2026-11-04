@@ -478,8 +478,8 @@ class ServiceHandler:
         new_instruction = (request.task_instruction or "").strip()
         if not new_instruction:
             return self._make_response(False, "task_instruction must be non-empty")
-        self._session.task_instruction = new_instruction
         self._control_loop.set_task_instruction(new_instruction)
+        self._session.task_instruction = new_instruction
         return self._make_response(True, f'instruction updated: "{new_instruction}"')
 
     def _status(self):
