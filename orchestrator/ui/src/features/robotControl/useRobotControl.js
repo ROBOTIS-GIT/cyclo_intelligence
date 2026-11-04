@@ -7,7 +7,7 @@ import ROSLIB from 'roslib';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import {
   PRESET_SERVICE, PRESET_TYPE, SOURCE_SERVICE,
-  SOURCE_STALE_MS, SOURCE_TOPIC, SOURCE_TYPE, normalizeSource, presetRequest,
+  SOURCE_STALE_MS, SOURCE_TOPIC, SOURCE_TYPE, normalizeSource, presetRequest, supportsHandPresets,
 } from './controlProtocol';
 
 const emptyState = () => ({
@@ -85,11 +85,13 @@ export default function useRobotControl(robotType, modeTopic) {
       try {
         const [source, presets] = await Promise.all([
           callService(ctx.ros, '/rosapi/services_for_type', 'rosapi_msgs/srv/ServicesForType', { type: SOURCE_TYPE }),
-          callService(ctx.ros, '/rosapi/services_for_type', 'rosapi_msgs/srv/ServicesForType', { type: PRESET_TYPE }),
+          supportsHandPresets(robotType)
+            ? callService(ctx.ros, '/rosapi/services_for_type', 'rosapi_msgs/srv/ServicesForType', { type: PRESET_TYPE })
+            : Promise.resolve({ services: [] }),
         ]);
         if (!ctx.alive) return;
         ctx.canSetSource = source.services?.includes(SOURCE_SERVICE) === true;
-        ctx.canSetPreset = presets.services?.includes(PRESET_SERVICE) === true;
+        ctx.canSetPreset = supportsHandPresets(robotType) && presets.services?.includes(PRESET_SERVICE) === true;
         patch(ctx, {
           canSetSource: ctx.canSetSource, canSetPreset: ctx.canSetPreset,
           ...(!ctx.canSetPreset ? { selected: { left: null, right: null } } : {}),
@@ -229,7 +231,7 @@ export default function useRobotControl(robotType, modeTopic) {
   });
 
   const setPreset = (target, left, right) => run('preset', async (ctx) => {
-    if (!ctx.canSetPreset) throw new Error('Hand preset control is unavailable on this robot.');
+    if (!supportsHandPresets(robotType) || !ctx.canSetPreset) throw new Error('Hand preset control is unavailable on this robot.');
     const request = presetRequest(target, left, right);
     const response = await callService(ctx.ros, PRESET_SERVICE, PRESET_TYPE, request);
     if (!ctx.alive) return;

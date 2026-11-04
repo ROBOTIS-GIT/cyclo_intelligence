@@ -95,7 +95,7 @@ test('source acceptance does not change the displayed source; waits for a new re
 });
 
 test('external uses SetBool false and never calls arm activation', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   emit('/source', 'teleop');
   act(() => { result.current.setSource('external'); });
@@ -106,7 +106,7 @@ test('external uses SetBool false and never calls arm activation', async () => {
 });
 
 test('stale source is unknown and cannot be used to issue a new source command', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   emit('/source', 'teleop');
   emit(DEFAULT_MODE_TOPIC, 'swerve');
@@ -127,7 +127,7 @@ test('unsupported robots disable optional controls', async () => {
 });
 
 test('preset service uses hand controller endpoint and only records accepted selections', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   act(() => { result.current.setPreset('left', '2', ''); });
   expect(command(PRESET_SERVICE).args).toEqual({ target_arm: 'left', left_preset_id: 2, right_preset_id: 0 });
@@ -140,7 +140,7 @@ test('preset service uses hand controller endpoint and only records accepted sel
 });
 
 test.each(['0', '65536', '2.5', '', '-1', 'NaN'])('rejects invalid preset ID %s before sending', async (id) => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   await act(async () => result.current.setPreset('both', id, '2'));
   expect(command(PRESET_SERVICE)).toBeUndefined();
@@ -148,7 +148,7 @@ test.each(['0', '65536', '2.5', '', '-1', 'NaN'])('rejects invalid preset ID %s 
 });
 
 test('service timeout reports uncertainty, never retries or marks a selection accepted', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   act(() => { result.current.setPreset('both', '2', '2'); });
   await advance(4000);
@@ -160,7 +160,7 @@ test('service timeout reports uncertainty, never retries or marks a selection ac
 });
 
 test('source acceptance without completion times out without claiming success', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   emit('/source', 'external');
   act(() => { result.current.setSource('teleop'); });
@@ -171,7 +171,7 @@ test('source acceptance without completion times out without claiming success', 
 });
 
 test('disconnect clears status and ignores a late response; reconnect subscribes anew', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   emit('/source', 'teleop');
   act(() => { result.current.setPreset('both', '3', '3'); });
@@ -192,7 +192,7 @@ test('disconnect clears status and ignores a late response; reconnect subscribes
 });
 
 test('switching robots invalidates the previous request and subscriptions', async () => {
-  const { result, rerender, unmount } = renderHook(({ robot }) => useRobotControl(robot), { initialProps: { robot: 'first' } });
+  const { result, rerender, unmount } = renderHook(({ robot }) => useRobotControl(robot), { initialProps: { robot: 'ffw_sh5_rev1' } });
   await flush();
   act(() => { result.current.setPreset('both', '2', '2'); });
   const oldCall = command(PRESET_SERVICE);
@@ -206,7 +206,7 @@ test('switching robots invalidates the previous request and subscriptions', asyn
 
 
 test('clears the last joystick mode when the leader publisher disappears', async () => {
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   emit(DEFAULT_MODE_TOPIC, 'swerve');
   expect(result.current.mode).toBe('swerve');
@@ -228,7 +228,7 @@ test('clears the last joystick mode when the leader publisher disappears', async
 
 test('uses the configured topic and retires its subscription when configuration changes', async () => {
   mockModeTopic = '/custom/leader/mode';
-  const { result, unmount } = renderHook(() => useRobotControl('robot'));
+  const { result, unmount } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   expect(command('/rosapi/publishers').args).toEqual({ topic: mockModeTopic });
   expect(mockTopics.some((t) => t.name === DEFAULT_MODE_TOPIC)).toBe(false);
@@ -249,7 +249,7 @@ test('uses the configured topic and retires its subscription when configuration 
 
 test('an empty configured mode topic is not replaced with a hard-coded fallback', async () => {
   mockModeTopic = '';
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   expect(mockTopics.map((t) => t.name)).toEqual(['/source']);
   expect(command('/rosapi/publishers')).toBeUndefined();
@@ -260,7 +260,7 @@ test('an empty configured mode topic is not replaced with a hard-coded fallback'
 
 test('robot info lookup failure does not disable source or preset services and is retried', async () => {
   mockInfoFailure = true;
-  const { result } = renderHook(() => useRobotControl('robot'));
+  const { result } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await flush();
   expect(result.current.canSetSource).toBe(true);
   expect(result.current.canSetPreset).toBe(true);
@@ -271,3 +271,17 @@ test('robot info lookup failure does not disable source or preset services and i
   emit(DEFAULT_MODE_TOPIC, 'swerve');
   expect(result.current.mode).toBe('swerve');
 });
+
+
+test.each(['f1', 'f2', 'ffw_bg2_rev4', 'ffw_sg2_rev1', 'omx_f', 'omy_f3m', 'unknown_robot'])(
+  '%s cannot issue a preset command through a shared SH5 backend', async (robotType) => {
+    const { result } = renderHook(() => useRobotControl(robotType));
+    await flush();
+    expect(result.current.canSetSource).toBe(true);
+    expect(result.current.canSetPreset).toBe(false);
+    expect(mockCalls.some((call) => call.args?.type === 'robotis_interfaces/srv/SetPreset')).toBe(false);
+    await act(async () => result.current.setPreset('both', '1', '1'));
+    expect(command(PRESET_SERVICE)).toBeUndefined();
+    expect(result.current.error).toMatch(/unavailable on this robot/);
+  }
+);

@@ -15,7 +15,7 @@ beforeEach(() => {
 const open = () => fireEvent.click(screen.getByRole('button', { name: 'Robot controls' }));
 
 test('starts as a small toggle; the popup is outside the recorder layout', () => {
-  const { container } = render(<RobotControls robotType="robot" />);
+  const { container } = render(<RobotControls robotType="ffw_sh5_rev1" />);
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(container.querySelector('.robot-control-anchor')).toBeInTheDocument();
   open();
@@ -28,32 +28,32 @@ test('starts as a small toggle; the popup is outside the recorder layout', () =>
   expect(control.setPreset).not.toHaveBeenCalled();
 });
 
-test('clicking the source status switches between blue External and green Teleop', () => {
-  const { rerender } = render(<RobotControls robotType="robot" />);
+test('clicking Source switches while matching cyan External and white Teleop/Head', () => {
+  const { rerender } = render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   const source = screen.getByRole('button', { name: 'Source: External' });
-  expect(source).toHaveClass('is-external');
+  expect(source).toHaveClass('is-cyan');
   fireEvent.click(source);
   expect(control.setSource).toHaveBeenCalledWith('teleop');
   control.source = 'teleop';
-  rerender(<RobotControls robotType="robot" />);
-  expect(screen.getByRole('button', { name: 'Source: Teleop' })).toHaveClass('is-teleop');
+  rerender(<RobotControls robotType="ffw_sh5_rev1" />);
+  expect(screen.getByRole('button', { name: 'Source: Teleop' })).toHaveClass('is-white');
   fireEvent.click(screen.getByRole('button', { name: 'Source: Teleop' }));
   expect(control.setSource).toHaveBeenLastCalledWith('external');
 });
 
 test('Head/Base updates independently and does not offer an unsupported robot command', () => {
-  const { rerender } = render(<RobotControls robotType="robot" />);
+  const { rerender } = render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   expect(screen.getByRole('button', { name: 'Joystick: Head' })).toBeDisabled();
   control.mode = 'swerve';
-  rerender(<RobotControls robotType="robot" />);
-  expect(screen.getByRole('button', { name: 'Joystick: Base' })).toHaveClass('is-swerve');
+  rerender(<RobotControls robotType="ffw_sh5_rev1" />);
+  expect(screen.getByRole('button', { name: 'Joystick: Base' })).toHaveClass('is-yellow');
   expect(screen.getByRole('button', { name: 'Source: External' })).toBeEnabled();
 });
 
 test('applies only the edited hand, without an extra target selector', async () => {
-  render(<RobotControls robotType="robot" />);
+  render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Left preset'), { target: { value: '2' } });
@@ -64,7 +64,7 @@ test('applies only the edited hand, without an extra target selector', async () 
 });
 
 test('changing both preset fields applies both hands once', async () => {
-  render(<RobotControls robotType="robot" />);
+  render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   fireEvent.change(screen.getByLabelText('Left preset'), { target: { value: '2' } });
   fireEvent.change(screen.getByLabelText('Right preset'), { target: { value: '3' } });
@@ -75,7 +75,7 @@ test('changing both preset fields applies both hands once', async () => {
 
 test('supports a right custom preset and keeps the draft after a failed request', async () => {
   control.setPreset.mockResolvedValue(false);
-  render(<RobotControls robotType="robot" />);
+  render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   fireEvent.change(screen.getByLabelText('Right preset'), { target: { value: 'custom' } });
   fireEvent.change(screen.getByLabelText('Right custom preset ID'), { target: { value: '42' } });
@@ -85,7 +85,7 @@ test('supports a right custom preset and keeps the draft after a failed request'
 });
 
 test('Escape returns focus to the toggle; outside click dismisses the popup', () => {
-  render(<RobotControls robotType="robot" />);
+  render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -98,15 +98,52 @@ test('Escape returns focus to the toggle; outside click dismisses the popup', ()
 test('missing services and pending requests cannot send commands', () => {
   control.canSetSource = false;
   control.canSetPreset = false;
-  const { rerender } = render(<RobotControls robotType="robot" />);
+  const { rerender } = render(<RobotControls robotType="ffw_sh5_rev1" />);
   open();
   expect(screen.getByRole('button', { name: 'Source: External' })).toBeDisabled();
   expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
   control.canSetSource = true;
   control.pending = 'source';
   control.error = 'Source change rejected';
-  rerender(<RobotControls robotType="robot" />);
+  rerender(<RobotControls robotType="ffw_sh5_rev1" />);
   expect(screen.getByRole('button', { name: 'Source: External' })).toBeDisabled();
   expect(screen.getByRole('status')).toHaveTextContent('Applying');
   expect(screen.getByRole('alert')).toHaveTextContent('Source change rejected');
+});
+
+
+test.each(['f1', 'f2', 'ffw_bg2_rev4', 'ffw_sg2_rev1', 'omx_f', 'omy_f3m', 'unknown_robot'])(
+  '%s hides hand presets even when the connected backend advertises them', (robotType) => {
+    render(<RobotControls robotType={robotType} />);
+    open();
+    expect(screen.getByRole('button', { name: 'Source: External' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Joystick: Head' })).toBeVisible();
+    expect(screen.queryByLabelText('Left preset')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Right preset')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Source: External' }));
+    expect(control.setSource).toHaveBeenCalledWith('teleop');
+    expect(control.setPreset).not.toHaveBeenCalled();
+  }
+);
+
+test.each([
+  ['external', 'head_control', 'cyan', false],
+  ['external', 'swerve', 'cyan', false],
+  ['teleop', 'head_control', 'white', false],
+  ['teleop', 'swerve', 'yellow', true],
+  ['teleop', null, 'unknown', false],
+  [null, 'swerve', 'unknown', false],
+])('source=%s, mode=%s uses LED color %s and conditional Base blinking', (source, mode, color, blinking) => {
+  control.source = source;
+  control.mode = mode;
+  const { container } = render(<RobotControls robotType="ffw_sh5_rev1" />);
+  open();
+  const badge = screen.getByRole('button', { name: /^Source:/ });
+  const dot = container.querySelector('.robot-source-dot');
+  for (const element of [badge, dot]) {
+    expect(element).toHaveClass('is-' + color);
+    expect(element.classList.contains('is-base-blinking')).toBe(blinking);
+  }
+  expect(screen.getByRole('button', { name: /^Joystick:/ }).classList.contains('is-base-blinking')).toBe(blinking);
 });

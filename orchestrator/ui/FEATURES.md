@@ -93,9 +93,20 @@ Dataset editing page.
 
 The **Robot** toggle sits above **Rosbag Recorder**, inside the existing sidebar
 header space. It opens a compact floating panel without resizing the recording
-layout. Click the Source status to switch External (blue) / Teleop (green).
-Joystick status shows Head (purple) / Base (amber); change it with the leader.
-Choose left and/or right presets and press Apply. Only edited hands are sent,
+layout. Click the Source status to switch External / Teleop.
+Source and the Robot indicator use the normal-state LED colors from
+[AI Worker PR #143](https://github.com/ROBOTIS-GIT/ai_worker/pull/143):
+External is cyan (`#00ffff`), Teleop + Head is white (`#ffffff`), and
+Teleop + Base is yellow (`#ffff00`). Teleop + Base blinks yellow, as requested
+for the deployment; the popup's Base status blinks with it. Reduced-motion
+preferences retain steady yellow. Unknown state stays neutral.
+Joystick status and the Record-page Mode badge use white for Head and yellow
+for Base; change the mode with the leader. Hardware fault/red LED feedback is
+owned by the robot manager and is not inferred from UI service errors.
+Only SH5 (`ffw_sh5_rev1`) shows hand presets, and only when its service is
+available. Other robot selections show Source and Joystick status without
+preset fields; their hook does not discover or send hand-preset commands.
+Choose left and/or right presets on SH5 and press Apply. Only edited hands are sent,
 so there is no separate target selector. Click outside or press Escape to close.
 Opening the panel and editing fields never send a robot command.
 
@@ -104,7 +115,7 @@ Opening the panel and editing fields never send a robot command.
 | Source status | `/source`, `std_msgs/msg/String` | `teleop` → Teleop; `model_action` or `external` → External. Missing/unknown or more than 3 seconds without a heartbeat → Unknown. |
 | Source selection | `/set_source`, `std_srvs/srv/SetBool` | `true` requests Teleop; `false` requests External. Completion requires a new matching source report, not just an accepted response. Does not enable arms. |
 | Joystick mode | `/get_robot_info` → `joystick_mode_topic`, `std_msgs/msg/String` (SH5: `/reference/joystick/mode`) | `head_control` → Head; `swerve` → Base; legacy `arm_control` → Arm. Display only; there is no mode-switch service in the supported leader. |
-| Hand preset selection | `/hand_preset_controller/set_preset`, `robotis_interfaces/srv/SetPreset` | Select left/right/both hands and IDs, then Apply. Defaults offer 1 (Envelope), 2 (Pinch), 3 (Three-finger); custom IDs 1–65535 are supported. The robot validates configured IDs. |
+| SH5 hand preset selection | `/hand_preset_controller/set_preset`, `robotis_interfaces/srv/SetPreset` | Select left/right/both hands and IDs, then Apply. Defaults offer 1 (Envelope), 2 (Pinch), 3 (Three-finger); custom IDs 1–65535 are supported. The robot validates configured IDs. |
 
 `orchestrator_bringup.launch.py` also starts `rosapi` so the UI can discover
 services by type without probing a motion service. Custom bringups must launch
@@ -112,12 +123,14 @@ services by type without probing a motion service. Custom bringups must launch
 must contain the matching `robotis_interfaces/srv/SetPreset` definition to call
 the optional preset service. No AI Worker code changes are required.
 
-**Status limits:** the leader publishes joystick mode only on change. It starts
+**Status limits:** legacy leaders publish joystick mode only on change. It starts
 as Waiting in the popup; switch it with a short simultaneous leader-button press
 to obtain a report. The popup checks the configured topic and its publisher every 5 seconds.
 An empty configuration is not replaced by a guessed topic. When it disappears,
 the popup clears the previous mode and displays Offline.
-Refreshing the browser cannot recover an event published before it subscribed;
+AI Worker PR #143 adds an initial mode report and transient-local retention;
+late-join delivery also depends on the deployed rosbridge QoS. With a legacy
+volatile publisher, refreshing cannot recover an event sent before subscription;
 no initial mode is inferred and no mode command is sent. Runtime deployments must
 install the updated SH5 YAML and reload the orchestrator robot configuration.
 Hand preset selection has no current-state/completion topic: the UI shows only

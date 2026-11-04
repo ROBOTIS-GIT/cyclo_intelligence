@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { useSelector } from 'react-redux';
 import { MdTune } from 'react-icons/md';
 import useRobotControl from './useRobotControl';
-import { modeLabel } from './controlProtocol';
+import { joystickColor, modeLabel, sourceColor, supportsHandPresets } from './controlProtocol';
 import './RobotControlPanel.css';
 
 export default function RobotControlPanel() {
@@ -24,6 +24,9 @@ export function RobotControls({ robotType, modeTopic }) {
   const toggle = useRef(null);
   const popup = useRef(null);
   const disabled = !control.connected || Boolean(control.pending);
+  const showPresets = supportsHandPresets(robotType) && control.canSetPreset;
+  const activeColor = sourceColor(control.source, control.mode);
+  const blinkBase = control.source === 'teleop' && control.mode === 'swerve' ? 'is-base-blinking' : '';
   const sourceLabel = control.source === 'teleop' ? 'Teleop' : control.source === 'external' ? 'External' : 'Unknown';
   const joystickLabel = control.mode ? modeLabel(control.mode) : control.modeAvailable === false ? 'Offline' : 'Waiting';
 
@@ -42,7 +45,7 @@ export function RobotControls({ robotType, modeTopic }) {
     window.addEventListener('resize', place);
     window.addEventListener('scroll', place, true);
     return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
-  }, [expanded, control.error, control.canSetPreset]);
+  }, [expanded, control.error, showPresets]);
 
   useEffect(() => {
     if (!expanded) return undefined;
@@ -59,6 +62,7 @@ export function RobotControls({ robotType, modeTopic }) {
 
   const apply = async (event) => {
     event.preventDefault();
+    if (!showPresets) return;
     const target = dirty.left && dirty.right ? 'both' : dirty.left ? 'left' : 'right';
     if (await control.setPreset(target, left, right)) setDirty({ left: false, right: false });
   };
@@ -68,24 +72,24 @@ export function RobotControls({ robotType, modeTopic }) {
       <button ref={toggle} type="button" className="robot-control-toggle" aria-label="Robot controls"
         aria-expanded={expanded} aria-controls="robot-control-popup" onClick={() => setExpanded(!expanded)}>
         <MdTune size={16} aria-hidden="true" /> Robot
-        <span className={`robot-source-dot is-${control.source || 'unknown'}`} aria-hidden="true" />
+        <span className={`robot-source-dot robot-mode-color is-${activeColor} ${blinkBase}`} aria-hidden="true" />
       </button>
       {expanded && createPortal(
         <div ref={popup} id="robot-control-popup" role="dialog" aria-label="Robot controls"
           className="robot-control-popup" style={position}>
           <div className="robot-control-status-row">
-            <button type="button" className={`robot-control-status is-${control.source || 'unknown'}`}
+            <button type="button" className={`robot-control-status robot-mode-color is-${activeColor} ${blinkBase}`}
               disabled={disabled || !control.canSetSource || !control.source}
               title={`Switch to ${control.source === 'teleop' ? 'External' : 'Teleop'}`}
               onClick={() => control.setSource(control.source === 'teleop' ? 'external' : 'teleop')}>
               Source: <strong>{sourceLabel}</strong>
             </button>
-            <button type="button" className={`robot-control-status is-${control.mode || 'unknown'}`}
+            <button type="button" className={`robot-control-status robot-control-mode robot-mode-color is-${joystickColor(control.mode)} ${blinkBase}`}
               disabled title="Switch Head / Base with both leader buttons">
               Joystick: <strong>{joystickLabel}</strong>
             </button>
           </div>
-          {control.canSetPreset && (
+          {showPresets && (
             <form className="robot-control-presets" onSubmit={apply}>
               <PresetInput side="Left" value={left} disabled={disabled} onChange={(value) => { setLeft(value); setDirty((old) => ({ ...old, left: true })); }} />
               <PresetInput side="Right" value={right} disabled={disabled} onChange={(value) => { setRight(value); setDirty((old) => ({ ...old, right: true })); }} />

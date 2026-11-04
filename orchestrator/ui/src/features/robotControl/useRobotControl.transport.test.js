@@ -26,7 +26,7 @@ test('real roslib sends both subscriptions and receives mode/source reports with
   } };
   useSelector.mockImplementation((selector) => selector({ ros: { rosbridgeUrl: 'ws://fixture' } }));
   rosConnectionManager.getCurrentConnection.mockReturnValue(ros);
-  const { result, unmount } = renderHook(() => useRobotControl('fixture_robot'));
+  const { result, unmount } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await act(async () => { await Promise.resolve(); });
   expect(sent.filter((msg) => msg.op === 'subscribe').map((msg) => msg.topic)).toEqual([
     '/source', DEFAULT_MODE_TOPIC,
@@ -52,7 +52,7 @@ test('unanswered discovery requests release real roslib listeners after timeout'
   ros.socket = { send: (data) => sent.push(JSON.parse(data)) };
   useSelector.mockImplementation((selector) => selector({ ros: { rosbridgeUrl: 'ws://fixture' } }));
   rosConnectionManager.getCurrentConnection.mockReturnValue(ros);
-  const { result, unmount } = renderHook(() => useRobotControl('fixture_robot'));
+  const { result, unmount } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   try {
     const calls = sent.filter((message) => message.op === 'call_service');
     expect(calls).toHaveLength(3);
@@ -84,7 +84,7 @@ test('mode changes update Head/Base state without issuing robot commands', async
   } };
   useSelector.mockImplementation((selector) => selector({ ros: { rosbridgeUrl: 'ws://fixture' } }));
   rosConnectionManager.getCurrentConnection.mockReturnValue(ros);
-  const { result, unmount } = renderHook(() => useRobotControl('fixture_robot'));
+  const { result, unmount } = renderHook(() => useRobotControl('ffw_sh5_rev1'));
   await act(async () => { await Promise.resolve(); });
   try {
     for (const mode of ['head_control', 'swerve', 'head_control']) {
