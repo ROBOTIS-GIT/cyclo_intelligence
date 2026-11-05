@@ -60,7 +60,7 @@ from interfaces.srv import (
 from orchestrator.internal.communication.communicator import Communicator
 from orchestrator.internal.communication.cyclo_data_client import CycloDataClient
 from orchestrator.internal.inference_recording import InferenceRecordingSession
-from orchestrator.internal.policy_catalog import execution_mode
+from shared.policy_catalog import execution_mode
 # DataManager is imported only for its whoami_huggingface @staticmethod
 # used by set_hf_user / get_hf_user callbacks. Session-state ownership
 # lives in cyclo_data.RecordingService (Step 3 Part C2d).
@@ -86,7 +86,7 @@ from cyclo_data.visualization.video_file_server import VideoFileServer
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 
 
@@ -1041,6 +1041,8 @@ class OrchestratorNode(Node):
         self._inference_status_stop = threading.Event()
         self._inference_status_wake = threading.Event()
         self._inference_status_generation = 0
+        # RESUME's own observer changes status generation, but not STOP intent.
+        self._inference_stop_generation = 0
         self._inference_commands_pending = 0
         self._inference_verified_stop = None
         self._inference_status_snapshot = dict(
@@ -1281,17 +1283,23 @@ class OrchestratorNode(Node):
         _duration_s: float,
     ) -> None:
         """Publish SYNCING until the central Runtime reports its real state."""
-        self._cancel_initial_pose_sync_status()
         with self._state_lock:
             if self.container_service_client is not client:
                 return
             self._initial_pose_sync_hold_pending = False
             self._initial_pose_sync_status_active = True
+            self._publish_inference_phase(InferenceStatus.SYNCING)
 
-        self._publish_inference_phase(InferenceStatus.SYNCING)
-
-    def _cancel_initial_pose_sync_status(self) -> bool:
+    def _cancel_initial_pose_sync_status(
+        self,
+        expected_client: Optional[ContainerServiceClient] = None,
+    ) -> bool:
         with self._state_lock:
+            if (
+                expected_client is not None
+                and self.container_service_client is not expected_client
+            ):
+                return False
             was_active = self._initial_pose_sync_status_active
             self._initial_pose_sync_status_active = False
             self._inference_status_generation += 1
@@ -1333,9 +1341,13 @@ class OrchestratorNode(Node):
         self,
         client: ContainerServiceClient,
     ):
+        with self._state_lock:
+            if self.container_service_client is not client:
+                raise RuntimeError('Inference session changed before Pause')
+            self._inference_stop_generation += 1
         sync_was_active = self._initial_pose_sync_is_active(client)
         if sync_was_active:
-            self._cancel_initial_pose_sync_status()
+            self._cancel_initial_pose_sync_status(expected_client=client)
         try:
             result = client.inference_command(ContainerServiceClient.CMD_PAUSE)
         except Exception as exc:
@@ -1364,8 +1376,11 @@ class OrchestratorNode(Node):
                 if (self.container_service_client is not client
                         or getattr(self, '_inference_cleanup_client', None) is client):
                     raise RuntimeError('Inference session changed or cleanup is pending; RESUME cancelled')
+                if self._inference_stop_generation != stop_generation:
+                    raise RuntimeError('Stop or Pause requested while RESUME was pending; RESUME cancelled')
 
             with self._state_lock:
+                stop_generation = self._inference_stop_generation
                 check_owner()
             result = client.inference_command(
                 ContainerServiceClient.CMD_RESUME,
@@ -1410,12 +1425,13 @@ class OrchestratorNode(Node):
         with self._state_lock:
             if self.container_service_client is not client:
                 raise RuntimeError('Inference session changed before Stop')
+            self._inference_stop_generation += 1
             self._inference_verified_stop = None
         sync_is_active = self._initial_pose_sync_is_active(client)
         if not sync_is_active and not force:
             return False
         if sync_is_active:
-            self._cancel_initial_pose_sync_status()
+            self._cancel_initial_pose_sync_status(expected_client=client)
         # Stop remains available during a long lifecycle RPC. Only an exclusive
         # Stop can be reused as proof for a later UNLOAD without another Stop.
         exclusive = self._inference_lifecycle_lock.acquire(blocking=False)
@@ -1917,11 +1933,9 @@ class OrchestratorNode(Node):
                 # selected a different checkpoint on the same backend, tear
                 # down first so START performs a real fresh LOAD.
                 #
-                # The policy container may have been restarted outside
-                # orchestrator, though; in that case the cached client is
-                # stale and the container replies with "not running" or
-                # "LOAD first". Fall back to a fresh LOAD -> START instead
-                # of surfacing that confusing error.
+                # A RESUME timeout does not prove the Runtime stopped or lost
+                # its policy. Keep the session on failure; recovery through
+                # Clear and a new Start must be explicitly requested.
                 # Snapshot the client so a concurrent _teardown_inference_client
                 # cannot null it between the prefix check and the call.
                 requested_policy_path = self._normalize_policy_path(
@@ -2026,18 +2040,9 @@ class OrchestratorNode(Node):
                             )
                             start_handled = True
                         else:
-                            resume_message = resume_result.message or ''
-                            if resume_message in ('not running', 'LOAD first'):
-                                self.get_logger().warning(
-                                    'Cached inference client for '
-                                    f'{service_prefix} is stale '
-                                    f'({resume_message}); reloading policy'
-                                )
-                                self._teardown_inference_client()
-                            else:
-                                response.success = False
-                                response.message = resume_message
-                                start_handled = True
+                            response.success = False
+                            response.message = resume_result.message or 'RESUME failed; session retained'
+                            start_handled = True
                         self.get_logger().info(
                             f'RESUME inference result: {resume_result.message}'
                         )
@@ -3555,7 +3560,7 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node._stop_inference_status_monitor()
@@ -3563,7 +3568,12 @@ def main(args=None):
         # in cyclo_data now — nothing orchestrator-side to tear down here.
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.try_shutdown()
+        except RuntimeError as exc:
+            # Jazzy's native signal handler can race try_shutdown's context check.
+            if rclpy.ok() or 'rcl_shutdown already called' not in str(exc):
+                raise
 
 
 if __name__ == '__main__':

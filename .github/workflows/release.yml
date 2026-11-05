@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  pull_request:
+    branches: [jazzy]
+    types: [opened, synchronize, edited, reopened, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: ROBOTIS-GIT/github_workflows/.github/workflows/release.yml@main
+    with:
+      source_branch: main
+      target_branch: jazzy
+
+  docker-publish:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    permissions:
+      contents: read
+    uses: ROBOTIS-GIT/github_workflows/.github/workflows/docker-publish.yml@main
+    with:
+      image: robotis/cyclo-intelligence
+      version: ${{ needs.release.outputs.version }}
+      checkout_ref: jazzy
+      context: .
+      dockerfile_amd64: ./docker/Dockerfile.amd64
+      dockerfile_arm64: ./docker/Dockerfile.arm64
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

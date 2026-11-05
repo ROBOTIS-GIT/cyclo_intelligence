@@ -76,10 +76,10 @@ _CONVERSION_WORKER_NICE_ENV = "CYCLO_CONVERSION_WORKER_NICE"
 _DEFAULT_VIDEO_SYNC_TOTAL_WORKERS = 6
 _VIDEO_SYNC_CLEAN_CACHE_ENV = "CYCLO_VIDEO_SYNC_CLEAN_CACHE"
 _EXTRACT_CACHE_DISABLE_ENV = "CYCLO_EXTRACT_CACHE_DISABLE"
-_EXTRACT_CACHE_VERSION = 2
+_EXTRACT_CACHE_VERSION = 3
 _RAW_CDR_EXTRACT_DISABLE_ENV = "CYCLO_EXTRACT_DISABLE_RAW_CDR"
 _PREPARED_EPISODE_CACHE_DISABLE_ENV = "CYCLO_PREPARED_EPISODE_CACHE_DISABLE"
-_PREPARED_EPISODE_CACHE_VERSION = 3
+_PREPARED_EPISODE_CACHE_VERSION = 4
 _VIDEO_COPY_MODE_ENV = "CYCLO_VIDEO_COPY_MODE"
 _VIDEO_STATS_SAMPLES_ENV = "CYCLO_VIDEO_STATS_SAMPLES"
 _CONVERTER_INFO_LOGS_ENV = "CYCLO_CONVERTER_INFO_LOGS"
@@ -3316,9 +3316,13 @@ class RosbagToLerobotConverterBase:
                 filter_failed_topics.add(topic)
             filter_indices_by_topic[topic] = indices
 
-        # Use timestamps from the first topic as reference
-        reference_topic = sorted_topics[0]
-        reference_timestamps = [t for t, _ in action_messages_by_topic[reference_topic]]
+        # Update on any action topic, even if the first topic stops publishing.
+        # Each topic independently holds its most recent command; a stopped
+        # hand must not prevent the other hand (or arm/base) from updating.
+        reference_timestamps = sorted({
+            t for topic in sorted_topics
+            for t, _ in action_messages_by_topic[topic]
+        })
         message_times_by_topic = {
             topic: [t for t, _ in action_messages_by_topic[topic]]
             for topic in sorted_topics
@@ -3344,9 +3348,6 @@ class RosbagToLerobotConverterBase:
                     idx += 1
                 cursor_by_topic[topic] = idx
                 if idx < 0:
-                    all_topics_have_data = False
-                    break
-                if (timestamp - times[idx]) > 0.05:
                     all_topics_have_data = False
                     break
                 prev_value = msgs[idx][1]

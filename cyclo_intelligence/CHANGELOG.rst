@@ -2,6 +2,44 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.4 (2026-11-02)
+------------------
+* Added the leader joystick trigger topic to the F1 and F2 robot configurations.
+
+1.4.3 (2026-10-29)
+------------------
+* Fixed ARM64 LeRobot CUDA initialization failing with error 801 when the inherited compatibility driver shadows the host driver after a JetPack update.
+* Updated Cyclo release metadata and default image tags to ``robotis/cyclo-intelligence:1.4.3`` and ``robotis/lerobot-zenoh:1.4.2``.
+* Contributors: Taehyeong Kim
+
+1.4.2 (2026-10-28)
+------------------
+* Fixed LeRobot conversion so a stopped action topic no longer freezes other command groups.
+* Extended converter CI coverage and invalidated affected caches; existing exported datasets require reconversion to receive corrected actions.
+* Updated Cyclo release metadata and the default Cyclo image tag to ``robotis/cyclo-intelligence:1.4.2``.
+* Kept LeRobot dataset format versions and LeRobot/GR00T policy image versions unchanged.
+* Contributors: DanielFH1, Taehyeong Kim
+
+1.4.1 (2026-10-27)
+------------------
+* Fixed LeRobot v2.1 frame indices and v3.0 task instruction metadata in dataset conversion.
+* Added CI regression coverage for exported metadata, episode frame indices, and cache invalidation/reuse.
+* Aligned CI PyArrow with the Cyclo image's 24.0.0 pin and installed NumPy 1.x-compatible OpenCV for converter tests.
+* Updated Cyclo release metadata and the default Cyclo image tag to ``robotis/cyclo-intelligence:1.4.1``.
+* Kept the LeRobot and GR00T policy image versions unchanged.
+* Contributors: DanielFH1, Taehyeong Kim
+
+1.4.0 (2026-08-31)
+------------------
+* Added Autonomy Studio: Mission Canvas and Action Canvas replace the Navigation and BT Manager pages.
+* Added map-based missions: waypoint routes, per-waypoint behavior trees, named missions with manifests and revisions.
+* Added a Navigation stage, AMCL localization through the supervisor API, map editing, and saved-map deletion.
+* Added ArmStateGate, per-joint JointControl, and SendCommand inference lifecycle control.
+* Improved navigation map streaming and rendering performance.
+* Separated the BT engine from the orchestrator control plane: ``bt_node`` owns ``/bt/*``, saved trees live under ``CYCLO_BT_TREES_DIR`` via ``/api/bt/trees``, and the supported robot list is defined once in ``shared.robot_configs.schema``.
+* Updated image support to ``robotis/cyclo-intelligence:1.4.0``.
+* Contributors: Seongwoo Kim
+
 1.3.1 (2026-08-26)
 ------------------
 * Forwarded UI ``Dataset FPS`` (service ``inference_hz``), ``Control Hz``, and ``Chunk Align Window`` settings from UI and behavior trees to the LeRobot and GR00T action-processing runtimes.

@@ -2,6 +2,27 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.4 (2026-11-02)
+------------------
+* Added the leader joystick trigger topic to the F1 and F2 robot configurations.
+
+1.4.3 (2026-10-29)
+------------------
+* None
+
+1.4.2 (2026-10-28)
+------------------
+* None
+
+1.4.1 (2026-10-27)
+------------------
+* None
+
+1.4.0 (2026-08-31)
+------------------
+* Added ``BT_SUPPORTED_ROBOT_TYPES`` and ``is_bt_supported()`` to ``robot_configs.schema``.
+* Contributors: Seongwoo Kim
+
 1.3.1 (2026-08-26)
 ------------------
 * None

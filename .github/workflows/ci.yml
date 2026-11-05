@@ -87,9 +87,11 @@ jobs:
             pandas \
             pillow \
             psutil \
-            pyarrow \
+            'pyarrow==24.0.0' \
             pytest \
             pyyaml
+          # Match the NumPy 1.x-compatible PyArrow version in both Cyclo images.
+          python3 -c 'import numpy, pandas, pyarrow; print(numpy.__version__, pandas.__version__, pyarrow.__version__)'
 
       - name: Build ROS packages
         run: |
@@ -133,6 +135,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout pinned LeRobot test sources
+        # Profile tests read the pinned source metadata; other model repos
+        # are not needed and may require separate credentials.
+        run: git submodule update --init -- cyclo_brain/policy/lerobot/lerobot
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -147,6 +154,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             'numpy<2' \
+            'opencv-python-headless==4.11.0.86' \
             huggingface_hub \
             matplotlib \
             mcap \
@@ -154,10 +162,12 @@ jobs:
             pandas \
             pillow \
             psutil \
-            pyarrow \
+            'pyarrow==24.0.0' \
             pytest \
             pyyaml
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          # Catch binary compatibility errors before collecting the test suites.
+          python -c 'import cv2, numpy, pandas, pyarrow; print(cv2.__version__, numpy.__version__, pandas.__version__, pyarrow.__version__)'
 
       - name: Run cyclo_data tests
         env:
@@ -178,12 +188,23 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            orchestrator/tests/bt/test_package_boundary.py \
             orchestrator/tests/bt/test_review_fixes.py \
             orchestrator/tests/test_inference_mode.py \
+            orchestrator/tests/test_orchestrator_entrypoint_shutdown.py \
             orchestrator/tests/data_processing/test_metadata_manager.py \
             orchestrator/tests/data_processing/test_video_metadata_extractor.py \
             orchestrator/tests/data_processing/test_episode_editor.py \
             orchestrator/tests/data_processing/test_replay_handler.py
+
+      - name: Run LeRobot converter metadata tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: cyclo_data:orchestrator:shared
+        run: |
+          set -euo pipefail
+          python -m pytest cyclo_data/tests/converter
+          python -m pytest orchestrator/tests/data_processing/test_rosbag_to_lerobot_converter.py
 
       - name: Run shared policy catalog and runtime tests
         env:
@@ -249,7 +270,7 @@ jobs:
       - name: Run supervisor API tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-        run: python -m pytest docker/supervisor_api/test_app.py
+        run: python -m pytest docker/supervisor_api/test_app.py docker/supervisor_api/test_worker_build.py
 
   ui-build:
     name: UI build

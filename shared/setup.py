@@ -81,7 +81,7 @@ robot_assets = [
 
 setup(
     name=package_name,
-    version='1.3.1',
+    version='1.4.4',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory, so 'shared' resolves to ./shared/ and subpackages

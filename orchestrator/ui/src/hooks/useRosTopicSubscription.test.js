@@ -7,6 +7,9 @@ import rosConnectionManager from '../utils/rosConnectionManager';
 import taskReducer from '../features/tasks/taskSlice';
 import { InferencePhase, RecordPhase } from '../constants/taskPhases';
 import { useRosTopicSubscription } from './useRosTopicSubscription';
+import appStore from '../store/store';
+import toast from 'react-hot-toast';
+import PageType from '../constants/pageType';
 
 jest.mock('roslib', () => ({ __esModule: true, default: { Topic: jest.fn() } }));
 jest.mock('../utils/rosConnectionManager', () => ({
@@ -16,7 +19,7 @@ jest.mock('./useRosServiceCaller', () => ({
   useRosServiceCaller: () => ({ getRobotInfo: jest.fn() }),
 }));
 jest.mock('../store/store', () => ({
-  __esModule: true, default: { getState: () => ({ tasks: { inferenceStatus: {} }, ui: {} }) },
+  __esModule: true, default: { getState: jest.fn(() => ({ tasks: { inferenceStatus: {} }, ui: {} })) },
 }));
 jest.mock('react-hot-toast', () => ({
   __esModule: true, default: { error: jest.fn() },
@@ -28,6 +31,7 @@ describe('central inference status subscription', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    appStore.getState.mockReturnValue({ tasks: { inferenceStatus: {} }, ui: {} });
     rosConnectionManager.getConnection.mockResolvedValue({});
     unsubscribe = jest.fn();
     ROSLIB.Topic.mockImplementation(() => ({
@@ -105,6 +109,39 @@ describe('central inference status subscription', () => {
       taskType: 'inference', running: true, topicReceived: false,
     });
   });
+
+  test.each([PageType.RECORD, PageType.INFERENCE])(
+    'camera warnings resume on %s after Autonomy Studio without losing recording state', async (page) => {
+      const { store, result } = await subscribe();
+      await act(async () => { await result.current.subscribeToRecordingStatus(); });
+      const message = {
+        record_phase: RecordPhase.RECORDING, proceed_time: 10,
+        task_info: { task_type: 'inference', task_name: 'inference' },
+        camera_monitor_topics: ['/camera/image'], camera_monitor_status: [2],
+      };
+      appStore.getState.mockReturnValue({
+        tasks: { inferenceStatus: {} }, ui: { currentPage: page },
+      });
+      act(() => callback(message));
+      expect(toast.error).toHaveBeenCalledTimes(1);
+      appStore.getState.mockReturnValue({
+        tasks: { inferenceStatus: {} }, ui: { currentPage: PageType.AUTONOMY_STUDIO },
+      });
+      act(() => callback(message));
+      expect(toast.error).toHaveBeenCalledTimes(1);
+      expect(store.getState().tasks.recordStatus).toMatchObject({
+        taskType: 'inference', running: true, topicReceived: true,
+      });
+      appStore.getState.mockReturnValue({
+        tasks: { inferenceStatus: {} }, ui: { currentPage: page },
+      });
+      act(() => callback(message));
+      expect(toast.error).toHaveBeenCalledTimes(2);
+      expect(toast.error).toHaveBeenLastCalledWith(
+        expect.stringContaining('/camera/image: Stalled'), { duration: 9000 },
+      );
+    },
+  );
 
   test('pose status expires without clearing a pending return and recovers after restart', async () => {
     const { store, result } = await subscribe();

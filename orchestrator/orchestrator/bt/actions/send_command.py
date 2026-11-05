@@ -16,7 +16,7 @@
 #
 # Author: Seongwoo Kim
 
-"""BT action: Load / Resume / Stop / Clear inference via SendCommand srv.
+"""BT action for inference and policy-Docker lifecycle commands.
 
 The four BT commands ride entirely on top of the SendCommand enums the
 UI already uses (START_INFERENCE / STOP_INFERENCE / RESUME_INFERENCE /
@@ -31,21 +31,39 @@ For each stage the node polls /task/inference_status and only advances
 once the phase the orchestrator publishes matches the expected target,
 so a downstream BT node never starts running against a half-loaded or
 mid-transition policy.
+
+``target=DOCKER`` reuses the same node for START / STOP / RESTART of the
+selected model backend. Docker operations go through the local supervisor API
+on a worker thread without blocking the BT executor tick. START and RESTART
+use existing images; builds are explicit Supervisor operations, never a BT
+side effect. ``target=INFERENCE`` remains the default for
+compatibility with trees saved before the target port existed. Its LOAD command
+checks readiness without mutating a running Worker, starting only a known
+stopped backend before the existing ROS stages.
 """
 
+import json
+import os
+import socket
 import threading
 import time
 from typing import TYPE_CHECKING
+from urllib.error import HTTPError
+from urllib.error import URLError
+from urllib.request import Request
+from urllib.request import urlopen
 
-from orchestrator.internal.policy_catalog import (
-    _policy_root_candidates,
+from interfaces.msg import InferenceStatus, TaskInfo
+from interfaces.srv import InferenceCommand as InferenceCommandSrv
+from interfaces.srv import SendCommand as SendCommandSrv
+
+from shared.policy_catalog import (
     load_policy_catalog as _load_policy_catalog,
 )
 
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import NodeStatus
-from interfaces.msg import InferenceStatus, TaskInfo
-from interfaces.srv import SendCommand as SendCommandSrv
+
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 
@@ -101,6 +119,7 @@ COMMAND_STAGES = {
 
 SERVICE_CALL_TIMEOUT_SEC = 30.0
 
+
 def _policy_selection_from_model(model: str) -> tuple[str, str]:
     """Resolve namespaced IDs and legacy bare aliases through manifests."""
     value = (model or '').strip().lower()
@@ -120,6 +139,27 @@ def _policy_selection_from_model(model: str) -> tuple[str, str]:
     return value, ''
 
 
+ALLOWED_TARGETS = frozenset({'INFERENCE', 'DOCKER'})
+DOCKER_COMMANDS = frozenset({'START', 'STOP', 'RESTART'})
+
+_DEFAULT_SUPERVISOR_PORT = 7100
+# Supervisor bounds local Compose startup at 60s; allow preflight overhead.
+# Worker readiness has its own deadline, and builds are never run here.
+_DEFAULT_BACKEND_HTTP_TIMEOUT_SEC = 120.0
+_MIN_BACKEND_HTTP_TIMEOUT_SEC = 1.0
+_MAX_BACKEND_HTTP_TIMEOUT_SEC = 300.0
+_DEFAULT_BACKEND_READY_TIMEOUT_SEC = 300.0
+_MIN_BACKEND_READY_TIMEOUT_SEC = 1.0
+_MAX_BACKEND_READY_TIMEOUT_SEC = 1800.0
+_BACKEND_STATUS_POLL_SEC = 0.5
+_BACKEND_SERVICE_POLL_SEC = 0.1
+_BACKEND_STATUS_HTTP_TIMEOUT_SEC = 10.0
+_COMPENSATING_STOP_TIMEOUT_SEC = 30.0
+
+_BACKEND_GENERATION_LOCK = threading.Lock()
+_BACKEND_GENERATIONS = {}
+
+
 def _service_type_from_model(model: str) -> str:
     return _policy_selection_from_model(model)[0]
 
@@ -131,14 +171,137 @@ def _normalize_action_request_mode(value: str) -> str:
     return 'async'
 
 
-class SendCommand(BaseAction):
-    """Drive the orchestrator inference pipeline through lifecycle commands.
+def _bounded_env_float(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Read a finite timeout from the environment and clamp it safely."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    if value != value or value in (float('inf'), float('-inf')):
+        value = default
+    return max(minimum, min(maximum, value))
 
-    LOAD starts and pauses a policy, RESUME starts ticking a loaded policy,
-    STOP pauses without unloading, and CLEAR finishes and unloads.
+
+def _supervisor_base_url() -> str:
+    """Return the fixed-localhost supervisor URL with a validated port."""
+    raw_port = os.environ.get(
+        'CYCLO_SUPERVISOR_API_PORT',
+        str(_DEFAULT_SUPERVISOR_PORT),
+    )
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f'Invalid CYCLO_SUPERVISOR_API_PORT: {raw_port!r}'
+        ) from exc
+    if port < 1 or port > 65535:
+        raise ValueError(
+            f'CYCLO_SUPERVISOR_API_PORT out of range: {port}'
+        )
+    return f'http://127.0.0.1:{port}'
+
+
+def _http_error_message(body: str, fallback: str) -> str:
+    """Extract FastAPI's detail/message field without trusting its shape."""
+    try:
+        payload = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        payload = {}
+    if isinstance(payload, dict):
+        return str(payload.get('detail') or payload.get('message') or fallback)
+    return fallback
+
+
+def _http_json_request(method: str, url: str, timeout: float) -> dict:
+    """Perform one bounded supervisor request and return a JSON object."""
+    request = Request(
+        url,
+        data=b'' if method.upper() == 'POST' else None,
+        headers={'Accept': 'application/json'},
+        method=method.upper(),
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read().decode('utf-8', errors='replace')
+            status = getattr(response, 'status', 200)
+    except HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        fallback = f'HTTP {exc.code} from supervisor'
+        raise RuntimeError(_http_error_message(body, fallback)) from exc
+    except (URLError, socket.timeout, TimeoutError, OSError) as exc:
+        reason = getattr(exc, 'reason', exc)
+        raise RuntimeError(f'Supervisor request failed: {reason}') from exc
+
+    if status < 200 or status >= 300:
+        fallback = f'HTTP {status} from supervisor'
+        raise RuntimeError(_http_error_message(body, fallback))
+    if not body:
+        return {}
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise RuntimeError('Supervisor returned invalid JSON') from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError('Supervisor returned a non-object JSON response')
+    return payload
+
+
+def _claim_backend_generation(backend: str) -> int:
+    """Claim ownership of the next lifecycle generation for a backend."""
+    with _BACKEND_GENERATION_LOCK:
+        generation = _BACKEND_GENERATIONS.get(backend, 0) + 1
+        _BACKEND_GENERATIONS[backend] = generation
+        return generation
+
+
+def _is_latest_backend_generation(backend: str, generation: int) -> bool:
+    """Return whether a job still owns backend compensation rights."""
+    with _BACKEND_GENERATION_LOCK:
+        return _BACKEND_GENERATIONS.get(backend, 0) == generation
+
+
+class _BackendJob:
+    """Per-execution worker state, isolated from later tree generations."""
+
+    def __init__(self, operation: str, generation: int):
+        self.operation = operation
+        self.generation = generation
+        self.cancel_event = threading.Event()
+        self.lock = threading.Lock()
+        self.result = None
+        self.message = ''
+        self.thread = None
+
+    def finish(self, result: bool, message: str):
+        with self.lock:
+            self.result = bool(result)
+            self.message = str(message or '')
+
+    def snapshot(self):
+        with self.lock:
+            return self.result, self.message
+
+
+class _BackendJobCancelled(Exception):
+    """Internal control flow for a tree reset while a worker is active."""
+
+    pass
+
+
+class SendCommand(BaseAction):
+    """Drive inference or its policy Docker through lifecycle commands.
+
+    INFERENCE keeps the legacy LOAD / RESUME / STOP / CLEAR behavior. DOCKER
+    accepts START / STOP / RESTART and waits for the requested runtime state.
     """
 
     _STATE_INIT = 'init'
+    _STATE_WAITING_BACKEND = 'waiting_backend'
     _STATE_BEGIN_STAGE = 'begin_stage'
     _STATE_WAITING_SERVICE = 'waiting_service'
     _STATE_CALLING = 'calling'
@@ -147,9 +310,11 @@ class SendCommand(BaseAction):
 
     @classmethod
     def from_xml_params(cls, context, name: str, params: dict):
+        """Build an action from XML ports and loader-owned dependencies."""
         task_instruction = params.get('task_instruction', '')
         if isinstance(task_instruction, list):
             task_instruction = ', '.join(task_instruction)
+        target = params.get('target', 'INFERENCE')
         command = params.get('command', 'LOAD')
         command_str = str(command or '').strip().upper()
         inference_mode = (
@@ -170,6 +335,7 @@ class SendCommand(BaseAction):
         action = cls(
             node=context.node,
             command=command,
+            target=target,
             model=params.get('model', 'lerobot:act'),
             policy_path=params.get('policy_path', ''),
             task_instruction=task_instruction,
@@ -180,7 +346,10 @@ class SendCommand(BaseAction):
             inference_mode=inference_mode,
             action_request_mode=action_request_mode,
             acceleration_mode=acceleration_mode,
-            acceleration_engine_path=params.get('acceleration_engine_path', ''),
+            acceleration_engine_path=params.get(
+                'acceleration_engine_path',
+                '',
+            ),
         )
         action.name = name
         return action
@@ -189,11 +358,10 @@ class SendCommand(BaseAction):
         self,
         node: 'Node',
         command: str = 'LOAD',
+        target: str = 'INFERENCE',
         # BT-facing name "model" matches the Inference UI's labeling.
-        # Values may be legacy backend names ("groot" / "lerobot") or
-        # Inference UI composite choices ("lerobot:act", "groot:n17").
-        # Internally this is normalized to TaskInfo.service_type, which
-        # orchestrator reads to pick the backend container.
+        # Resolve runtime IDs, policy IDs and legacy aliases from manifests.
+        # The central Runtime uses TaskInfo to select an engine-only Worker.
         model: str = 'lerobot:act',
         policy_path: str = '',
         task_instruction: str = '',
@@ -207,9 +375,18 @@ class SendCommand(BaseAction):
         service_name: str = '/task/command',
         action_steps: int | None = None,
     ):
+        """Initialize an inference or Docker lifecycle action."""
         super().__init__(node, name='SendCommand')
         self.command_str = (command or '').strip().upper()
+        self.target_str = (target or 'INFERENCE').strip().upper()
         self.model = model
+        self.backend = _service_type_from_model(model)
+        _, catalog = _load_policy_catalog()
+        self._backend_spec = next(
+            (runtime for runtime in catalog['runtimes']
+             if runtime['id'] == self.backend),
+            None,
+        )
         self.policy_path = policy_path
         self.task_instruction = task_instruction
         self.inference_hz = int(inference_hz) if inference_hz else 0
@@ -244,28 +421,55 @@ class SendCommand(BaseAction):
             else ''
         )
 
-        self._client = self.node.create_client(SendCommandSrv, service_name)
+        self._client = None
+        self._backend_service_client = None
+        self._backend_service_name = ''
+        self._status_sub = None
+        if self.target_str == 'INFERENCE':
+            self._client = self.node.create_client(
+                SendCommandSrv,
+                service_name,
+            )
+
+        # Worker containers run only their manifest-declared engine services.
+        # Inference commands are always served by the central Policy Runtime.
+        backend_operation = self._backend_operation()
+        if (
+            self._backend_spec is not None
+            and backend_operation in {'START', 'RESTART'}
+        ):
+            self._backend_service_name = '/policy/inference_command'
+            self._backend_service_client = self.node.create_client(
+                InferenceCommandSrv,
+                self._backend_service_name,
+            )
 
         self._latest_phase = None
         self._latest_error = ''
         self._phase_lock = threading.Lock()
         # Subscribe up front so phase transitions that land between the
         # srv response and the phase-wait state aren't missed.
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-        self._status_sub = self.node.create_subscription(
-            InferenceStatus,
-            '/task/inference_status',
-            self._status_callback,
-            qos,
-        )
+        if self.target_str == 'INFERENCE':
+            qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+            self._status_sub = self.node.create_subscription(
+                InferenceStatus,
+                '/task/inference_status',
+                self._status_callback,
+                qos,
+            )
 
         self._state = self._STATE_INIT
-        self._stages = COMMAND_STAGES.get(self.command_str, [])
+        self._stages = (
+            COMMAND_STAGES.get(self.command_str, [])
+            if self.target_str == 'INFERENCE'
+            else []
+        )
         self._stage_idx = 0
         self._future = None
         self._result = None
         self._service_wait_started = None
         self._phase_deadline = None
+        self._backend_job = None
 
     def _status_callback(self, msg: InferenceStatus):
         with self._phase_lock:
@@ -281,32 +485,345 @@ class SendCommand(BaseAction):
     def _stage(self):
         return self._stages[self._stage_idx]
 
+    def _configuration_error(self) -> str:
+        if self.target_str not in ALLOWED_TARGETS:
+            return (
+                f'Unknown target: {self.target_str}. '
+                f'Expected one of {sorted(ALLOWED_TARGETS)}'
+            )
+        if self.target_str == 'DOCKER':
+            if self.command_str not in DOCKER_COMMANDS:
+                return (
+                    f'Unknown Docker command: {self.command_str}. '
+                    f'Expected one of {sorted(DOCKER_COMMANDS)}'
+                )
+            if self._backend_spec is None:
+                return (
+                    f'Unsupported Docker backend from model {self.model!r}: '
+                    f'{self.backend or "<empty>"}'
+                )
+            return ''
+        if self.command_str not in COMMAND_STAGES:
+            return f'Unknown inference command: {self.command_str}'
+        if (
+            self.command_str == 'LOAD'
+            and self._backend_spec is None
+        ):
+            return (
+                f'Unsupported inference backend from model {self.model!r}: '
+                f'{self.backend or "<empty>"}'
+            )
+        return ''
+
+    def _backend_operation(self):
+        if self.target_str == 'DOCKER':
+            return self.command_str
+        if self.target_str == 'INFERENCE' and self.command_str == 'LOAD':
+            return 'START'
+        return None
+
+    def _backend_reached_target(
+        self,
+        operation: str,
+        status: dict,
+    ) -> bool:
+        state = str(status.get('container_state') or '').strip().lower()
+        if operation == 'STOP':
+            return state in {'exited', 'not_created'}
+        if state != 'running':
+            return False
+        # A central ROS service can be ready while this Worker is still
+        # starting, incompatible, or missing its heartbeat.
+        if status.get('worker_compatible') is not True:
+            return False
+
+        required = self._backend_spec['services']
+        service_states = {
+            str(service.get('name') or ''): str(
+                service.get('state') or ''
+            ).lower()
+            for service in status.get('services', [])
+            if isinstance(service, dict)
+        }
+        return all(service_states.get(name) == 'up' for name in required)
+
+    @staticmethod
+    def _supervisor_action_url(
+        base_url: str,
+        backend: str,
+        operation: str,
+    ) -> str:
+        return f'{base_url}/backends/{backend}/{operation.lower()}'
+
+    def _compensating_stop(self, base_url: str, job: _BackendJob) -> str:
+        """Best-effort STOP after reset races with START/RESTART completion."""
+        stop_url = f'{base_url}/backends/{self.backend}/stop'
+        try:
+            response = _http_json_request(
+                'POST',
+                stop_url,
+                _COMPENSATING_STOP_TIMEOUT_SEC,
+            )
+            if response.get('ok') is False:
+                detail = response.get('message') or 'supervisor rejected STOP'
+                raise RuntimeError(str(detail))
+            self.log_info(
+                f'Compensating Docker STOP completed for {self.backend}'
+            )
+            return 'cancelled; compensating STOP completed'
+        # A worker must always publish a terminal result, including unexpected
+        # transport and parsing failures.
+        except Exception as exc:
+            self.log_error(
+                f'Compensating Docker STOP failed for {self.backend}: {exc}'
+            )
+            return f'cancelled; compensating STOP failed: {exc}'
+
+    def _run_backend_job(self, job: _BackendJob):
+        operation = job.operation
+        lifecycle_may_have_started = False
+        result = False
+        message = ''
+        base_url = ''
+
+        try:
+            if job.cancel_event.is_set():
+                raise _BackendJobCancelled()
+
+            base_url = _supervisor_base_url()
+            http_timeout = _bounded_env_float(
+                'CYCLO_BT_BACKEND_HTTP_TIMEOUT_SEC',
+                _DEFAULT_BACKEND_HTTP_TIMEOUT_SEC,
+                _MIN_BACKEND_HTTP_TIMEOUT_SEC,
+                _MAX_BACKEND_HTTP_TIMEOUT_SEC,
+            )
+            ready_timeout = _bounded_env_float(
+                'CYCLO_BT_BACKEND_READY_TIMEOUT_SEC',
+                _DEFAULT_BACKEND_READY_TIMEOUT_SEC,
+                _MIN_BACKEND_READY_TIMEOUT_SEC,
+                _MAX_BACKEND_READY_TIMEOUT_SEC,
+            )
+
+            status_url = f'{base_url}/backends/{self.backend}/status'
+            inference_load = self.target_str == 'INFERENCE' and self.command_str == 'LOAD'
+            pending_status = None
+            needs_action = True
+            response = {}
+            if inference_load:
+                pending_status = _http_json_request(
+                    'GET', status_url,
+                    min(_BACKEND_STATUS_HTTP_TIMEOUT_SEC, ready_timeout),
+                )
+                state = str(pending_status.get('container_state') or '').strip().lower()
+                if state not in {'running', 'exited', 'not_created'}:
+                    raise RuntimeError(f'Cannot prepare Worker with unknown container state: {state!r}')
+                needs_action = state != 'running'
+
+            if job.cancel_event.is_set():
+                raise _BackendJobCancelled()
+            if needs_action:
+                action_url = self._supervisor_action_url(
+                    base_url,
+                    self.backend,
+                    operation,
+                )
+                lifecycle_may_have_started = operation in {'START', 'RESTART'}
+                response = _http_json_request('POST', action_url, http_timeout)
+                if response.get('ok') is False:
+                    raise RuntimeError(
+                        str(
+                            response.get('message')
+                            or 'supervisor rejected action'
+                        )
+                    )
+                pending_status = None
+            if job.cancel_event.is_set():
+                raise _BackendJobCancelled()
+
+            deadline = time.monotonic() + ready_timeout
+            latest_state = 'not reported'
+            while True:
+                if job.cancel_event.is_set():
+                    raise _BackendJobCancelled()
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f'Docker {operation} readiness timed out '
+                        f'(last state: {latest_state})'
+                    )
+
+                status = pending_status
+                pending_status = None
+                if status is None:
+                    status = _http_json_request(
+                        'GET',
+                        status_url,
+                        min(_BACKEND_STATUS_HTTP_TIMEOUT_SEC, ready_timeout),
+                    )
+                if job.cancel_event.is_set():
+                    raise _BackendJobCancelled()
+                if inference_load:
+                    state = str(status.get('container_state') or '').strip().lower()
+                    if state not in {'running', 'exited', 'not_created'}:
+                        raise RuntimeError(f'Cannot prepare Worker with unknown container state: {state!r}')
+                latest_state = str(
+                    status.get('worker_message')
+                    or status.get('raw_state')
+                    or status.get('container_state')
+                    or 'unknown'
+                )
+                supervisor_ready = self._backend_reached_target(
+                    operation,
+                    status,
+                )
+
+                if supervisor_ready and operation in {'START', 'RESTART'}:
+                    if self._backend_service_client is None:
+                        raise RuntimeError(
+                            'ROS inference service client was not initialized '
+                            f'for {self.backend}'
+                        )
+                    try:
+                        service_ready = bool(
+                            self._backend_service_client.service_is_ready()
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            'ROS inference service readiness check failed for '
+                            f'{self._backend_service_name}: {exc}'
+                        ) from exc
+                    if not service_ready:
+                        latest_state = (
+                            f'{latest_state}; waiting for ROS service '
+                            f'{self._backend_service_name}'
+                        )
+                        job.cancel_event.wait(_BACKEND_SERVICE_POLL_SEC)
+                        continue
+
+                if supervisor_ready:
+                    result = True
+                    message = (
+                        response.get('message')
+                        or (f'{self.backend} Worker ready' if inference_load
+                            else f'{self.backend} Docker {operation} completed')
+                    )
+                    break
+                job.cancel_event.wait(_BACKEND_STATUS_POLL_SEC)
+        except _BackendJobCancelled:
+            message = 'Docker operation cancelled by tree reset'
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+        finally:
+            should_compensate = (
+                job.cancel_event.is_set()
+                and lifecycle_may_have_started
+                and base_url
+                and _is_latest_backend_generation(
+                    self.backend,
+                    job.generation,
+                )
+            )
+            if should_compensate:
+                result = False
+                message = self._compensating_stop(base_url, job)
+            elif job.cancel_event.is_set() and lifecycle_may_have_started:
+                # A newer lifecycle action owns this backend. Stopping here
+                # would tear down the new generation that replaced this job.
+                result = False
+                message = (
+                    'cancelled; compensating STOP skipped because a newer '
+                    'backend generation is active'
+                )
+            elif job.cancel_event.is_set():
+                result = False
+                message = 'Worker readiness wait cancelled by tree reset'
+            job.finish(result, message)
+
+    def _start_backend_job(self, operation: str):
+        job = _BackendJob(
+            operation,
+            _claim_backend_generation(self.backend),
+        )
+        thread = threading.Thread(
+            target=self._run_backend_job,
+            args=(job,),
+            daemon=True,
+            name=f'bt-{self.backend}-{operation.lower()}',
+        )
+        job.thread = thread
+        self._backend_job = job
+        thread.start()
+
     def tick(self) -> NodeStatus:
+        """Advance the non-blocking backend or inference state machine."""
         if self._state == self._STATE_INIT:
-            if not self._stages:
-                self.log_error(f'Unknown command: {self.command_str}')
+            configuration_error = self._configuration_error()
+            if configuration_error:
+                self.log_error(configuration_error)
                 self._state = self._STATE_DONE
                 self._result = False
                 return NodeStatus.FAILURE
-            if self.command_str == 'LOAD':
+
+            if self.target_str == 'DOCKER':
                 self.log_info(
                     'SendCommand started '
-                    f'(command={self.command_str}, model={self.model}, '
+                    f'(target=DOCKER, command={self.command_str}, '
+                    f'backend={self.backend})'
+                )
+            elif self.command_str == 'LOAD':
+                self.log_info(
+                    'SendCommand started '
+                    f'(target=INFERENCE, command={self.command_str}, '
+                    f'model={self.model}, '
                     f'inference_mode={self.inference_mode}, '
                     f'acceleration_mode={self.acceleration_mode}, '
                     f'publish_to_robot={self.inference_mode == "robot"})'
                 )
                 if self.inference_mode == 'simulation':
                     self.log_warn(
-                        'simulation mode selected; inference previews may update, '
+                        'simulation mode selected; inference previews may '
+                        'update, '
                         'but robot command topics will not be published'
                     )
             else:
                 self.log_info(
                     'SendCommand started '
-                    f'(command={self.command_str}, model={self.model}, '
+                    f'(target=INFERENCE, command={self.command_str}, '
+                    f'model={self.model}, '
                     'publish_to_robot=loaded)'
                 )
+
+            backend_operation = self._backend_operation()
+            if backend_operation:
+                self._start_backend_job(backend_operation)
+                self._state = self._STATE_WAITING_BACKEND
+                return NodeStatus.RUNNING
+
+            self._state = self._STATE_BEGIN_STAGE
+            return NodeStatus.RUNNING
+
+        if self._state == self._STATE_WAITING_BACKEND:
+            result, message = self._backend_job.snapshot()
+            if result is None:
+                return NodeStatus.RUNNING
+
+            self._backend_job = None
+            if not result:
+                self.log_error(
+                    f'{self.backend} Docker {self._backend_operation()} '
+                    f'failed: {message}'
+                )
+                self._state = self._STATE_DONE
+                self._result = False
+                return NodeStatus.FAILURE
+
+            self.log_info(message)
+            if self.target_str == 'DOCKER':
+                self._state = self._STATE_DONE
+                self._result = True
+                return NodeStatus.SUCCESS
+
+            # INFERENCE LOAD only: Docker is ready, so enter the unchanged ROS
+            # service + inference phase sequence.
             self._state = self._STATE_BEGIN_STAGE
             return NodeStatus.RUNNING
 
@@ -452,7 +969,10 @@ class SendCommand(BaseAction):
         )
         if self.command_str == 'LOAD' and hasattr(ti, 'acceleration_mode'):
             ti.acceleration_mode = self.acceleration_mode
-        if self.command_str == 'LOAD' and hasattr(ti, 'acceleration_engine_path'):
+        if (
+            self.command_str == 'LOAD'
+            and hasattr(ti, 'acceleration_engine_path')
+        ):
             ti.acceleration_engine_path = self.acceleration_engine_path
         if self.control_hz:
             ti.control_hz = self.control_hz
@@ -468,7 +988,18 @@ class SendCommand(BaseAction):
         return ti
 
     def reset(self):
+        """Cancel pending work without letting a late START escape cleanup."""
         super().reset()
+        backend_job = self._backend_job
+        if backend_job is not None:
+            backend_result, _ = backend_job.snapshot()
+            if backend_result is None:
+                # Do not block the executor on an in-flight Supervisor request.
+                # The isolated job notices cancellation and, when
+                # START/RESTART may already have succeeded, issues a
+                # compensating STOP before publishing its terminal result.
+                backend_job.cancel_event.set()
+        self._backend_job = None
         if self._future is not None and not self._future.done():
             self._future.cancel()
         self._future = None

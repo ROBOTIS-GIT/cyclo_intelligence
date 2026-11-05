@@ -25,22 +25,30 @@ export default function BTActionNode({ data }) {
   return (
     <div
       className={clsx(
-        'px-4 py-3 rounded-xl border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
+        'px-4 py-3 rounded-2xl border-2 min-w-[160px] text-center shadow-sm cursor-pointer',
         isActive
-          ? 'border-orange-500 bg-orange-50 ring-2 ring-orange-300 animate-pulse'
+          ? 'border-[#c96442] bg-[#f4e5dc] ring-2 ring-[#c96442]/30 animate-pulse'
           : isSelected
-            ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-300'
-            : 'border-green-500 bg-green-50'
+            ? 'border-[#5b8266] bg-[#eef3ec] ring-2 ring-[#1c1a17]/20'
+            : 'border-[#5b8266] bg-[#eef3ec]'
       )}
     >
-      <Handle type="target" position={Position.Top} className={clsx(isActive ? '!bg-orange-500' : '!bg-green-500')} />
-      <div className="text-xs text-green-600 font-semibold mb-1">
+      <Handle
+        type="target"
+        position={Position.Top}
+        className={clsx(isActive ? '!bg-[#c96442]' : '!bg-[#5b8266]')}
+      />
+      <div className="text-xs font-semibold mb-1 text-[#4f7a52]">
         {data.nodeType}
       </div>
-      <div className="text-sm font-medium text-gray-800 truncate">
+      <div className="text-sm font-semibold text-[#1c1a17] truncate">
         {data.label}
       </div>
-      <Handle type="source" position={Position.Bottom} className={clsx(isActive ? '!bg-orange-500' : '!bg-green-500')} />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className={clsx(isActive ? '!bg-[#c96442]' : '!bg-[#5b8266]')}
+      />
     </div>
   );
 }

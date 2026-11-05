@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Author: Seongwoo Kim
 
 """supervisor_api — PLAN §4.7 + §4.8 control plane.
 
@@ -81,17 +83,33 @@ if _PACKAGE_PARENT not in sys.path:
 
 from supervisor_api.worker_build import WorkerBuilds
 
-_NAVIGATION_PATH = Path(__file__).resolve().with_name("navigation.py")
-_NAVIGATION_SPEC = importlib.util.spec_from_file_location(
-    "supervisor_api.navigation",
-    _NAVIGATION_PATH,
-)
-if _NAVIGATION_SPEC is None or _NAVIGATION_SPEC.loader is None:
-    raise ImportError(f"Cannot load navigation router from {_NAVIGATION_PATH}")
-_navigation_module = importlib.util.module_from_spec(_NAVIGATION_SPEC)
-sys.modules[_NAVIGATION_SPEC.name] = _navigation_module
-_NAVIGATION_SPEC.loader.exec_module(_navigation_module)
+def _load_sibling_module(module_name: str, filename: str):
+    path = Path(__file__).resolve().with_name(filename)
+    spec = importlib.util.spec_from_file_location(
+        f"supervisor_api.{module_name}",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {module_name} router from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_navigation_module = _load_sibling_module("navigation", "navigation.py")
 navigation_router = _navigation_module.router
+_navigation_spots_module = _load_sibling_module(
+    "navigation_spots", "navigation_spots.py"
+)
+navigation_spots_router = _navigation_spots_module.router
+_navigation_missions_module = _load_sibling_module(
+    "navigation_missions", "navigation_missions.py"
+)
+navigation_missions_router = _navigation_missions_module.router
+_bt_support_module = _load_sibling_module("bt_support", "bt_support.py")
+_bt_trees_module = _load_sibling_module("bt_trees", "bt_trees.py")
+bt_trees_router = _bt_trees_module.router
 
 
 logger = logging.getLogger("supervisor_api")
@@ -136,7 +154,6 @@ _USER_SERVICES: tuple[str, ...] = (
 )
 
 _BT_ROBOT_TYPE_FILE = "/run/cyclo_intelligence/bt_node_robot_type"
-_BT_SUPPORTED_ROBOT_TYPE = "ffw_sg2_rev1"
 _ROBOT_TYPE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -189,13 +206,19 @@ def _validate_robot_type(robot_type: str) -> str:
 
 
 def _validate_bt_robot_type(robot_type: str = "") -> str:
-    normalized = robot_type.strip() or _BT_SUPPORTED_ROBOT_TYPE
+    # shared.robot_configs.schema owns the supported list; bt_node and its
+    # launch file validate against the same source.
+    try:
+        supported = _bt_support_module.bt_supported_robot_types()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    normalized = robot_type.strip() or supported[0]
     normalized = _validate_robot_type(normalized)
-    if normalized != _BT_SUPPORTED_ROBOT_TYPE:
+    if normalized not in supported:
         raise HTTPException(
             400,
             "bt_node currently supports only "
-            f"{_BT_SUPPORTED_ROBOT_TYPE}",
+            f"{', '.join(supported)}",
         )
     return normalized
 
@@ -576,6 +599,20 @@ def _require_known_backend(name: str) -> Dict[str, str]:
             404, f"Unknown backend '{name}'. Known: {known}"
         )
     return _BACKENDS[name]
+
+
+def _require_allowlisted_backend_spec(
+    name: str,
+    spec: Dict[str, str],
+) -> Dict[str, str]:
+    """Reject internal lifecycle calls that try to override Docker targets."""
+    allowlisted = _require_known_backend(name)
+    if spec != allowlisted:
+        raise HTTPException(
+            400,
+            "Backend image, container, and compose service overrides are not allowed",
+        )
+    return allowlisted
 
 
 _HOST_PROJECT_DIR_CACHE: Optional[str] = None
@@ -1306,6 +1343,7 @@ async def _lifespan(_app):
     global _WORKER_BUILDS
     _WORKER_BUILDS = WorkerBuilds()
     try:
+        _navigation_module.ensure_ros_grid_subscriber_started()
         yield
     finally:
         await asyncio.to_thread(_WORKER_BUILDS.close)
@@ -1314,11 +1352,14 @@ async def _lifespan(_app):
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.3.1",
+    version="1.4.4",
     lifespan=_lifespan,
 )
 
 _include_router_with_eager_routes(app, navigation_router)
+_include_router_with_eager_routes(app, navigation_spots_router)
+_include_router_with_eager_routes(app, navigation_missions_router)
+_include_router_with_eager_routes(app, bt_trees_router)
 
 
 # Inference trial results share the existing API and persistent workspace.
@@ -1796,6 +1837,8 @@ async def service_stop(name: str) -> ActionResult:
 #   - stop   → docker-py container.stop(), keeping the container for reuse.
 #   - restart → hard reset an existing backend, or create/start it when absent.
 #   - status → docker-py images.get + containers.get
+#
+# UI and BT callers share the same explicit Build and guarded lifecycle paths.
 
 
 @app.get("/backends/groot/trt/status", response_model=TrtEngineStatus)
@@ -2001,6 +2044,7 @@ async def _ensure_backend_running(
 ) -> ActionResult:
     """Start a policy backend without building it."""
 
+    spec = _require_allowlisted_backend_spec(name, spec)
     container_name = spec["container"]
 
     def _start_or_restart_existing() -> tuple[Optional[bool], str]:

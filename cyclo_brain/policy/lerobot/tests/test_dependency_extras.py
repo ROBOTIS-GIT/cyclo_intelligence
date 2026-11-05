@@ -145,4 +145,6 @@ def test_compose_passes_provenance_to_lerobot_only():
                for name, service in compose["services"].items() if name != "lerobot")
     script = (root / "docker/container.sh").read_text()
     assert "prepare_lerobot_build_metadata" in script
-    assert 'recorded_lerobot_commit="$(git -C "$repo" rev-parse HEAD:cyclo_brain/policy/lerobot/lerobot)"' in script
+    # Check the pinned gitlink lookup, independent of Git's safe.directory wrapper.
+    # Real-Git checkout mismatch rejection is exercised in docker/test_container_sh.py.
+    assert "rev-parse HEAD:cyclo_brain/policy/lerobot/lerobot" in script

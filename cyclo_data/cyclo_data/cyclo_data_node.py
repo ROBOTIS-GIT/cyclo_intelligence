@@ -18,7 +18,7 @@ from pathlib import Path
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 
 from interfaces.msg import DataOperationStatus
@@ -76,7 +76,7 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         # Services that own background workers / external resources clean
@@ -86,7 +86,12 @@ def main(args=None):
         node._recording.shutdown()
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.try_shutdown()
+        except RuntimeError as exc:
+            # Jazzy's native signal handler can race try_shutdown's context check.
+            if rclpy.ok() or 'rcl_shutdown already called' not in str(exc):
+                raise
 
 
 if __name__ == '__main__':

@@ -2,6 +2,30 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.4 (2026-11-02)
+------------------
+* None
+
+1.4.3 (2026-10-29)
+------------------
+* None
+
+1.4.2 (2026-10-28)
+------------------
+* None
+
+1.4.1 (2026-10-27)
+------------------
+* None
+
+1.4.0 (2026-08-31)
+------------------
+* Added Autonomy Studio with the Mission Canvas and the Action Canvas; removed the Navigation and BT Manager pages.
+* Added per-joint JointControl chips, a shared edge rule, and safe clear actions to the BT editors.
+* Improved map rendering and navigation performance; unified runtime shutdown and page-exit cleanup.
+* Loaded and saved Action Canvas trees through ``/api/bt/trees`` and read supported robots from ``/api/bt/support``.
+* Contributors: Seongwoo Kim
+
 1.3.1 (2026-08-26)
 ------------------
 * Removed the fixed 45-second policy backend warm-up delay once all runtime services are running.

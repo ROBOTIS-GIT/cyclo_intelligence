@@ -28,19 +28,20 @@ from launch_ros.actions import Node
 from shared.robot_configs import schema as robot_schema
 
 
-SUPPORTED_BT_ROBOT_TYPE = 'ffw_sg2_rev1'
+DEFAULT_BT_ROBOT_TYPE = robot_schema.BT_SUPPORTED_ROBOT_TYPES[0]
 
 
 def launch_setup(context, *args, **kwargs):
 
     robot_type = (
         LaunchConfiguration('robot_type').perform(context)
-        or SUPPORTED_BT_ROBOT_TYPE
+        or DEFAULT_BT_ROBOT_TYPE
     )
-    if robot_type != SUPPORTED_BT_ROBOT_TYPE:
+    if not robot_schema.is_bt_supported(robot_type):
         raise RuntimeError(
             'BT currently supports only '
-            f'{SUPPORTED_BT_ROBOT_TYPE}; got {robot_type}'
+            f'{", ".join(robot_schema.BT_SUPPORTED_ROBOT_TYPES)}; '
+            f'got {robot_type}'
         )
 
     shared_share = get_package_share_directory('shared')
@@ -108,9 +109,10 @@ def generate_launch_description():
 
     robot_type_arg = DeclareLaunchArgument(
         'robot_type',
-        default_value=SUPPORTED_BT_ROBOT_TYPE,
+        default_value=DEFAULT_BT_ROBOT_TYPE,
         description=(
-            'BT robot type. Currently only ffw_sg2_rev1 is supported.'
+            'BT robot type. Supported types are listed in '
+            'shared.robot_configs.schema.BT_SUPPORTED_ROBOT_TYPES.'
         )
     )
 

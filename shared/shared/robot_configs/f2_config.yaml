@@ -3,6 +3,8 @@ orchestrator:
     f2:
       robot_name: "FFW F2"
       urdf_path: urdf/ffw_f2_follower.urdf
+      joystick:
+        trigger_topic: /leader/joystick_controller/tact_trigger
 
       # ────────────────────────────────────────────────────────────────
       # Observation — every signal the policy reads from the robot.

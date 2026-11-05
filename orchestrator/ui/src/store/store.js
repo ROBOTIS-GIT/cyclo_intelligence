@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Author: Kiwoong Park
+ * Author: Kiwoong Park, Seongwoo Kim
  */
 
 import { configureStore } from '@reduxjs/toolkit';
@@ -24,8 +24,9 @@ import trainingSlice from '../features/training/trainingSlice';
 import editDatasetSlice from '../features/editDataset/editDatasetSlice';
 import replaySlice from '../features/replay/replaySlice';
 import layoutSlice from '../features/layout/layoutSlice';
-import btmanagerSlice from '../features/btmanager/btmanagerSlice';
-import btCatalogSlice from '../features/btmanager/btCatalogSlice';
+import actionCanvasSlice from '../features/actionCanvas/actionCanvasSlice';
+import btCatalogSlice from '../features/actionCanvas/btCatalogSlice';
+import btSupportSlice from '../features/actionCanvas/btSupportSlice';
 
 export const store = configureStore({
   reducer: {
@@ -36,8 +37,9 @@ export const store = configureStore({
     editDataset: editDatasetSlice,
     replay: replaySlice,
     layout: layoutSlice,
-    btmanager: btmanagerSlice,
+    actionCanvas: actionCanvasSlice,
     btCatalog: btCatalogSlice,
+    btSupport: btSupportSlice,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

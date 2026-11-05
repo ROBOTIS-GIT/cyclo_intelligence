@@ -193,7 +193,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:1.3.1
+    image: robotis/cyclo-intelligence:1.4.4
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}
@@ -235,6 +235,13 @@ services:
       - ABOT_FLASH_ATTN_CUDA_ARCHS=${ABOT_FLASH_ATTN_CUDA_ARCHS:-}
       - LINGBOT_VLA_FLASH_ATTN_CUDA_ARCHS=${LINGBOT_VLA_FLASH_ATTN_CUDA_ARCHS:-}
       - RLDX_FLASH_ATTN_CUDA_ARCHS=${RLDX_FLASH_ATTN_CUDA_ARCHS:-}
+      # Mission Canvas runtime data is owned by cyclo_intelligence and
+      # persisted through the ./workspace bind mount, not the ai_worker source.
+      - CYCLO_NAVIGATION_DATA_DIR=${CYCLO_NAVIGATION_DATA_DIR:-/workspace/navigation}
+      # Action Canvas trees are user data under the same bind mount; the
+      # packaged examples are seeded into it on first use.
+      - CYCLO_BT_TREES_DIR=${CYCLO_BT_TREES_DIR:-/workspace/bt/trees}
+      - CYCLO_BT_EXAMPLE_TREES_DIR=${CYCLO_BT_EXAMPLE_TREES_DIR:-/root/ros2_ws/install/orchestrator/share/orchestrator/bt/trees}
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
@@ -255,6 +262,10 @@ services:
       - ../shared/shared/robot_configs/urdf:/usr/share/nginx/html/urdf/urdf:ro
       - ../shared/shared/robot_configs/ffw_description:/usr/share/nginx/html/urdf/ffw_description:ro
       - ../shared/shared/robot_configs/open_manipulator_description:/usr/share/nginx/html/urdf/open_manipulator_description:ro
+      # Capability checks use the same robot config bundle as the Workers.
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      # Keep s6 ROS/Zenoh env sourcing current for pre-built main images.
+      - ./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro
       - /dev:/dev
       - /dev/shm:/dev/shm
       - ./workspace:/workspace
@@ -299,7 +310,7 @@ services:
   # ============================================================
   lerobot:
     container_name: lerobot_server
-    image: robotis/lerobot-zenoh:1.4.1-${ARCH:-arm64}
+    image: robotis/lerobot-zenoh:1.4.2-${ARCH:-arm64}
     pull_policy: never
     build:
       context: ..
@@ -383,7 +394,7 @@ services:
 
   # ============================================================
   # GR00T N1.7 Engine-only policy worker.
-  # Pulled / started on demand by the UI
+  # Built locally / started on demand by the UI
   # via supervisor_api (PLAN §4.8).
   # ============================================================
   groot:

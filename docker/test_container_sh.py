@@ -1,12 +1,101 @@
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_merged_compose_preserves_runtime_navigation_and_release_contracts():
+    services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
+    main = services["cyclo_intelligence"]
+    assert main["image"] == "robotis/cyclo-intelligence:1.4.4"
+    assert services["lerobot"]["image"] == "robotis/lerobot-zenoh:1.4.2-${ARCH:-arm64}"
+    for name, service in services.items():
+        assert service["build"]["context"] == ".."
+        if name != "cyclo_intelligence":
+            assert service["pull_policy"] == "never"
+        targets = [
+            mount["target"] if isinstance(mount, dict) else mount.split(":")[1]
+            for mount in service["volumes"]
+        ]
+        assert len(targets) == len(set(targets)), name
+    for setting in (
+        "CYCLO_POLICY_ROOT=/opt/cyclo/policy",
+        "CYCLO_SUPERVISOR_API_COMPOSE_FILE=/opt/cyclo/docker/docker-compose.yml",
+        "CYCLO_NAVIGATION_DATA_DIR=${CYCLO_NAVIGATION_DATA_DIR:-/workspace/navigation}",
+        "CYCLO_BT_TREES_DIR=${CYCLO_BT_TREES_DIR:-/workspace/bt/trees}",
+        "CYCLO_BT_EXAMPLE_TREES_DIR=${CYCLO_BT_EXAMPLE_TREES_DIR:-/root/ros2_ws/install/orchestrator/share/orchestrator/bt/trees}",
+    ):
+        assert setting in main["environment"]
+    for mount in (
+        "./workspace:/workspace",
+        "../shared/shared/robot_configs:/orchestrator_config:ro",
+        "./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro",
+    ):
+        assert mount in main["volumes"]
+
+
+def test_lerobot_arm64_does_not_restore_inherited_compat_driver_path():
+    contents = (REPO_ROOT / "cyclo_brain/policy/lerobot/Dockerfile.arm64").read_text()
+    overrides = [line for line in contents.splitlines() if line.startswith("ENV LD_LIBRARY_PATH=")]
+    assert overrides == ["ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64"]
+
+
+def test_ci_keeps_converter_catalog_runtime_and_worker_build_suites():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    commands = "\n".join(
+        step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+    )
+    for suite in (
+        "cyclo_data/tests/converter",
+        "orchestrator/tests/data_processing/test_rosbag_to_lerobot_converter.py",
+        "cyclo_brain/policy/common/catalog/tests",
+        "cyclo_brain/policy/common/runtime/tests",
+        "docker/test_container_sh.py",
+        "docker/test_dockerfiles.py",
+        "docker/supervisor_api/test_app.py",
+        "docker/supervisor_api/test_worker_build.py",
+    ):
+        assert suite in commands
+
+
+def test_python_ci_initializes_only_the_pinned_lerobot_submodule():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["python-tests"]["steps"]
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+    assert not checkout.get("with", {}).get("submodules", False)
+    commands = [
+        shlex.split(line)
+        for step in steps for line in step.get("run", "").splitlines()
+        if line.strip().startswith("git submodule ")
+    ]
+    assert commands == [[
+        "git", "submodule", "update", "--init", "--",
+        "cyclo_brain/policy/lerobot/lerobot",
+    ]]
+
+
+def test_python_ci_installs_torch_and_torchvision_together_from_cpu_index():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["python-tests"]["steps"]
+    commands = [
+        shlex.split(line)
+        for step in steps for line in step.get("run", "").splitlines()
+        if "download.pytorch.org" in line
+    ]
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:4] == ["python", "-m", "pip", "install"]
+    assert command[command.index("--index-url") + 1] == "https://download.pytorch.org/whl/cpu"
+    assert {"torch", "torchvision"} <= set(command)
 
 
 def _copy_container_script(tmp_path):
@@ -40,7 +129,7 @@ def _write_start_stub(tmp_path):
         "    printf '%s\\n' cyclo_intelligence lerobot groot\n"
         "    ;;\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.2-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    ;;\n"
         "esac\n"
         "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
@@ -312,7 +401,7 @@ def test_start_pulls_main_image_only(tmp_path):
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.2-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    ;;\n"
         "esac\n"
         "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
@@ -409,7 +498,7 @@ def test_start_does_not_remove_policy_container_with_stale_workspace_mount(tmp_p
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"image\":\"robotis/lerobot-zenoh:1.4.2-arm64\"},\"groot\":{\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    exit 0\n"
         "    ;;\n"
         "esac\n"
@@ -467,7 +556,7 @@ def test_start_lerobot_removes_stale_workspace_mount(tmp_path):
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
         "case \" $* \" in\n"
         "  *' config --format json '*)\n"
-        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.1-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
+        "    printf '%s\\n' '{\"services\":{\"lerobot\":{\"container_name\":\"lerobot_server\",\"image\":\"robotis/lerobot-zenoh:1.4.2-arm64\"},\"groot\":{\"container_name\":\"groot_server\",\"image\":\"robotis/groot-zenoh:1.3.5-arm64\"}}}'\n"
         "    exit 0\n"
         "    ;;\n"
         "esac\n"

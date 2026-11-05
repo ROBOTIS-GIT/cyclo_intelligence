@@ -1,4 +1,8 @@
 import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
 import sys
 import types
 
@@ -27,6 +31,10 @@ from cyclo_data.converter.base_converter import (
     ConversionConfig,
     EpisodeData,
     RosbagToLerobotConverterBase,
+)
+from cyclo_data.converter.to_lerobot_v30 import (
+    RosbagToLerobotV30Converter,
+    V30ConversionConfig,
 )
 
 
@@ -133,3 +141,74 @@ def test_feature_names_ignore_none_name_sources(tmp_path):
     converter._build_features([first, second])
 
     assert converter._features["action"]["names"] == action_names
+
+
+@pytest.mark.parametrize("instructions", [
+    [],
+    ["Pick up the object."],
+    ["Place the object.", "Pick up the object.", "물체를 잡으세요."],
+])
+def test_v30_tasks_restore_instruction_as_pandas_index(tmp_path, instructions):
+    converter = RosbagToLerobotV30Converter(
+        V30ConversionConfig(repo_id="test", output_dir=tmp_path)
+    )
+    converter._tasks = dict(enumerate(instructions))
+    converter._task_names_by_task = {
+        task: f"Task_{i:06d}" for i, task in enumerate(instructions)
+    }
+
+    converter._write_tasks_parquet()
+
+    path = tmp_path / "meta" / "tasks.parquet"
+    tasks = pd.read_parquet(path)
+    expected = instructions or ["default_task"]
+    assert tasks.index.name == "task"
+    assert tasks.index.tolist() == expected
+    assert tasks["task_index"].tolist() == list(range(len(expected)))
+    for i, instruction in enumerate(expected):
+        # This is how LeRobotDataset.__getitem__ resolves the prompt.
+        assert tasks.iloc[i].name == instruction
+        assert tasks.iloc[i]["task_name"] == (
+            f"Task_{i:06d}" if instructions else "default_task"
+        )
+    table = pq.read_table(path)
+    assert table["task"].to_pylist() == expected
+    assert table.schema.field("task").type == pa.string()
+    assert table.schema.field("task_name").type == pa.string()
+
+
+def test_v30_tasks_bypass_legacy_cache_and_reuse_corrected_cache(tmp_path, monkeypatch):
+    converter = RosbagToLerobotV30Converter(
+        V30ConversionConfig(repo_id="test", output_dir=tmp_path / "output")
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    episodes = [EpisodeData(episode_index=0, source_path=source)]
+    converter._tasks = {0: "Pick up the object."}
+    converter._task_names_by_task = {"Pick up the object.": "Task_000650"}
+    converter._current_data_aggregate_cache_key = {"test": "task-index"}
+    key = converter._tasks_parquet_cache_key()
+    assert key["version"] == 2
+    legacy_key = {**key, "version": 1}
+    legacy = tmp_path / "legacy.parquet"
+    pq.write_table(pa.Table.from_pylist([{
+        "task_index": 0, "task": "Pick up the object.", "task_name": "Task_000650",
+    }]), legacy)
+    converter._store_small_parquet_cache(
+        episodes, legacy_key, legacy,
+        cache_name="tasks_parquet_v30", artifact_name="tasks.parquet",
+    )
+    assert pd.read_parquet(legacy).iloc[0].name == 0
+
+    converter._write_tasks_parquet(episodes)
+    output = tmp_path / "output" / "meta" / "tasks.parquet"
+    assert pd.read_parquet(output).iloc[0].name == "Pick up the object."
+    cache = converter._small_parquet_cache_path(episodes, key, "tasks_parquet_v30")
+    assert (cache / "tasks.parquet").exists()
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("The corrected tasks cache should be reused")
+
+    monkeypatch.setattr(pq, "write_table", unexpected_write)
+    converter._write_tasks_parquet(episodes)
+    assert pd.read_parquet(output).iloc[0].name == "Pick up the object."

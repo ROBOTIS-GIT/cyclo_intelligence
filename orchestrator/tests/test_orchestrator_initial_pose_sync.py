@@ -718,9 +718,11 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             ),
         ]
 
-        self.node._begin_initial_pose_sync_status(self.client, 0.01)
-        self.node._poll_inference_status_once()
-        self.node._poll_inference_status_once()
+        with patch('orchestrator.orchestrator_node.threading.Timer',
+                   side_effect=AssertionError('Sync completion must come from Runtime STATUS')):
+            self.node._begin_initial_pose_sync_status(self.client, 0.01)
+            self.node._poll_inference_status_once()
+            self.node._poll_inference_status_once()
 
         self.assertEqual(
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
@@ -826,6 +828,35 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             [phase for phase, _robot_type, _error in self.node.communicator.phases],
             [InferenceStatus.SYNCING],
         )
+
+    def test_stale_begin_does_not_cancel_replacement_client_sync(self) -> None:
+        replacement_client = FakeInferenceClient()
+        self.node.container_service_client = replacement_client
+        self.node._begin_initial_pose_sync_status(replacement_client, 60.0)
+        generation = self.node._inference_status_generation
+
+        self.node._begin_initial_pose_sync_status(self.client, 60.0)
+
+        self.assertTrue(self.node._initial_pose_sync_status_active)
+        self.assertEqual(self.node._inference_status_generation, generation)
+        self.assertEqual(
+            [phase for phase, _robot_type, _error in self.node.communicator.phases],
+            [InferenceStatus.SYNCING],
+        )
+
+    def test_stale_cancel_preserves_replacement_sync_and_status_generation(self):
+        replacement = FakeInferenceClient()
+        self.node.container_service_client = replacement
+        self.node._begin_initial_pose_sync_status(replacement, 0.01)
+        generation = self.node._inference_status_generation
+
+        self.assertFalse(self.node._cancel_initial_pose_sync_status(expected_client=self.client))
+
+        self.assertTrue(self.node._initial_pose_sync_status_active)
+        self.assertEqual(self.node._inference_status_generation, generation)
+        self.assertTrue(self.node._cancel_initial_pose_sync_status(expected_client=replacement))
+        self.assertFalse(self.node._initial_pose_sync_status_active)
+        self.assertGreater(self.node._inference_status_generation, generation)
 
     def test_pause_hold_failure_stays_syncing_until_retry_succeeds(self) -> None:
         self.client.pause_results = [

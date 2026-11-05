@@ -157,6 +157,19 @@ class JointControl(BaseAction):
                 kwargs['right_positions'] = params.get(
                     'right_positions', default_positions,
                 )
+                # Optional per-joint selection (BT Manager joint chips):
+                # when present, the trajectory commands only these joints
+                # instead of the full robot-yaml joint order.
+                left_joint_names = params.get('left_joint_names')
+                if _has_value(left_joint_names):
+                    kwargs['left_joint_names'] = _parse_groups(
+                        left_joint_names,
+                    )
+                right_joint_names = params.get('right_joint_names')
+                if _has_value(right_joint_names):
+                    kwargs['right_joint_names'] = _parse_groups(
+                        right_joint_names,
+                    )
             if enable_lift:
                 kwargs['lift_position'] = params.get('lift_position', 0.0)
 
@@ -180,10 +193,12 @@ class JointControl(BaseAction):
         head_positions='0.0, 0.0',
         head_joint_names: Optional[list[str]] = None,
         enable_arms: bool = False,
-        left_positions: Optional[list[float]] = None,
-        right_positions: Optional[list[float]] = None,
+        # joint_names precede positions so the generated catalog (ctor
+        # order) renders each joint selector above its positions field.
         left_joint_names: Optional[list[str]] = None,
+        left_positions: Optional[list[float]] = None,
         right_joint_names: Optional[list[str]] = None,
+        right_positions: Optional[list[float]] = None,
         enable_lift: bool = False,
         lift_position: float = 0.0,
         lift_joint_name: Optional[str] = None,

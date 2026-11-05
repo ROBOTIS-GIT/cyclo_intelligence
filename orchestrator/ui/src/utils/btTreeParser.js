@@ -56,13 +56,22 @@ export function parseBTXml(xmlString) {
   }
 
   if (!rootElement) {
-    const firstBT = behaviorTrees[0];
+    // Pending trees are editor-only disconnected components and must never be
+    // promoted to the executable root when an external XML omits/invalidates
+    // main_tree_to_execute.
+    const firstBT = [...behaviorTrees].find((bt) => (
+      !String(bt.getAttribute('ID') || '').startsWith('__pending__')
+    ));
     if (firstBT && firstBT.children.length > 0) {
       rootElement = firstBT.children[0];
     }
   }
 
-  if (!rootElement) {
+  const pendingTrees = [...behaviorTrees].filter((bt) => (
+    String(bt.getAttribute('ID') || '').startsWith('__pending__') && bt.children.length > 0
+  ));
+
+  if (!rootElement && pendingTrees.length === 0) {
     return { nodes: [], edges: [], xmlDoc: doc, nodeElementMap: new Map(), nodeDataMap: new Map() };
   }
 
@@ -123,7 +132,16 @@ export function parseBTXml(xmlString) {
     }
   }
 
-  traverse(rootElement, null);
+  if (rootElement) traverse(rootElement, null);
+
+  // Disconnected work-in-progress is serialized under a non-executed
+  // __pending__ BehaviorTree. Restore it as disconnected canvas components so
+  // switching waypoints or reloading the page cannot make those nodes vanish.
+  for (const bt of pendingTrees) {
+    for (const child of bt.children) {
+      traverse(child, null);
+    }
+  }
 
   const layout = applyDagreLayout(nodes, edges);
   return { ...layout, xmlDoc: doc, nodeElementMap, nodeDataMap };
@@ -136,8 +154,18 @@ export function parseBTXml(xmlString) {
  * survive a reload. With `respectStored: false` (in-app re-layout after
  * a structural change) the stored hints are ignored so dagre is the sole
  * source of truth and the graph stays tidy.
+ *
+ * `anchorNodeId` keeps that node at its pre-layout canvas coordinates by
+ * translating the whole result. This is useful for automatic layout during
+ * edge creation: dagre normally starts every layout near (0, 0), which can
+ * move the graph outside the viewport even though the viewport itself did
+ * not change.
  */
-export function applyDagreLayout(nodes, edges, { respectStored = true } = {}) {
+export function applyDagreLayout(
+  nodes,
+  edges,
+  { respectStored = true, anchorNodeId = null } = {},
+) {
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
   g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 60 });
@@ -174,7 +202,7 @@ export function applyDagreLayout(nodes, edges, { respectStored = true } = {}) {
 
   dagre.layout(g);
 
-  const layoutNodes = nodes.map(({ _storedX, _storedY, ...node }) => {
+  let layoutNodes = nodes.map(({ _storedX, _storedY, ...node }) => {
     if (
       respectStored &&
       _storedX !== null && _storedX !== undefined && _storedX !== '' &&
@@ -193,5 +221,64 @@ export function applyDagreLayout(nodes, edges, { respectStored = true } = {}) {
     };
   });
 
+  const anchorBefore = anchorNodeId
+    ? nodes.find((node) => node.id === anchorNodeId)
+    : null;
+  const anchorAfter = anchorNodeId
+    ? layoutNodes.find((node) => node.id === anchorNodeId)
+    : null;
+  if (
+    Number.isFinite(anchorBefore?.position?.x) &&
+    Number.isFinite(anchorBefore?.position?.y) &&
+    Number.isFinite(anchorAfter?.position?.x) &&
+    Number.isFinite(anchorAfter?.position?.y)
+  ) {
+    const offsetX = anchorBefore.position.x - anchorAfter.position.x;
+    const offsetY = anchorBefore.position.y - anchorAfter.position.y;
+    layoutNodes = layoutNodes.map((node) => ({
+      ...node,
+      position: {
+        x: node.position.x + offsetX,
+        y: node.position.y + offsetY,
+      },
+    }));
+  }
+
   return { nodes: layoutNodes, edges };
+}
+
+/**
+ * Choose a surviving node whose canvas position should remain fixed while
+ * re-laying out a graph after deletion. Prefer a node adjacent to the deleted
+ * node/edge, then fall back to the first remaining node for disconnected
+ * deletions.
+ */
+export function findDeletionLayoutAnchor(
+  nodes,
+  edges,
+  deletedNodeIds,
+  deletedEdgeIds,
+) {
+  const removedNodes = deletedNodeIds instanceof Set
+    ? deletedNodeIds
+    : new Set(deletedNodeIds || []);
+  const removedEdges = deletedEdgeIds instanceof Set
+    ? deletedEdgeIds
+    : new Set(deletedEdgeIds || []);
+  const remainingNodeIds = new Set(
+    nodes.filter((node) => !removedNodes.has(node.id)).map((node) => node.id),
+  );
+
+  if (remainingNodeIds.size === 0) return null;
+
+  for (const edge of edges) {
+    const touchesDeletion = removedEdges.has(edge.id)
+      || removedNodes.has(edge.source)
+      || removedNodes.has(edge.target);
+    if (!touchesDeletion) continue;
+    if (remainingNodeIds.has(edge.source)) return edge.source;
+    if (remainingNodeIds.has(edge.target)) return edge.target;
+  }
+
+  return nodes.find((node) => remainingNodeIds.has(node.id))?.id || null;
 }

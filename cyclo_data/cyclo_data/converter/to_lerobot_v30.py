@@ -58,7 +58,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -4095,9 +4094,13 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             return
 
         # LeRobot reads tasks.iloc[task_index].name. Preserve the named index
-        # metadata, while keeping the physical task column for Arrow readers.
-        tasks = pd.DataFrame(tasks_data).set_index("task")
-        table = pa.Table.from_pandas(tasks, preserve_index=True)
+        # and Arrow string types regardless of pandas' default string dtype.
+        table = pa.Table.from_pylist(tasks_data)
+        table = pa.Table.from_pandas(
+            table.to_pandas().set_index("task"),
+            schema=table.schema,
+            preserve_index=True,
+        )
         pq.write_table(table, file_path, **_v30_parquet_write_kwargs())
         if cache_key is not None:
             self._store_small_parquet_cache(
