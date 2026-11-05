@@ -273,6 +273,17 @@ jobs:
         working-directory: orchestrator/ui
         run: npm ci --legacy-peer-deps
 
+      - name: Test robot controls and app integration
+        working-directory: orchestrator/ui
+        env:
+          CI: 'true'
+        run: >-
+          npm test -- --watchAll=false --runInBand --runTestsByPath
+          src/features/robotControl/RobotControlPanel.test.js
+          src/features/robotControl/useRobotControl.test.js
+          src/features/robotControl/useRobotControl.transport.test.js
+          src/App.test.js
+
       - name: Build UI
         working-directory: orchestrator/ui
         run: npm run build

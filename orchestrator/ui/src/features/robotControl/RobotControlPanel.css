@@ -1,0 +1,39 @@
+.robot-control-anchor { display: flex; justify-content: flex-end; width: 100%; max-width: 350px; flex-shrink: 0; }
+.robot-control-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px; color: #4b5563; background: #fff; border: 1px solid #e5e7eb; border-radius: 9999px; box-shadow: 0 1px 2px #0000000d; }
+.robot-control-toggle:hover { background: #f9fafb; }
+.robot-inline-status { position: relative; flex-shrink: 0; }
+.robot-inline-status .robot-control-status { border-radius: 9999px; box-shadow: 0 1px 2px #0000000d; }
+.robot-inline-status .robot-control-status:disabled { opacity: 1; cursor: not-allowed; }
+.robot-inline-status .robot-control-mode:disabled { cursor: default; }
+.robot-inline-status .robot-control-status:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+.robot-inline-error { position: absolute; top: 100%; left: 0; z-index: 80; width: 280px; max-width: calc(100vw - 24px); padding: 8px 10px; background: #fff; border: 1px solid #fecaca; border-radius: 8px; box-shadow: 0 4px 12px #0000001a; }
+.dark .robot-inline-error { background: #0f172a; border-color: #7f1d1d; }
+.robot-control-popup { position: fixed; z-index: 80; width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; padding: 12px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; color: #374151; box-shadow: 0 8px 24px #0000001a; font-size: 12px; }
+.robot-control-status-row { display: flex; gap: 8px; }
+.robot-control-status { flex: 1; white-space: nowrap; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f3f4f6; font-size: 12px; }
+.robot-mode-color { color: #374151; background: #e5e7eb; border-color: #9ca3af; }
+.robot-mode-color.is-cyan { color: #0369a1; background: #e0f2fe; border-color: #bae6fd; }
+.robot-mode-color.is-white { color: #475569; background: #f8fafc; border-color: #cbd5e1; }
+.robot-mode-color.is-yellow { color: #854d0e; background: #fef3c7; border-color: #fde68a; }
+.robot-mode-color.is-base-blinking { animation: robot-base-blink 1s steps(1, end) infinite; }
+@keyframes robot-base-blink { 0%, 100% { background-color: #fef3c7; } 50% { background-color: #fffbeb; } }
+/* Keep text readable in both blink phases on a dark popup. */
+.dark .robot-control-status.is-base-blinking { animation-name: robot-base-blink-dark; }
+@keyframes robot-base-blink-dark { 0%, 100% { background-color: #fef3c7; } 50% { background-color: #fffbeb; } }
+@media (prefers-reduced-motion: reduce) {
+  .robot-mode-color.is-base-blinking, .dark .robot-control-status.is-base-blinking { animation: none; }
+}
+.robot-control-popup button:disabled, .robot-control-popup select:disabled, .robot-control-popup input:disabled { cursor: not-allowed; opacity: .55; }
+.robot-control-popup .robot-control-status:disabled { opacity: 1; }
+.robot-control-popup .robot-control-mode:disabled { cursor: default; }
+.robot-control-popup button:focus-visible, .robot-control-popup select:focus-visible, .robot-control-popup input:focus-visible, .robot-control-toggle:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+.robot-control-presets { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.robot-control-preset-input { display: flex; flex-direction: column; gap: 4px; color: #6b7280; font-size: 11px; }
+.robot-control-preset-input select, .robot-control-preset-input input { width: 100%; min-width: 0; height: 30px; padding: 3px 5px; border: 1px solid #d1d5db; border-radius: 6px; color: #374151; background: #fff; font-size: 12px; }
+.robot-control-apply { height: 30px; padding: 0 8px; border: 1px solid #d1d5db; border-radius: 6px; color: #374151; background: #f9fafb; }
+.robot-control-hint, .robot-control-error { margin-top: 8px; font-size: 11px; }
+.robot-control-error { color: #b91c1c; }
+.dark .robot-control-popup, .dark .robot-control-toggle { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+.dark .robot-control-preset-input { color: #94a3b8; }
+.dark .robot-control-preset-input select, .dark .robot-control-preset-input input, .dark .robot-control-apply { background: #1e293b; color: #e2e8f0; border-color: #475569; }
+.dark .robot-control-error { color: #fca5a5; }
