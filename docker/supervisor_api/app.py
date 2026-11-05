@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from contextlib import asynccontextmanager
 import hashlib
 import io
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,8 @@ from pydantic import BaseModel, Field
 _PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
 if _PACKAGE_PARENT not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT)
+
+from supervisor_api.worker_build import WorkerBuilds
 
 _NAVIGATION_PATH = Path(__file__).resolve().with_name("navigation.py")
 _NAVIGATION_SPEC = importlib.util.spec_from_file_location(
@@ -252,6 +255,7 @@ class BackendStatus(BaseModel):
     worker_compatible: Optional[bool] = None
     worker_message: str = ""
     worker_readiness: Optional[Literal["waiting", "error", "ready"]] = None
+    build: dict = Field(default_factory=lambda: {"state": "idle", "message": "", "log_tail": []})
 
 
 class TrtBuildRequest(BaseModel):
@@ -1294,10 +1298,24 @@ def _parse_svstat(raw: str) -> dict:
 # -- FastAPI app ---------------------------------------------------------------
 
 
+_WORKER_BUILDS = WorkerBuilds()
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    global _WORKER_BUILDS
+    _WORKER_BUILDS = WorkerBuilds()
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_WORKER_BUILDS.close)
+
+
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
     version="1.3.1",
+    lifespan=_lifespan,
 )
 
 _include_router_with_eager_routes(app, navigation_router)
@@ -1769,13 +1787,12 @@ async def service_stop(name: str) -> ActionResult:
 
 
 # -- Backend container endpoints — PLAN §4.8 -----------------------------------
-# Hybrid wiring (matches PLAN §4.8 example):
-#   - pull   → docker-py client.api.pull(stream=True), SSE per layer
+# Worker builds are explicit and never start/recreate a container.
+#   - build  → shared container.sh build-policy, background job with status/logs
 #   - start  → keep an existing running container, start an existing
 #              stopped container, or 'docker compose up -d --no-build
 #              <service>' when the container does not exist. No build is
-#              attempted from the UI path; missing images are reported so the
-#              user can pull/install first.
+#              attempted by ON; build a missing image first.
 #   - stop   → docker-py container.stop(), keeping the container for reuse.
 #   - restart → hard reset an existing backend, or create/start it when absent.
 #   - status → docker-py images.get + containers.get
@@ -1828,44 +1845,48 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
 
 
 @app.post("/backends/{name}/pull")
-async def backend_pull(name: str) -> StreamingResponse:
+async def backend_pull(name: str):
+    _require_known_backend(name)
+    raise HTTPException(410, "Worker images are built locally. Use the Build action.")
+
+
+def _worker_build_command(name: str) -> list[str]:
+    _require_known_backend(name)
+    root = Path(_CYCLO_REPO_MOUNT).resolve()
+    script = root / "docker/container.sh"
+    if not script.is_file() or not (root / ".git").exists():
+        raise HTTPException(409, "Worker builds require the full Cyclo Git checkout mounted in the Cyclo container.")
+    return ["bash", str(script), "build-policy", name]
+
+
+@app.post("/backends/{name}/build", status_code=202)
+async def backend_build(name: str):
     spec = _require_known_backend(name)
-    image = spec["image"]
+    command = _worker_build_command(name)
+    env = os.environ.copy()
+    env["CYCLO_EXPECTED_WORKER_IMAGE"] = spec["image"]
+    builds = _WORKER_BUILDS
 
-    def generate():
-        token = ""
+    def start():
+        # Keep acquisition and ownership transfer together even if HTTP is cancelled.
+        token = _begin_worker_mutation(name)
         try:
-            token = _begin_worker_mutation(name)
-            client = _docker_client()
-        except Exception as e:
-            detail = e.detail if isinstance(e, HTTPException) else str(e)
-            payload = json.dumps({"message": detail})
-            yield f"event: error\ndata: {payload}\n\n"
-            return
-
-        try:
-            try:
-                for chunk in client.api.pull(image, stream=True, decode=True):
-                    yield f"data: {json.dumps(chunk)}\n\n"
-            except DockerException as e:
-                payload = json.dumps({"image": image, "message": str(e)})
-                yield f"event: error\ndata: {payload}\n\n"
-                return
-
-            # Docker may end a pull stream after reporting a manifest error.
-            try:
-                client.images.get(image)
-                done = json.dumps({"image": image, "ok": True})
-                yield f"event: done\ndata: {done}\n\n"
-            except ImageNotFound:
-                payload = json.dumps(
-                    {"image": image, "message": "pull stream ended but image missing"}
-                )
-                yield f"event: error\ndata: {payload}\n\n"
-        finally:
+            return builds.start(
+                name, command, env,
+                lambda: _docker_client().images.get(spec["image"]),
+                lambda: _end_worker_mutation(name, token),
+            )
+        except Exception as exc:
             _end_worker_mutation(name, token)
+            raise HTTPException(409, str(exc)) from exc
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return await asyncio.to_thread(start)
+
+
+@app.get("/backends/{name}/build")
+async def backend_build_status(name: str):
+    _require_known_backend(name)
+    return _WORKER_BUILDS.status(name)
 
 
 @app.post("/backends/{name}/start", response_model=ActionResult)
@@ -1904,7 +1925,7 @@ async def backend_recreate(name: str) -> ActionResult:
             raise HTTPException(
                 409,
                 f"No local image for {name}. Expected one of: {images}. "
-                f"Connect internet and call /backends/{name}/pull first.",
+                f"Build the Worker image with /backends/{name}/build first.",
             )
         try:
             ctr = client.containers.get(spec["container"])
@@ -1922,7 +1943,7 @@ async def backend_recreate(name: str) -> ActionResult:
 
     try:
         local_image, removed = await asyncio.to_thread(_remove_existing)
-        cmd = _compose_base_cmd() + ["create", "--no-build", spec["service"]]
+        cmd = _compose_base_cmd() + ["create", "--no-build", "--pull", "never", spec["service"]]
         result = await _run(*cmd, timeout=60.0, env=_compose_env())
         ok = result.rc == 0
         msg = result.stderr or result.stdout or f"rc={result.rc}"
@@ -2039,10 +2060,10 @@ async def _ensure_backend_running(
         raise HTTPException(
             409,
             f"No local image for {name}. Expected one of: {images}. "
-            f"Connect internet and call /backends/{name}/pull first.",
+            f"Build the Worker image with /backends/{name}/build first.",
         )
 
-    cmd = _compose_base_cmd() + ["up", "-d", "--no-build", spec["service"]]
+    cmd = _compose_base_cmd() + ["up", "-d", "--no-build", "--pull", "never", spec["service"]]
     result = await _run(*cmd, timeout=60.0, env=_compose_env())
     ok = result.rc == 0
     msg = result.stderr or result.stdout or f"rc={result.rc}"
@@ -2150,4 +2171,5 @@ async def backend_status(name: str) -> BackendStatus:
         worker_compatible=worker_compatible,
         worker_message=worker_message,
         worker_readiness=worker_readiness,
+        build=_WORKER_BUILDS.status(name),
     )

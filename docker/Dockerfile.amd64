@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     nginx \
     docker.io \
     docker-compose-v2 \
+    docker-buildx \
     python3-pip \
     ros-${ROS_DISTRO}-rmw-zenoh-cpp \
     ros-${ROS_DISTRO}-rosbridge-server \

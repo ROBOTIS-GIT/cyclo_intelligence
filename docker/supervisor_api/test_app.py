@@ -84,6 +84,116 @@ def trial_model(relative):
     return str(path)
 
 
+def test_worker_build_uses_mounted_source_not_host_runtime_project(tmp_path, monkeypatch):
+    source = tmp_path / "mounted-source"
+    (source / "docker").mkdir(parents=True)
+    (source / "docker/container.sh").write_text("#!/bin/bash\n")
+    (source / ".git").mkdir()
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(source))
+    monkeypatch.setattr(app, "_host_project_dir", lambda: "/host/only/cyclo/docker")
+    assert app._worker_build_command("lerobot") == [
+        "bash", str(source / "docker/container.sh"), "build-policy", "lerobot",
+    ]
+    with pytest.raises(app.HTTPException) as exc:
+        app._worker_build_command("cyclo_intelligence")
+    assert exc.value.status_code == 404
+
+
+def test_worker_build_requires_source_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path))
+    with pytest.raises(app.HTTPException) as exc:
+        app._worker_build_command("lerobot")
+    assert exc.value.status_code == 409
+
+
+def test_worker_build_endpoint_holds_lease_until_completion(monkeypatch):
+    from supervisor_api.worker_build import WorkerBuilds
+    import time
+    builds = WorkerBuilds()
+    events = []
+    monkeypatch.setattr(app, "_WORKER_BUILDS", builds)
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: [sys.executable, "-c", "print('built')"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", lambda name: events.append("begin") or "token")
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: events.append((name, token)))
+    monkeypatch.setattr(app, "_docker_client", lambda: SimpleNamespace(images=SimpleNamespace(get=lambda tag: events.append(tag))))
+    try:
+        result = asyncio.run(app.backend_build("lerobot"))
+        assert result["state"] == "building"
+        deadline = time.monotonic() + 5
+        while builds.status("lerobot")["state"] == "building" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert builds.status("lerobot")["state"] == "succeeded"
+        assert events == ["begin", app._BACKENDS["lerobot"]["image"], ("lerobot", "token")]
+    finally:
+        builds.close()
+
+
+def test_worker_build_launch_rejection_releases_lease(monkeypatch):
+    events = []
+    def busy(*args):
+        raise RuntimeError("already building")
+    monkeypatch.setattr(app, "_WORKER_BUILDS", SimpleNamespace(start=busy))
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: ["bash", "builder"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", lambda name: "token")
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: events.append((name, token)))
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_build("groot"))
+    assert exc.value.status_code == 409
+    assert events == [("groot", "token")]
+
+
+def test_worker_build_rejected_by_runtime_never_starts(monkeypatch):
+    def denied(name):
+        raise app.HTTPException(409, "Clear the loaded model first")
+    def unexpected(*args):
+        pytest.fail("a build must not start without the maintenance reservation")
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: ["bash", "builder"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", denied)
+    monkeypatch.setattr(app, "_WORKER_BUILDS", SimpleNamespace(start=unexpected))
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_build("lerobot"))
+    assert exc.value.status_code == 409
+
+
+def test_worker_pull_is_retired_without_contacting_docker(monkeypatch):
+    def unexpected():
+        pytest.fail("Worker pull must not contact Docker")
+    monkeypatch.setattr(app, "_docker_client", unexpected)
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_pull("lerobot"))
+    assert exc.value.status_code == 410
+
+
+def test_cancelled_build_request_transfers_acquired_lease(monkeypatch):
+    import threading
+    entered, proceed, released = threading.Event(), threading.Event(), threading.Event()
+    builds = app.WorkerBuilds()
+    def acquire(name):
+        entered.set()
+        assert proceed.wait(5)
+        return "token"
+    monkeypatch.setattr(app, "_WORKER_BUILDS", builds)
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", acquire)
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: released.set())
+    monkeypatch.setattr(app, "_docker_client", lambda: SimpleNamespace(images=SimpleNamespace(get=lambda tag: None)))
+
+    async def cancel():
+        task = asyncio.create_task(app.backend_build("lerobot"))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+        assert await asyncio.to_thread(released.wait, 5)
+    try:
+        asyncio.run(cancel())
+        assert builds.status("lerobot")["state"] == "succeeded"
+    finally:
+        proceed.set()
+        builds.close()
+
+
 def test_trial_results_crud_and_persistent_model_isolation(trial_client, tmp_path):
     client = trial_client
     model = trial_model("run/checkpoints/100000")

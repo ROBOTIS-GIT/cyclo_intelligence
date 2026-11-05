@@ -34,8 +34,8 @@ else
     echo "[container.sh] Detected AMD64 architecture (x86_64)"
 fi
 
-# Optional opt-in rebuild. Default is to use the pre-built Hub image.
-# Pass `--build` (or `-b`) on any start* command to rebuild from source.
+# Cyclo uses the published image. Workers reuse local images or build from source.
+# Pass `--build` (or `-b`) on any start* command to rebuild explicitly.
 BUILD_FLAG=""
 NEW_ARGS=()
 for arg in "$@"; do
@@ -46,11 +46,11 @@ for arg in "$@"; do
 done
 set -- "${NEW_ARGS[@]}"
 
-COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
+COMPOSE=(docker compose -f "${SCRIPT_DIR}/docker-compose.yml")
 # Keep local overrides (for example, no-GPU main-container settings) on top
 # of the default source-mounted deployment.
 [ -f "${SCRIPT_DIR}/docker-compose.override.yml" ] \
-    && COMPOSE="${COMPOSE} -f ${SCRIPT_DIR}/docker-compose.override.yml"
+    && COMPOSE+=(-f "${SCRIPT_DIR}/docker-compose.override.yml")
 
 # Pre-create host bind-mount targets so docker doesn't auto-create them
 # as root-owned directories (which then can't be written to from the
@@ -133,24 +133,31 @@ prepare_host_mounts() {
 }
 
 prepare_lerobot_build_metadata() {
-    local repo="${SCRIPT_DIR}/.."
-    local lerobot="${POLICY_ROOT}/lerobot/lerobot"
+    local repo="$(canonical_path "${SCRIPT_DIR}/..")"
+    local lerobot="$(canonical_path "${POLICY_ROOT}/lerobot/lerobot")"
     local profile="${POLICY_ROOT}/lerobot/dependency_profile/dependencies.toml"
     local recorded_lerobot_commit
 
-    export CYCLO_SOURCE_COMMIT="$(git -C "$repo" rev-parse HEAD)"
-    export LEROBOT_SOURCE_COMMIT="$(git -C "$lerobot" rev-parse HEAD)"
-    recorded_lerobot_commit="$(git -C "$repo" rev-parse HEAD:cyclo_brain/policy/lerobot/lerobot)"
+    local git_cmd=(git -c "safe.directory=$repo" -c "safe.directory=$lerobot")
+    CYCLO_SOURCE_COMMIT="$("${git_cmd[@]}" -C "$repo" rev-parse HEAD)"
+    LEROBOT_SOURCE_COMMIT="$("${git_cmd[@]}" -C "$lerobot" rev-parse HEAD)"
+    export CYCLO_SOURCE_COMMIT LEROBOT_SOURCE_COMMIT
+    recorded_lerobot_commit="$("${git_cmd[@]}" -C "$repo" rev-parse HEAD:cyclo_brain/policy/lerobot/lerobot)"
     if [ "$LEROBOT_SOURCE_COMMIT" != "$recorded_lerobot_commit" ]; then
         echo "[container.sh] Error: LeRobot checkout differs from the Cyclo submodule commit" >&2
         exit 1
     fi
-    export CYCLO_PROFILE_SHA256="$(sha256sum "$profile" | cut -d ' ' -f 1)"
-    export LEROBOT_LOCK_SHA256="$(sha256sum "$lerobot/uv.lock" | cut -d ' ' -f 1)"
+    CYCLO_PROFILE_SHA256="$(sha256sum "$profile")"
+    LEROBOT_LOCK_SHA256="$(sha256sum "$lerobot/uv.lock")"
+    export CYCLO_PROFILE_SHA256="${CYCLO_PROFILE_SHA256%% *}"
+    export LEROBOT_LOCK_SHA256="${LEROBOT_LOCK_SHA256%% *}"
+    local cyclo_status lerobot_status
+    cyclo_status="$("${git_cmd[@]}" -C "$repo" status --porcelain --untracked-files=all)"
+    lerobot_status="$("${git_cmd[@]}" -C "$lerobot" status --porcelain --untracked-files=all)"
     CYCLO_SOURCE_STATE=clean
     LEROBOT_SOURCE_STATE=clean
-    [ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ] || CYCLO_SOURCE_STATE=dirty
-    [ -z "$(git -C "$lerobot" status --porcelain --untracked-files=all)" ] || LEROBOT_SOURCE_STATE=dirty
+    [ -z "$cyclo_status" ] || CYCLO_SOURCE_STATE=dirty
+    [ -z "$lerobot_status" ] || LEROBOT_SOURCE_STATE=dirty
     export CYCLO_SOURCE_STATE LEROBOT_SOURCE_STATE
 }
 
@@ -174,23 +181,23 @@ container_running() {
 
 compose_service_image() {
     local service="$1"
-    $COMPOSE config --format json 2>/dev/null \
+    "${COMPOSE[@]}" config --format json 2>/dev/null \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service"
 }
 
 policy_container_name() {
     local runtime="$1"
-    $COMPOSE config --format json 2>/dev/null \
+    "${COMPOSE[@]}" config --format json 2>/dev/null \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["container_name"])' "$runtime"
 }
 
 require_policy_runtime() {
     local runtime="$1"
-    if [ ! -f "${POLICY_ROOT}/${runtime}/manifest.yaml" ]; then
+    if [[ ! "$runtime" =~ ^[a-zA-Z0-9_-]+$ ]] || [ ! -f "${POLICY_ROOT}/${runtime}/manifest.yaml" ]; then
         echo "Error: unknown policy runtime '$runtime' (manifest not found)." >&2
         exit 1
     fi
-    if ! $COMPOSE config --format json 2>/dev/null \
+    if ! "${COMPOSE[@]}" config --format json 2>/dev/null \
         | python3 -c 'import json, sys; raise SystemExit(0 if sys.argv[1] in json.load(sys.stdin)["services"] else 1)' "$runtime"; then
         echo "Error: policy runtime '$runtime' has no Compose service." >&2
         exit 1
@@ -255,13 +262,15 @@ show_help() {
 Usage: $0 <command>
 
 Main image (cyclo_intelligence):
-  start            Build (if needed) and start cyclo_intelligence
+  start            Pull the published image and start cyclo_intelligence
   enter            Open an interactive bash in cyclo_intelligence
   logs             Tail cyclo_intelligence logs
 
 Policy containers:
   start-policy <runtime>
-                   Build + start a manifest-backed policy runtime.
+                   Reuse a local Worker image, or build if missing, then start.
+  build-policy <runtime>
+                   Build a Worker image only; never start/recreate containers.
   enter-policy <runtime>
                    Open an interactive bash in that runtime container.
   start-lerobot, start-groot, start-rldx, start-lingbot-vla, start-abot
@@ -281,10 +290,8 @@ UI development:
                    e.g. test-ui -- --watchAll=false
 
 Flags (any start* command):
-  --build, -b      Rebuild image from local Dockerfile instead of using
-                    the pre-built image pulled from Docker Hub. Default
-                    is to use the pulled image (fast, no source build
-                    required). Use this only when iterating on Dockerfile.
+  --build, -b      Rebuild from local source before starting. Workers never
+                    pull a published Worker image. Cyclo still pulls by default.
 
 Environment:
   GPU_ARCH         default | blackwell   (optional, amd64 only)
@@ -389,11 +396,42 @@ start_main() {
     else
         echo "[container.sh] Pulling pre-built image..."
         echo "[container.sh] Local Dockerfile changes are ignored without --build."
-        $COMPOSE pull --ignore-pull-failures "$MAIN_SERVICE" || true
+        "${COMPOSE[@]}" pull --ignore-pull-failures "$MAIN_SERVICE" || true
     fi
     echo "[container.sh] Starting $MAIN_SERVICE (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
-    $COMPOSE up -d $BUILD_FLAG "$MAIN_SERVICE"
+    "${COMPOSE[@]}" up -d $BUILD_FLAG "$MAIN_SERVICE"
     echo "[container.sh] Done. 'docker/container.sh status' to check s6 services."
+}
+
+build_policy() {
+    local runtime="$1"
+    require_policy_runtime "$runtime"
+    if [ -n "${CYCLO_EXPECTED_WORKER_IMAGE:-}" ] && [ "$(compose_service_image "$runtime")" != "$CYCLO_EXPECTED_WORKER_IMAGE" ]; then
+        echo "Error: Worker image configuration differs from Supervisor; reload Supervisor before building." >&2
+        return 1
+    fi
+    if [ ! -f "${POLICY_ROOT}/${runtime}/Dockerfile.${ARCH}" ]; then
+        echo "Error: no Dockerfile.${ARCH} for $runtime; this architecture is unsupported." >&2
+        return 1
+    fi
+    local repo="$(canonical_path "${SCRIPT_DIR}/..")"
+    local sources source_path
+    for source_path in "cyclo_brain/policy/$runtime" cyclo_brain/sdk/zenoh_ros2_sdk; do
+        sources="$(git -c "safe.directory=$repo" -C "$repo" submodule status --recursive -- "$source_path")"
+        if [ -z "$sources" ] || printf '%s\n' "$sources" | grep -qE '^[+U-]'; then
+            echo "Error: initialize $source_path submodules at the commits recorded by Cyclo before building." >&2
+            return 1
+        fi
+    done
+    if ! docker buildx version >/dev/null 2>&1; then
+        echo "Error: Docker Buildx is required. Update the Cyclo image or install the host Docker Buildx plugin." >&2
+        return 1
+    fi
+    if [ "$runtime" = lerobot ]; then
+        prepare_lerobot_build_metadata
+    fi
+    echo "[container.sh] Building $runtime from local source (ARCH=$ARCH)."
+    "${COMPOSE[@]}" --progress plain build "$runtime"
 }
 
 start_policy() {
@@ -403,19 +441,14 @@ start_policy() {
     container="$(policy_container_name "$runtime")"
     prepare_host_mounts
     setup_x11
-    if [ -n "$BUILD_FLAG" ]; then
-        if [ "$runtime" = lerobot ]; then
-            prepare_lerobot_build_metadata
-        fi
-        echo "[container.sh] Building $runtime from local Dockerfile; skipping pre-built image pull."
-    else
-        echo "[container.sh] Pulling pre-built images..."
-        echo "[container.sh] Local Dockerfile/s6 changes are ignored without --build."
-        $COMPOSE pull --ignore-pull-failures "$runtime" || true
+    local image
+    image="$(compose_service_image "$runtime")"
+    if [ -n "$BUILD_FLAG" ] || ! docker image inspect "$image" >/dev/null 2>&1; then
+        build_policy "$runtime"
     fi
     remove_stale_policy_container "$runtime" "$container"
     echo "[container.sh] Starting $runtime (ARCH=$ARCH${BUILD_FLAG:+, rebuild on})..."
-    $COMPOSE up -d $BUILD_FLAG "$runtime"
+    "${COMPOSE[@]}" up -d --no-build --pull never "$runtime"
 }
 
 enter_main() {
@@ -440,7 +473,7 @@ enter_policy() {
 }
 
 show_logs() {
-    $COMPOSE logs -f
+    "${COMPOSE[@]}" logs -f
 }
 
 show_status() {
@@ -510,7 +543,7 @@ stop_all() {
     read -p "Are you sure? [y/N] " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        $COMPOSE down
+        "${COMPOSE[@]}" down
     else
         echo "Cancelled."
     fi
@@ -519,6 +552,7 @@ stop_all() {
 case "${1:-help}" in
     start)           start_main ;;
     start-policy)    [ -n "${2:-}" ] || { echo "Error: runtime is required" >&2; exit 1; }; start_policy "$2" ;;
+    build-policy)    [ -n "${2:-}" ] || { echo "Error: runtime is required" >&2; exit 1; }; build_policy "$2" ;;
     start-lerobot)   start_policy lerobot ;;
     start-groot)     start_policy groot ;;
     start-rldx)      start_policy rldx ;;

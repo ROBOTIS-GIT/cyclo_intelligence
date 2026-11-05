@@ -4,10 +4,8 @@
 #   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
 #                         cyclo_data + UI + nginx + Policy Runtime. Always
 #                         started first.
-#   lerobot              policy container (PLAN §4.8) — pulled /
-#                         started on demand by the UI via
-#                         supervisor_api. May be brought up manually
-#                         for Step 4 verification.
+#   lerobot              policy container, built locally and started on demand
+#                         by the UI via supervisor_api or container.sh.
 #   groot, rldx          independent policy environments, started on demand.
 #
 # Usage: prefer the container.sh wrapper — it auto-detects ARCH from
@@ -39,6 +37,7 @@ services:
   abot:
     container_name: abot_server
     image: robotis/abot-zenoh:dev-${ARCH:-amd64}
+    pull_policy: never
     build:
       context: ..
       dockerfile: cyclo_brain/policy/abot/Dockerfile.${ARCH:-amd64}
@@ -89,6 +88,7 @@ services:
   lingbot_vla:
     container_name: lingbot_vla_server
     image: robotis/lingbot-vla-zenoh:dev-${ARCH:-amd64}
+    pull_policy: never
     build:
       context: ..
       dockerfile: cyclo_brain/policy/lingbot_vla/Dockerfile.${ARCH:-amd64}
@@ -138,6 +138,7 @@ services:
   rldx:
     container_name: rldx_server
     image: robotis/rldx-zenoh:dev-${ARCH:-amd64}
+    pull_policy: never
     build:
       context: ..
       dockerfile: cyclo_brain/policy/rldx/Dockerfile.${ARCH:-amd64}
@@ -226,6 +227,14 @@ services:
       - CYCLO_SUPERVISOR_API_PORT=${CYCLO_SUPERVISOR_API_PORT:-7100}
       - CYCLO_POLICY_ROOT=/opt/cyclo/policy
       - CYCLO_SUPERVISOR_API_COMPOSE_FILE=/opt/cyclo/docker/docker-compose.yml
+      # UI builds use the same GPU settings as host-side Worker builds.
+      - GPU_ARCH=${GPU_ARCH:-default}
+      - FLASH_ATTN_BUILD_JOBS=${FLASH_ATTN_BUILD_JOBS:-}
+      - FLASH_ATTN_NVCC_THREADS=${FLASH_ATTN_NVCC_THREADS:-}
+      - FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS:-}
+      - ABOT_FLASH_ATTN_CUDA_ARCHS=${ABOT_FLASH_ATTN_CUDA_ARCHS:-}
+      - LINGBOT_VLA_FLASH_ATTN_CUDA_ARCHS=${LINGBOT_VLA_FLASH_ATTN_CUDA_ARCHS:-}
+      - RLDX_FLASH_ATTN_CUDA_ARCHS=${RLDX_FLASH_ATTN_CUDA_ARCHS:-}
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
@@ -286,12 +295,12 @@ services:
 
   # ============================================================
   # LeRobot Engine-only policy worker.
-  # Not in depends_on — PLAN §4.8 says lerobot is pulled/started
-  # on demand.
+  # Not in depends_on: build/reuse locally and start on demand.
   # ============================================================
   lerobot:
     container_name: lerobot_server
     image: robotis/lerobot-zenoh:1.4.1-${ARCH:-arm64}
+    pull_policy: never
     build:
       context: ..
       dockerfile: cyclo_brain/policy/lerobot/Dockerfile.${ARCH:-arm64}
@@ -380,6 +389,7 @@ services:
   groot:
     container_name: groot_server
     image: robotis/groot-zenoh:1.3.5-${ARCH:-arm64}
+    pull_policy: never
     build:
       context: ..
       dockerfile: cyclo_brain/policy/groot/Dockerfile.${ARCH:-arm64}

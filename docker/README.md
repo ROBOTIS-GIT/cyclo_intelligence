@@ -20,6 +20,40 @@ these mounts. Compose intentionally runs the host checkout, not that snapshot.
 
 ## First Application
 
+### Model Worker Images
+
+Cyclo itself still uses a published image. All model Workers use local images:
+no Worker image is pulled automatically. Existing compatible images are reused;
+new installations build from this checkout and its recorded submodules.
+
+```bash
+git submodule update --init --recursive
+./docker/container.sh build-policy lerobot     # build only
+./docker/container.sh start-lerobot            # reuse, or build if missing
+./docker/container.sh start-lerobot --build    # rebuild and start
+```
+
+The same commands apply to `groot`, `abot`, `lingbot_vla`, and `rldx`, subject
+to each Worker's supported architecture. Build dependencies/base images still
+require network access. CUDA/FlashAttention settings remain Compose build inputs.
+
+In the UI, use **Build** for a missing image, or the wrench to rebuild an existing
+one. Builds run in Supervisor, survive browser navigation, and expose bounded
+logs through status polling. ON never silently builds or pulls. After a rebuild,
+use **Update Container** if shown, then ON. Builds do not start/recreate workers.
+Stop/Clear before Worker maintenance. Only one UI build runs at a time.
+
+UI builds require a full Git checkout mounted in Cyclo, Docker socket access,
+Compose V2 and Buildx. The Cyclo Dockerfiles install these tools; older Cyclo
+images need an image update before UI builds work. Host CLI builds use the host's
+Docker tools. Existing container-local Zenoh settings must be preserved before
+any container recreation.
+
+Do not edit the checkout or stop Supervisor during a build. Graceful Supervisor
+shutdown cancels its build and releases the maintenance reservation. If Supervisor
+is forcibly killed, confirm no build is running before restarting Policy Runtime
+to clear an abandoned reservation. Build logs are in memory, not an audit archive.
+
 Stop/Clear inference and saved-pose return before maintenance. Preserve any
 container-local `.bashrc` Zenoh settings: recreating a container discards them.
 

@@ -10,6 +10,16 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_workers_build_locally_and_main_has_build_tools():
+    services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
+    for name in ("lerobot", "groot", "abot", "lingbot_vla", "rldx"):
+        assert services[name]["pull_policy"] == "never"
+        assert "build" in services[name]
+    assert services["cyclo_intelligence"].get("pull_policy") != "never"
+    for arch in ("amd64", "arm64"):
+        assert "    docker-buildx \\\n" in (REPO_ROOT / f"docker/Dockerfile.{arch}").read_text()
+
+
 def test_worker_healthcheck_rejects_down_normally_up_and_status_errors():
     states = (
         ("up (pid 123) 4 seconds", "true", "0", True),

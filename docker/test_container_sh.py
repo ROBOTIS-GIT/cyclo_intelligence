@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +32,9 @@ def _write_start_stub(tmp_path):
     docker_stub.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$DOCKER_STUB_LOG\"\n"
+        "if [ \"$1 $2\" = 'image inspect' ] && [ \"$IMAGE_MISSING\" = 1 ]; then exit 1; fi\n"
+        "if [ \"$1\" = buildx ] && [ \"$BUILDX_MISSING\" = 1 ]; then exit 1; fi\n"
+        "case \" $* \" in *' build '*) exit \"${BUILD_EXIT:-0}\" ;; esac\n"
         "case \" $* \" in\n"
         "  *' config --services '*)\n"
         "    printf '%s\\n' cyclo_intelligence lerobot groot\n"
@@ -47,14 +52,24 @@ def _write_start_stub(tmp_path):
     return log_path
 
 
-def _init_lerobot_build_sources(tmp_path):
+def _init_lerobot_build_sources(tmp_path, runtime="lerobot"):
     """Provide real Git provenance without fetching the model submodule."""
-    policy = tmp_path / "cyclo_brain/policy/lerobot"
-    source = policy / "lerobot"
+    policy = tmp_path / "cyclo_brain/policy" / runtime
+    source = policy / "upstream" if runtime != "lerobot" else policy / "lerobot"
     source.mkdir()
     (source / "uv.lock").write_text("version = 1\n")
     shutil.copytree(REPO_ROOT / "cyclo_brain/policy/lerobot/dependency_profile",
                     policy / "dependency_profile")
+    for arch in ("amd64", "arm64"):
+        (policy / f"Dockerfile.{arch}").write_text("FROM scratch\n")
+    relative = source.relative_to(tmp_path).as_posix()
+    sdk = tmp_path / "cyclo_brain/sdk/zenoh_ros2_sdk"
+    sdk.mkdir(parents=True)
+    (sdk / "README.md").write_text("SDK fixture\n")
+    (tmp_path / ".gitmodules").write_text(
+        f'[submodule "upstream"]\n\tpath = {relative}\n\turl = https://example.invalid/upstream\n'
+        '[submodule "sdk"]\n\tpath = cyclo_brain/sdk/zenoh_ros2_sdk\n\turl = https://example.invalid/sdk\n'
+    )
 
     def git(root, *args):
         return subprocess.run(
@@ -63,10 +78,11 @@ def _init_lerobot_build_sources(tmp_path):
             check=True, capture_output=True, text=True,
         ).stdout.strip()
 
-    for root in (source, tmp_path):
+    for root in (source, sdk, tmp_path):
         git(root, "init", "-q")
         git(root, "add", ".")
         git(root, "commit", "-qm", "Build fixture")
+    git(tmp_path, "submodule", "init")
     return source, git
 
 
@@ -98,6 +114,82 @@ def _stub_env(tmp_path, log_path):
         "DOCKER_STUB_LOG": str(log_path),
         "CYCLO_AGENT_SOCKETS_DIR": str(tmp_path / "agent_sockets"),
     }
+
+
+def test_build_policy_does_not_start_pull_or_remove_containers(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    _init_lerobot_build_sources(tmp_path)
+    (tmp_path / "cyclo_brain/policy/lerobot/Dockerfile.amd64").write_text("FROM scratch\n")
+    (tmp_path / "cyclo_brain/policy/lerobot/Dockerfile.arm64").write_text("FROM scratch\n")
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "build-policy", "lerobot"],
+        env=_stub_env(tmp_path, log), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert any("build lerobot" in call for call in calls)
+    assert not any("pull " in call or "up -d" in call or "rm -f" in call for call in calls)
+
+
+def test_start_policy_reuses_local_image_without_pull(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "start-groot"],
+        env=_stub_env(tmp_path, log), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert not any("pull --" in call or " build groot" in call for call in calls)
+    assert any("up -d --no-build --pull never groot" in call for call in calls)
+
+
+@pytest.mark.parametrize("build_exit", [0, 7])
+def test_missing_image_builds_before_start_and_build_failure_never_starts(tmp_path, build_exit):
+    docker_dir = _copy_container_script(tmp_path)
+    _init_lerobot_build_sources(tmp_path, "groot")
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "start-groot"],
+        env={**_stub_env(tmp_path, log), "IMAGE_MISSING": "1", "BUILD_EXIT": str(build_exit)},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == build_exit, result.stderr
+    calls = log.read_text().splitlines()
+    build_index = next(i for i, call in enumerate(calls) if " build groot" in call)
+    starts = [i for i, call in enumerate(calls) if "up -d" in call]
+    assert (len(starts) == 1 and starts[0] > build_index) if build_exit == 0 else not starts
+    assert not any("pull --" in call for call in calls)
+
+
+@pytest.mark.parametrize("env, message", [
+    ({"BUILDX_MISSING": "1"}, "Buildx is required"),
+    ({"CYCLO_EXPECTED_WORKER_IMAGE": "wrong:tag"}, "configuration differs"),
+])
+def test_worker_build_preflight_failure_does_not_build(tmp_path, env, message):
+    docker_dir = _copy_container_script(tmp_path)
+    _init_lerobot_build_sources(tmp_path, "groot")
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "build-policy", "groot"],
+        env={**_stub_env(tmp_path, log), **env}, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert " build groot" not in log.read_text()
+
+
+def test_build_policy_rejects_missing_architecture_dockerfile(tmp_path):
+    docker_dir = _copy_container_script(tmp_path)
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "build-policy", "groot"],
+        env=_stub_env(tmp_path, log), capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Dockerfile" in result.stderr
+    assert not any(" build groot" in call for call in log.read_text().splitlines())
 
 
 def test_ui_commands_use_external_non_root_node_builder():
@@ -257,6 +349,7 @@ def test_start_pulls_main_image_only(tmp_path):
 
 def test_start_groot_build_skips_prebuilt_pull(tmp_path):
     docker_dir = _copy_container_script(tmp_path)
+    _init_lerobot_build_sources(tmp_path, "groot")
     log_path = _write_start_stub(tmp_path)
 
     subprocess.run(
@@ -270,7 +363,8 @@ def test_start_groot_build_skips_prebuilt_pull(tmp_path):
 
     docker_calls = log_path.read_text().splitlines()
     assert not any("pull --ignore-pull-failures groot" in call for call in docker_calls)
-    assert any("up -d --build groot" in call for call in docker_calls)
+    assert any("build groot" in call for call in docker_calls)
+    assert any("up -d --no-build --pull never groot" in call for call in docker_calls)
 
 
 def test_start_policy_uses_manifest_backed_runtime(tmp_path):
@@ -288,7 +382,7 @@ def test_start_policy_uses_manifest_backed_runtime(tmp_path):
     )
 
     assert any(
-        "up -d --build lerobot" in call
+        "up -d --no-build --pull never lerobot" in call
         for call in log_path.read_text().splitlines()
     )
 
@@ -303,7 +397,7 @@ def test_lerobot_build_rejects_a_checkout_different_from_the_parent_commit(tmp_p
         cwd=tmp_path, env=_stub_env(tmp_path, log_path), capture_output=True, text=True,
     )
     assert result.returncode != 0
-    assert "LeRobot checkout differs from the Cyclo submodule commit" in result.stderr
+    assert "submodules at the commits recorded by Cyclo" in result.stderr
     assert not any("up -d --build" in call for call in log_path.read_text().splitlines())
 
 
@@ -414,7 +508,7 @@ def test_start_lerobot_removes_stale_workspace_mount(tmp_path):
     )
 
     docker_calls = log_path.read_text().splitlines()
-    assert any(
+    assert not any(
         "pull --ignore-pull-failures lerobot" in call
         for call in docker_calls
     )
