@@ -8,11 +8,15 @@ export const SOURCE_TYPE = 'std_srvs/srv/SetBool';
 export const PRESET_TYPE = 'robotis_interfaces/srv/SetPreset';
 export const SOURCE_STALE_MS = 3000;
 
+export function supportsRobotControls(robotType) {
+  return ['f1', 'f2', 'ffw_bg2_rev4', 'ffw_sg2_rev1', 'ffw_sh5_rev1'].includes(robotType);
+}
+
 export function supportsHandPresets(robotType) {
   return robotType === 'ffw_sh5_rev1';
 }
 
-// Normal-state LED palette in ai_worker PR #143. Fault LEDs are owned by
+// Color families follow ai_worker PR #143, with softer UI tones. Fault LEDs are owned by
 // the robot manager; a UI request failure is not a hardware fault report.
 export function joystickColor(mode) {
   if (mode === 'head_control') return 'white';

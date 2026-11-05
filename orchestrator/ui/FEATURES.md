@@ -91,21 +91,25 @@ Dataset editing page.
 
 ### Robot controls
 
-The **Robot** toggle sits above **Rosbag Recorder**, inside the existing sidebar
-header space. It opens a compact floating panel without resizing the recording
-layout. Click the Source status to switch External / Teleop.
-Source and the Robot indicator use the normal-state LED colors from
-[AI Worker PR #143](https://github.com/ROBOTIS-GIT/ai_worker/pull/143):
-External is cyan (`#00ffff`), Teleop + Head is white (`#ffffff`), and
-Teleop + Base is yellow (`#ffff00`). Teleop + Base blinks yellow, as requested
-for the deployment; the popup's Base status blinks with it. Reduced-motion
-preferences retain steady yellow. Unknown state stays neutral.
-Joystick status and the Record-page Mode badge use white for Head and yellow
-for Base; change the mode with the leader. Hardware fault/red LED feedback is
-owned by the robot manager and is not inferred from UI service errors.
-Only SH5 (`ffw_sh5_rev1`) shows hand presets, and only when its service is
-available. Other robot selections show Source and Joystick status without
-preset fields; their hook does not discover or send hand-preset commands.
+The **Source** and **Joystick** buttons are always visible beside **Robot Type**.
+Click Source to switch External / Teleop; Joystick displays Head / Base and is
+changed with the leader. The separate **Presets** toggle stays above **Rosbag
+Recorder**, with only the left/right preset fields and Apply. The preset popup floats
+above the page without resizing the recording layout. It shares one control
+connection and command guard with the inline status buttons.
+
+Status controls are available for `f1`, `f2`, `ffw_bg2_rev4`, `ffw_sg2_rev1`, and
+`ffw_sh5_rev1`. Only SH5 shows Presets, when its service is available. OMX, OMY,
+and other robot selections retain the main UI without the added controls or
+their ROS subscriptions.
+
+Color families follow [AI Worker PR #143](https://github.com/ROBOTIS-GIT/ai_worker/pull/143),
+using softer UI tones: External is pale blue (`#e0f2fe`), Teleop + Head is
+near-white (`#f8fafc`), and Teleop + Base is pastel yellow (`#fef3c7`).
+Teleop + Base blinks between two soft yellow tones; reduced-motion preferences
+retain steady yellow. Unknown state stays neutral. These UI shades do not
+change the physical LEDs. Hardware fault/red LED feedback is owned by the
+robot manager and is not inferred from UI service errors.
 Choose left and/or right presets on SH5 and press Apply. Only edited hands are sent,
 so there is no separate target selector. Click outside or press Escape to close.
 Opening the panel and editing fields never send a robot command.

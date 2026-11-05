@@ -26,8 +26,8 @@ import InlineSystemStatus from '../components/InlineSystemStatus';
 import ImageGrid from '../components/ImageGrid';
 import RobotViewer3D from '../components/RobotViewer3D';
 import SegmentPanel from '../components/SegmentPanel';
-import RobotControlPanel from '../features/robotControl/RobotControlPanel';
-import { joystickColor, modeLabel } from '../features/robotControl/controlProtocol';
+import RobotControlPanel, { RobotControlProvider } from '../features/robotControl/RobotControlPanel';
+import { supportsRobotControls } from '../features/robotControl/controlProtocol';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -162,6 +162,7 @@ export default function RecordPage({ isActive = true }) {
   const classHeartbeatStatus = clsx('absolute', 'top-[4.5rem]', 'left-5', 'z-10');
 
   return (
+    <RobotControlProvider>
     <div className={classMainContainer}>
       <div className={classContentsArea}>
         <div className={classLeftArea}>
@@ -171,11 +172,11 @@ export default function RecordPage({ isActive = true }) {
                 <div className={classRobotType}>Robot Type</div>
                 <div className={classRobotTypeValue}>{robotType}</div>
               </div>
-              {joystickMode && (
+              {supportsRobotControls(robotType) ? <RobotControlPanel /> : joystickMode && (
                 <div className={classRobotTypeContainer}>
                   <div className={classRobotType}>Mode</div>
-                  <div className={`mx-0.5 px-2 py-0.5 text-sm rounded-full whitespace-nowrap border robot-mode-color is-${joystickColor(joystickMode)}`}>
-                    {modeLabel(joystickMode)}
+                  <div className={classRobotTypeValue}>
+                    {joystickMode}
                   </div>
                 </div>
               )}
@@ -227,12 +228,13 @@ export default function RecordPage({ isActive = true }) {
           </button>
           <div className={classRightPanel}>
             <div className="w-full min-h-10 flex items-center justify-end pr-6">
-              {!isRightPanelCollapsed && <RobotControlPanel />}
+              {!isRightPanelCollapsed && <RobotControlPanel section="presets" />}
             </div>
             <SegmentPanel />
           </div>
         </div>
       </div>
     </div>
+    </RobotControlProvider>
   );
 }
