@@ -32,6 +32,7 @@ Session-state boundary (REVIEW §9.3):
 
 import shutil
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -120,6 +121,8 @@ class RecordingService:
         # _session_lock just brackets the pointer reads/writes — DataManager
         # has its own internal _state_lock so we never need to nest locks.
         self._session_lock = threading.Lock()
+        # Serialize dataset deletion with recording commands, not long merges.
+        self._dataset_edit_lock = threading.Lock()
         self._finish_episode_lock = threading.Lock()
         self._finish_episode_thread: Optional[threading.Thread] = None
 
@@ -262,6 +265,24 @@ class RecordingService:
     # DataManager management
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def edit_task(self, task_dir: Path):
+        """Serialize deletion with commands and refresh the selected task."""
+        with self._dataset_edit_lock:
+            with self._session_lock:
+                dm = self._data_manager
+            if dm is None or Path(dm._save_rosbag_path).resolve() != task_dir.resolve():
+                yield
+                return
+            if dm.get_status() != 'idle' or self._finish_episode_in_progress():
+                raise RuntimeError('Stop recording and wait for saving before editing this task')
+            try:
+                yield
+            finally:
+                # A filesystem error can leave a partially edited dataset too.
+                dm.refresh_episode_position()
+                self._publish_recording_status()
+
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:
             self._robot_type = robot_type
@@ -380,6 +401,10 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _callback(self, request, response):
+        with self._dataset_edit_lock:
+            return self._dispatch_command(request, response)
+
+    def _dispatch_command(self, request, response):
         command_name = _COMMAND_NAMES.get(request.command)
         if command_name is None:
             response.success = False
