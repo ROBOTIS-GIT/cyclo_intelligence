@@ -268,7 +268,10 @@ class RecordingService:
     @contextmanager
     def edit_task(self, task_dir: Path):
         """Serialize deletion with commands and refresh the selected task."""
-        with self._dataset_edit_lock:
+        # Recording commands need free executor threads for rosbag responses.
+        if not self._dataset_edit_lock.acquire(blocking=False):
+            raise RuntimeError('Recording command or dataset edit in progress; retry shortly')
+        try:
             with self._session_lock:
                 dm = self._data_manager
             if dm is None or Path(dm._save_rosbag_path).resolve() != task_dir.resolve():
@@ -276,12 +279,16 @@ class RecordingService:
                 return
             if dm.get_status() != 'idle' or self._finish_episode_in_progress():
                 raise RuntimeError('Stop recording and wait for saving before editing this task')
+            if dm.saved_subtask_indices_for_full_episode():
+                raise RuntimeError('Finish or discard the current episode before editing this task')
             try:
                 yield
             finally:
                 # A filesystem error can leave a partially edited dataset too.
                 dm.refresh_episode_position()
                 self._publish_recording_status()
+        finally:
+            self._dataset_edit_lock.release()
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:

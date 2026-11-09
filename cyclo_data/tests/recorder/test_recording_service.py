@@ -762,3 +762,71 @@ def test_delete_resolves_alias_of_selected_task(tmp_path, monkeypatch):
 
     assert edit._callback(request, SimpleNamespace()).success
     assert published[-1].current_episode_number == 1
+
+
+def test_delete_does_not_starve_recording_command_response(tmp_path, monkeypatch):
+    edit, recording, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch)
+    command_started = Event()
+    delete_started = Event()
+    response_ready = Event()
+
+    def dispatch(*args):
+        command_started.set()
+        return response_ready.wait(2)
+
+    def delete():
+        delete_started.set()
+        return edit._callback(request, SimpleNamespace())
+
+    monkeypatch.setattr(recording, "_dispatch_command", dispatch)
+    # Model a two-thread ROS executor: command, edit, then rosbag response.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        command = pool.submit(recording._callback, None, None)
+        assert command_started.wait(5)
+        deletion = pool.submit(delete)
+        assert delete_started.wait(5)
+        response = pool.submit(response_ready.set)
+        assert command.result(timeout=5), "DELETE blocked the rosbag response"
+        response.result(timeout=5)
+        result = deletion.result(timeout=5)
+
+    assert not result.success
+    assert "retry" in result.message.lower()
+    assert len(list(Path(dm._save_rosbag_path).iterdir())) == 6
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("total,saved", [(1, 1), (2, 1), (2, 2)])
+def test_delete_preserves_segments_pending_finish(
+    tmp_path, monkeypatch, compact, total, saved,
+):
+    edit, _, dm, request, published = _episode_edit_services(
+        tmp_path, monkeypatch, segments=total,
+    )
+    root = Path(dm._save_rosbag_path)
+    for index in range(saved):
+        segment = root / "6" / "segments" / str(index)
+        segment.mkdir(parents=True)
+        (segment / "episode_info.json").write_text(json.dumps({
+            "episode_index": 6 + index,
+            "recording_mode": "subtask" if total > 1 else "single_segment",
+            "full_episode_index": 6,
+            "subtask_index": index,
+            "subtask_total": total,
+        }))
+    request.delete_episode_num = [0]
+    request.delete_compact = compact
+
+    result = edit._callback(request, SimpleNamespace())
+
+    assert not result.success
+    assert "finish or discard" in result.message.lower()
+    assert (root / "0").is_dir()
+    assert (root / "6" / "segments" / "0" / "episode_info.json").is_file()
+    assert dm.get_current_full_episode_index() == 6
+    assert dm.saved_subtask_indices_for_full_episode() == set(range(saved))
+    assert published == []
+
+    # After DISCARD_EPISODE removes the saved segments, editing is allowed.
+    dm.discard_current_full_episode()
+    assert edit._callback(request, SimpleNamespace()).success
