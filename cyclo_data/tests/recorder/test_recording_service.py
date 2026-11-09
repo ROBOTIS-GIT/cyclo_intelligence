@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 from unittest.mock import Mock
 import pytest
 from types import ModuleType, SimpleNamespace
@@ -157,8 +157,75 @@ class _Logger:
 def _service_with_logger():
     logger = _Logger()
     service = RecordingService.__new__(RecordingService)
+    service._command_lock = RLock()
     service._node = SimpleNamespace(get_logger=lambda: logger)
     return service, logger
+
+
+def test_shutdown_stops_native_writer_before_closing_local_writers_without_saving():
+    service, _ = _service_with_logger()
+    events = []
+    manager = SimpleNamespace(is_recording=lambda: True, stop_recording=Mock())
+    service._status_timer = None
+    service._session_lock = RLock()
+    service._data_manager = manager
+    service._rosbag = SimpleNamespace(shutdown=lambda: events.append('bag stopped'))
+    service._video_recorder = SimpleNamespace(close=lambda: events.append('video closed'))
+    service._camera_info = SimpleNamespace(close=lambda: events.append('camera closed'))
+    service._transcoder = None
+
+    service.shutdown()
+
+    assert events == ['bag stopped', 'video closed', 'camera closed']
+    manager.stop_recording.assert_not_called()
+    assert service._data_manager is None
+
+
+def test_shutdown_rejects_late_commands_without_starting_another_episode():
+    service, _ = _service_with_logger()
+    service._shutting_down = True
+    service._do_start = Mock()
+    request = _request(command=_RecordingCommand.Request.START, robot_type='omy_f3m')
+    request.task_info.task_num = 'late'
+    response = SimpleNamespace(success=True, message='')
+
+    service._callback(request, response)
+
+    assert response.success is False
+    assert 'shutdown' in response.message.lower()
+    service._do_start.assert_not_called()
+
+
+def test_shutdown_waits_for_inflight_command_before_stopping_writers():
+    service, _ = _service_with_logger()
+    entered, release, stopped = Event(), Event(), Event()
+    service._status_timer = None
+    service._session_lock = RLock()
+    service._data_manager = None
+    service._video_recorder = service._camera_info = service._transcoder = None
+    service._rosbag = SimpleNamespace(shutdown=stopped.set)
+
+    def start(request, response):
+        entered.set()
+        assert release.wait(2)
+        return response
+
+    service._do_start = start
+    request = _request(command=_RecordingCommand.Request.START, robot_type='omy_f3m')
+    request.task_info.task_num = 'inflight'
+    callback = Thread(target=service._callback, args=(request, SimpleNamespace()))
+    shutdown_thread = Thread(target=service.shutdown)
+    callback.start()
+    assert entered.wait(1)
+    shutdown_thread.start()
+    try:
+        assert not stopped.wait(0.1), 'must not tear down an in-flight START'
+    finally:
+        release.set()
+        callback.join(2)
+        shutdown_thread.join(2)
+    assert stopped.is_set()
+    assert not callback.is_alive() and not shutdown_thread.is_alive()
 
 
 def test_inference_save_failure_retains_ownership_and_retry_does_not_rewrite_metadata(tmp_path):

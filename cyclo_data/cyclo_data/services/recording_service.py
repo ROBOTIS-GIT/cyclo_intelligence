@@ -81,6 +81,8 @@ class RecordingService:
 
     def __init__(self, node, status_publisher):
         self._node = node
+        self._shutting_down = False
+        self._command_lock = threading.Lock()
         self._status_pub = status_publisher  # umbrella /data/status
         self._rosbag = RosbagControl(node)
 
@@ -154,23 +156,23 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._shutting_down = True
+        with self._command_lock:
+            self._shutdown()
+
+    def _shutdown(self) -> None:
         if self._status_timer is not None:
             try:
                 self._status_timer.cancel()
             except Exception:  # noqa: BLE001
                 pass
             self._status_timer = None
-        # Best-effort teardown of a live session before node destroy.
+        # Stop the remote writer while ROS is alive, then drain local writers.
+        # Shutdown preserves an interrupted episode; it is neither Save nor
+        # Discard and must not advance counters or claim an episode was saved.
+        self._rosbag.shutdown()
         with self._session_lock:
-            dm = self._data_manager
             self._data_manager = None
-        if dm is not None:
-            try:
-                if dm.is_recording():
-                    dm.stop_recording()
-            except Exception as exc:  # noqa: BLE001
-                self._node.get_logger().warning(
-                    f'DataManager stop on shutdown failed: {exc}')
         # Release persistent video/camera_info subscriptions held since
         # REFRESH_TOPICS. rclpy's node.destroy_node() would clean them
         # up anyway, but doing it explicitly lets leak audits see a
@@ -196,7 +198,6 @@ class RecordingService:
                 self._node.get_logger().warning(
                     f'TranscodeWorker.shutdown failed: {exc}')
             self._transcoder = None
-        self._rosbag.shutdown()
 
     # ------------------------------------------------------------------
     # Background episode archive
@@ -380,6 +381,14 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _callback(self, request, response):
+        with self._command_lock:
+            return self._dispatch(request, response)
+
+    def _dispatch(self, request, response):
+        if getattr(self, '_shutting_down', False):
+            response.success = False
+            response.message = 'Recording shutdown in progress'
+            return response
         command_name = _COMMAND_NAMES.get(request.command)
         if command_name is None:
             response.success = False
