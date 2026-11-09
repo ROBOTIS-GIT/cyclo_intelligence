@@ -2,6 +2,16 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-11-09)
+------------------
+* Separated robot command execution into the central Policy Runtime and model computation into manifest-discovered Worker Engines.
+* Added ABot-M0, LingBot-VLA, and RLDX inference adapters and native training entrypoints with channel selection and checkpoint metadata.
+* Added execution-context contracts, named observation mapping, action-step limits, model chunk reporting, and fail-closed action publication handling.
+* Added saved joint poses and configurable return duration, independent of model unload, alongside Slow Start and retryable hold handling.
+* Centralized LeRobot dependency profiles outside the upstream submodule and retained the Jetson-specific installation path.
+* Replaced Worker image pulls with source builds and guarded maintenance in CLI/UI. Existing image names remain local build tags, not a promise of published Worker artifacts.
+* Removed multi-task DiT from Cyclo's supported policy catalog.
+
 1.4.4 (2026-11-02)
 ------------------
 * None

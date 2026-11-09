@@ -26,6 +26,13 @@ Cyclo itself still uses a published image. All model Workers use local images:
 no Worker image is pulled automatically. Existing compatible images are reused;
 new installations build from this checkout and its recorded submodules.
 
+This includes LeRobot and GR00T. Their `robotis/*-zenoh` names in Compose are
+local build tags, not an instruction to download or publish Worker images.
+Only `robotis/cyclo-intelligence` is published by this repository's release
+workflows. CUDA/base images and model weights are still downloaded when needed.
+For the 1.4.x to 1.5.0 upgrade, follow [the release notes](../docs/releases/1.5.0.md)
+and rebuild Workers instead of assuming an old image with the same tag is compatible.
+
 ```bash
 git submodule update --init --recursive
 ./docker/container.sh build-policy lerobot     # build only

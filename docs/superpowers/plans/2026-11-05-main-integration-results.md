@@ -1,5 +1,10 @@
 # Main Integration Verification
 
+Historical report for the initial integration phase. See
+[Cyclo 1.5.0 release preparation](../../releases/1.5.0.md) for subsequent ARM,
+active-recording and final-source validation, publication policy, and remaining
+gaps. The source/commit/push statements below describe the initial phase only.
+
 ## Scope
 
 - Integration branch: `integration/main-leaderboard-20261105`.

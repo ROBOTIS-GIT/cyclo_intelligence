@@ -111,7 +111,7 @@ be released as one compatible set.
 All image builds use the repository root as context. Worker Build is a local
 operation that does not pull Worker images or change running containers; the
 main image can still be pulled by `container.sh start`. The release defaults
-are Cyclo `1.4.4` and LeRobot `1.4.2-<arch>`. UI build/test commands use an
+are Cyclo `1.5.0` and the local LeRobot build tag `1.4.2-<arch>`. UI build/test commands use an
 external Node container with the host user's UID/GID, not npm in the main
 container.
 

@@ -1,8 +1,11 @@
+import ast
+import json
 import os
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import pytest
 import yaml
@@ -11,10 +14,48 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_core_release_metadata_is_consistent():
+    packages = [
+        "cyclo_intelligence", "cyclo_data", "orchestrator", "interfaces",
+        "shared", "cyclo_data/recorder/rosbag_recorder",
+    ]
+    version = ET.parse(REPO_ROOT / "cyclo_intelligence/package.xml").findtext("version")
+    for package in packages:
+        assert ET.parse(REPO_ROOT / package / "package.xml").findtext("version") == version
+    for package in ("cyclo_data", "orchestrator", "shared"):
+        tree = ast.parse((REPO_ROOT / package / "setup.py").read_text())
+        versions = [keyword.value.value for node in ast.walk(tree)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "setup" for keyword in node.keywords
+                    if keyword.arg == "version" and isinstance(keyword.value, ast.Constant)]
+        assert versions == [version]
+    ui = REPO_ROOT / "orchestrator/ui"
+    assert json.loads((ui / "package.json").read_text())["version"] == version
+    lock = json.loads((ui / "package-lock.json").read_text())
+    assert lock["version"] == lock["packages"][""]["version"] == version
+    services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
+    assert services["cyclo_intelligence"]["image"] == f"robotis/cyclo-intelligence:{version}"
+    for package in packages + ["cyclo_brain", "orchestrator/ui"]:
+        headings = [line for line in (REPO_ROOT / package / "CHANGELOG.rst").read_text().splitlines()
+                    if line and line[0].isdigit() and " (" in line]
+        assert headings[0].startswith(f"{version} (")
+
+
+def test_release_workflows_only_publish_cyclo_core():
+    images = []
+    for path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
+        jobs = yaml.safe_load(path.read_text()).get("jobs", {})
+        for job in jobs.values():
+            if "docker-publish.yml@" in job.get("uses", ""):
+                images.append(job["with"]["image"])
+    assert images
+    assert set(images) == {"robotis/cyclo-intelligence"}
+
+
 def test_merged_compose_preserves_runtime_navigation_and_release_contracts():
     services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
     main = services["cyclo_intelligence"]
-    assert main["image"] == "robotis/cyclo-intelligence:1.4.4"
+    assert main["image"] == "robotis/cyclo-intelligence:1.5.0"
     assert services["lerobot"]["image"] == "robotis/lerobot-zenoh:1.4.2-${ARCH:-arm64}"
     for name, service in services.items():
         assert service["build"]["context"] == ".."

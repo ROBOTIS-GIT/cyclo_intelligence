@@ -2,6 +2,12 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-11-09)
+------------------
+* Shared policy catalog discovery and inference recording folder validation between consumers.
+* Packaged updated robot URDF assets for preview and pose workflows.
+* Kept robot configuration and channel ordering available to source-mounted Runtime and Worker deployments.
+
 1.4.4 (2026-11-02)
 ------------------
 * Added the leader joystick trigger topic to the F1 and F2 robot configurations.

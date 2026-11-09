@@ -2,6 +2,14 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-11-09)
+------------------
+* Reused explicitly selected inference recording folders across episodes and preserved model metadata captured at recording start.
+* Validated recording folder identity and episode numbering without overwriting incomplete recordings.
+* Kept the ROS executor alive while stopping the native recorder during graceful shutdown, then drained local video writers.
+* Serialized recording commands against shutdown and bounded the shutdown STOP acknowledgement wait without changing normal STOP behavior.
+* Preserved interrupted raw data without automatically saving, discarding, or marking an incomplete episode as finalized.
+
 1.4.4 (2026-11-02)
 ------------------
 * None
