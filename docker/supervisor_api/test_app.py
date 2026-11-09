@@ -82,6 +82,12 @@ _GROOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["groot"]
 _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
 
 
+@pytest.fixture(autouse=True)
+def isolate_navigation_ros(monkeypatch):
+    # API unit tests must not start a native ROS executor in the pytest process.
+    monkeypatch.setattr(app._navigation_module, "ensure_ros_grid_subscriber_started", lambda: None)
+
+
 @pytest.fixture
 def trial_client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
