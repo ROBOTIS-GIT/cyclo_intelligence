@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from types import ModuleType, SimpleNamespace
 import sys
+
+import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -39,6 +43,7 @@ class _RecordingStatus:
 
 
 class _DataOperationStatus:
+    OP_EDIT = 4
     IDLE = 0
     RUNNING = 1
     COMPLETED = 2
@@ -72,12 +77,18 @@ class _Dummy:
         pass
 
 
+class _EditDataset:
+    class Request:
+        MERGE = 0
+        DELETE = 1
+
+
 _stub_module(
     "interfaces.msg",
     DataOperationStatus=_DataOperationStatus,
     RecordingStatus=_RecordingStatus,
 )
-_stub_module("interfaces.srv", RecordingCommand=_RecordingCommand)
+_stub_module("interfaces.srv", RecordingCommand=_RecordingCommand, EditDataset=_EditDataset)
 _stub_module("cyclo_data.recorder.camera_info_snapshot", CameraInfoSnapshot=_Dummy)
 _stub_module("cyclo_data.recorder.rosbag_control", RosbagControl=_Dummy)
 _stub_module("cyclo_data.recorder.transcoder", TranscodeWorker=_Dummy)
@@ -93,6 +104,7 @@ _stub_module("psutil", cpu_percent=lambda interval=None: 0.0)
 
 import cyclo_data.services.recording_service as recording_service_module  # noqa: E402
 from cyclo_data.services.recording_service import RecordingService  # noqa: E402
+from cyclo_data.services.edit_service import EditService  # noqa: E402
 
 for _module_name in (
     "cyclo_data.recorder.camera_info_snapshot",
@@ -544,3 +556,277 @@ def test_cancel_segment_rejects_when_no_active_recording():
     assert result is response
     assert response.success is False
     assert response.message == "CANCEL_SEGMENT: no active recording"
+
+
+def _episode_edit_services(tmp_path, monkeypatch, *, segments=1):
+    """Exercise the real delete callback, filesystem scan, and status payload."""
+    from cyclo_data.recorder.session_manager import DataManager
+    from cyclo_data.recorder import session_manager
+
+    root = tmp_path / "task"
+    root.mkdir()
+    for index in range(6):
+        episode = root / str(index)
+        episode.mkdir()
+        (episode / "episode_info.json").write_text(json.dumps({
+            "episode_index": index,
+            **({"segments": [{"segment_index": i} for i in range(segments)]}
+               if segments else {}),
+        }))
+        (episode / f"{index}_0.mcap").write_bytes(b"test")
+        (episode / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
+
+    dm = DataManager.__new__(DataManager)
+    dm._save_rosbag_path = str(root)
+    dm._state_lock = RLock()
+    dm._status = "idle"
+    dm._start_time_s = 0
+    dm._record_episode_count = 6
+    dm._current_full_episode_index = 6
+    dm._current_subtask_index = 0
+    dm._current_scenario_number = 0
+    dm._segmented_storage_mode = True
+    dm._single_task = segments <= 1
+    dm._subtask_mode = segments > 1
+    dm._physical_segment_total = max(1, segments)
+    dm._subtask_total = segments if segments > 1 else 0
+    dm._subtask_instructions = [f"segment {i}" for i in range(dm._subtask_total)]
+    dm._saved_subtasks_cache = {i: set(range(segments)) for i in range(6)}
+    dm._robot_type = "test"
+    dm._task_info = SimpleNamespace()
+    dm.current_instruction = "test"
+    dm._main_task_instruction = "test"
+    dm._cpu_checker = SimpleNamespace(get_cpu_usage=lambda: 0)
+    monkeypatch.setattr(session_manager.RAMChecker, "get_ram_gb", lambda: (1, 0))
+    monkeypatch.setattr(session_manager.StorageChecker, "get_storage_gb", lambda _: (1, 0))
+
+    recording, logger = _service_with_logger()
+    recording._session_lock = RLock()
+    recording._dataset_edit_lock = RLock()
+    recording._data_manager = dm
+    recording._finish_episode_in_progress = lambda: False
+    published = []
+    recording._publish_recording_status = lambda: published.append(dm.get_current_record_status())
+    group = object()
+    registrations = []
+    node = SimpleNamespace(
+        io_callback_group=group,
+        get_logger=lambda: logger,
+        create_service=lambda *args, **kwargs: registrations.append(kwargs),
+    )
+    edit = EditService(node, SimpleNamespace(publish=lambda _: None), recording)
+    assert registrations[0]["callback_group"] is group
+    request = SimpleNamespace(
+        mode=_EditDataset.Request.DELETE,
+        delete_task_dir=str(root),
+        delete_episode_num=[1, 2, 3, 4, 5],
+        delete_compact=True,
+    )
+    return edit, recording, dm, request, published
+
+
+@pytest.mark.parametrize("segments", [0, 1, 2])
+@pytest.mark.parametrize("indices,compact,expected", [
+    ([1, 2, 3, 4, 5], True, 1),
+    ([0, 1, 2, 3, 4, 5], True, 0),
+    ([1, 3], True, 4),
+    ([1, 3], False, 6),
+    ([5], False, 5),
+])
+def test_delete_updates_record_status_and_next_recording(
+    tmp_path, monkeypatch, segments, indices, compact, expected,
+):
+    edit, _, dm, request, published = _episode_edit_services(
+        tmp_path, monkeypatch, segments=segments,
+    )
+    request.delete_episode_num = indices
+    request.delete_compact = compact
+
+    response = edit._callback(request, SimpleNamespace())
+
+    assert response.success, response.message
+    assert response.affected_count == len(indices)
+    assert published[-1].current_episode_number == expected
+    assert published[-1].current_subtask_index == 0
+    assert dm.get_current_full_episode_index() == expected
+    assert dm._record_episode_count == expected
+    assert expected not in dm._saved_subtasks_cache
+    dm.start_recording()
+    assert dm.get_current_record_status().current_episode_number == expected
+    assert not (Path(dm._save_rosbag_path) / str(expected)).exists()
+
+
+@pytest.mark.parametrize("busy", ["recording", "save", "archive"])
+def test_delete_rejects_busy_selected_task_before_changing_files(tmp_path, monkeypatch, busy):
+    edit, recording, dm, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    if busy == "archive":
+        recording._finish_episode_in_progress = lambda: True
+    else:
+        dm._status = busy
+
+    response = edit._callback(request, SimpleNamespace())
+
+    assert not response.success
+    assert "wait for saving" in response.message
+    assert len(list(Path(dm._save_rosbag_path).iterdir())) == 6
+    assert dm._current_full_episode_index == 6
+    assert published == []
+
+
+def test_delete_other_task_leaves_recording_session_untouched(tmp_path, monkeypatch):
+    edit, _, dm, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    other = tmp_path / "other"
+    (other / "0").mkdir(parents=True)
+    (other / "0" / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
+    (other / "0" / "0_0.mcap").write_bytes(b"test")
+    request.delete_task_dir = str(other)
+    request.delete_episode_num = [0]
+    dm._status = "recording"
+
+    response = edit._callback(request, SimpleNamespace())
+
+    assert response.success
+    assert list(other.iterdir()) == []
+    assert dm._current_full_episode_index == 6
+    assert published == []
+
+
+def test_delete_refreshes_cursor_after_partial_filesystem_failure(tmp_path, monkeypatch):
+    edit, _, dm, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    delete = edit._editor.delete_rosbag_episodes
+
+    def partial_delete(*args, **kwargs):
+        delete(*args, **kwargs)
+        raise OSError("simulated filesystem failure")
+
+    monkeypatch.setattr(edit._editor, "delete_rosbag_episodes", partial_delete)
+    response = edit._callback(request, SimpleNamespace())
+
+    assert not response.success
+    assert "simulated filesystem failure" in response.message
+    assert published[-1].current_episode_number == 1
+    assert dm._current_full_episode_index == 1
+
+
+def test_delete_without_recording_session(tmp_path, monkeypatch):
+    edit, recording, _, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    recording._data_manager = None
+
+    response = edit._callback(request, SimpleNamespace())
+
+    assert response.success
+    assert published == []
+
+
+def test_recording_command_waits_for_delete_and_cursor_refresh(tmp_path, monkeypatch):
+    edit, recording, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch)
+    deleting = Event()
+    release = Event()
+    command_called = Event()
+    dispatched = Event()
+    delete = edit._editor.delete_rosbag_episodes
+
+    def slow_delete(*args, **kwargs):
+        deleting.set()
+        assert release.wait(5)
+        return delete(*args, **kwargs)
+
+    def dispatch(*args):
+        dispatched.set()
+        return dm.get_current_full_episode_index()
+
+    def command():
+        command_called.set()
+        return recording._callback(None, None)
+
+    monkeypatch.setattr(edit._editor, "delete_rosbag_episodes", slow_delete)
+    monkeypatch.setattr(recording, "_dispatch_command", dispatch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        deletion = pool.submit(edit._callback, request, SimpleNamespace())
+        try:
+            assert deleting.wait(5)
+            pending_command = pool.submit(command)
+            assert command_called.wait(5)
+            assert not dispatched.wait(0.05)
+        finally:
+            release.set()
+        assert deletion.result(timeout=5).success
+        assert pending_command.result(timeout=5) == 1
+
+
+def test_delete_resolves_alias_of_selected_task(tmp_path, monkeypatch):
+    edit, _, dm, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    alias = tmp_path / "alias"
+    alias.symlink_to(dm._save_rosbag_path, target_is_directory=True)
+    request.delete_task_dir = str(alias)
+
+    assert edit._callback(request, SimpleNamespace()).success
+    assert published[-1].current_episode_number == 1
+
+
+def test_delete_does_not_starve_recording_command_response(tmp_path, monkeypatch):
+    edit, recording, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch)
+    command_started = Event()
+    delete_started = Event()
+    response_ready = Event()
+
+    def dispatch(*args):
+        command_started.set()
+        return response_ready.wait(2)
+
+    def delete():
+        delete_started.set()
+        return edit._callback(request, SimpleNamespace())
+
+    monkeypatch.setattr(recording, "_dispatch_command", dispatch)
+    # Model a two-thread ROS executor: command, edit, then rosbag response.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        command = pool.submit(recording._callback, None, None)
+        assert command_started.wait(5)
+        deletion = pool.submit(delete)
+        assert delete_started.wait(5)
+        response = pool.submit(response_ready.set)
+        assert command.result(timeout=5), "DELETE blocked the rosbag response"
+        response.result(timeout=5)
+        result = deletion.result(timeout=5)
+
+    assert not result.success
+    assert "retry" in result.message.lower()
+    assert len(list(Path(dm._save_rosbag_path).iterdir())) == 6
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("total,saved", [(1, 1), (2, 1), (2, 2)])
+def test_delete_preserves_segments_pending_finish(
+    tmp_path, monkeypatch, compact, total, saved,
+):
+    edit, _, dm, request, published = _episode_edit_services(
+        tmp_path, monkeypatch, segments=total,
+    )
+    root = Path(dm._save_rosbag_path)
+    for index in range(saved):
+        segment = root / "6" / "segments" / str(index)
+        segment.mkdir(parents=True)
+        (segment / "episode_info.json").write_text(json.dumps({
+            "episode_index": 6 + index,
+            "recording_mode": "subtask" if total > 1 else "single_segment",
+            "full_episode_index": 6,
+            "subtask_index": index,
+            "subtask_total": total,
+        }))
+    request.delete_episode_num = [0]
+    request.delete_compact = compact
+
+    result = edit._callback(request, SimpleNamespace())
+
+    assert not result.success
+    assert "finish or discard" in result.message.lower()
+    assert (root / "0").is_dir()
+    assert (root / "6" / "segments" / "0" / "episode_info.json").is_file()
+    assert dm.get_current_full_episode_index() == 6
+    assert dm.saved_subtask_indices_for_full_episode() == set(range(saved))
+    assert published == []
+
+    # After DISCARD_EPISODE removes the saved segments, editing is allowed.
+    dm.discard_current_full_episode()
+    assert edit._callback(request, SimpleNamespace()).success

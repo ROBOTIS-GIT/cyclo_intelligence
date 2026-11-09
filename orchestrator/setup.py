@@ -51,7 +51,7 @@ packages = [
 ]
 setup(
     name=package_name,
-    version='1.4.4',
+    version='1.4.5',
     packages=packages,
     # Nested layout convention (D17): root namespace '' maps to current
     # directory. Avoids colcon-core's _symlinks_in_build veto on
