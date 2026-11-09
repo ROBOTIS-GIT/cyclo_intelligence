@@ -2,6 +2,10 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.5 (2026-11-09)
+------------------
+* None
+
 1.4.4 (2026-11-02)
 ------------------
 * Added the leader joystick trigger topic to the F1 and F2 robot configurations.

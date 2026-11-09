@@ -2,6 +2,15 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.4.5 (2026-11-09)
+------------------
+* Fixed stale recording episode numbers after dataset deletion by rescanning the selected task and immediately publishing the updated recording status.
+* Serialized episode deletion with recording commands and blocked deletion of the selected task while recording, saving, or archiving.
+* Kept ROS response callbacks available during concurrent requests and protected saved segments awaiting episode finish or discard.
+* Added regression coverage for compaction, deletion without renumbering, empty tasks, partial failures, and concurrent recording requests.
+* Updated Cyclo release metadata and the default image tag to ``robotis/cyclo-intelligence:1.4.5``; dataset format versions and LeRobot/GR00T image versions are unchanged.
+* Contributors: Seungwoo Lim, Taehyeong Kim
+
 1.4.4 (2026-11-02)
 ------------------
 * Added the leader joystick trigger topic to the F1 and F2 robot configurations.
