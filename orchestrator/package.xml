@@ -26,6 +26,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>web_video_server</exec_depend>
   <exec_depend>rosbridge_suite</exec_depend>
+  <exec_depend>rosapi</exec_depend>
   <exec_depend>image_transport_plugins</exec_depend>
   <!-- The data_processing tests exercise cyclo_data converters. -->
   <test_depend>rosbag2_py</test_depend>

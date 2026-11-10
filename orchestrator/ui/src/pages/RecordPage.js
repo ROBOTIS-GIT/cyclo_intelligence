@@ -26,6 +26,8 @@ import InlineSystemStatus from '../components/InlineSystemStatus';
 import ImageGrid from '../components/ImageGrid';
 import RobotViewer3D from '../components/RobotViewer3D';
 import SegmentPanel from '../components/SegmentPanel';
+import RobotControlPanel, { RobotControlProvider } from '../features/robotControl/RobotControlPanel';
+import { supportsRobotControls } from '../features/robotControl/controlProtocol';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -160,6 +162,7 @@ export default function RecordPage({ isActive = true }) {
   const classHeartbeatStatus = clsx('absolute', 'top-[4.5rem]', 'left-5', 'z-10');
 
   return (
+    <RobotControlProvider>
     <div className={classMainContainer}>
       <div className={classContentsArea}>
         <div className={classLeftArea}>
@@ -169,7 +172,7 @@ export default function RecordPage({ isActive = true }) {
                 <div className={classRobotType}>Robot Type</div>
                 <div className={classRobotTypeValue}>{robotType}</div>
               </div>
-              {joystickMode && (
+              {supportsRobotControls(robotType) ? <RobotControlPanel /> : joystickMode && (
                 <div className={classRobotTypeContainer}>
                   <div className={classRobotType}>Mode</div>
                   <div className={classRobotTypeValue}>
@@ -224,11 +227,14 @@ export default function RecordPage({ isActive = true }) {
             </span>
           </button>
           <div className={classRightPanel}>
-            <div className="w-full min-h-10"></div>
+            <div className="w-full min-h-10 flex items-center justify-end pr-6">
+              {!isRightPanelCollapsed && <RobotControlPanel section="presets" />}
+            </div>
             <SegmentPanel />
           </div>
         </div>
       </div>
     </div>
+    </RobotControlProvider>
   );
 }

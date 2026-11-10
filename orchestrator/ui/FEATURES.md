@@ -89,6 +89,73 @@ Dataset editing page.
 
 ## Components
 
+### Robot controls
+
+The **Source** and **Joystick** buttons are always visible beside **Robot Type**.
+Click Source to switch External / Teleop; Joystick displays Head / Base and is
+changed with the leader. The separate **Presets** toggle stays above **Rosbag
+Recorder**, with only the left/right preset fields and Apply. The preset popup floats
+above the page without resizing the recording layout. It shares one control
+connection and command guard with the inline status buttons.
+
+Status controls are available for `f1`, `f2`, `ffw_bg2_rev4`, `ffw_sg2_rev1`, and
+`ffw_sh5_rev1`. Only SH5 shows Presets, when its service is available. OMX, OMY,
+and other robot selections retain the main UI without the added controls or
+their ROS subscriptions.
+
+Color families follow [AI Worker PR #143](https://github.com/ROBOTIS-GIT/ai_worker/pull/143),
+using softer UI tones: External is pale blue (`#e0f2fe`), Teleop + Head is
+near-white (`#f8fafc`), and Teleop + Base is pastel yellow (`#fef3c7`).
+Teleop + Base blinks between two soft yellow tones; reduced-motion preferences
+retain steady yellow. Unknown state stays neutral. These UI shades do not
+change the physical LEDs. Hardware fault/red LED feedback is owned by the
+robot manager and is not inferred from UI service errors.
+Choose left and/or right presets on SH5 and press Apply. Only edited hands are sent,
+so there is no separate target selector. Click outside or press Escape to close.
+Opening the panel and editing fields never send a robot command.
+
+| Function | Existing AI Worker interface | Behavior |
+|---------|-----------------------------|----------|
+| Source status | `/source`, `std_msgs/msg/String` | `teleop` → Teleop; `model_action` or `external` → External. Missing/unknown or more than 3 seconds without a heartbeat → Unknown. |
+| Source selection | `/set_source`, `std_srvs/srv/SetBool` | `true` requests Teleop; `false` requests External. Completion requires a new matching source report, not just an accepted response. Does not enable arms. |
+| Joystick mode | `/get_robot_info` → `joystick_mode_topic`, `std_msgs/msg/String` (SH5: `/reference/joystick/mode`) | `head_control` → Head; `swerve` → Base; legacy `arm_control` → Arm. Display only; there is no mode-switch service in the supported leader. |
+| SH5 hand preset selection | `/hand_preset_controller/set_preset`, `robotis_interfaces/srv/SetPreset` | Select left/right/both hands and IDs, then Apply. Defaults offer 1 (Envelope), 2 (Pinch), 3 (Three-finger); custom IDs 1–65535 are supported. The robot validates configured IDs. |
+
+`orchestrator_bringup.launch.py` also starts `rosapi` so the UI can discover
+services by type without probing a motion service. Custom bringups must launch
+`rosapi/rosapi_node` as `rosapi` alongside rosbridge. The rosbridge environment
+must contain the matching `robotis_interfaces/srv/SetPreset` definition to call
+the optional preset service. No AI Worker code changes are required.
+
+**Status limits:** legacy leaders publish joystick mode only on change. It starts
+as Waiting in the popup; switch it with a short simultaneous leader-button press
+to obtain a report. The popup checks the configured topic and its publisher every 5 seconds.
+An empty configuration is not replaced by a guessed topic. When it disappears,
+the popup clears the previous mode and displays Offline.
+AI Worker PR #143 adds an initial mode report and transient-local retention;
+late-join delivery also depends on the deployed rosbridge QoS. With a legacy
+volatile publisher, refreshing cannot recover an event sent before subscription;
+no initial mode is inferred and no mode command is sent. Runtime deployments must
+install the updated SH5 YAML and reload the orchestrator robot configuration.
+Hand preset selection has no current-state/completion topic: the UI shows only
+the last selection accepted in this browser connection, not the physical hand
+state. `/control/status` preset IDs refer to a different controller and are not
+used as hand-preset feedback. External changes are not inferred. Source handoffs
+can clear arm activation; the user enables the desired arms with the leader.
+
+All status and accepted selections reset when the ROS connection or selected
+robot changes. Requests have timeouts, cannot overlap, are never automatically
+retried, and are not sent while disconnected. Check the robot after an uncertain
+timeout before retrying.
+
+Validation: run `CI=true npm test -- --watchAll=false --runInBand
+--testPathPattern=robotControl` and `npm run build` in `orchestrator/ui`.
+For a connected UI check, verify source changes from the leader, a Head/Base
+report after a short simultaneous press, Leader unavailable after stopping the
+leader, and cleared status after disconnecting. With
+the robot in a safe test configuration, verify explicit source selection and
+hand preset requests; unsupported robots must keep these controls unavailable.
+
 ### Image & Camera
 | Component | File | Description |
 |-----------|------|-------------|
