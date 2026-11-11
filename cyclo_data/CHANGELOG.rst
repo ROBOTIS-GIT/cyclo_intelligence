@@ -2,13 +2,27 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-09)
+1.5.0 (2026-11-11)
 ------------------
 * Reused explicitly selected inference recording folders across episodes and preserved model metadata captured at recording start.
 * Validated recording folder identity and episode numbering without overwriting incomplete recordings.
 * Kept the ROS executor alive while stopping the native recorder during graceful shutdown, then drained local video writers.
 * Serialized recording commands against shutdown and bounded the shutdown STOP acknowledgement wait without changing normal STOP behavior.
 * Preserved interrupted raw data without automatically saving, discarding, or marking an incomplete episode as finalized.
+* Integrated 1.4.5 episode-number refresh with the shared recording-command and shutdown lock.
+* Rejected task deletion during active recording or archiving so unrelated edits cannot delay recording STOP.
+* Protected task deletion and renumbering against queued or running background video conversion, including tasks without an active recording session.
+* Kept interrupted inference episodes reserved when refreshing recording positions after deletion.
+* Contributors: Seungwoo Lim, Taehyeong Kim
+
+1.4.5 (2026-11-09)
+------------------
+* Reconciled the active recording session's episode and subtask positions with saved folders after episode deletion, including compacted and non-compacted datasets.
+* Immediately published the refreshed recording status so the UI and the next recording use the updated episode number.
+* Serialized deletion with recording commands and rejected deletion of a busy selected task while allowing edits to other task folders.
+* Rejected contending edits without blocking ROS response callbacks, and required pending saved segments to be finished or discarded before editing the selected task.
+* Refreshed session positions after partial deletion failures and added regression tests for deletion, path aliases, and concurrent commands.
+* Contributors: Seungwoo Lim, Taehyeong Kim
 
 1.4.4 (2026-11-02)
 ------------------

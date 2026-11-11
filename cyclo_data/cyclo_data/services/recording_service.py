@@ -32,6 +32,7 @@ Session-state boundary (REVIEW §9.3):
 
 import shutil
 import threading
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -262,6 +263,35 @@ class RecordingService:
     # ------------------------------------------------------------------
     # DataManager management
     # ------------------------------------------------------------------
+
+    @contextmanager
+    def edit_task(self, task_dir: Path):
+        """Allow idle deletion without racing commands or video conversion."""
+        # Recording commands need free executor threads for rosbag responses.
+        if not self._command_lock.acquire(blocking=False):
+            raise RuntimeError('Recording command or dataset edit in progress; retry shortly')
+        try:
+            if self._shutting_down:
+                raise RuntimeError('Recording shutdown in progress')
+            with self._session_lock:
+                dm = self._data_manager
+            # Even unrelated deletion must not hold up STOP of a live recording.
+            if (dm is not None and dm.get_status() != 'idle') or self._finish_episode_in_progress():
+                raise RuntimeError('Stop recording and wait for saving before editing this task')
+            selected = dm is not None and Path(dm._save_rosbag_path).resolve() == task_dir.resolve()
+            if selected and dm.saved_subtask_indices_for_full_episode():
+                raise RuntimeError('Finish or discard the current episode before editing this task')
+            worker = self._transcoder
+            with worker.edit_task(task_dir) if worker is not None else nullcontext():
+                try:
+                    yield
+                finally:
+                    if selected:
+                        # A filesystem error can leave a partially edited dataset too.
+                        dm.refresh_episode_position()
+                        self._publish_recording_status()
+        finally:
+            self._command_lock.release()
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:

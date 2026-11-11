@@ -33,6 +33,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 import pyarrow as pa
@@ -59,6 +61,67 @@ from cyclo_data.recorder.transcoder import (  # noqa: E402
     _patch_status,
 )
 import cyclo_data.recorder.transcoder as transcoder_module  # noqa: E402
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_task_edit_rejects_queued_and_running_transcodes(tmp_path, running):
+    worker = TranscodeWorker()
+    task = tmp_path / "task"
+    task.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(task, target_is_directory=True)
+    future = Future()
+    if running:
+        future.set_running_or_notify_cancel()
+    worker._inflight[str(task / "0")] = future
+    with pytest.raises(RuntimeError, match="Wait for video transcoding"):
+        with worker.edit_task(alias):
+            pytest.fail("An active transcode must prevent renumbering")
+    with worker.edit_task(tmp_path / "task_other"):
+        pass
+    future.set_result(None)
+    with worker.edit_task(task):
+        pass
+
+
+def test_task_edit_does_not_block_on_transcode_scheduler(tmp_path):
+    worker = TranscodeWorker()
+    with worker._lock:
+        with pytest.raises(RuntimeError, match="scheduling in progress"):
+            with worker.edit_task(tmp_path):
+                pytest.fail("Edit should fail immediately")
+
+
+def test_transcode_submit_cannot_touch_files_during_task_edit(tmp_path, monkeypatch):
+    worker = TranscodeWorker()
+    cleaned = Event()
+    submitted = Event()
+    pending = Future()
+    monkeypatch.setattr(worker, "_cleanup_orphan_tmps", lambda _: cleaned.set())
+    monkeypatch.setattr(worker, "_ensure_pool", lambda: None)
+    from types import SimpleNamespace
+    worker._pool = SimpleNamespace(submit=lambda *args: pending)
+
+    def submit():
+        submitted.set()
+        return worker.submit(tmp_path / "0")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with worker.edit_task(tmp_path):
+            call = pool.submit(submit)
+            assert submitted.wait(2)
+            assert not cleaned.wait(0.05)
+        assert call.result(timeout=2) is pending
+        assert cleaned.is_set()
+
+
+def test_duplicate_submit_does_not_clean_active_transcode_files(tmp_path, monkeypatch):
+    worker = TranscodeWorker()
+    pending = Future()
+    episode = tmp_path / "0"
+    worker._inflight[str(episode)] = pending
+    monkeypatch.setattr(worker, "_cleanup_orphan_tmps", lambda _: pytest.fail("Active files must be untouched"))
+    assert worker.submit(episode) is pending
 
 
 # ----------------------------------------------------------------------

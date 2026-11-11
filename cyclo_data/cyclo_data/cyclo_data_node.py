@@ -55,7 +55,7 @@ class CycloDataNode(Node):
         self._recording = RecordingService(self, self._status_publisher)
         self._conversion = ConversionService(self, self._status_publisher)
         self._hub = HubService(self, self._status_publisher)
-        self._edit = EditService(self, self._status_publisher)
+        self._edit = EditService(self, self._status_publisher, self._recording)
 
         # Resume any background transcodes that were interrupted by the
         # previous service exit. Done after services are advertised so a

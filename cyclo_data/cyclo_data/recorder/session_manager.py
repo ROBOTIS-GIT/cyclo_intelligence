@@ -1367,6 +1367,30 @@ class DataManager:
 
         return video_segments, warnings
 
+    def refresh_episode_position(self):
+        """Reconcile an idle session with episode folders after dataset edits."""
+        with self._state_lock:
+            if self._status != 'idle':
+                raise RuntimeError('Stop recording before editing this task')
+            self._episode_info_scan_cache = self._collect_episode_info_entries()
+            try:
+                self._record_episode_count = self._find_next_episode_number()
+                if getattr(self._task_info, 'task_type', '') == 'inference':
+                    # Match session startup: interrupted inference stays untouched.
+                    self._current_full_episode_index = self._record_episode_count
+                    self._current_subtask_index = 0
+                    self._saved_subtasks_cache = {}
+                else:
+                    (
+                        self._current_full_episode_index,
+                        self._current_subtask_index,
+                    ) = self._find_next_subtask_position()
+                if self._single_task:
+                    self._record_episode_count = self._current_full_episode_index
+                self._current_scenario_number = self._current_subtask_index
+            finally:
+                self._episode_info_scan_cache = None
+
     def update_task_info(self, task_info):
         """Refresh per-session config from a new task_info.
 

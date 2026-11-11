@@ -35,9 +35,10 @@ _MODE_NAMES = {
 class EditService:
     SERVICE_NAME = '/data/edit'
 
-    def __init__(self, node, status_publisher):
+    def __init__(self, node, status_publisher, recording_service):
         self._node = node
         self._status_pub = status_publisher
+        self._recording = recording_service
         self._editor = DataEditor()
         self._server = node.create_service(
             EditDataset,
@@ -74,11 +75,13 @@ class EditService:
                 )
 
             elif request.mode == EditDataset.Request.DELETE:
-                result = self._editor.delete_rosbag_episodes(
-                    Path(request.delete_task_dir),
-                    [int(i) for i in request.delete_episode_num],
-                    compact=bool(request.delete_compact),
-                )
+                task_dir = Path(request.delete_task_dir)
+                with self._recording.edit_task(task_dir):
+                    result = self._editor.delete_rosbag_episodes(
+                        task_dir,
+                        [int(i) for i in request.delete_episode_num],
+                        compact=bool(request.delete_compact),
+                    )
                 response.success = True
                 response.affected_count = int(result.deleted_count)
                 response.message = (

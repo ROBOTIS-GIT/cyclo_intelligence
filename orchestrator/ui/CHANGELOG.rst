@@ -2,7 +2,7 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-09)
+1.5.0 (2026-11-11)
 ------------------
 * Added manifest-driven model selection with LeRobot first, Worker build progress, and explicit container update controls.
 * Added Action Steps selection and observed chunk limits, Slow Start, and saved-pose Save/Return/Stop controls with configurable duration.
@@ -10,6 +10,10 @@ Changelog for package cyclo-ui
 * Stored trial results in the selected model's evaluation_manifest.json, using sequential trial IDs without upload state or evaluation UUID generation.
 * Added Hugging Face model paths for native Worker integrations and retained topic-owned runtime and pose state.
 * Documented outstanding inference toolbar clipping and narrow-screen overflow; automated UI tests do not constitute a responsive-layout pass.
+
+1.4.5 (2026-11-09)
+------------------
+* None
 
 1.4.4 (2026-11-02)
 ------------------

@@ -2,12 +2,16 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-09)
+1.5.0 (2026-11-11)
 ------------------
 * Added Worker Engine description, status, execution-context, and context-update fields for the central Runtime protocol.
 * Added policy identity, action-step selection and observed chunk size to inference command/status contracts.
 * Added RobotPoseCommand and explicit inference recording folder selection.
 * Rebuild interfaces and update all communicating Runtime, Worker, SDK, and UI consumers together; wire definitions differ from 1.4.x.
+
+1.4.5 (2026-11-09)
+------------------
+* None
 
 1.4.4 (2026-11-02)
 ------------------

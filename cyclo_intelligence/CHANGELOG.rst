@@ -2,7 +2,7 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-09)
+1.5.0 (2026-11-11)
 ------------------
 * Added a central Policy Runtime with manifest-discovered Workers and ABot-M0, LingBot-VLA, and RLDX integrations.
 * Added explicit action-step selection, saved initial poses, inference recording folder reuse, and per-model evaluation manifests.
@@ -11,6 +11,18 @@ Changelog for package cyclo_intelligence
 * Preserved interrupted recording data and waited for recorder STOP acknowledgement before closing ROS during graceful shutdown, with a bounded wait and warnings on failure.
 * Updated Cyclo packages, UI, and the default core image tag to 1.5.0. Rebuild generated interfaces and compatible Worker images together; older service-interface images are not a supported mixed deployment.
 * See docs/releases/1.5.0.md for upgrade instructions, validation scope, and outstanding ARM/UI issues.
+* Integrated main's 1.4.5 fixes and Discord release notifications while preserving the published changelog history.
+* Protected episode deletion against background video conversion and prevented unrelated deletion from delaying recording STOP.
+* Contributors: Seungwoo Lim, Taehyeong Kim
+
+1.4.5 (2026-11-09)
+------------------
+* Fixed stale recording episode numbers after dataset deletion by rescanning the selected task and immediately publishing the updated recording status.
+* Serialized episode deletion with recording commands and blocked deletion of the selected task while recording, saving, or archiving.
+* Kept ROS response callbacks available during concurrent requests and protected saved segments awaiting episode finish or discard.
+* Added regression coverage for compaction, deletion without renumbering, empty tasks, partial failures, and concurrent recording requests.
+* Updated Cyclo release metadata and the default image tag to ``robotis/cyclo-intelligence:1.4.5``; dataset format versions and LeRobot/GR00T image versions are unchanged.
+* Contributors: Seungwoo Lim, Taehyeong Kim
 
 1.4.4 (2026-11-02)
 ------------------
