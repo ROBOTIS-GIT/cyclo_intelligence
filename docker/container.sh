@@ -417,9 +417,12 @@ build_policy() {
     local repo="$(canonical_path "${SCRIPT_DIR}/..")"
     local sources source_path
     for source_path in "cyclo_brain/policy/$runtime" cyclo_brain/sdk/zenoh_ros2_sdk; do
-        sources="$(git -c "safe.directory=$repo" -C "$repo" submodule status --recursive -- "$source_path")"
+        # Inference uses top-level sources; nested benchmark repositories are
+        # optional and excluded from the worker's Docker build context.
+        sources="$(git -c "safe.directory=$repo" -C "$repo" submodule status -- "$source_path")"
         if [ -z "$sources" ] || printf '%s\n' "$sources" | grep -qE '^[+U-]'; then
             echo "Error: initialize $source_path submodules at the commits recorded by Cyclo before building." >&2
+            echo "From the repository root, run: git submodule update --init -- $source_path" >&2
             return 1
         fi
     done

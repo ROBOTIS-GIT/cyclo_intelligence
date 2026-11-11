@@ -15,17 +15,18 @@ jobs:
     name: Submodule check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with submodules
+      - name: Checkout with top-level submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Nested simulation benchmarks are not required by Cyclo workers.
+          submodules: true
 
       - name: Verify submodules are pinned and clean
         shell: bash
         run: |
           set -euo pipefail
-          git submodule status --recursive
-          if git submodule status --recursive | grep -E '^[+-]'; then
+          git submodule status
+          if git submodule status | grep -E '^[+U-]'; then
             echo "Submodule checkout is missing or not at the pinned commit." >&2
             exit 1
           fi
@@ -265,7 +266,7 @@ jobs:
           python -m pip install -r docker/supervisor_api/requirements.txt pytest httpx
 
       - name: Run Docker helper tests
-        run: python -m pytest docker/test_dockerfiles.py docker/test_container_sh.py
+        run: python -m pytest test_install_sh.py docker/test_dockerfiles.py docker/test_container_sh.py
 
       - name: Run supervisor API tests
         env:

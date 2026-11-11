@@ -562,7 +562,7 @@ def test_policy_build_contexts_use_runtime_specific_ignore_files():
         assert not any(line.startswith("!") for line in groot_ignore.splitlines())
         assert "docker/" in groot_ignore
         assert "cyclo_brain/policy/lerobot/" in groot_ignore
-        assert "cyclo_brain/policy/groot/" not in groot_ignore
+        assert "cyclo_brain/policy/groot/" not in groot_ignore.splitlines()
 
         main_ignores.append(main_ignore)
         for required in (
@@ -583,6 +583,19 @@ def test_policy_build_contexts_use_runtime_specific_ignore_files():
         assert "!cyclo_brain/policy/groot/Isaac-GR00T/**" not in main_ignore
 
     assert main_ignores[0] == main_ignores[1]
+
+
+def test_inference_build_contexts_exclude_optional_benchmark_sources():
+    policy_root = REPO_ROOT / "cyclo_brain/policy"
+    for runtime, upstream, arches in (
+        ("groot", "Isaac-GR00T", ("amd64", "arm64")),
+        ("rldx", "RLDX-1", ("amd64",)),
+    ):
+        for arch in arches:
+            rules = (policy_root / runtime / f"Dockerfile.{arch}.dockerignore").read_text().splitlines()
+            assert f"cyclo_brain/policy/{runtime}/{upstream}/external_dependencies/" in rules
+            assert f"cyclo_brain/policy/{runtime}/{upstream}/" not in rules
+            assert not any(rule.startswith("!") for rule in rules)
 
 
 def test_policy_workers_install_only_the_shared_engine_service():

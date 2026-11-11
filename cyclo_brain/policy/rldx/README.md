@@ -26,9 +26,11 @@ action chunks through the common Engine protocol. There is no extra ZMQ server.
 ## Build
 
 ```bash
-git submodule update --init cyclo_brain/policy/rldx/RLDX-1
+git submodule update --init -- \
+  cyclo_brain/sdk/zenoh_ros2_sdk \
+  cyclo_brain/policy/rldx/RLDX-1
 # RTX 5090 (SM120); use RLDX_FLASH_ATTN_CUDA_ARCHS=100 for B200.
-ARCH=amd64 docker compose -f docker/docker-compose.yml build rldx
+./docker/container.sh build-policy rldx
 ./docker/container.sh start-rldx
 ```
 

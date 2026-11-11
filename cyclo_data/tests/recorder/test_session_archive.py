@@ -549,7 +549,7 @@ def test_archive_writes_korean_subtask_instruction_as_utf8(tmp_path):
         subtask_idx=0,
         subtask_total=2,
         with_video=False,
-        subtask_instruction="화장품 집기",
+        subtask_instruction="\ud654\uc7a5\ud488 \uc9d1\uae30",
     )
     _write_segment(
         root,
@@ -557,11 +557,11 @@ def test_archive_writes_korean_subtask_instruction_as_utf8(tmp_path):
         subtask_idx=1,
         subtask_total=2,
         with_video=False,
-        subtask_instruction="정리하기",
+        subtask_instruction="\uc815\ub9ac\ud558\uae30",
     )
 
     out = manager._archive_full_episode(0)
 
     raw = (out / "episode_info.json").read_text(encoding="utf-8")
-    assert "화장품 집기" in raw
+    assert "\ud654\uc7a5\ud488 \uc9d1\uae30" in raw
     assert "\\ud654" not in raw

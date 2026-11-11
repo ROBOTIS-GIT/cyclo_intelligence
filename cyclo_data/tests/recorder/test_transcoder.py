@@ -292,7 +292,7 @@ def test_patch_status_preserves_korean_instruction_as_utf8(tmp_path):
     info_path.write_text(
         json.dumps(
             {
-                "subtask_instruction": "화장품 집기",
+                "subtask_instruction": "\ud654\uc7a5\ud488 \uc9d1\uae30",
                 "transcoding_status": STATUS_PENDING,
             },
             ensure_ascii=False,
@@ -303,7 +303,7 @@ def test_patch_status_preserves_korean_instruction_as_utf8(tmp_path):
     _patch_status(info_path, STATUS_DONE)
 
     raw = info_path.read_text(encoding="utf-8")
-    assert "화장품 집기" in raw
+    assert "\ud654\uc7a5\ud488 \uc9d1\uae30" in raw
     assert "\\ud654" not in raw
 
 

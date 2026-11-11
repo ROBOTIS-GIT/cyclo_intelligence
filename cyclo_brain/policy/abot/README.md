@@ -30,7 +30,9 @@ robot. Unit tests mock the large policy; they do not establish task performance.
 ## Build
 
 ```bash
-git submodule update --init cyclo_brain/policy/abot/ABot-Manipulation
+git submodule update --init -- \
+  cyclo_brain/sdk/zenoh_ros2_sdk \
+  cyclo_brain/policy/abot/ABot-Manipulation
 ./docker/container.sh start-abot --build
 ```
 

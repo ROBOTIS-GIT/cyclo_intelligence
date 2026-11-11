@@ -124,6 +124,17 @@ def test_python_ci_initializes_only_the_pinned_lerobot_submodule():
     ]]
 
 
+def test_submodule_ci_checks_top_level_pins_without_optional_benchmarks():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["submodule-check"]["steps"]
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["submodules"] is True
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert "git submodule status" in commands
+    assert "--recursive" not in commands
+    assert "^[+U-]" in commands
+
+
 def test_python_ci_installs_torch_and_torchvision_together_from_cpu_index():
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["python-tests"]["steps"]
@@ -260,6 +271,75 @@ def test_build_policy_does_not_start_pull_or_remove_containers(tmp_path):
     calls = log.read_text().splitlines()
     assert any("build lerobot" in call for call in calls)
     assert not any("pull " in call or "up -d" in call or "rm -f" in call for call in calls)
+
+
+@pytest.mark.parametrize("nested_state", ["missing", "mismatched"])
+def test_build_policy_ignores_optional_nested_and_unselected_sources(tmp_path, nested_state):
+    docker_dir = _copy_container_script(tmp_path)
+    source, git = _init_lerobot_build_sources(tmp_path, "groot")
+    nested = source / "external_dependencies/benchmark"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    git(nested, "commit", "--allow-empty", "-qm", "Benchmark fixture")
+    (source / ".gitmodules").write_text(
+        '[submodule "benchmark"]\n\tpath = external_dependencies/benchmark\n'
+        '\turl = https://example.invalid/benchmark\n'
+    )
+    git(source, "add", ".")
+    git(source, "commit", "-qm", "Record optional benchmark")
+    git(source, "submodule", "init")
+    git(tmp_path, "add", str(source.relative_to(tmp_path)))
+    git(tmp_path, "commit", "-qm", "Pin selected source")
+    if nested_state == "missing":
+        shutil.rmtree(nested)
+    else:
+        git(nested, "commit", "--allow-empty", "-qm", "Unpinned benchmark")
+
+    # An unavailable model must not affect the selected worker build.
+    with (tmp_path / ".gitmodules").open("a") as stream:
+        stream.write(
+            '[submodule "unselected"]\n\tpath = cyclo_brain/policy/other/upstream\n'
+            '\turl = https://example.invalid/unselected\n'
+        )
+    git(tmp_path, "update-index", "--add", "--cacheinfo", "160000",
+        git(source, "rev-parse", "HEAD"), "cyclo_brain/policy/other/upstream")
+    git(tmp_path, "add", ".gitmodules")
+    git(tmp_path, "commit", "-qm", "Record unselected model")
+    statuses = git(tmp_path, "submodule", "status", "--recursive").splitlines()
+    assert any(line.startswith("-") and "other/upstream" in line for line in statuses)
+    nested_status = next(line for line in statuses if "external_dependencies/benchmark" in line)
+    assert nested_status.startswith("-" if nested_state == "missing" else "+")
+
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "build-policy", "groot"],
+        env=_stub_env(tmp_path, log), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert " build groot" in log.read_text()
+    assert not (tmp_path / "cyclo_brain/policy/other/upstream").exists()
+    assert not any("up -d" in call or "pull " in call for call in log.read_text().splitlines())
+
+
+@pytest.mark.parametrize("target", ["model", "sdk"])
+@pytest.mark.parametrize("state", ["missing", "mismatched"])
+def test_build_policy_still_rejects_unavailable_required_pins(tmp_path, target, state):
+    docker_dir = _copy_container_script(tmp_path)
+    source, git = _init_lerobot_build_sources(tmp_path, "groot")
+    required = source if target == "model" else tmp_path / "cyclo_brain/sdk/zenoh_ros2_sdk"
+    if state == "missing":
+        shutil.rmtree(required)
+    else:
+        git(required, "commit", "--allow-empty", "-qm", "Wrong required pin")
+    log = _write_start_stub(tmp_path)
+    result = subprocess.run(
+        [str(docker_dir / "container.sh"), "build-policy", "groot"],
+        env=_stub_env(tmp_path, log), capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "submodules at the commits recorded by Cyclo" in result.stderr
+    assert "git submodule update --init --" in result.stderr
+    assert " build groot" not in log.read_text()
 
 
 def test_start_policy_reuses_local_image_without_pull(tmp_path):

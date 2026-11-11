@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -113,32 +113,32 @@
   <header>
     <div class="shell">
       <p class="eyebrow">Cyclo Brain / Current Operating Architecture</p>
-      <h1>중앙 Policy Runtime과<br>Engine-only Worker</h1>
-      <p>인퍼런스 제어는 Cyclo 이미지가 소유하고, 모델 의존성 및 추론은 Worker 이미지가 소유합니다. 이 문서는 현재 코드의 프로세스, 통신, 안전 경계와 파일 위치를 설명합니다.</p>
+      <h1>Central Policy Runtime and<br>Engine-only Worker</h1>
+      <p>The Cyclo image owns inference control, while Worker images own model dependencies and inference execution. This document describes the processes, communication, safety boundaries, and file locations in the current code.</p>
     </div>
   </header>
-  <nav class="tabs" role="tablist" aria-label="문서 섹션">
-    <button class="tab" aria-selected="true" data-target="overview">전체 구조</button>
+  <nav class="tabs" role="tablist" aria-label="Document sections">
+    <button class="tab" aria-selected="true" data-target="overview">Overview</button>
     <button class="tab" aria-selected="false" data-target="runtime">Policy Runtime</button>
     <button class="tab" aria-selected="false" data-target="worker">Worker</button>
-    <button class="tab" aria-selected="false" data-target="flows">데이터 흐름</button>
-    <button class="tab" aria-selected="false" data-target="safety">상태와 안전</button>
-    <button class="tab" aria-selected="false" data-target="files">코드 지도</button>
+    <button class="tab" aria-selected="false" data-target="flows">Data Flow</button>
+    <button class="tab" aria-selected="false" data-target="safety">State and Safety</button>
+    <button class="tab" aria-selected="false" data-target="files">Code Map</button>
   </nav>
 
   <main class="shell">
     <section class="panel active" id="overview">
-      <h2>전체 구조</h2>
-      <p class="intro">Policy Runtime은 모델이 아닙니다. 전역 inference session, action 처리, 로봇 명령과 안전을 담당하는 중앙 제어 계층입니다. Worker는 카메라와 state를 직접 받아 모델 action chunk만 반환합니다.</p>
+      <h2>Overview</h2>
+      <p class="intro">Policy Runtime is not a model. It is the central control layer responsible for the global inference session, action processing, robot commands, and safety. Workers receive camera data and state directly and return only model action chunks.</p>
       <div class="architecture">
         <article class="container">
           <h3><span>cyclo_intelligence</span><span class="tag cyclo">Cyclo image</span></h3>
           <div class="processes">
-            <div class="process"><strong>nginx / UI</strong><br><small>사용자 입력, catalog 기반 정책/파라미터 화면</small></div>
-            <div class="process"><strong>Orchestrator</strong><br><small>TaskInfo를 중앙 서비스 요청으로 변환</small></div>
+            <div class="process"><strong>nginx / UI</strong><br><small>User input, catalog-based policy and parameter screens</small></div>
+            <div class="process"><strong>Orchestrator</strong><br><small>Converts TaskInfo into central service requests</small></div>
             <div class="process central"><strong>Policy Runtime</strong><br><small>session, ControlLoop, action pipeline, safety</small></div>
-            <div class="process"><strong>Supervisor API</strong><br><small>Worker lifecycle과 runtime interlock</small></div>
-            <div class="process"><strong>Cyclo Data</strong><br><small>데이터 취득/변환, 이번 구조 변경 범위 밖</small></div>
+            <div class="process"><strong>Supervisor API</strong><br><small>Worker lifecycle and runtime interlock</small></div>
+            <div class="process"><strong>Cyclo Data</strong><br><small>Data acquisition and conversion, outside the scope of this architectural change</small></div>
           </div>
         </article>
         <div class="arrow"><span>⇄</span>ROS2/Zenoh<br><small>services + topics</small></div>
@@ -154,97 +154,97 @@
         </div>
       </div>
       <div class="grid three">
-        <article class="card"><span class="tag runtime">단일 제어 소유자</span><h3>중앙 Runtime</h3><p>모든 정책은 동일한 lifecycle과 안전 동작을 거칩니다. 동시에 하나의 inference session만 허용합니다.</p></article>
-        <article class="card"><span class="tag worker">직접 관측</span><h3>Engine-only Worker</h3><p>이미지/state는 Worker가 Zenoh topic을 직접 구독하므로 중앙 Runtime이 대용량 관측을 중계하지 않습니다.</p></article>
-        <article class="card"><span class="tag wire">명시적 계약</span><h3>Engine Protocol</h3><p><code>DESCRIBE</code>, <code>LOAD</code>, <code>GET_ACTION</code>, <code>STATUS</code>, <code>UNLOAD</code>로 구현체와 제어 로직을 분리합니다.</p></article>
+        <article class="card"><span class="tag runtime">Single Control Owner</span><h3>Central Runtime</h3><p>All policies follow the same lifecycle and safety behavior. Only one inference session is allowed at a time.</p></article>
+        <article class="card"><span class="tag worker">Direct Observation</span><h3>Engine-only Worker</h3><p>Workers subscribe directly to Zenoh topics for images and state, so the central Runtime does not relay large observation payloads.</p></article>
+        <article class="card"><span class="tag wire">Explicit Contract</span><h3>Engine Protocol</h3><p><code>DESCRIBE</code>, <code>LOAD</code>, <code>GET_ACTION</code>, <code>STATUS</code>, and <code>UNLOAD</code> separate implementations from control logic.</p></article>
       </div>
-      <div class="notice"><strong>호환성:</strong> Python package 이름 <code>main_runtime</code>은 기존 import 호환을 위해 유지하지만, Worker의 s6 <code>main-runtime</code> 서비스는 제거되었습니다. 해당 package는 Cyclo 이미지의 <code>policy-runtime</code> 서비스에서만 실행됩니다.</div>
+      <div class="notice"><strong>Compatibility:</strong> The Python package name <code>main_runtime</code> is retained for compatibility with existing imports, but the Worker's s6 <code>main-runtime</code> service has been removed. This package runs only in the Cyclo image's <code>policy-runtime</code> service.</div>
     </section>
 
     <section class="panel" id="runtime">
-      <h2>Policy Runtime 책임</h2>
-      <p class="intro">하나의 Python 프로세스 안에서 아래 객체들이 역할을 나눕니다. 각각이 별도 서비스라는 뜻은 아닙니다.</p>
+      <h2>Policy Runtime Responsibilities</h2>
+      <p class="intro">The following objects share responsibilities within a single Python process. They are not separate services.</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>모듈</th><th>입력</th><th>책임</th><th>출력</th></tr></thead>
+        <thead><tr><th>Module</th><th>Input</th><th>Responsibility</th><th>Output</th></tr></thead>
         <tbody>
-          <tr><td><strong>MainRuntime</strong><br><code>main.py</code></td><td>catalog, 환경 설정</td><td>공통 객체를 조립하고 중앙 서비스, heartbeat, UDS control server를 시작/종료</td><td><code>/policy/inference_command</code> 및 alias</td></tr>
-          <tr><td><strong>ServiceHandler</strong><br><code>service_handler.py</code></td><td>InferenceCommand</td><td>명령 검증, Worker 선택, session 전환, load/start/stop/unload 순서 보장</td><td>상태가 포함된 response</td></tr>
-          <tr><td><strong>SessionState</strong><br><code>session_state.py</code></td><td>검증된 상태 전환</td><td>단일 session의 policy, runtime, phase, signature, error를 메모리에 보관</td><td>명령 허용 여부와 snapshot</td></tr>
-          <tr><td><strong>WorkerRegistry</strong><br><code>worker_registry.py</code></td><td>manifest + DESCRIBE</td><td>policy prefix로 Worker를 찾고 protocol, policy set, capability, heartbeat를 검증</td><td>호환 가능한 Worker client</td></tr>
-          <tr><td><strong>InferenceRequester</strong><br><code>inference_requester.py</code></td><td>LOAD/GET_ACTION payload</td><td>EngineCommand 생성, timeout과 seq_id 처리, 한 번에 하나의 action 요청 유지</td><td>정규화된 action chunk</td></tr>
-          <tr><td><strong>ControlLoop</strong><br><code>control_loop.py</code></td><td>action chunk + timing</td><td>buffer 보충, 보간, control tick, sync/async, initial pose sync, pause/stop hold</td><td>RobotClient command</td></tr>
-          <tr><td><strong>RuntimeControlServer</strong><br><code>runtime_control.py</code></td><td>로컬 UDS 요청</td><td>Supervisor가 Worker mutation 전 lease를 얻도록 하고 active/hold-pending 작업을 차단</td><td>허용/거부 및 lease token</td></tr>
+          <tr><td><strong>MainRuntime</strong><br><code>main.py</code></td><td>catalog, environment configuration</td><td>Assembles shared objects and starts/stops the central services, heartbeat, and UDS control server</td><td><code>/policy/inference_command</code> and aliases</td></tr>
+          <tr><td><strong>ServiceHandler</strong><br><code>service_handler.py</code></td><td>InferenceCommand</td><td>Validates commands, selects Workers, transitions sessions, and enforces the load/start/stop/unload sequence</td><td>Response including state</td></tr>
+          <tr><td><strong>SessionState</strong><br><code>session_state.py</code></td><td>Validated state transitions</td><td>Keeps the policy, runtime, phase, signature, and error for a single session in memory</td><td>Command permission and snapshot</td></tr>
+          <tr><td><strong>WorkerRegistry</strong><br><code>worker_registry.py</code></td><td>manifest + DESCRIBE</td><td>Finds Workers by policy prefix and validates protocol, policy set, capability, and heartbeat</td><td>Compatible Worker client</td></tr>
+          <tr><td><strong>InferenceRequester</strong><br><code>inference_requester.py</code></td><td>LOAD/GET_ACTION payload</td><td>Creates EngineCommand, handles timeouts and seq_id, and keeps only one action request in flight at a time</td><td>Normalized action chunk</td></tr>
+          <tr><td><strong>ControlLoop</strong><br><code>control_loop.py</code></td><td>action chunk + timing</td><td>Buffer replenishment, interpolation, control ticks, sync/async, initial pose sync, and pause/stop hold</td><td>RobotClient command</td></tr>
+          <tr><td><strong>RuntimeControlServer</strong><br><code>runtime_control.py</code></td><td>Local UDS requests</td><td>Requires Supervisor to obtain a lease before mutating a Worker and blocks operations while active or hold-pending</td><td>Approval/denial and lease token</td></tr>
         </tbody>
       </table></div>
-      <h3>외부 서비스</h3>
+      <h3>External Services</h3>
       <div class="grid">
-        <article class="card"><span class="tag runtime">Primary</span><h3><code>/policy/inference_command</code></h3><p>Orchestrator와 신규 호출자가 사용하는 통합 endpoint입니다. <code>policy_id</code> prefix로 Worker가 결정됩니다.</p></article>
-        <article class="card"><span class="tag wire">Compatibility</span><h3><code>/lerobot/inference_command</code><br><code>/groot/inference_command</code></h3><p>한 릴리스 동안 유지하는 alias입니다. 내부적으로 동일 ServiceHandler와 전역 session을 사용합니다.</p></article>
+        <article class="card"><span class="tag runtime">Primary</span><h3><code>/policy/inference_command</code></h3><p>The unified endpoint used by Orchestrator and new callers. The <code>policy_id</code> prefix determines the Worker.</p></article>
+        <article class="card"><span class="tag wire">Compatibility</span><h3><code>/lerobot/inference_command</code><br><code>/groot/inference_command</code></h3><p>These aliases are retained for one release. Internally, they use the same ServiceHandler and global session.</p></article>
       </div>
     </section>
 
     <section class="panel" id="worker">
       <h2>Engine-only Worker</h2>
-      <p class="intro">Worker는 framework 의존성과 모델 실행만 소유합니다. 제어 주기, action buffer, 로봇 명령, pause/stop 안전 상태는 Worker에 두지 않습니다.</p>
+      <p class="intro">Workers own only framework dependencies and model execution. The control cycle, action buffer, robot commands, and pause/stop safety states do not reside in Workers.</p>
       <div class="flow">
-        <article class="flow-step"><strong>Robot topics</strong><small>camera, joint state, optional sensor를 직접 구독</small></article>
-        <article class="flow-step"><strong>I/O mapping</strong><small>robot config alias와 checkpoint feature 연결</small></article>
-        <article class="flow-step"><strong>Preprocess</strong><small>모델별 tensor/feature 전처리</small></article>
-        <article class="flow-step"><strong>Inference</strong><small>LeRobot 또는 GR00T policy 실행</small></article>
-        <article class="flow-step"><strong>Action chunk</strong><small>키와 shape를 포함해 Runtime에 반환</small></article>
+        <article class="flow-step"><strong>Robot topics</strong><small>Subscribe directly to camera, joint state, and optional sensor topics</small></article>
+        <article class="flow-step"><strong>I/O mapping</strong><small>Map robot config aliases to checkpoint features</small></article>
+        <article class="flow-step"><strong>Preprocess</strong><small>Model-specific tensor/feature preprocessing</small></article>
+        <article class="flow-step"><strong>Inference</strong><small>Run a LeRobot or GR00T policy</small></article>
+        <article class="flow-step"><strong>Action chunk</strong><small>Return to Runtime with keys and shapes</small></article>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>EngineCommand</th><th>Worker 동작</th><th>중앙 Runtime 사용 목적</th></tr></thead>
+        <thead><tr><th>EngineCommand</th><th>Worker Behavior</th><th>Purpose in the Central Runtime</th></tr></thead>
         <tbody>
-          <tr><td><code>DESCRIBE</code></td><td>protocol/runtime/instance ID, policy ID, capability 반환</td><td>catalog와 실제 이미지 호환성 검증</td></tr>
-          <tr><td><code>LOAD</code></td><td>checkpoint와 policy parameter를 검증하고 모델 로드</td><td>session 준비</td></tr>
-          <tr><td><code>GET_ACTION</code></td><td>최신 observation snapshot으로 action chunk 생성</td><td>ControlLoop buffer 보충</td></tr>
-          <tr><td><code>STATUS</code></td><td>loaded policy와 error 상태 반환</td><td>재연결 및 상태 확인</td></tr>
-          <tr><td><code>UNLOAD</code></td><td>모델 자원과 subscriber 해제</td><td>session 종료</td></tr>
+          <tr><td><code>DESCRIBE</code></td><td>Return protocol/runtime/instance ID, policy ID, and capability</td><td>Validate compatibility between the catalog and the actual image</td></tr>
+          <tr><td><code>LOAD</code></td><td>Validate the checkpoint and policy parameters, then load the model</td><td>Prepare the session</td></tr>
+          <tr><td><code>GET_ACTION</code></td><td>Generate an action chunk from the latest observation snapshot</td><td>Replenish the ControlLoop buffer</td></tr>
+          <tr><td><code>STATUS</code></td><td>Return the loaded policy and error state</td><td>Reconnect and check status</td></tr>
+          <tr><td><code>UNLOAD</code></td><td>Release model resources and subscribers</td><td>End the session</td></tr>
         </tbody>
       </table></div>
-      <div class="notice"><strong>Readiness:</strong> s6의 <code>engine-process</code>, ready marker, heartbeat, <code>DESCRIBE</code>를 Supervisor가 함께 확인합니다. 프로세스가 단순히 실행 중인 것만으로 Backend ready가 되지 않습니다.</div>
+      <div class="notice"><strong>Readiness:</strong> Supervisor checks the s6 <code>engine-process</code>, ready marker, heartbeat, and <code>DESCRIBE</code> together. A running process alone does not make the backend ready.</div>
     </section>
 
     <section class="panel" id="flows">
-      <h2>명령과 데이터 흐름</h2>
-      <h3>LOAD 및 START</h3>
+      <h2>Command and Data Flow</h2>
+      <h3>LOAD and START</h3>
       <div class="sequence">
-        <article><div><strong>UI / BT가 TaskInfo를 생성</strong><p><code>policy_id</code>, checkpoint, timing, initial pose sync, 모델 파라미터를 포함합니다.</p></div></article>
-        <article><div><strong>Orchestrator가 중앙 Runtime을 호출</strong><p>JSON 문법을 확인하고 <code>/policy/inference_command</code>에 LOAD 또는 START를 전달합니다.</p></div></article>
-        <article><div><strong>Runtime이 catalog와 Worker를 검증</strong><p>manifest schema, Worker DESCRIBE, protocol major, capability, heartbeat가 모두 맞아야 LOAD합니다.</p></div></article>
-        <article><div><strong>Worker가 observation을 직접 수집하고 추론</strong><p>Runtime은 이미지나 일반 센서를 Worker로 전달하지 않습니다.</p></div></article>
-        <article><div><strong>Runtime이 action을 처리하고 발행</strong><p>ActionChunkProcessor와 ControlLoop가 보간·버퍼링한 뒤 RobotClient로 명령을 보냅니다.</p></div></article>
+        <article><div><strong>UI / BT creates TaskInfo</strong><p>It includes <code>policy_id</code>, checkpoint, timing, initial pose sync, and model parameters.</p></div></article>
+        <article><div><strong>Orchestrator calls the central Runtime</strong><p>It checks JSON syntax and sends LOAD or START to <code>/policy/inference_command</code>.</p></div></article>
+        <article><div><strong>Runtime validates the catalog and Worker</strong><p>LOAD proceeds only if the manifest schema, Worker DESCRIBE, protocol major version, capability, and heartbeat all pass validation.</p></div></article>
+        <article><div><strong>Worker collects observations directly and runs inference</strong><p>Runtime does not forward images or general sensor data to Workers.</p></div></article>
+        <article><div><strong>Runtime processes and publishes actions</strong><p>ActionChunkProcessor and ControlLoop interpolate and buffer actions, then send commands through RobotClient.</p></div></article>
       </div>
-      <h3>토픽 구독 소유권</h3>
+      <h3>Topic Subscription Ownership</h3>
       <div class="grid three">
-        <article class="card"><h3>Worker</h3><p><strong>항상:</strong> 모델에 필요한 image, state, sensors를 구독합니다.</p></article>
-        <article class="card"><h3>Policy Runtime</h3><p><strong>실제 로봇 active session:</strong> hold와 freshness 확인에 필요한 joint state만 구독합니다.</p></article>
-        <article class="card"><h3>Cyclo Data</h3><p><strong>녹화 중:</strong> 데이터 취득을 위해 별도 구독합니다. inference와 목적이 달라 중복은 의도적입니다.</p></article>
+        <article class="card"><h3>Worker</h3><p><strong>Always:</strong> Subscribes to the images, state, and sensors required by the model.</p></article>
+        <article class="card"><h3>Policy Runtime</h3><p><strong>Active session on a physical robot:</strong> Subscribes only to the joint state needed for hold and freshness checks.</p></article>
+        <article class="card"><h3>Cyclo Data</h3><p><strong>During recording:</strong> Subscribes separately for data acquisition. This duplication is intentional because its purpose differs from inference.</p></article>
       </div>
-      <p class="notice"><strong>중요:</strong> 관측을 중앙 Runtime으로 모아 Worker에 재전송하는 Gateway는 도입하지 않았습니다. 따라서 이미지 직렬화와 중간 복사가 한 단계 늘어나지 않습니다.</p>
+      <p class="notice"><strong>Important:</strong> No Gateway was introduced to collect observations in the central Runtime and retransmit them to Workers. This avoids adding another stage of image serialization and intermediate copying.</p>
     </section>
 
     <section class="panel" id="safety">
-      <h2>상태와 안전 경계</h2>
-      <p class="intro">안전 정지는 “서비스 응답 성공”보다 우선합니다. hold가 확인되지 않으면 session을 정상 종료 상태로 표시하거나 Worker를 내리지 않습니다.</p>
+      <h2>State and Safety Boundaries</h2>
+      <p class="intro">A safe stop takes priority over a successful service response. Until hold is confirmed, the session is not marked as having ended normally, and the Worker is not shut down.</p>
       <div class="flow">
-        <article class="flow-step"><strong>READY</strong><small>Worker 미선택 또는 unloaded</small></article>
-        <article class="flow-step"><strong>LOADED</strong><small>Worker 및 policy 호환 검증 완료</small></article>
-        <article class="flow-step"><strong>SYNCING</strong><small>선택적 initial pose sync</small></article>
-        <article class="flow-step"><strong>RUNNING</strong><small>action loop와 robot command 활성</small></article>
-        <article class="flow-step"><strong>PAUSED / ERROR</strong><small>hold 성공 또는 안전 정지 대기</small></article>
+        <article class="flow-step"><strong>READY</strong><small>No Worker selected, or unloaded</small></article>
+        <article class="flow-step"><strong>LOADED</strong><small>Worker and policy compatibility validated</small></article>
+        <article class="flow-step"><strong>SYNCING</strong><small>Optional initial pose sync</small></article>
+        <article class="flow-step"><strong>RUNNING</strong><small>Action loop and robot commands active</small></article>
+        <article class="flow-step"><strong>PAUSED / ERROR</strong><small>Hold succeeded or awaiting a safe stop</small></article>
       </div>
       <div class="grid">
-        <article class="card"><h3>실패 감지</h3><p>Worker heartbeat 단절, Orchestrator heartbeat 단절, action timeout, Worker instance 교체, protocol 불일치가 감시 대상입니다.</p></article>
-        <article class="card"><h3>Fail-safe 순서</h3><p>action buffer 삭제 → zero Twist → fresh joint state 기반 현재 자세 hold → 상태 전환 순으로 처리합니다.</p></article>
-        <article class="card"><h3>Lifecycle interlock</h3><p>active inference 또는 hold pending이면 Supervisor의 Worker stop/restart/recreate/update를 UDS lease 단계에서 거부합니다.</p></article>
-        <article class="card risk"><h3>시스템 경계</h3><p>강제 전원 차단, Docker daemon kill, 커널 장애는 애플리케이션이 hold를 보장할 수 없습니다. 로봇 제어기 command watchdog이 필수입니다.</p></article>
+        <article class="card"><h3>Failure Detection</h3><p>Monitoring covers loss of Worker heartbeat, loss of Orchestrator heartbeat, action timeouts, Worker instance replacement, and protocol mismatches.</p></article>
+        <article class="card"><h3>Fail-safe Sequence</h3><p>Processing follows this order: clear the action buffer → zero Twist → hold the current pose using fresh joint state → transition state.</p></article>
+        <article class="card"><h3>Lifecycle interlock</h3><p>While inference is active or hold is pending, Supervisor's Worker stop/restart/recreate/update operations are rejected at the UDS lease stage.</p></article>
+        <article class="card risk"><h3>System Boundaries</h3><p>The application cannot guarantee hold during forced power loss, Docker daemon termination, or kernel failure. A command watchdog in the robot controller is essential.</p></article>
       </div>
     </section>
 
     <section class="panel" id="files">
-      <h2>코드와 배포 지도</h2>
+      <h2>Code and Deployment Map</h2>
       <pre>cyclo_brain/policy/
 ├── common/
 │   ├── catalog/                         # manifest load / validation
@@ -265,19 +265,19 @@ docker/
 ├── supervisor_api/                      # catalog + lifecycle interlock
 └── docker-compose.yml                   # deployment definition</pre>
       <div class="table-wrap"><table>
-        <thead><tr><th>변경</th><th>재빌드 대상</th><th>이유</th></tr></thead>
+        <thead><tr><th>Change</th><th>Rebuild Target</th><th>Reason</th></tr></thead>
         <tbody>
-          <tr><td>UI, Orchestrator</td><td>Cyclo</td><td>UI와 orchestration code가 Cyclo image에 있음</td></tr>
-          <tr><td>ControlLoop, sync/async/RTC, safety</td><td>Cyclo</td><td>중앙 Policy Runtime이 소유</td></tr>
-          <tr><td>catalog 표시/parameter schema</td><td>Cyclo</td><td>검증된 manifest가 Cyclo image에 포함</td></tr>
-          <tr><td>LeRobot model/adapter/dependency</td><td>LeRobot Worker</td><td>framework와 모델 실행만 변경</td></tr>
-          <tr><td>GR00T model/adapter/dependency</td><td>GR00T Worker</td><td>framework와 모델 실행만 변경</td></tr>
-          <tr><td>Engine wire protocol 또는 shared SDK</td><td>Cyclo + 영향 Worker</td><td>양쪽의 직렬화 계약이 함께 바뀜</td></tr>
+          <tr><td>UI, Orchestrator</td><td>Cyclo</td><td>UI and orchestration code reside in the Cyclo image</td></tr>
+          <tr><td>ControlLoop, sync/async/RTC, safety</td><td>Cyclo</td><td>Owned by the central Policy Runtime</td></tr>
+          <tr><td>Catalog display/parameter schema</td><td>Cyclo</td><td>Validated manifests are included in the Cyclo image</td></tr>
+          <tr><td>LeRobot model/adapter/dependency</td><td>LeRobot Worker</td><td>Only the framework and model execution change</td></tr>
+          <tr><td>GR00T model/adapter/dependency</td><td>GR00T Worker</td><td>Only the framework and model execution change</td></tr>
+          <tr><td>Engine wire protocol or shared SDK</td><td>Cyclo + affected Workers</td><td>The serialization contract changes on both sides</td></tr>
         </tbody>
       </table></div>
       <div class="grid">
-        <article class="card"><h3>Container</h3><p><code>docker-compose.yml</code>은 image 내용을 기준으로 실행하며 runtime/UI/Supervisor source bind mount를 사용하지 않습니다.</p></article>
-        <article class="card"><h3>Local iteration</h3><p>코드 변경은 해당 image를 <code>--build</code>로 다시 만들고, UI만 바꿀 때에는 <code>container.sh build-ui</code>로 정적 파일을 교체합니다.</p></article>
+        <article class="card"><h3>Container</h3><p><code>docker-compose.yml</code> runs from the image contents and does not use source bind mounts for runtime/UI/Supervisor.</p></article>
+        <article class="card"><h3>Local iteration</h3><p>For code changes, rebuild the relevant image with <code>--build</code>. For UI-only changes, replace the static files with <code>container.sh build-ui</code>.</p></article>
       </div>
     </section>
   </main>

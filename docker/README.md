@@ -30,11 +30,14 @@ This includes LeRobot and GR00T. Their `robotis/*-zenoh` names in Compose are
 local build tags, not an instruction to download or publish Worker images.
 Only `robotis/cyclo-intelligence` is published by this repository's release
 workflows. CUDA/base images and model weights are still downloaded when needed.
-For the 1.4.x to 1.5.0 upgrade, follow [the release notes](../docs/releases/1.5.0.md)
+For the 1.4.x to 1.5.0 upgrade, follow [the upgrade steps](#upgrading-from-14x)
 and rebuild Workers instead of assuming an old image with the same tag is compatible.
 
 ```bash
-git submodule update --init --recursive
+# Common SDK plus the selected worker only (run from the repository root).
+git submodule update --init -- \
+  cyclo_brain/sdk/zenoh_ros2_sdk \
+  cyclo_brain/policy/lerobot/lerobot
 ./docker/container.sh build-policy lerobot     # build only
 ./docker/container.sh start-lerobot            # reuse, or build if missing
 ./docker/container.sh start-lerobot --build    # rebuild and start
@@ -43,6 +46,71 @@ git submodule update --init --recursive
 The same commands apply to `groot`, `abot`, `lingbot_vla`, and `rldx`, subject
 to each Worker's supported architecture. Build dependencies/base images still
 require network access. CUDA/FlashAttention settings remain Compose build inputs.
+
+### Selective Source Checkout
+
+A normal clone without `--recurse-submodules` does not download model sources.
+The repository's `install.sh` initializes only the common SDK, not model sources.
+Initialize the common SDK and only the worker source you need using the command
+above, replacing the LeRobot path with one of these paths:
+
+| Worker | Model submodule path |
+| --- | --- |
+| `lerobot` | `cyclo_brain/policy/lerobot/lerobot` |
+| `groot` | `cyclo_brain/policy/groot/Isaac-GR00T` |
+| `abot` | `cyclo_brain/policy/abot/ABot-Manipulation` |
+| `lingbot_vla` | `cyclo_brain/policy/lingbot_vla/lingbot-vla-v2` |
+| `rldx` | `cyclo_brain/policy/rldx/RLDX-1` |
+
+Repeat the same targeted update after updating Cyclo. Do not use `--remote`:
+workers must use the commits recorded by the Cyclo checkout, not upstream branch
+tips. Building a worker checks its top-level source and the common SDK; other
+models and optional nested simulation benchmarks need not be initialized.
+These commands do not remove sources you already downloaded or change running
+containers. Stop/Clear before updating a checkout used by running services.
+
+Cyclo's core image needs the common SDK but no model submodule. The model source
+is needed when building that worker image, not when reusing a compatible image.
+The SDK is still required on the host for the source-mounted deployment.
+
+GR00T and RLDX simulation benchmarks are optional and are excluded from their
+inference images even if present locally. To work on an upstream benchmark,
+initialize only its subtree, for example:
+
+```bash
+git -C cyclo_brain/policy/groot/Isaac-GR00T submodule update --init --recursive -- \
+  external_dependencies/LIBERO
+```
+
+Follow upstream's separate evaluation setup and review the benchmark code and
+asset licenses. An inference worker image is not a simulator evaluation image.
+Source selection does not change model-weight or third-party license terms.
+
+### Upgrading from 1.4.x
+
+1. Stop/Clear inference and finish or discard recording. Stop pose return and
+   navigation before changing a checkout used by running services.
+2. Back up deployment-specific Compose overrides, Zenoh settings, model/data
+   folders, the checkout commit and image IDs. Container recreation discards
+   settings stored only inside the container.
+3. Update Cyclo and initialize the common SDK and selected worker sources as
+   described above.
+4. Recreate core with the matching published image, or use
+   `./docker/container.sh start --build` before that image is published. Rebuild
+   ROS interfaces and restart their consumers together; old and new service
+   definitions are not a supported mixed deployment.
+5. Rebuild selected Workers with `./docker/container.sh start-lerobot --build`
+   (replace `lerobot` as needed). An existing image tag does not guarantee
+   compatibility with the new source.
+6. Restore network settings and verify Preview camera/joint mappings before
+   enabling physical robot commands.
+
+For rollback, stop work and restore both the old source checkout and matching
+images. Restoring only an image is insufficient with source bind mounts. Preserve
+data backups when changing formats. Merging into main does not publish images;
+publication follows the existing main-to-jazzy release workflow.
+
+### UI Builds
 
 In the UI, use **Build** for a missing image, or the wrench to rebuild an existing
 one. Builds run in Supervisor, survive browser navigation, and expose bounded
