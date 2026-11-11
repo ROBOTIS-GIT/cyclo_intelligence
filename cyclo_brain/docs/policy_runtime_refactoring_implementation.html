@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cyclo Brain Policy Runtime Architecture Refactoring: Detailed Report</title>
+  <style>
+    :root {
+      --ink:#172129;--muted:#5b6770;--paper:#f4f6f5;--surface:#fff;
+      --line:#cbd3d7;--line-strong:#89969e;--cyclo:#126b5c;
+      --cyclo-soft:#e7f4f0;--worker:#245f9d;--worker-soft:#eaf1f8;
+      --robot:#8c4a31;--robot-soft:#faeee9;--control:#775618;
+      --control-soft:#f8f1df;--risk:#a33636;--risk-soft:#fbecec;
+      --code:#182a35;--ok:#18704f;--pending:#9a6800;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;color:var(--ink);background:var(--paper);font-family:Pretendard,"Noto Sans KR",Arial,sans-serif;font-size:15px;line-height:1.62;overflow-x:hidden}
+    button{font:inherit} code,pre{font-family:"SFMono-Regular",Consolas,monospace}
+    code{padding:1px 4px;color:#153b50;background:#edf1f3;border-radius:3px;overflow-wrap:anywhere}
+    .shell{width:calc(100% - 32px);max-width:1240px;min-width:0;margin:0 auto}
+    header{padding:34px 0 28px;color:#fff;background:#1c3038;border-bottom:5px solid var(--cyclo)}
+    .eyebrow{margin-bottom:7px;color:#9ed6ca;font-size:12px;font-weight:800;text-transform:uppercase}
+    h1{max-width:940px;margin:0;font-size:42px;line-height:1.16;letter-spacing:0}
+    header p{max-width:900px;margin:14px 0 0;color:#d9e4e7}
+    h2{margin:0 0 8px;font-size:28px;line-height:1.3;letter-spacing:0}
+    h3{margin:0 0 7px;font-size:18px;line-height:1.4;letter-spacing:0}
+    p{margin:0 0 11px} ul{margin:8px 0 0;padding-left:20px} li+li{margin-top:5px}
+    .tabs{position:sticky;top:0;z-index:30;display:flex;gap:5px;overflow-x:auto;padding:10px max(16px,calc((100vw - 1240px)/2));background:rgba(244,246,245,.97);border-bottom:1px solid var(--line);scrollbar-width:thin}
+    .tab,.sequence-button{flex:0 0 auto;min-height:40px;padding:8px 13px;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:5px;cursor:pointer;font-weight:750}
+    .tab:hover,.sequence-button:hover{border-color:var(--worker)}
+    .tab[aria-selected="true"]{color:#fff;background:var(--worker);border-color:var(--worker)}
+    main{padding:28px 0 58px}.panel{display:none}.panel.active{display:block}
+    .lead{max-width:960px;color:var(--muted);font-size:16px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:18px 0}
+    .grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .card{min-width:0;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:6px}
+    .card p:last-child,.card ul:last-child{margin-bottom:0}
+    .metric{min-height:146px;border-top:4px solid var(--cyclo)}.metric.worker{border-top-color:var(--worker)}.metric.control{border-top-color:var(--control)}
+    .metric strong{display:block;margin-bottom:5px;font-size:20px}
+    .badge{display:inline-flex;align-items:center;min-height:24px;margin-bottom:8px;padding:2px 8px;color:#fff;background:var(--line-strong);border-radius:4px;font-size:12px;font-weight:800}
+    .badge.ok{background:var(--ok)}.badge.pending{background:var(--pending)}.badge.risk{background:var(--risk)}.badge.cyclo{background:var(--cyclo)}.badge.worker{background:var(--worker)}
+    .callout{margin:18px 0;padding:14px 16px;background:var(--control-soft);border-left:5px solid var(--control)}
+    .callout.info{background:var(--worker-soft);border-left-color:var(--worker)}.callout.risk{background:var(--risk-soft);border-left-color:var(--risk)}
+    .diagram{margin:20px 0;padding:18px;background:#eef1f1;border:1px solid var(--line);border-radius:6px;overflow-x:auto}
+    .architecture{display:grid;grid-template-columns:minmax(190px,.8fr) 54px minmax(360px,1.5fr) 54px minmax(250px,1fr);gap:10px;align-items:stretch;min-width:970px}
+    .lane{min-width:0;padding:12px;background:#fff;border:2px solid var(--line-strong);border-radius:6px}
+    .lane.cyclo{border-color:var(--cyclo);background:var(--cyclo-soft)}.lane.worker{border-color:var(--worker);background:var(--worker-soft)}.lane.robot{border-color:var(--robot);background:var(--robot-soft)}
+    .lane-title{display:flex;justify-content:space-between;gap:8px;padding-bottom:8px;border-bottom:1px solid rgba(23,33,41,.2);font-weight:850}
+    .node{margin-top:9px;padding:9px 10px;background:rgba(255,255,255,.9);border:1px solid var(--line);border-radius:4px}
+    .node strong,.node small{display:block}.node small{color:var(--muted);line-height:1.45}
+    .connector{display:grid;place-items:center;min-width:54px;color:var(--muted);text-align:center;font-size:12px;font-weight:750}
+    .connector:before{content:"";width:100%;height:2px;background:var(--line-strong)}.connector span{padding:4px 2px;background:#eef1f1}
+    .flow-key{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:13px}.key-item{display:inline-flex;align-items:center;gap:6px}.key-line{width:28px;height:3px;background:var(--worker)}.key-line.topic{background:var(--robot)}.key-line.http{background:var(--control)}
+    .compare{display:grid;grid-template-columns:minmax(0,1fr) 56px minmax(0,1fr);gap:12px;align-items:stretch;margin:20px 0}
+    .compare-side{padding:16px;background:#fff;border:2px solid var(--risk);border-radius:6px}.compare-side.after{border-color:var(--ok)}
+    .compare-arrow{display:grid;place-items:center;color:var(--worker);font-size:30px;font-weight:900}
+    .stack{display:grid;gap:8px;margin-top:12px}.stack-item{padding:10px;background:#f9faf9;border:1px solid var(--line);border-radius:4px}
+    .sequence-controls{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 12px}.sequence-button[aria-pressed="true"]{color:#fff;background:var(--cyclo);border-color:var(--cyclo)}
+    .sequence{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:14px 0}
+    .sequence-step{position:relative;min-height:146px;padding:12px;background:#fff;border:1px solid var(--line);border-top:4px solid var(--cyclo);border-radius:5px}
+    .sequence-step:not(:last-child):after{content:">";position:absolute;top:42%;right:-15px;z-index:2;color:var(--worker);font-size:22px;font-weight:900}
+    .sequence-step b{display:grid;place-items:center;width:26px;height:26px;margin-bottom:8px;color:#fff;background:var(--cyclo);border-radius:50%}.sequence-step strong{display:block;margin-bottom:5px}.sequence-step small{color:var(--muted)}
+    .sequence-detail{min-height:116px;padding:15px;background:#fff;border:1px solid var(--line);border-left:5px solid var(--cyclo);border-radius:5px}
+    .table-wrap{overflow-x:auto;margin:16px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
+    table{width:100%;min-width:840px;border-collapse:collapse}th,td{padding:11px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#e7ecee;font-size:13px;white-space:nowrap}tr:last-child td{border-bottom:0}td.good{color:var(--ok);font-weight:750}td.cost{color:var(--risk);font-weight:750}
+    pre{margin:14px 0;padding:16px;overflow-x:auto;color:#edf4f6;background:var(--code);border-radius:6px;line-height:1.5;tab-size:2}.file-tree{color:#d9edf4}.file-tree .new{color:#8ee0bf}.file-tree .moved{color:#ffd383}
+    details{margin:8px 0;background:#fff;border:1px solid var(--line);border-radius:5px}summary{padding:11px 13px;cursor:pointer;font-weight:800}details>div{padding:0 13px 13px}
+    .responsibility{display:grid;grid-template-columns:190px minmax(0,1fr) 230px;gap:12px;align-items:start;padding:12px 0;border-bottom:1px solid var(--line)}.responsibility:last-child{border-bottom:0}.owner{font-weight:850}.path{color:var(--muted);font-size:13px}
+    .boundary{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;color:#33434d;background:#edf1f3;border:1px solid #d8dfe2;border-radius:3px;font-size:12px;font-weight:700}
+    .status-list{display:grid;gap:8px;margin:16px 0}.status-item{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;padding:12px;background:#fff;border:1px solid var(--line);border-radius:5px}
+    footer{padding:22px 0 34px;color:var(--muted);border-top:1px solid var(--line);font-size:13px}
+    @media(max-width:900px){h1{font-size:34px}.grid,.grid.three{grid-template-columns:1fr}.compare{grid-template-columns:1fr}.compare-arrow{transform:rotate(90deg);min-height:40px}.sequence{grid-template-columns:1fr}.sequence-step{min-height:0}.sequence-step:not(:last-child):after{content:"v";top:auto;right:auto;bottom:-19px;left:50%}.responsibility{grid-template-columns:1fr;gap:4px}}
+    @media(max-width:560px){h1{font-size:29px}h2{font-size:24px}.shell{width:calc(100% - 22px)}header{padding:28px 0 24px}main{padding-top:22px}.card,.diagram{padding:13px}.status-item{grid-template-columns:1fr;gap:5px}}
+  </style>
+</head>
+<body>
+  <header><div class="shell"><div class="eyebrow">Actual Working Tree / 2026-09-07</div><h1>Cyclo Brain Policy Runtime<br>Architecture Refactoring: Detailed Report</h1><p>Based on the code implemented in the current working tree, this report explains the differences from the previous architecture, each module's responsibilities, inference data flow, deployment impact, verification results, and remaining risks.</p></div></header>
+  <nav class="tabs" role="tablist" aria-label="Report sections">
+    <button class="tab" role="tab" aria-selected="true" data-target="overview">Overview</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="comparison">Before and After</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="modules">Module Responsibilities</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="dataflow">Data Flow</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="lifecycle">Execution Sequence</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="folders">Folder Structure</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="catalog">Catalog and UI</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="docker">Docker and Deployment</button>
+    <button class="tab" role="tab" aria-selected="false" data-target="assessment">Objective Assessment</button>
+  </nav>
+  <main class="shell">
+    <section class="panel active" id="overview" role="tabpanel">
+      <h2>Key Conclusions</h2>
+      <p class="lead">Previously, the LeRobot and GR00T containers each owned not only model inference but also the action buffer, control cycle, robot command publishing, and safe stopping. The shared control layer has now moved to the <strong>central Policy Runtime in the Cyclo container</strong>, and the model containers have been reduced to <strong>Engine-only Workers</strong>.</p>
+      <div class="grid three">
+        <article class="card metric"><span class="badge cyclo">Centralized</span><strong>One Control Layer</strong><p>Cyclo provides a single implementation of the session, ControlLoop, action chunk processing, initial pose sync, and safe stopping.</p></article>
+        <article class="card metric worker"><span class="badge worker">Isolated</span><strong>Separate Model Workers</strong><p>LeRobot and GR00T handle only framework dependencies, model loading, observation preprocessing, and inference.</p></article>
+        <article class="card metric control"><span class="badge ok">Catalog-driven</span><strong>Unified Policy Information</strong><p>The policy list, capabilities, and UI parameters are declared in manifests, and the UI and Supervisor use the same catalog.</p></article>
+      </div>
+      <div class="diagram" aria-label="Current overall architecture">
+        <div class="architecture">
+          <div class="lane"><div class="lane-title"><span>User Layer</span><span>Browser</span></div><div class="node"><strong>Inference UI</strong><small>Select policy, checkpoint, timing, sync/async, and robot/simulation</small></div><div class="node"><strong>Backend Control</strong><small>Worker pull, start, stop, recreate, and status checks</small></div></div>
+          <div class="connector"><span>ROS / HTTP</span></div>
+          <div class="lane cyclo"><div class="lane-title"><span>cyclo_intelligence</span><span>Control Plane</span></div><div class="node"><strong>Orchestrator</strong><small>Normalize UI requests, manage TaskInfo, and call the central inference service</small></div><div class="node"><strong>Policy Runtime</strong><small>Single session, Worker routing, ControlLoop, action buffer, safety</small></div><div class="node"><strong>Supervisor API</strong><small>Serve the catalog, Docker lifecycle, UDS interlock</small></div></div>
+          <div class="connector"><span>Zenoh service</span></div>
+          <div><div class="lane worker"><div class="lane-title"><span>lerobot_server</span><span>Worker</span></div><div class="node"><strong>Engine Process</strong><small>Load LeRobot policies such as ACT, preprocess observations, and infer action chunks</small></div></div><div class="lane worker" style="margin-top:10px"><div class="lane-title"><span>groot_server</span><span>Worker</span></div><div class="node"><strong>Engine Process</strong><small>Load GR00T N1.7, preprocess observations, and infer action chunks</small></div></div><div class="lane robot" style="margin-top:10px"><div class="lane-title"><span>Robot</span><span>ROS2 / Zenoh</span></div><div class="node"><strong>Observation topics</strong><small>camera, joint_states, odom</small></div><div class="node"><strong>Command topics</strong><small>joint trajectory, cmd_vel</small></div></div></div>
+        </div>
+        <div class="flow-key"><span class="key-item"><span class="key-line"></span>Lifecycle/action chunk: Zenoh service</span><span class="key-item"><span class="key-line topic"></span>Robot data: Zenoh topic</span><span class="key-item"><span class="key-line http"></span>Container lifecycle: HTTP + Docker API</span></div>
+      </div>
+      <div class="callout info"><strong>Important:</strong> This is not a switch to a gateway architecture in which Cyclo receives observation images and forwards them to Workers. Workers subscribe directly to the robot's camera/state topics, so the observation path has no added HTTP, NPZ, or copying stage.</div>
+      <div class="callout"><strong>Current status:</strong> This document describes the current large, uncommitted working tree, not a committed release. The new architecture has been brought up on AMD64, but ARM64, a real GR00T checkpoint, and the readiness items below still require validation or fixes before completion.</div>
+    </section>
+
+    <section class="panel" id="comparison" role="tabpanel">
+      <h2>What Changed</h2><p class="lead">There are still three containers, but their internal responsibilities and ownership of the inference service have changed.</p>
+      <div class="compare">
+        <article class="compare-side"><span class="badge risk">Previous Architecture</span><h3>Main Runtime Duplicated in Each Worker</h3><div class="stack"><div class="stack-item"><strong>cyclo_intelligence</strong><br>UI + Orchestrator + Supervisor</div><div class="stack-item"><strong>lerobot_server</strong><br>Main Runtime + ControlLoop + command + LeRobot Engine</div><div class="stack-item"><strong>groot_server</strong><br>Main Runtime + ControlLoop + command + GR00T Engine</div></div><ul><li>Shared control changes require rebuilding both model images</li><li>Session and command ownership are distributed across backends</li><li>Policy information is hardcoded separately in the UI and Supervisor</li></ul></article>
+        <div class="compare-arrow">&gt;</div>
+        <article class="compare-side after"><span class="badge ok">Current Architecture</span><h3>One Cyclo Runtime + Engine Workers</h3><div class="stack"><div class="stack-item"><strong>cyclo_intelligence</strong><br>UI + Orchestrator + Supervisor + Policy Runtime + command</div><div class="stack-item"><strong>lerobot_server</strong><br>LeRobot Engine Process only</div><div class="stack-item"><strong>groot_server</strong><br>GR00T Engine Process only</div></div><ul><li>Shared control changes affect only the Cyclo image</li><li>The global inference session is managed in one place</li><li>Manifests are the shared source of information for the UI, routing, and Supervisor</li></ul></article>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Aspect</th><th>Before</th><th>Now</th><th>Impact</th></tr></thead><tbody>
+        <tr><td>External endpoint</td><td><code>/lerobot/inference_command</code><br><code>/groot/inference_command</code></td><td><code>/policy/inference_command</code> is primary; previous addresses are temporary aliases</td><td class="good">Simpler Orchestrator routing</td></tr>
+        <tr><td>Shared control code</td><td>Each Worker image</td><td>Standalone s6 service in Cyclo</td><td class="good">Fewer Worker rebuilds</td></tr>
+        <tr><td>Model containers</td><td>Main + Engine</td><td>Engine Process only</td><td class="good">Clear model dependency boundaries</td></tr>
+        <tr><td>Policy list</td><td>Scattered across UI constants, Supervisor dicts, and other locations</td><td>Catalog generated from <code>manifest.yaml</code></td><td class="good">Fewer duplicate edits</td></tr>
+        <tr><td>Observation path</td><td>Engine subscribes directly to topics</td><td>Unchanged</td><td>No additional hop</td></tr>
+        <tr><td>Command publishing</td><td>Worker's Main Runtime</td><td>Cyclo Policy Runtime</td><td class="good">Unified safety and command ownership</td></tr>
+        <tr><td>Compatibility checks</td><td>Primarily checks whether the process is up</td><td>ready marker + heartbeat + DESCRIBE</td><td class="good">Incompatible combinations blocked before LOAD</td></tr>
+        <tr><td>Wire protocol changes</td><td>Impact confined to the backend</td><td>Coordinated changes to Cyclo and affected Workers</td><td class="cost">Compatible releases must be managed</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="panel" id="modules" role="tabpanel">
+      <h2>Each Module's Responsibilities</h2><p class="lead">This breakdown follows the state each module actually owns and the boundaries it crosses.</p>
+      <details open><summary>1. Central Policy Runtime in the Cyclo Container</summary><div>
+        <div class="responsibility"><div><div class="owner">PolicyRuntime</div><div class="path">main_runtime/main.py</div></div><div>The overall assembly point. It creates Catalog, WorkerRegistry, SessionState, ControlLoop, and ServiceHandler, then starts the central service, heartbeat subscriber, and UDS server. On shutdown, it attempts the fail-safe first.</div><div><span class="boundary">process lifetime</span><span class="boundary">watchdog</span><span class="boundary">ready marker</span></div></div>
+        <div class="responsibility"><div><div class="owner">ServiceHandler</div><div class="path">main_runtime/service_handler.py</div></div><div>Executes the <code>LOAD/START/PAUSE/RESUME/STOP/UNLOAD/STATUS</code> state transitions. It validates the policy ID and parameters, selects a Worker, and configures ControlLoop after LOAD succeeds.</div><div><span class="boundary">lifecycle</span><span class="boundary">validation</span><span class="boundary">rollback</span></div></div>
+        <div class="responsibility"><div><div class="owner">SessionState</div><div class="path">main_runtime/session_state.py</div></div><div>Stores a single global session. The loaded/running/paused/error state, model path, policy ID, timing, action mode, and initial pose sync settings provide the basis for restoring the UI through STATUS.</div><div><span class="boundary">single session</span><span class="boundary">snapshot</span></div></div>
+        <div class="responsibility"><div><div class="owner">ControlLoop</div><div class="path">main_runtime/control_loop.py</div></div><div>Handles control ticks, action requests, buffering, previews, and actual command publishing. It also owns sync/async refill, initial pose sync, holding the current pose, and emergency stopping.</div><div><span class="boundary">action buffer</span><span class="boundary">robot command</span><span class="boundary">safety</span></div></div>
+        <div class="responsibility"><div><div class="owner">InferenceRequester</div><div class="path">main_runtime/inference_requester.py</div></div><div>Adds a <code>seq_id</code> to EngineCommand and rejects stale responses that arrive after a timeout. It also prevents duplicate GET_ACTION requests.</div><div><span class="boundary">timeout</span><span class="boundary">stale guard</span></div></div>
+        <div class="responsibility"><div><div class="owner">WorkerRegistry</div><div class="path">main_runtime/worker_registry.py</div></div><div>Creates Worker clients based on policy ID prefixes and compares DESCRIBE with the Catalog. It tracks the protocol major version, runtime ID, policy list, capabilities, instance, and heartbeat.</div><div><span class="boundary">routing</span><span class="boundary">compatibility</span><span class="boundary">heartbeat</span></div></div>
+        <div class="responsibility"><div><div class="owner">RuntimeControlServer</div><div class="path">main_runtime/runtime_control.py</div></div><div>Provides runtime status and permission to modify Workers to the Supervisor over a local Unix socket. It issues tokens that prevent stop/recreate/update races during an active session.</div><div><span class="boundary">local UDS</span><span class="boundary">interlock</span></div></div>
+      </div></details>
+      <details open><summary>2. LeRobot / GR00T Worker</summary><div>
+        <div class="responsibility"><div><div class="owner">EngineWorker</div><div class="path">runtime/engine_process/worker.py</div></div><div>The shared Worker service shell. It calls the backend's <code>create_engine()</code> and forwards EngineCommand to the concrete engine. It also provides DESCRIBE, STATUS, heartbeat, instance ID, and a ready marker.</div><div><span class="boundary">EngineCommand</span><span class="boundary">metadata</span></div></div>
+        <div class="responsibility"><div><div class="owner">InferenceEngine</div><div class="path">runtime/engine.py</div></div><div>The minimal interface implemented by each backend. It defines only <code>load_policy()</code>, <code>get_action_chunk()</code>, and <code>cleanup()</code>, with no knowledge of ControlLoop or robot commands.</div><div><span class="boundary">backend contract</span></div></div>
+        <div class="responsibility"><div><div class="owner">LeRobotEngine</div><div class="path">lerobot/lerobot_engine/</div></div><div>Reads the policy class and input features from the checkpoint config and loads the model. It converts RobotClient camera/state data into tensors and returns action chunks from the LeRobot policy.</div><div><span class="boundary">PyTorch</span><span class="boundary">pre/postprocess</span></div></div>
+        <div class="responsibility"><div><div class="owner">GR00T Engine</div><div class="path">groot/groot_engine/ + runtime/</div></div><div>Owns GR00T N1.7, embodiment/modality config, and optional TensorRT DiT, returning action chunks through the same InferenceEngine contract.</div><div><span class="boundary">GR00T</span><span class="boundary">TensorRT</span></div></div>
+        <div class="responsibility"><div><div class="owner">Worker RobotClient</div><div class="path">sdk/robot_client/robot_client.py</div></div><div>Subscribes directly to camera, joint state, and odom topics and retains the latest observations. Its role is read-only: it creates no command publishers.</div><div><span class="boundary">observation only</span><span class="boundary">Zenoh topic</span></div></div>
+      </div></details>
+      <details open><summary>3. Orchestrator, UI, Supervisor</summary><div>
+        <div class="responsibility"><div><div class="owner">Orchestrator</div><div class="path">orchestrator_node.py</div></div><div>Receives UI task commands, creates TaskInfo, normalizes JSON syntax and size, and forwards requests to <code>/policy/inference_command</code>. The Runtime validates parameter semantics and ranges.</div><div><span class="boundary">UI to runtime</span><span class="boundary">status publish</span></div></div>
+        <div class="responsibility"><div><div class="owner">PolicyCatalogContext</div><div class="path">ui/src/contexts/PolicyCatalogContext.js</div></div><div>Makes <code>/api/policies/catalog</code> available throughout the UI. If the Catalog fails, it displays an error and Retry and blocks inference rather than starting with a static fallback.</div><div><span class="boundary">catalog loading</span><span class="boundary">fail closed</span></div></div>
+        <div class="responsibility"><div><div class="owner">PolicyParameterFields</div><div class="path">ui/src/components/PolicyParameterFields.js</div></div><div>Renders the manifest schema as text/path/number/integer/select/toggle controls. When the model changes, it applies defaults and removes unknown parameter keys.</div><div><span class="boundary">dynamic UI</span><span class="boundary">conditions</span></div></div>
+        <div class="responsibility"><div><div class="owner">Supervisor API</div><div class="path">docker/supervisor_api/app.py</div></div><div>Provides the Catalog API and Worker pull/start/stop/recreate/status operations. It compares Compose with running containers and uses UDS tokens to block changes to active Workers.</div><div><span class="boundary">FastAPI</span><span class="boundary">Docker socket</span><span class="boundary">UDS</span></div></div>
+      </div></details>
+    </section>
+
+    <section class="panel" id="dataflow" role="tabpanel">
+      <h2>Where the Data Goes</h2><p class="lead">Control requests, observations, action chunks, and robot commands follow different paths.</p>
+      <div class="grid three"><article class="card"><span class="badge worker">Control request</span><h3>From UI to Model Execution</h3><p>UI → Orchestrator → Policy Runtime → Worker. Only small lifecycle requests and action chunks pass through services.</p></article><article class="card"><span class="badge risk">Observation</span><h3>From Robot to Model</h3><p>Robot topic → Worker RobotClient → preprocessing. This path does not pass through Cyclo.</p></article><article class="card"><span class="badge cyclo">Command</span><h3>From Model Output to Robot</h3><p>Worker action chunk → Runtime buffer/interpolation → Cyclo RobotClient → command topic.</p></article></div>
+      <h3>Complete Normal Inference Flow</h3>
+      <pre>Browser UI
+  |  task command / policy_id / timing / parameters
+  v
+Orchestrator
+  |  InferenceCommand: LOAD, START, ...
+  |  /policy/inference_command
+  v
+Cyclo Policy Runtime
+  +-- Catalog validation + WorkerRegistry routing
+  +-- SessionState owns one global session
+  +-- ControlLoop owns action buffer and timing
+  |
+  |  EngineCommand: LOAD_POLICY / GET_ACTION / UNLOAD / DESCRIBE / STATUS
+  v
+Selected Engine Worker                         Robot
+  +-- RobotClient &lt;--- camera / joint / odom topics ---+
+  +-- preprocessing                                   |
+  +-- model inference                                 |
+  +-- action chunk ------&gt; ControlLoop                |
+                              +-- resample / align    |
+                              +-- preview topic       |
+                              +-- joint/cmd_vel ------&gt;</pre>
+      <h3>Where Subscriptions Are Actually Created</h3>
+      <div class="table-wrap"><table><thead><tr><th>Scenario</th><th>Worker</th><th>Policy Runtime</th><th>Cyclo Data</th><th>Reason</th></tr></thead><tbody>
+        <tr><td>Simulation inference</td><td>camera + state + sensor</td><td>No observations</td><td>None when disabled</td><td>Only the Worker reads model inputs; the Runtime publishes previews only</td></tr>
+        <tr><td>Real robot inference</td><td>camera + state + sensor</td><td>Joint state only</td><td>None when disabled</td><td>Joint state is needed to hold the current pose and stop safely</td></tr>
+        <tr><td>Inference + recording</td><td>Model inputs</td><td>Joint state for safety</td><td>All topics for bag recording</td><td>Intentional duplication for distinct inference, safety, and recording purposes</td></tr>
+      </tbody></table></div>
+      <div class="callout info"><strong>Where copying increased:</strong> An action chunk crosses one container boundary from the Worker to the Cyclo Runtime. Images are not relayed; transmitting small numeric arrays is the tradeoff for centralized control code.</div>
+    </section>
+
+    <section class="panel" id="lifecycle" role="tabpanel">
+      <h2>Execution Sequence by Command</h2><p class="lead">Select a button to see which modules execute, in order, for each command.</p>
+      <div class="sequence-controls"><button class="sequence-button" aria-pressed="true" data-sequence="load">LOAD</button><button class="sequence-button" aria-pressed="false" data-sequence="start">START</button><button class="sequence-button" aria-pressed="false" data-sequence="loop">CONTROL LOOP</button><button class="sequence-button" aria-pressed="false" data-sequence="stop">STOP / UNLOAD</button><button class="sequence-button" aria-pressed="false" data-sequence="fault">FAIL-SAFE</button></div>
+      <div class="sequence" id="sequenceSteps" aria-live="polite"></div><div class="sequence-detail" id="sequenceDetail"></div>
+      <h3 style="margin-top:22px">State Model</h3>
+      <pre>unloaded --LOAD--&gt; loaded --START--&gt; syncing(optional) --&gt; running
+                         ^                                  |    |
+                         |                                  |    +-- PAUSE --&gt; paused -- RESUME
+                         +-- UNLOAD &lt;-- stopped &lt;-- STOP ---+
+
+worker/action/heartbeat fault --&gt; buffer clear + hold attempt --&gt; error</pre>
+      <div class="callout"><strong>Compatibility endpoints:</strong> The primary endpoint is <code>/policy/inference_command</code>. <code>/lerobot/inference_command</code> and <code>/groot/inference_command</code> remain as temporary aliases that call the same handler.</div>
+    </section>
+
+    <section class="panel" id="folders" role="tabpanel">
+      <h2>Folder Structure and Executable Code</h2><p class="lead">The central runtime and catalog were added while retaining existing directories rather than moving code extensively.</p>
+      <pre class="file-tree">cyclo_brain/
++-- policy/
+|  +-- common/
+|  |  +-- <span class="new">catalog/</span>
+|  |  |  +-- catalog.py                # manifest and parameter validation
+|  |  +-- runtime/
+|  |     +-- engine.py                 # InferenceEngine contract
+|  |     +-- <span class="moved">engine_process/</span>           # shared Worker service shell
+|  |     |  +-- protocol.py            # EngineCommand wire definition
+|  |     |  +-- worker.py              # commands, DESCRIBE, heartbeat
+|  |     +-- <span class="new">main_runtime/</span>             # runs in the Cyclo image
+|  |        +-- main.py                # PolicyRuntime assembly and watchdog
+|  |        +-- service_handler.py     # lifecycle
+|  |        +-- session_state.py       # global session
+|  |        +-- control_loop.py        # timing, buffer, command, safety
+|  |        +-- inference_requester.py # seq, timeout, stale guard
+|  |        +-- worker_registry.py     # routing and compatibility
+|  |        +-- runtime_control.py     # UDS for Supervisor
+|  +-- lerobot/
+|  |  +-- <span class="new">manifest.yaml</span>
+|  |  +-- lerobot/                     # lerobot-cyclo submodule
+|  |  +-- lerobot_engine/              # adapter and inference
+|  |  +-- Dockerfile.*                 # Engine-only image
+|  +-- groot/
+|     +-- <span class="new">manifest.yaml</span>
+|     +-- Isaac-GR00T/                 # upstream submodule
+|     +-- groot_engine/ + runtime/
+|     +-- Dockerfile.*                 # Engine-only image
++-- sdk/
+   +-- zenoh_ros2_sdk/                 # Zenoh topic/service
+   +-- robot_client/                   # observation/command abstraction
+   +-- action_chunk_processing/        # interpolation, alignment, buffer
+
+docker/
++-- docker-compose.yml                 # production-like declarations
++-- docker-compose.override.yml        # local no-GPU Cyclo override
++-- Dockerfile.amd64 / arm64           # includes the central Runtime
++-- s6-services/<span class="new">policy-runtime/</span>        # standalone longrun
++-- supervisor_api/                    # catalog + Worker lifecycle
+
+interfaces/
++-- msg/TaskInfo.msg
++-- srv/InferenceCommand.srv           # external lifecycle and STATUS
++-- srv/<span class="new">EngineCommand.srv</span>              # Runtime and Worker contract
+
+orchestrator/
++-- orchestrator/...                   # central endpoint and state synchronization
++-- ui/src/contexts/<span class="new">PolicyCatalogContext.js</span>
++-- ui/src/components/<span class="new">PolicyParameterFields.js</span></pre>
+      <div class="grid"><article class="card"><h3>Why the <code>main_runtime</code> Name Remains</h3><p>The directory name remains because the existing shared runtime was reused, but it runs in Cyclo, not in a Worker. The actual s6 service is named <code>policy-runtime</code>; it is not a functionally duplicated runtime.</p></article><article class="card"><h3>Removed Worker Service</h3><p>The <code>main-runtime</code> s6 definition was removed from LeRobot and GR00T. Worker healthchecks now check <code>engine-process</code> and the ready marker.</p></article></div>
+    </section>
+
+    <section class="panel" id="catalog" role="tabpanel">
+      <h2>Policy Catalog and Dynamic UI</h2><p class="lead">Model execution code lives in Workers, but Cyclo manifests determine which models are displayed and which parameters they accept.</p>
+      <div class="sequence"><article class="sequence-step"><b>1</b><strong>manifest</strong><small>Declare runtimes, policies, capabilities, and parameters</small></article><article class="sequence-step"><b>2</b><strong>Loader</strong><small>Validate format, duplicate IDs, Compose, and ranges</small></article><article class="sequence-step"><b>3</b><strong>Supervisor</strong><small>Serve <code>/api/policies/catalog</code></small></article><article class="sequence-step"><b>4</b><strong>React UI</strong><small>Generate selectors and fields</small></article><article class="sequence-step"><b>5</b><strong>Runtime</strong><small>Canonicalize JSON and validate the schema</small></article><article class="sequence-step"><b>6</b><strong>DESCRIBE</strong><small>Compare the Worker's actual capabilities</small></article></div>
+      <div class="grid"><article class="card"><span class="badge ok">Global IDs</span><h3><code>lerobot:act</code>, <code>groot:n17</code></h3><p>The runtime precedes the colon, and the model follows it. Model aliases in manifests provide compatibility with older bare IDs.</p></article><article class="card"><span class="badge worker">Parameter schema</span><h3>Generate Model-Specific UI from Declarations</h3><p>Supports text/path/number/integer/select/toggle controls, defaults, ranges, and <code>visible_when</code>. GR00T TensorRT is a concrete example.</p></article></div>
+      <pre>models:
+  - id: n17
+    label: N1.7
+    requires_instruction: true
+    parameters:
+      - key: acceleration_mode
+        control: select
+        binding: task_info.accelerationMode
+        default: pytorch
+        options: [pytorch, tensorrt_dit]
+      - key: acceleration_engine_path
+        control: path
+        binding: task_info.accelerationEnginePath
+        visible_when: {acceleration_mode: tensorrt_dit}</pre>
+      <div class="callout info"><strong>Scope of policy aliases:</strong> The manifest's <code>aliases: [act]</code> provides compatibility information for resolving older policy names. Robot config has no separate camera alias layer; the shared resolver only normalizes common differences in prefixes and side/part notation between checkpoint keys and camera names.</div>
+      <h3>Changes Required to Add a Runtime</h3>
+      <div class="table-wrap"><table><thead><tr><th>Task</th><th>Where to Add It</th><th>Shared Code Changes</th></tr></thead><tbody>
+        <tr><td>InferenceEngine adapter</td><td><code>policy/&lt;runtime&gt;/&lt;runtime&gt;_engine/</code></td><td>None in principle</td></tr><tr><td>Policies/capabilities</td><td><code>manifest.yaml</code></td><td>None</td></tr><tr><td>dependency image</td><td><code>Dockerfile.*</code></td><td>None</td></tr><tr><td>Deployment service</td><td><code>docker-compose.yml</code></td><td class="cost">One entry required</td></tr><tr><td>UI selector/parameter</td><td>Generated from manifests</td><td class="good">No React list changes</td></tr><tr><td>Supervisor backend list</td><td>catalog + Compose</td><td class="good">No Python dict changes</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="panel" id="docker" role="tabpanel">
+      <h2>Docker Files and Deployment Scope</h2><p class="lead">Compose uses image contents as the operational baseline, and each Dockerfile's build context is limited to the files it needs.</p>
+      <div class="table-wrap"><table><thead><tr><th>File</th><th>Role</th><th>Reason for Separation</th></tr></thead><tbody>
+        <tr><td><code>docker-compose.yml</code></td><td>Deployment declarations for three services</td><td>The code inside the image is authoritative; no source mounts</td></tr><tr><td><code>docker-compose.override.yml</code></td><td>No-GPU Cyclo adjustments for the current PC</td><td>Separates Worker GPU requirements from UI/data container requirements</td></tr><tr><td><code>Dockerfile.amd64/arm64</code></td><td>Architecture-specific images</td><td>Different ROS/CUDA bases and installation steps</td></tr><tr><td><code>Dockerfile.*.dockerignore</code></td><td>build context allowlist</td><td>Prevents transferring large model submodules and unrelated directories</td></tr>
+      </tbody></table></div>
+      <h3>Rebuilds by Change Type</h3>
+      <div class="table-wrap"><table><thead><tr><th>Change</th><th>Cyclo</th><th>LeRobot</th><th>GR00T</th><th>Notes</th></tr></thead><tbody>
+        <tr><td>React UI</td><td class="good">Build or build-ui</td><td>Not needed</td><td>Not needed</td><td>Static files alone can be replaced during development</td></tr><tr><td>Orchestrator</td><td class="good">Rebuild</td><td>Not needed</td><td>Not needed</td><td>Cyclo owns the ROS packages</td></tr><tr><td>ControlLoop/safety/sync/async</td><td class="good">Rebuild</td><td>Not needed</td><td>Not needed</td><td>Key improvement</td></tr><tr><td>LeRobot adapter/policy</td><td>Not needed</td><td class="good">Rebuild</td><td>Not needed</td><td>Only the affected Worker</td></tr><tr><td>GR00T adapter/policy</td><td>Not needed</td><td>Not needed</td><td class="good">Rebuild</td><td>Only the affected Worker</td></tr><tr><td>EngineCommand wire</td><td class="cost">Rebuild</td><td class="cost">Rebuild</td><td class="cost">Rebuild</td><td>A compatible set is required</td></tr><tr><td>RobotClient contract</td><td class="cost">Check impact</td><td class="cost">Rebuild</td><td class="cost">Rebuild</td><td>Shared SDK</td></tr>
+      </tbody></table></div>
+      <div class="callout"><strong>The initial migration is an exception:</strong> Because Main Runtime was removed from Workers and EngineCommand was extended, the first deployment must replace Cyclo, LeRobot, and GR00T together. Independent builds become beneficial after that transition.</div>
+    </section>
+
+    <section class="panel" id="assessment" role="tabpanel">
+      <h2>Objective Improvements and Remaining Risks</h2><p class="lead">A new architecture is not inherently an improvement. Duplication, deployment, communication, fault isolation, and operational complexity are assessed separately.</p>
+      <div class="grid"><article class="card"><span class="badge ok">Improvement</span><h3>Eliminate Shared Control Duplication</h3><p>ControlLoop and safety are no longer duplicated in every Worker, so the benefit grows with the number of models.</p></article><article class="card"><span class="badge ok">Improvement</span><h3>Unified Command Ownership</h3><p>A single global session and one Runtime publish commands, preventing control contention between backends in one place.</p></article><article class="card"><span class="badge ok">Improvement</span><h3>Fewer UI Changes When Adding Models</h3><p>Policy display, instructions, and parameters have moved into manifests, reducing hardcoded React/Python configuration.</p></article><article class="card"><span class="badge ok">Improvement</span><h3>Reproducible Deployment Images</h3><p>Removing source mounts from the default Compose configuration reduces the risk of a host checkout implicitly changing an image's behavior.</p></article><article class="card"><span class="badge pending">Cost</span><h3>Container Hop for Action Chunks</h3><p>Small numeric arrays move from Workers to Cyclo. This costs less than relaying images, but latency still needs to be measured.</p></article><article class="card"><span class="badge pending">Cost</span><h3>Protocol Compatibility Management</h3><p>Changes to EngineCommand require coordinated management of Cyclo and Worker version combinations.</p></article></div>
+      <h3>Status Directly Verified So Far</h3>
+      <div class="status-list">
+        <div class="status-item"><span class="badge ok">Verified</span><div><strong>Three containers</strong><br><code>cyclo_intelligence</code>, <code>lerobot_server</code>, and <code>groot_server</code> are healthy on AMD64.</div></div>
+        <div class="status-item"><span class="badge ok">Verified</span><div><strong>Catalog and Worker contract</strong><br>The live API returns both manifests, and both Workers are compatible with protocol 1.0.</div></div>
+        <div class="status-item"><span class="badge ok">Verified</span><div><strong>LeRobot ACT action path</strong><br>Live robot topics were received from three cameras and joint_states at approximately 14 Hz, and a direct GET_ACTION call to the Engine returned a <code>100 x 22</code> chunk.</div></div>
+        <div class="status-item"><span class="badge pending">Needs Fix</span><div><strong>Sensor readiness</strong><br>LeRobot loading ignores <code>wait_for_ready()</code> failures, so it can succeed even when joint data is temporarily unavailable. It waits for all configured cameras and also warns about <code>cam_right_head</code>, which the policy does not use.</div></div>
+        <div class="status-item"><span class="badge pending">Needs Fix</span><div><strong>Worker status timeout</strong><br>DESCRIBE queries can hit a two-second timeout while the model is busy. This is separate from action timeouts, but the status path needs to be made nonblocking or cache-based.</div></div>
+        <div class="status-item"><span class="badge pending">To Validate</span><div><strong>ARM64 and real GR00T</strong><br>Completion requires verifying LOAD with a real checkpoint, observations, action chunks, and faults on the target robot.</div></div>
+      </div>
+      <h3>Remaining Architectural Limitations</h3>
+      <div class="table-wrap"><table><thead><tr><th>Limitation</th><th>Impact</th><th>Assessment</th></tr></thead><tbody>
+        <tr><td>One global session</td><td>Cannot run multiple robots/policies simultaneously</td><td>Suitable for the current single-robot operation; expansion requires session keys</td></tr><tr><td>Workers depend on robot config and the Zenoh SDK</td><td>Not purely framework-only remote servers</td><td>Practical for same-PC operation and low observation latency</td></tr><tr><td>Manual Compose service declarations</td><td>One YAML entry required per runtime</td><td>An intentional constraint that makes deployment topology explicit</td></tr><tr><td>Catalog copied into Cyclo and Workers</td><td>Manifest mismatches block LOAD</td><td>Fails closed, but releases must be synchronized</td></tr><tr><td>Limits of software-based hold</td><td>Cannot issue commands after power loss</td><td>The robot controller watchdog is the final safeguard</td></tr>
+      </tbody></table></div>
+      <div class="callout risk"><strong>Conclusion:</strong> This architecture is better suited than the previous one to adding multiple models quickly and frequently changing shared inference features. However, deployment must not be considered complete until sensor readiness and status timeouts are addressed and ARM64, GR00T, and real fail-safe validation have passed.</div>
+    </section>
+  </main>
+  <footer><div class="shell">Source of truth: current working tree at 2026-09-07. No version bump, commit, push or deployment is implied.</div></footer>
+  <script>
+    const tabs=[...document.querySelectorAll('.tab')],panels=[...document.querySelectorAll('.panel')];
+    function showPanel(id,hash=true){tabs.forEach(t=>t.setAttribute('aria-selected',String(t.dataset.target===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(hash)history.replaceState(null,'',`#${id}`);window.scrollTo({top:0,behavior:'auto'})}
+    tabs.forEach(t=>t.addEventListener('click',()=>showPanel(t.dataset.target)));
+    const sequences={
+      load:{detail:'<h3>LOAD: Prepare the Model and Control Path</h3><p>Validate the policy and parameters against the Catalog and cross-check Worker DESCRIBE. Once the Worker prepares the model and observation RobotClient and returns action_keys, the Runtime configures the command RobotClient and ActionChunkProcessor.</p>',steps:[['UI','policy ID, path, timing, parameter'],['Orchestrator','Normalize JSON and LOAD'],['Runtime','Catalog validation and routing'],['Worker','DESCRIBE and model loading'],['Engine','Prepare observation subscribers'],['Runtime','Configure ControlLoop and session']]},
+      start:{detail:'<h3>START: Authorize Execution and the First Action</h3><p>Simulation permits previews only; robot mode permits command publishing. If Initial Pose Sync is enabled, move slowly to the first action pose, then request a new chunk.</p>',steps:[['UI','START and execution mode'],['Orchestrator','InferenceCommand START'],['Handler','Check loaded state and safety'],['ControlLoop','Optional pose sync'],['Worker','First GET_ACTION'],['Session','syncing or running']]},
+      loop:{detail:'<h3>CONTROL LOOP: Only Small Action Arrays Are Returned</h3><p>The Worker computes a chunk from the latest observations. The Runtime interpolates using Dataset FPS and Control Hz and consumes one action at a time. Async mode refills in advance; sync mode requests a chunk after the buffer is empty.</p>',steps:[['Robot','camera/state/odom'],['Worker','Direct subscriptions and tensors'],['Model','Infer action chunks'],['Runtime','Validate seq and receive'],['Processor','align, resample, buffer'],['RobotClient','preview or command']]},
+      stop:{detail:'<h3>STOP / UNLOAD: Separate Control from GPU Resources</h3><p>STOP halts the loop but keeps the model loaded. UNLOAD is rejected while running or while a hold is pending; after a safe stop, it performs Worker cleanup and deconfigures the Runtime.</p>',steps:[['UI','STOP or CLEAR'],['Runtime','Invalidate buffer and generation'],['Safety','Hold current pose if needed'],['Session','Record stopped state'],['Worker','model cleanup'],['Runtime','Release RobotClient']]},
+      fault:{detail:'<h3>FAIL-SAFE: Never Reuse Late Actions</h3><p>Clear the buffer when a GET_ACTION failure, heartbeat loss, or Worker replacement is detected. For a real robot, attempt a zero Twist and a hold based on fresh joint state, then transition to error.</p>',steps:[['Monitor','Detect fault'],['ControlLoop','Set running false and clear'],['Requester','Discard stale seq'],['RobotClient','zero Twist and hold'],['Session','Store error cause'],['Supervisor','Block Worker changes']]}
+    };
+    const seqButtons=[...document.querySelectorAll('.sequence-button')],steps=document.getElementById('sequenceSteps'),detail=document.getElementById('sequenceDetail');
+    function renderSequence(name){const data=sequences[name];seqButtons.forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.sequence===name)));steps.innerHTML=data.steps.map((s,i)=>`<article class="sequence-step"><b>${i+1}</b><strong>${s[0]}</strong><small>${s[1]}</small></article>`).join('');detail.innerHTML=data.detail}
+    seqButtons.forEach(b=>b.addEventListener('click',()=>renderSequence(b.dataset.sequence)));renderSequence('load');
+    const initial=location.hash.slice(1);if(initial&&panels.some(p=>p.id===initial))showPanel(initial,false);
+  </script>
+</body>
+</html>

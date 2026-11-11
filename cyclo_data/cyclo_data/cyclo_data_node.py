@@ -15,11 +15,14 @@ the /data/ prefix. DataOperationStatus flows on /data/status.
 """
 
 from pathlib import Path
+import signal
+import threading
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 
 from interfaces.msg import DataOperationStatus
 
@@ -70,23 +73,71 @@ class CycloDataNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = CycloDataNode()
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
+    shutdown_requested = threading.Event()
+    stop_spinning = threading.Event()
+    previous_handlers = {}
+    node = executor = spin_thread = None
+    spin_thread_started = False
+    errors = []
+
+    def spin():
+        try:
+            while not stop_spinning.is_set() and rclpy.ok():
+                try:
+                    executor.spin_once(timeout_sec=0.1)
+                except (KeyboardInterrupt, ExternalShutdownException):
+                    shutdown_requested.set()
+                except Exception as exc:
+                    if not errors:
+                        errors.append(exc)
+                    shutdown_requested.set()
+                    # Keep delivering STOP responses after a callback failure,
+                    # without busy-looping if the executor itself is broken.
+                    stop_spinning.wait(0.01)
+        finally:
+            shutdown_requested.set()
+
     try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
+        # The main thread owns teardown; signals must not close ROS first.
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(
+                signum, lambda *_: shutdown_requested.set())
+        node = CycloDataNode()
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        spin_thread = threading.Thread(target=spin, name='cyclo_data_executor')
+        spin_thread.start()
+        spin_thread_started = True
+        shutdown_requested.wait()
     finally:
-        # Services that own background workers / external resources clean
-        # them up explicitly before rclpy shutdown.
-        node._hub.shutdown()
-        node._conversion.shutdown()
-        node._recording.shutdown()
-        executor.shutdown()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node is not None:
+                # RecordingService serializes against in-flight commands. Its
+                # bounded STOP can still receive callbacks on the live executor.
+                for service in (node._recording, node._hub, node._conversion):
+                    try:
+                        service.shutdown()
+                    except Exception as exc:
+                        errors.append(exc)
+            stop_spinning.set()
+            if spin_thread_started:
+                spin_thread.join()
+            if executor is not None:
+                executor.shutdown()
+            if node is not None:
+                node.destroy_node()
+        finally:
+            try:
+                rclpy.try_shutdown()
+            except RuntimeError as exc:
+                if rclpy.ok() or 'rcl_shutdown already called' not in str(exc):
+                    raise
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
+    if errors:
+        raise errors[0]
 
 
 if __name__ == '__main__':

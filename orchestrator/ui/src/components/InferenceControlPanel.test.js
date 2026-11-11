@@ -3,10 +3,12 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
-import taskReducer, { setInferenceStatus } from '../features/tasks/taskSlice';
-import rosReducer from '../features/ros/rosSlice';
+import taskReducer, { setInferenceStatus, setRobotPoseStatus, selectRobotType, setRecordStatus } from '../features/tasks/taskSlice';
+import rosReducer, { setRosbridgeUrl } from '../features/ros/rosSlice';
 import { InferencePhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { PolicyCatalogProvider } from '../contexts/PolicyCatalogContext';
+import { testPolicyCatalog } from '../testUtils/policyCatalog';
 
 jest.mock('react-hot-toast', () => {
   const toast = jest.fn();
@@ -42,16 +44,29 @@ const renderPanel = ({
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
   sendRecordCommand: sendOverride = null,
+  inferenceStatusKnown = true,
+  catalog = testPolicyCatalog,
+  runtimeStateOverride = null,
+  poseReturning = false,
+  poseCommand = jest.fn().mockResolvedValue({ success: true }),
 } = {}) => {
+  const { taskInstruction, ...inferenceOverrides } = taskOverrides;
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
     success: true,
     message: 'ok',
   });
-  useRosServiceCaller.mockReturnValue({ sendRecordCommand });
+  const runtimeState = {
+    [InferencePhase.READY]: 'unloaded',
+    [InferencePhase.LOADING]: 'loading',
+    [InferencePhase.INFERENCING]: 'running',
+    [InferencePhase.PAUSED]: 'paused',
+    [InferencePhase.SYNCING]: 'syncing',
+  }[inferencePhase];
+  const getInferenceStatus = jest.fn();
+  useRosServiceCaller.mockReturnValue({ sendRecordCommand, getInferenceStatus, sendRobotPoseCommand: poseCommand });
 
   const initialTasks = taskReducer(undefined, { type: '@@INIT' });
   const initialRos = rosReducer(undefined, { type: '@@INIT' });
-  const { taskInstruction, ...inferenceOverrides } = taskOverrides;
   const sharedTaskInstruction =
     taskInstruction ?? initialTasks.sharedTaskInfo.taskInstruction;
   const store = configureStore({
@@ -62,6 +77,7 @@ const renderPanel = ({
     preloadedState: {
       tasks: {
         ...initialTasks,
+        robotPoseStatus: { returning: poseReturning, device_id: 'first-runtime' },
         sharedTaskInfo: {
           ...initialTasks.sharedTaskInfo,
           taskInstruction: sharedTaskInstruction,
@@ -70,38 +86,140 @@ const renderPanel = ({
           ...initialTasks.inferenceTaskInfo,
           policyPath: '/policy_checkpoints/lerobot/model',
           inferenceMode,
+          policyId: inferenceOverrides.serviceType === 'groot'
+            ? 'groot:n17'
+            : 'lerobot:act',
           ...inferenceOverrides,
         },
         taskInfo: {
           ...initialTasks.taskInfo,
           policyPath: '/policy_checkpoints/lerobot/model',
           inferenceMode,
+          policyId: taskOverrides.serviceType === 'groot'
+            ? 'groot:n17'
+            : 'lerobot:act',
           ...taskOverrides,
         },
         inferenceStatus: {
           ...initialTasks.inferenceStatus,
           inferencePhase,
+          topicReceived: inferenceStatusKnown,
+          runtimeState: inferenceStatusKnown
+            ? (runtimeStateOverride || runtimeState)
+            : 'unknown',
+          loadedModelPath: inferencePhase === InferencePhase.READY
+            ? ''
+            : '/policy_checkpoints/lerobot/model',
         },
       },
       ros: {
         ...initialRos,
         rosHost: 'localhost',
+        connected: true,
       },
     },
   });
 
-  render(
-    <Provider store={store}>
-      <InferenceControlPanel />
-    </Provider>
+  const { unmount } = render(
+    <PolicyCatalogProvider initialCatalog={catalog}>
+      <Provider store={store}>
+        <InferenceControlPanel />
+      </Provider>
+    </PolicyCatalogProvider>
   );
 
-  return { store, sendRecordCommand };
+  return { store, sendRecordCommand, getInferenceStatus, unmount };
 };
+
+describe('manual pose Stop and Clear', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('recording disables Clear without disabling inference Stop', async () => {
+    const { store, sendRecordCommand } = renderPanel({ inferencePhase: InferencePhase.INFERENCING });
+    act(() => store.dispatch(setRecordStatus({ running: true })));
+    expect(screen.getByRole('button', { name: /Save or Discard recording before Clear/i })).toBeDisabled();
+    const stop = screen.getByRole('button', { name: /pause inference/i });
+    expect(stop).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+  });
+
+  test('Stop response cannot clear the authoritative returning state', async () => {
+    let resolve;
+    const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+    const { store } = renderPanel({ poseReturning: true, poseCommand });
+    fireEvent.click(screen.getByRole('button', { name: /pause inference/i }));
+    await act(async () => { resolve({ success: true, returning: false }); });
+    expect(store.getState().tasks.robotPoseStatus.returning).toBe(true);
+  });
+
+  test('failed pose Stop prevents Clear from unloading the policy', async () => {
+    const poseCommand = jest.fn().mockResolvedValue({ success: false, message: 'hold failed' });
+    const { sendRecordCommand } = renderPanel({
+      poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('hold failed'));
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('a disconnected pose Stop cannot proceed to Clear', async () => {
+    let resolve;
+    const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+    const { sendRecordCommand } = renderPanel({
+      poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await act(async () => { resolve(null); });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test.each(['robot', 'runtime', 'target', 'unmount'])(
+    'Clear ignores a late successful Stop after %s changes', async (change) => {
+      let resolve;
+      const poseCommand = jest.fn(() => new Promise((done) => { resolve = done; }));
+      const { store, sendRecordCommand, unmount } = renderPanel({
+        poseReturning: true, poseCommand, inferencePhase: InferencePhase.PAUSED,
+      });
+      fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+      if (change === 'robot') act(() => store.dispatch(selectRobotType('other')));
+      if (change === 'runtime') act(() => store.dispatch(setRobotPoseStatus({ device_id: 'new-runtime' })));
+      if (change === 'target') act(() => store.dispatch(setRosbridgeUrl('ws://second')));
+      if (change === 'unmount') unmount();
+      await act(async () => { resolve({ success: true }); });
+      expect(sendRecordCommand).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    }
+  );
+});
 
 describe('InferenceControlPanel deploy safety', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('preparation shows first-action progress and leaves Stop and Clear available', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferencePhase: InferencePhase.LOADING,
+      runtimeStateOverride: 'preparing',
+    });
+    expect(screen.getByText('Preparing first action...')).toBeInTheDocument();
+    const stop = screen.getByRole('button', { name: /Pause inference/i });
+    expect(stop).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Stop inference and unload model/i })).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+  });
+
+  test('blocks inference when the policy catalog cannot be loaded', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('catalog offline'));
+    const { sendRecordCommand } = renderPanel({ catalog: null });
+
+    const startButton = await screen.findByRole('button', { name: 'catalog offline' });
+    expect(startButton).toBeDisabled();
+    fireEvent.click(startButton);
+    expect(sendRecordCommand).not.toHaveBeenCalled();
   });
 
   test('shows a warning instead of starting immediately for Real Robot Deploy', async () => {
@@ -138,7 +256,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
 
-    expect(await screen.findByText('Initial Pose Sync: 7.5 s')).toBeInTheDocument();
+    expect(await screen.findByText('Slow Start: 7.5 s')).toBeInTheDocument();
   });
 
   test('shows unusual Dataset FPS in the robot confirmation without blocking deploy', async () => {
@@ -192,10 +310,18 @@ describe('InferenceControlPanel deploy safety', () => {
     });
 
     act(() => {
-      store.dispatch(setInferenceStatus({ inferencePhase: InferencePhase.INFERENCING }));
+      store.dispatch(setInferenceStatus({
+        inferencePhase: InferencePhase.INFERENCING,
+        runtimeState: 'running',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+      }));
     });
     act(() => {
-      store.dispatch(setInferenceStatus({ inferencePhase: InferencePhase.PAUSED }));
+      store.dispatch(setInferenceStatus({
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'paused',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+      }));
     });
     sendRecordCommand.mockClear();
 
@@ -208,6 +334,29 @@ describe('InferenceControlPanel deploy safety', () => {
     });
     expect(screen.queryByRole('dialog', { name: /real robot deploy/i }))
       .not.toBeInTheDocument();
+  });
+
+  test('resumes after a pose return without unloading or another deploy warning', async () => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      poseReturning: true,
+    });
+    expect(screen.getByRole('button', { name: /resume inference/i })).toBeDisabled();
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+
+    act(() => {
+      store.dispatch(setRobotPoseStatus({ returning: false, device_id: 'first-runtime' }));
+    });
+    const resume = screen.getByRole('button', { name: /resume inference/i });
+    expect(resume).toBeEnabled();
+    fireEvent.click(resume);
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledTimes(1);
+      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', {
+        inferenceMode: 'robot',
+      });
+    });
+    expect(screen.queryByRole('dialog', { name: /real robot deploy/i })).not.toBeInTheDocument();
   });
 
   test('resumes an interrupted sync without another deploy warning', async () => {
@@ -228,10 +377,18 @@ describe('InferenceControlPanel deploy safety', () => {
     });
 
     act(() => {
-      store.dispatch(setInferenceStatus({ inferencePhase: InferencePhase.SYNCING }));
+      store.dispatch(setInferenceStatus({
+        inferencePhase: InferencePhase.SYNCING,
+        runtimeState: 'syncing',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+      }));
     });
     act(() => {
-      store.dispatch(setInferenceStatus({ inferencePhase: InferencePhase.PAUSED }));
+      store.dispatch(setInferenceStatus({
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'paused',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+      }));
     });
     sendRecordCommand.mockClear();
 
@@ -259,7 +416,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith(
-        'Initial Pose Sync duration must be between 1 and 60 seconds'
+        'Slow Start duration must be between 1 and 60 seconds'
       );
     });
     expect(screen.queryByRole('dialog', { name: /real robot deploy/i }))
@@ -277,6 +434,82 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
     expect(screen.getByText('Synchronizing initial robot pose...')).toBeInTheDocument();
+  });
+
+  test.each([InferencePhase.PAUSED, InferencePhase.LOADING])(
+    'requires Clear before restarting a failed policy session in phase %s', (inferencePhase) => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase,
+      runtimeStateOverride: 'error',
+    });
+
+    expect(screen.getByRole('button', {
+      name: 'Clear the failed policy session before restarting',
+    })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
+    expect(screen.getByText(
+      'Policy Runtime failed. Clear the session before restarting.'
+    )).toBeInTheDocument();
+  });
+
+  test('restores running controls from Policy Runtime after the page remounts', async () => {
+    const { store, getInferenceStatus } = renderPanel({
+      inferenceMode: 'robot',
+      inferenceStatusKnown: false,
+    });
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.INFERENCING,
+        runtimeState: 'running',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+        loadedPolicyId: 'lerobot:act',
+        publishToRobot: true,
+      }));
+    });
+
+    await waitFor(() => {
+      expect(getInferenceStatus).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: /start inference/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
+    });
+    expect(screen.getByText('Inferencing')).toBeInTheDocument();
+  });
+
+  test('restores a paused session and resumes it without local component history', async () => {
+    const sendRecordCommand = jest.fn().mockResolvedValue({
+      success: true,
+      message: 'resumed',
+    });
+    const { store } = renderPanel({
+      inferenceMode: 'robot',
+      inferenceStatusKnown: false,
+      sendRecordCommand,
+    });
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'paused',
+        loadedModelPath: '/policy_checkpoints/lerobot/model',
+        loadedPolicyId: 'lerobot:act',
+        publishToRobot: true,
+      }));
+    });
+
+    const resumeButton = await screen.findByRole('button', { name: /resume inference/i });
+    expect(resumeButton).toBeEnabled();
+    fireEvent.click(resumeButton);
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', {
+        inferenceMode: 'robot',
+      });
+    });
+    expect(screen.queryByRole('dialog', { name: /real robot deploy/i }))
+      .not.toBeInTheDocument();
   });
 
   test.each([
@@ -308,6 +541,38 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(store.getState().tasks.inferenceStatus.inferencePhase)
       .toBe(InferencePhase.SYNCING);
     expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
+  });
+
+  test('does not report Clear completion before asynchronous cleanup succeeds', async () => {
+    const sendRecordCommand = jest.fn().mockResolvedValue({
+      success: true,
+      message: 'Inference cleanup requested',
+    });
+    const { store } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      sendRecordCommand,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /unload model/i }));
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith('Clear requested. Waiting for model unload.');
+    });
+    expect(sendRecordCommand).toHaveBeenCalledWith('finish', {});
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(store.getState().tasks.inferenceStatus.inferencePhase)
+      .toBe(InferencePhase.PAUSED);
+
+    act(() => {
+      store.dispatch(setInferenceStatus({
+        topicReceived: true,
+        inferencePhase: InferencePhase.PAUSED,
+        runtimeState: 'error',
+        error: 'STOP rejected: current-pose hold failed; retry STOP',
+      }));
+    });
+    expect(screen.getByText(/STOP rejected: current-pose hold failed/)).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /unload model/i })).toBeEnabled();
   });
 

@@ -2,6 +2,12 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-11-11)
+------------------
+* Shared policy catalog discovery and inference recording folder validation between consumers.
+* Packaged updated robot URDF assets for preview and pose workflows.
+* Kept robot configuration and channel ordering available to source-mounted Runtime and Worker deployments.
+
 1.4.5 (2026-11-09)
 ------------------
 * None

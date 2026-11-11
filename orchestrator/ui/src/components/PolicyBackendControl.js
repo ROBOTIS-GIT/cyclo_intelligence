@@ -6,11 +6,11 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
-  MdCloudDownload,
+  MdBuild,
   MdKey,
   MdPowerSettingsNew,
   MdRefresh,
@@ -25,10 +25,6 @@ import {
   getPolicyBackendStaleReason,
 } from '../hooks/usePolicyBackendStatus';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import {
-  createDockerPullProgressTracker,
-  parseDockerPullSseBlock,
-} from '../utils/dockerPullProgress';
 
 const API_BASE = '/api';
 const HUGGINGFACE_ENDPOINT = 'https://huggingface.co';
@@ -38,12 +34,6 @@ const stateLabels = {
   exited: 'Stopped',
   not_created: 'Not created',
   unknown: 'Unknown',
-};
-
-const getBackendLabel = (serviceType) => {
-  if (serviceType === 'groot') return 'GR00T Docker';
-  if (serviceType === 'lerobot') return 'LeRobot Docker';
-  return 'Policy Docker';
 };
 
 async function readJsonResponse(response) {
@@ -56,89 +46,37 @@ async function readJsonResponse(response) {
   }
 }
 
-function getPullErrorMessage(data) {
-  return data?.message ||
-    data?.error ||
-    data?.errorDetail?.message ||
-    'Image pull failed';
+export default function PolicyBackendControl({ serviceType, runtime = null }) {
+  return <WorkerControl key={runtime?.id || serviceType} serviceType={serviceType} runtime={runtime} />;
 }
 
-async function readPullStream(response, onProgress) {
-  if (!response.body) {
-    onProgress({ percent: null, message: 'Image pull started...', layers: 0 });
-    return;
-  }
-
-  const tracker = createDockerPullProgressTracker();
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let completed = false;
-
-  const handleBlock = (block) => {
-    const item = parseDockerPullSseBlock(block);
-    if (!item) return;
-    if (item.event === 'error' || item.data?.error) {
-      throw new Error(getPullErrorMessage(item.data));
-    }
-    if (item.event === 'done') {
-      completed = true;
-      onProgress(tracker.complete(item.data?.message || 'Image pull complete'));
-      return;
-    }
-    onProgress(tracker.update(item.data));
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (value) {
-      buffer += decoder.decode(value, { stream: !done });
-    }
-    if (done) {
-      buffer += decoder.decode();
-    }
-
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() || '';
-    for (const block of blocks) {
-      handleBlock(block);
-    }
-
-    if (done) break;
-  }
-
-  if (buffer.trim()) {
-    handleBlock(buffer);
-  }
-  if (!completed) {
-    onProgress(tracker.complete());
-  }
-}
-
-export default function PolicyBackendControl({ serviceType }) {
-  const backend = serviceType === 'groot' ? 'groot' : 'lerobot';
+function WorkerControl({ serviceType, runtime }) {
+  const backend = runtime?.id || String(serviceType || '').trim();
   const label = useMemo(
-    () => getBackendLabel(serviceType),
-    [serviceType]
+    () => `${runtime?.label || 'Policy'} Docker`,
+    [runtime]
   );
 
   const [status, setStatus] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
-  const [pullProgress, setPullProgress] = useState(null);
+  const [statusError, setStatusError] = useState('');
+  const alive = useRef(true);
+  const statusSequence = useRef(0);
+  const actionPending = useRef(false);
   const [showTokenPopup, setShowTokenPopup] = useState(false);
   const [isRegisteringToken, setIsRegisteringToken] = useState(false);
   const [tokenRegistered, setTokenRegistered] = useState(false);
   const { registerHFUser, listHFEndpoints } = useRosServiceCaller();
 
   useEffect(() => {
-    if (!pullProgress || pendingAction === 'pull') return undefined;
-    if (pullProgress.percent !== 100 || pullProgress.error) return undefined;
-    const id = setTimeout(() => setPullProgress(null), 3000);
-    return () => clearTimeout(id);
-  }, [pendingAction, pullProgress]);
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   const refreshStatus = useCallback(async ({ quiet = false } = {}) => {
+    if (!backend) return;
+    const sequence = ++statusSequence.current;
     if (!quiet) setIsRefreshing(true);
     try {
       const response = await fetch(`${API_BASE}/backends/${backend}/status`);
@@ -146,28 +84,35 @@ export default function PolicyBackendControl({ serviceType }) {
       if (!response.ok) {
         throw new Error(data.detail || `status failed (${response.status})`);
       }
+      if (!alive.current || sequence !== statusSequence.current) return;
       setStatus(data);
+      setStatusError('');
     } catch (error) {
-      setStatus({
-        container_state: 'unknown',
-        image_pulled: false,
-        raw_state: error.message,
-      });
+      if (!alive.current || sequence !== statusSequence.current) return;
+      setStatusError(error.message);
       if (!quiet) toast.error(`${label} status failed: ${error.message}`);
     } finally {
-      if (!quiet) setIsRefreshing(false);
+      if (alive.current && !quiet) setIsRefreshing(false);
     }
   }, [backend, label]);
 
   useEffect(() => {
-    refreshStatus({ quiet: true });
-    const id = setInterval(() => refreshStatus({ quiet: true }), 5000);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      await refreshStatus({ quiet: true });
+      if (!cancelled) timer = setTimeout(poll, 5000);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [refreshStatus]);
 
   useEffect(() => {
     let cancelled = false;
-    if (backend !== 'groot') return undefined;
+    if (!runtime?.capabilities?.requires_hf_token) return undefined;
     listHFEndpoints()
       .then((result) => {
         if (cancelled || !result?.success) return;
@@ -180,9 +125,11 @@ export default function PolicyBackendControl({ serviceType }) {
     return () => {
       cancelled = true;
     };
-  }, [backend, listHFEndpoints]);
+  }, [listHFEndpoints, runtime]);
 
   const callBackend = useCallback(async (action, successLabel) => {
+    if (actionPending.current) return;
+    actionPending.current = true;
     setPendingAction(action);
     try {
       const response = await fetch(`${API_BASE}/backends/${backend}/${action}`, {
@@ -192,52 +139,43 @@ export default function PolicyBackendControl({ serviceType }) {
       if (!response.ok || data.ok === false) {
         throw new Error(data.detail || data.message || `${action} failed`);
       }
+      if (!alive.current) return;
       toast.success(`${label} ${successLabel}`);
       await refreshStatus({ quiet: true });
     } catch (error) {
+      if (!alive.current) return;
       toast.error(`${label} ${action} failed: ${error.message}`);
       await refreshStatus({ quiet: true });
     } finally {
-      setPendingAction(null);
+      actionPending.current = false;
+      if (alive.current) setPendingAction(null);
     }
   }, [backend, label, refreshStatus]);
 
-  const pullBackendImage = useCallback(async () => {
-    setPendingAction('pull');
-    setPullProgress({
-      percent: null,
-      message: 'Preparing image pull...',
-      layers: 0,
-    });
+  const buildBackendImage = useCallback(async () => {
+    if (actionPending.current) return;
+    actionPending.current = true;
+    ++statusSequence.current;
+    setPendingAction('build');
     try {
-      const response = await fetch(`${API_BASE}/backends/${backend}/pull`, {
+      const response = await fetch(`${API_BASE}/backends/${backend}/build`, {
         method: 'POST',
       });
+      const data = await readJsonResponse(response);
+      if (!alive.current) return;
       if (!response.ok) {
-        const data = await readJsonResponse(response);
-        throw new Error(data.detail || data.message || `pull failed (${response.status})`);
+        throw new Error(data.detail || data.message || `build failed (${response.status})`);
       }
-      await readPullStream(response, setPullProgress);
+      ++statusSequence.current;
+      setStatus(previous => ({ ...previous, build: data }));
       await refreshStatus({ quiet: true });
-      setPullProgress((previous) => ({
-        ...(previous || {}),
-        percent: 100,
-        layerPercent: null,
-        message: 'Image ready. Press ON.',
-        detail: '',
-      }));
-      toast.success(`${label} image ready`);
     } catch (error) {
-      setPullProgress((previous) => ({
-        ...(previous || {}),
-        percent: previous?.percent ?? null,
-        message: error.message || 'Image pull failed',
-        error: true,
-      }));
-      toast.error(`${label} pull failed: ${error.message}`);
+      if (!alive.current) return;
+      toast.error(`${label} build failed: ${error.message}`);
       await refreshStatus({ quiet: true });
     } finally {
-      setPendingAction(null);
+      actionPending.current = false;
+      if (alive.current) setPendingAction(null);
     }
   }, [backend, label, refreshStatus]);
 
@@ -268,17 +206,18 @@ export default function PolicyBackendControl({ serviceType }) {
 
   const state = status?.container_state || 'unknown';
   const hasStatus = Boolean(status);
-  const isBusy = Boolean(pendingAction) || isRefreshing;
-  const isPulling = pendingAction === 'pull';
+  const build = status?.build;
+  const isBuilding = build?.state === 'building' || pendingAction === 'build';
+  const isBusy = Boolean(pendingAction) || isRefreshing || isBuilding || Boolean(statusError);
   const isRunning = state === 'running';
   const imagePulled = Boolean(status?.image_pulled);
   const staleReason = getPolicyBackendStaleReason(status);
   const isStaleContainer = Boolean(staleReason);
-  const showPullButton = isPulling || (hasStatus && !imagePulled);
+  const showBuildButton = hasStatus && !imagePulled;
   const showUpdateButton = hasStatus && imagePulled && isStaleContainer;
   const showRuntimeControls = !isStaleContainer &&
     (imagePulled || (hasStatus && state !== 'not_created'));
-  const showTokenControl = backend === 'groot';
+  const showTokenControl = Boolean(runtime?.capabilities?.requires_hf_token);
   const readiness = useMemo(() => getPolicyBackendReadiness(status), [status]);
   const isWarming = isRunning && !readiness.ready &&
     (readiness.state === 'checking' || readiness.state === 'warming');
@@ -340,28 +279,25 @@ export default function PolicyBackendControl({ serviceType }) {
       'bg-blue-500 text-white hover:bg-blue-600': variant === 'on',
       'bg-gray-500 text-white hover:bg-gray-600': variant === 'restart',
       'bg-red-500 text-white hover:bg-red-600': variant === 'off',
-      'bg-emerald-500 text-white hover:bg-emerald-600': variant === 'pull',
+      'bg-emerald-500 text-white hover:bg-emerald-600': variant === 'build',
       'bg-amber-500 text-white hover:bg-amber-600': variant === 'update',
       'bg-violet-500 text-white hover:bg-violet-600': variant === 'token',
     }
   );
 
-  const pullPercent = Number.isFinite(pullProgress?.percent)
-    ? pullProgress.percent
-    : null;
-  const layerPercent = Number.isFinite(pullProgress?.layerPercent)
-    ? pullProgress.layerPercent
-    : null;
-  const pullProgressLabel = pullPercent === null
-    ? (layerPercent === null ? '...' : `Layer ${layerPercent}%`)
-    : `${pullPercent}%`;
-  const pullBarWidth = `${pullPercent ?? layerPercent ?? (isPulling ? 8 : 0)}%`;
-
   return (
-    <div className="mb-3 border-t border-b border-gray-200 py-2">
-      <div className="flex items-center justify-between gap-2 mb-2">
+    <div className="mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <div className="text-sm font-semibold text-gray-700">{label}</div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {imagePulled && (
+            <Tooltip position="bottom" content="Rebuild Worker image from local source">
+              <button type="button" className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                disabled={isBusy} onClick={buildBackendImage} aria-label={`${label} rebuild image`}>
+                <MdBuild size={16} />
+              </button>
+            </Tooltip>
+          )}
           <span className={statusClass}>
             {statusLabel}
           </span>
@@ -380,7 +316,7 @@ export default function PolicyBackendControl({ serviceType }) {
           {!imagePulled && (
             <Tooltip
               position="bottom"
-              content="Image is not available locally. Connect internet and pull/install before first start."
+              content="Build the Worker image from the local Cyclo checkout before first start."
             >
               <span className="text-xs font-semibold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded-full">
                 Image missing
@@ -392,23 +328,23 @@ export default function PolicyBackendControl({ serviceType }) {
       <div className={clsx(
         'grid',
         'gap-2',
-        showUpdateButton || (showPullButton && !showRuntimeControls) ? 'grid-cols-1' : (
-          showPullButton ? 'grid-cols-2' : (
+        showUpdateButton || (showBuildButton && !showRuntimeControls) ? 'grid-cols-1' : (
+          showBuildButton ? 'grid-cols-2' : (
             showTokenControl ? 'grid-cols-2' : 'grid-cols-3'
           )
         )
       )}
       >
-        {showPullButton && (
+        {showBuildButton && (
           <button
             type="button"
-            className={buttonClass('pull')}
+            className={buttonClass('build')}
             disabled={isBusy}
-            onClick={pullBackendImage}
-            aria-label={`${label} pull image`}
+            onClick={buildBackendImage}
+            aria-label={`${label} build image`}
           >
-            <MdCloudDownload size={16} />
-            Pull
+            <MdBuild size={16} />
+            {isBuilding ? 'Building...' : 'Build'}
           </button>
         )}
         {showUpdateButton && (
@@ -474,69 +410,20 @@ export default function PolicyBackendControl({ serviceType }) {
           </>
         )}
       </div>
-      {pullProgress && (
-        <Tooltip
-          position="bottom"
-          content={pullProgress.message}
-          disabled={!pullProgress.message}
-          className="w-full"
-        >
-          <div className={clsx(
-            'mt-2',
-            'w-full',
-            'rounded-md',
-            'bg-gray-50',
-            'px-2',
-            'py-2',
-            pullProgress.error && 'bg-red-50'
-          )}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className={clsx(
-                'min-w-0',
-                'truncate',
-                'text-xs',
-                'font-medium',
-                pullProgress.error ? 'text-red-700' : 'text-gray-600'
-              )}
-              >
-                {pullProgress.message || 'Pulling image...'}
-              </span>
-              <span className={clsx(
-                'shrink-0',
-                'text-xs',
-                'font-semibold',
-                pullProgress.error ? 'text-red-700' : 'text-gray-700'
-              )}
-              >
-                {pullProgressLabel}
-              </span>
-            </div>
-            {pullProgress.detail && (
-              <div className={clsx(
-                'mt-0.5',
-                'truncate',
-                'text-[11px]',
-                'font-medium',
-                pullProgress.error ? 'text-red-600' : 'text-gray-500'
-              )}
-              >
-                {pullProgress.detail}
-              </div>
-            )}
-            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-200">
-              <div
-                className={clsx(
-                  'h-full',
-                  'transition-all',
-                  'duration-300',
-                  pullProgress.error ? 'bg-red-500' : 'bg-emerald-500'
-                )}
-                style={{ width: pullBarWidth }}
-              />
-            </div>
+      {statusError && <div role="alert" className="mt-2 break-words text-xs text-red-700">{statusError}</div>}
+      {build && build.state !== 'idle' && (
+        <div className="mt-2 min-w-0 text-xs">
+          <div role={build.state === 'failed' ? 'alert' : 'status'}
+            className={clsx('break-words', build.state === 'failed' ? 'text-red-700' : 'text-gray-600')}>
+            {build.message}
           </div>
-        </Tooltip>
+          {build.log_tail?.length > 0 && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-gray-600">Build log</summary>
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all bg-gray-50 p-2 text-[11px]">{build.log_tail.join('\n')}</pre>
+            </details>
+          )}
+        </div>
       )}
       {isRunning && (
         <>
@@ -566,7 +453,7 @@ export default function PolicyBackendControl({ serviceType }) {
             })}
           </div>
           {!readiness.ready && (
-            <div className="mt-1 text-xs font-medium text-yellow-700">
+            <div className={`mt-1 text-xs font-medium ${readiness.state === 'error' ? 'text-red-600' : 'text-yellow-700'}`}>
               {readiness.message}
             </div>
           )}

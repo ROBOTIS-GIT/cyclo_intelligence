@@ -1,0 +1,42 @@
+# Build context: Cyclo repository root, including the pinned LingBot submodule.
+# Explicit validate/train/reload commands; no ROS or automatic training startup.
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-dev curl ca-certificates git build-essential ffmpeg libegl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.12.21@sha256:d5f9251169d92c6b547266079bd0570ae343a853244a16be5e43b119ca56b02b /uv /usr/local/bin/uv
+COPY cyclo_brain/policy/lingbot_vla/lingbot-vla-v2/ /lingbot-vla-v2/
+COPY cyclo_brain/policy/lingbot_vla/training/requirements*.lock /opt/lingbot-build/
+RUN --mount=type=bind,source=cyclo_brain/policy/lingbot_vla/training,target=/opt/lingbot-policy,readonly \
+    python3 /opt/lingbot-policy/environment.py verify --policy /opt/lingbot-policy
+RUN uv venv --python /usr/bin/python3 /opt/lingbot-env
+ENV PATH=/opt/lingbot-env/bin:$PATH
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip sync --python /opt/lingbot-env/bin/python --require-hashes \
+    /opt/lingbot-build/requirements-build.lock
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip sync --python /opt/lingbot-env/bin/python --require-hashes \
+    --no-build-isolation /opt/lingbot-build/requirements.lock
+# Use only the pinned dataset/teacher source APIs. Their full training/demo
+# package metadata contradicts the VLA stack and is deliberately not installed.
+COPY cyclo_brain/policy/lingbot_vla/training/ /opt/lingbot-build/
+RUN python /opt/lingbot-build/environment.py fetch
+COPY cyclo_brain/policy/lingbot_vla/lingbot_vla_training/ /opt/cyclo-training/lingbot_vla_training/
+ENV PYTHONPATH=/opt/cyclo-training:/lingbot-vla-v2:/opt/lerobot/src:/lingbot-vla-v2/lingbotvla/models/vla/vision_models/MoGe:/lingbot-vla-v2/lingbotvla/models/vla/vision_models/lingbot-depth
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# Catch source/API incompatibilities before the expensive CUDA compilation.
+RUN python /opt/lingbot-build/environment.py smoke
+ARG FLASH_ATTN_CUDA_ARCHS=120
+ARG MAX_JOBS=2
+RUN --mount=type=cache,target=/root/.cache/uv-flash,id=lingbot-flash-torch280-${FLASH_ATTN_CUDA_ARCHS}-${MAX_JOBS} \
+    UV_CACHE_DIR=/root/.cache/uv-flash \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
+    uv pip install --python /opt/lingbot-env/bin/python --no-build-isolation --no-deps \
+    'https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz#sha256=1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d'
+ARG CYCLO_COMMIT=uncommitted
+ENV CYCLO_COMMIT=${CYCLO_COMMIT}
+RUN python /opt/lingbot-build/environment.py receipt \
+    --flash-arch "${FLASH_ATTN_CUDA_ARCHS}" --max-jobs "${MAX_JOBS}"
+WORKDIR /lingbot-vla-v2
+ENTRYPOINT ["/opt/lingbot-env/bin/python"]

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyclo-lerobot-io"
+version = "0.1.0"
+description = "Named training channels and portable inference mapping for LeRobot"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6"]
+
+[project.entry-points."lerobot.training_adapters"]
+cyclo_channels = "cyclo_lerobot_io.selection:ChannelSelectionAdapter"
+
+[project.scripts]
+cyclo-io-mapping = "cyclo_lerobot_io.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cyclo_lerobot_io*"]

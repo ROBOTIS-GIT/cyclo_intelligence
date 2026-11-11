@@ -11,36 +11,36 @@
 """LeRobot engine loading helpers (LoadingMixin).
 
 Extracted from ``engine.py`` to keep the core ``LeRobotEngine`` class
-focused on the ``InferenceEngine`` API. Mixed into the engine via
-multiple inheritance; bind-mounted into the policy container as part
+focused on the ``InferenceEngine`` API. Installed in the Worker as part
 of the ``/app/lerobot_engine/`` package.
 
 Owns:
 - ``_resolve_model_dir``: auto-descend lerobot training-output roots.
 - ``_load_policy_assets``: load weights + stored pre/post processors.
-- ``_infer_image_resize``: read per-input-image shape hints off the policy.
+- ``_prepare_policy_predictor``: prepare the adapter's optional batch predictor.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import torch
-
-from .image_preprocessing import infer_image_resize_targets
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+
+from .policy_validation import validate_checkpoint
+from .adapters import resolve_adapter
 
 
 logger = logging.getLogger("lerobot_engine")
 
 
 class LoadingMixin:
-    """Policy load helpers — weights, processors, resize hint."""
+    """Policy load helpers — weights and saved processors."""
 
     @staticmethod
     def _resolve_model_dir(model_path: str) -> str:
@@ -67,7 +67,9 @@ class LoadingMixin:
         config_path = Path(model_path) / "config.json"
         if config_path.exists():
             with open(config_path) as f:
-                policy_type = json.load(f).get("type", "act")
+                checkpoint_config = json.load(f)
+            validate_checkpoint(checkpoint_config, model_path)
+            policy_type = checkpoint_config.get("type", "act")
         else:
             # ACT was the original default; fall back to it for
             # checkpoints saved before ``type`` started being recorded.
@@ -76,34 +78,15 @@ class LoadingMixin:
         logger.info("Policy type: %s", policy_type)
         PolicyClass = get_policy_class(policy_type)
 
-        # FastWAM's text encoder must stay on the CPU. Its default config can
-        # auto-select CUDA inside ``from_pretrained`` and exhaust VRAM before
-        # the offload hook runs, so pin only this policy's initial load to CPU.
-        if policy_type == "fastwam":
-            policy_config = PreTrainedConfig.from_pretrained(model_path)
-            policy_config.device = "cpu"
-            policy = PolicyClass.from_pretrained(model_path, config=policy_config)
+        loader = resolve_adapter(policy_type).policy_loader
+        if loader is not None:
+            policy = loader(PolicyClass, PreTrainedConfig, model_path, device)
         else:
-            policy = PolicyClass.from_pretrained(model_path)
-
-        # MolmoAct2 errors out unless the action mode is set. We run the
-        # continuous (flow matching) head; a checkpoint that names one keeps it.
-        if policy_type == "molmoact2" and not getattr(
-            policy.config, "inference_action_mode", None
-        ):
-            policy.config.inference_action_mode = "continuous"
-
-        if policy_type == "fastwam":
-            policy = policy.eval()
-            logger.info("FastWAM weights loaded on CPU for selective offload")
-        else:
-            policy = policy.to(device).eval()
+            policy = PolicyClass.from_pretrained(model_path).to(device).eval()
             logger.info("Policy weights loaded on %s", device)
 
-        # Stored processor pipelines include the dataset-time normalizer
-        # stats and image transforms so we don't re-derive (and de-sync)
-        # them. Falling through to the default factory here would wipe
-        # those stats and produce garbage actions.
+        # Restore serialized steps and statistics. Dataset-side transforms
+        # outside this pipeline are not necessarily recorded in the checkpoint.
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=policy.config,
             pretrained_path=model_path,
@@ -114,17 +97,9 @@ class LoadingMixin:
         logger.info("Pre/post processors loaded")
         return policy, preprocessor, postprocessor
 
-    def _infer_image_resize(self, policy: PreTrainedPolicy) -> Dict[str, Tuple[int, int]]:
-        """Best-effort per-policy-key target ``(W, H)`` from config.
-
-        Many lerobot policies advertise the expected image shape under
-        ``input_features['observation.images.<cam>'].shape = (C, H, W)``.
-        Pre-resizing on the host keeps mixed camera shapes aligned with the
-        dataset metadata. Missing keys mean: leave that camera at native size.
-        """
-        try:
-            features = getattr(policy.config, "input_features", {}) or {}
-            return infer_image_resize_targets(features)
-        except Exception:
-            pass
-        return {}
+    def _prepare_policy_predictor(self, request: Any) -> None:
+        """Prepare once per weights load; cached LOAD keeps the predictor."""
+        factory = resolve_adapter(self._policy.config.type).predictor_factory
+        self._chunk_predictor = factory(self._policy, self._device, request) if factory else None
+        if factory is not None and not callable(self._chunk_predictor):
+            raise TypeError("adapter predictor_factory must return a callable")

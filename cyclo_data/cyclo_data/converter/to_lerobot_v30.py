@@ -4070,7 +4070,7 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
                 "task": task,
                 "task_name": task_names.get(task, task),
             }
-            for idx, task in self._tasks.items()
+            for idx, task in sorted(self._tasks.items())
         ]
 
         if not tasks_data:
@@ -4093,8 +4093,9 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             self._log_info("Reused v3 tasks parquet cache")
             return
 
+        # LeRobot reads tasks.iloc[task_index].name. Preserve the named index
+        # and Arrow string types regardless of pandas' default string dtype.
         table = pa.Table.from_pylist(tasks_data)
-        # LeRobot resolves task instructions from the pandas row index.
         table = pa.Table.from_pandas(
             table.to_pandas().set_index("task"),
             schema=table.schema,

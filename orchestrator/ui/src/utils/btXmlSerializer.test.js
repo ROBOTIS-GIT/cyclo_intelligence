@@ -52,6 +52,28 @@ function sampleGraph() {
 }
 
 describe('btXmlSerializer', () => {
+  it.each([
+    ['INFERENCE', 'LOAD', true],
+    ['INFERENCE', 'RESUME', false],
+    ['DOCKER', 'START', false],
+  ])('keeps action_steps only for %s %s when round-tripping a catalog model', (target, command, keepSteps) => {
+    const params = { target, command, model: 'lerobot:wall_x', action_steps: '7' };
+    const nodes = [{ id: 'bt_0', type: 'btAction', data: { nodeType: 'SendCommand', params } }];
+    const nodeDataMap = new Map([
+      ['bt_0', { tag: 'SendCommand', name: 'Command', params }],
+    ]);
+
+    const xml = serializeFromGraph(nodes, [], nodeDataMap);
+    const parsed = [...parseBTXml(xml).nodeDataMap.values()][0].params;
+
+    expect(parsed).toMatchObject({ target, command });
+    if (keepSteps) {
+      expect(parsed).toMatchObject({ model: 'lerobot:wall_x', action_steps: '7' });
+    } else {
+      expect(parsed).not.toHaveProperty('action_steps');
+    }
+  });
+
   it('serializes graph nodes without layout attributes', () => {
     const { nodes, edges, nodeDataMap } = sampleGraph();
     const xml = serializeFromGraph(nodes, edges, nodeDataMap);

@@ -24,10 +24,49 @@ Tests the ROS2 service based communication with Docker containers.
 
 import unittest
 import sys
+from unittest.mock import Mock
 
 
 class TestContainerServiceClient(unittest.TestCase):
     """Test ContainerServiceClient for container communication (inference + training)."""
+
+    def test_action_steps_wire_preserves_omission_and_zero(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        from interfaces.srv import InferenceCommand
+        self.assertEqual(InferenceCommand.Request().action_steps, -1)
+        client = ContainerServiceClient(node=None)
+        client._call_service = Mock(return_value='ok')
+        for steps in (None, 0, 10):
+            client.inference_command(client.CMD_RESUME, action_steps=steps)
+            request = client._call_service.call_args.args[1]
+            self.assertEqual(request.action_steps, -1 if steps is None else steps)
+        for invalid in (True, -1, 1.5, '2'):
+            with self.assertRaises(ValueError):
+                client.inference_command(client.CMD_START, action_steps=invalid)
+
+    def test_status_reader_only_creates_one_client(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        node = Mock()
+        client = ContainerServiceClient(node=node, inference_only=True)
+        self.assertTrue(client.connect())
+        self.assertTrue(client.connect())
+        node.create_client.assert_called_once()
+        self.assertEqual(node.create_client.call_args.args[1], '/policy/inference_command')
+        client.disconnect()
+        node.destroy_client.assert_called_once()
+
+    def test_command_observer_excludes_status_and_balances_on_failure(self):
+        from orchestrator.internal.communication.container_service_client import ContainerServiceClient
+        observer = Mock()
+        client = ContainerServiceClient(node=None, command_observer=observer)
+        client._call_service = Mock(return_value='ok')
+        client.inference_command(client.CMD_STATUS, timeout_sec=1.0)
+        observer.assert_not_called()
+        self.assertEqual(client._call_service.call_args.kwargs['availability_timeout_sec'], 1.0)
+        client._call_service.side_effect = RuntimeError('failed')
+        with self.assertRaises(RuntimeError):
+            client.inference_command(client.CMD_PAUSE)
+        self.assertEqual([call.args for call in observer.call_args_list], [(True,), (False,)])
 
     def test_01_import_ros2_interfaces(self):
         """Test that ROS2 interfaces can be imported."""
@@ -79,6 +118,8 @@ class TestContainerServiceClient(unittest.TestCase):
         self.assertEqual(ContainerServiceClient.CMD_RESUME, 3)
         self.assertEqual(ContainerServiceClient.CMD_STOP, 4)
         self.assertEqual(ContainerServiceClient.CMD_UNLOAD, 5)
+        self.assertEqual(ContainerServiceClient.CMD_UPDATE_INSTRUCTION, 6)
+        self.assertEqual(ContainerServiceClient.CMD_STATUS, 7)
         print("PASS: InferenceCommand constants match .srv")
 
     def test_05_create_client_default(self):
@@ -129,7 +170,7 @@ class TestContainerServiceClient(unittest.TestCase):
 
         groot_client = ContainerServiceClient(node=None, service_prefix="/groot")
         self.assertEqual(
-            groot_client.service_inference_command, '/groot/inference_command'
+            groot_client.service_inference_command, '/policy/inference_command'
         )
         self.assertEqual(groot_client.service_stop, '/groot/stop')
         self.assertEqual(groot_client.service_train, '/groot/train')
@@ -137,7 +178,7 @@ class TestContainerServiceClient(unittest.TestCase):
 
         lerobot_client = ContainerServiceClient(node=None, service_prefix="/lerobot")
         self.assertEqual(
-            lerobot_client.service_inference_command, '/lerobot/inference_command'
+            lerobot_client.service_inference_command, '/policy/inference_command'
         )
         self.assertEqual(lerobot_client.service_stop, '/lerobot/stop')
         self.assertEqual(lerobot_client.service_train, '/lerobot/train')
@@ -264,6 +305,31 @@ class TestContainerServiceClient(unittest.TestCase):
 
         self.assertEqual(captured_timeouts, [10.0, 10.0])
 
+    def test_14_policy_selection_fields_reach_ros_request(self):
+        from orchestrator.internal.communication.container_service_client import (
+            ContainerServiceClient,
+        )
+
+        client = ContainerServiceClient(node=None, service_prefix="/lerobot")
+        captured = {}
+
+        def capture_call(_client, request, _service_name, **_kwargs):
+            captured["request"] = request
+            return None
+
+        client._call_service = capture_call
+        client.inference_command(
+            ContainerServiceClient.CMD_LOAD,
+            policy_id="lerobot:act",
+            policy_parameters_json='{"gain":0.5}',
+        )
+
+        self.assertEqual(captured["request"].policy_id, "lerobot:act")
+        self.assertEqual(
+            captured["request"].policy_parameters_json,
+            '{"gain":0.5}',
+        )
+
 
 class TestServiceResponse(unittest.TestCase):
     """Test ServiceResponse dataclass."""
@@ -318,6 +384,20 @@ class TestServiceResponse(unittest.TestCase):
             policies = ["act", "diffusion"]
             checkpoints = ["ckpt1", "ckpt2"]
             models = ["model1"]
+            runtime_state = "paused"
+            loaded_model_path = "/models/act"
+            loaded_policy_id = "lerobot:act"
+            loaded_policy_parameters_json = '{"gain":0.5}'
+            publish_to_robot = True
+            loaded_action_request_mode = "sync"
+            loaded_acceleration_mode = "pytorch"
+            loaded_acceleration_engine_path = ""
+            loaded_control_hz = 80
+            observed_chunk_size = 15
+            loaded_inference_hz = 20
+            loaded_chunk_align_window_s = 0.25
+            loaded_initial_pose_sync = True
+            loaded_initial_pose_sync_duration_s = 7.0
 
         response = ServiceResponse.from_service_response(MockResponse())
 
@@ -326,6 +406,16 @@ class TestServiceResponse(unittest.TestCase):
         self.assertEqual(response.data['state'], "training")
         self.assertEqual(response.data['step'], 100)
         self.assertEqual(response.data['policies'], ["act", "diffusion"])
+        self.assertEqual(response.data['runtime_state'], "paused")
+        self.assertEqual(response.data['loaded_model_path'], "/models/act")
+        self.assertEqual(response.data['loaded_policy_id'], "lerobot:act")
+        self.assertTrue(response.data['publish_to_robot'])
+        self.assertEqual(response.data['loaded_action_request_mode'], "sync")
+        self.assertEqual(response.data['loaded_control_hz'], 80)
+        self.assertEqual(response.data['observed_chunk_size'], 15)
+        self.assertEqual(response.data['loaded_inference_hz'], 20)
+        self.assertEqual(response.data['loaded_chunk_align_window_s'], 0.25)
+        self.assertTrue(response.data['loaded_initial_pose_sync'])
         print("PASS: _extract_data extracts all attributes correctly")
 
 

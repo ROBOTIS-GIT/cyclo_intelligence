@@ -29,6 +29,10 @@ import {
 } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
+import InferenceTryResults from './InferenceTryResults';
+import PolicyParameterFields from './PolicyParameterFields';
+import SavedPoseControlPanel from './SavedPoseControlPanel';
+import InferenceRecordingControls from './InferenceRecordingControls';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -45,7 +49,7 @@ import {
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import { findPolicy, usePolicyCatalog } from '../contexts/PolicyCatalogContext';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
 import {
   getInferenceTimingWarnings,
@@ -61,7 +65,16 @@ const InferencePanel = () => {
   const taskInfoSync = useSelector((state) => state.tasks.inferenceTaskInfoSync);
   const robotType = useSelector((state) => state.tasks.robotType);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
-  const showInstruction = requiresInstruction(info.serviceType, info.policyType);
+  const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
+  const { catalog, status: catalogStatus, error: catalogError, retry: retryCatalog } = usePolicyCatalog();
+  const selectedPolicy = findPolicy(
+    catalog,
+    info.policyId,
+    info.serviceType,
+    info.policyType
+  );
+  const selectedRuntime = selectedPolicy?.runtime;
+  const showInstruction = Boolean(selectedPolicy?.requires_instruction);
 
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
   const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
@@ -78,8 +91,9 @@ const InferencePanel = () => {
     String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
       : 'async';
-  const isGrootModel = info.serviceType === 'groot';
   const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
+  const isTensorRtCapable = selectedRuntime?.capabilities?.operations?.includes('groot_trt');
+  const actionRequestModes = selectedRuntime?.capabilities?.action_request_modes || [];
   const initialPoseSyncEnabled = Boolean(info.initialPoseSync);
   const timingInputIncomplete = hasIncompleteInferenceTiming(info);
   const timingWarnings = getInferenceTimingWarnings({
@@ -94,7 +108,21 @@ const InferencePanel = () => {
     InferencePhase.PAUSED,
     InferencePhase.SYNCING,
   ].includes(inferenceStatus.inferencePhase);
-  const disabled = isTaskRunning;
+  const disabled = isTaskRunning || catalogStatus !== 'ready' || !selectedPolicy;
+  const actionStepsSupported = selectedPolicy?.execution_mode === 'chunk';
+  const actionStepsHelp = selectedPolicy?.execution_mode === 'step'
+    ? 'This policy manages its own action queue. Only All is supported.'
+    : !actionStepsSupported
+      ? 'Action Steps support is unknown. Refresh the policy catalog before selecting a count.'
+      : 'Choose how many actions to use from each prediction after alignment. Leave empty for All. Max shows the latest model chunk length after Start, not the selected count. Changes apply on Start; alignment may leave fewer actions.';
+  const canEditActionSteps = catalogStatus === 'ready' && actionStepsSupported
+    && [InferencePhase.READY, InferencePhase.PAUSED].includes(inferenceStatus.inferencePhase);
+  const observedChunkSize = inferenceStatus.observedChunkSize;
+  const hasObservedChunk = actionStepsSupported && inferenceStatus.topicReceived && isModelActive
+    && selectedPolicy?.policy_id === inferenceStatus.loadedPolicyId
+    && Boolean(info.policyPath)
+    && info.policyPath.replace(/\/+$/, '') === (inferenceStatus.loadedModelPath || '').replace(/\/+$/, '')
+    && Number.isInteger(observedChunkSize) && observedChunkSize > 0;
   const [isEditable, setIsEditable] = useState(!disabled);
   const [isUpdatingInstruction, setIsUpdatingInstruction] = useState(false);
   const syncGenerationRef = useRef(0);
@@ -107,17 +135,21 @@ const InferencePanel = () => {
       // taskInstruction stays editable while inference is running so a
       // multi-task language-conditioned policy can be re-conditioned via
       // the "Update Task Instruction" button below.
-      if (field !== 'taskInstruction' && !isEditable) return;
+      if (field === 'actionSteps') {
+        if (!canEditActionSteps) return;
+      } else if (field !== 'taskInstruction' && !isEditable) return;
       dispatch(setInferenceTaskInfo({ [field]: value }));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
-    [isEditable, dispatch]
+    [isEditable, canEditActionSteps, dispatch]
   );
 
   const taskSyncKey = useMemo(
     () => getInferenceTaskInfoKey(info),
     [info]
   );
+  const taskInfoRef = useRef(info);
+  useEffect(() => { taskInfoRef.current = info; }, [info]);
 
   useEffect(
     () => () => {
@@ -152,6 +184,8 @@ const InferencePanel = () => {
     const generation = syncGenerationRef.current + 1;
     syncGenerationRef.current = generation;
     const submittedTaskKey = taskSyncKey;
+    // Status updates rebuild the selector result but must not restart the debounce.
+    const submittedTaskInfo = taskInfoRef.current;
     dispatch(markInferenceTaskInfoSyncPending());
 
     syncTimerRef.current = setTimeout(async () => {
@@ -162,7 +196,9 @@ const InferencePanel = () => {
         });
         if (syncGenerationRef.current !== generation) return;
         if (result && result.success) {
-          dispatch(markInferenceTaskInfoSyncSuccess({ taskKey: submittedTaskKey }));
+          dispatch(markInferenceTaskInfoSyncSuccess({
+            taskKey: submittedTaskKey, taskInfo: submittedTaskInfo,
+          }));
         } else {
           dispatch(markInferenceTaskInfoSyncFailed(
             (result && result.message) || 'Inference task info not synced.'
@@ -254,10 +290,7 @@ const InferencePanel = () => {
     setShowPolicyBrowser(false);
   }, [isEditable, dispatch]);
 
-  const policyBrowserPath =
-    info.serviceType === 'groot'
-      ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
-      : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
+  const policyBrowserPath = selectedRuntime?.checkpoint_root || '/workspace/model';
 
   // Update isEditable state when the disabled prop changes
   useEffect(() => {
@@ -415,10 +448,24 @@ const InferencePanel = () => {
         Task Information
       </div>
 
+      {catalogStatus === 'error' && (
+        <div className="mb-3 border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+          <div>{catalogError || 'Policy catalog is unavailable.'}</div>
+          <button
+            type="button"
+            className="mt-2 text-blue-600 underline"
+            onClick={retryCatalog}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       <InferenceModelSelector readonly={!isEditable} />
 
       <PolicyBackendControl
         serviceType={info.serviceType}
+        runtime={selectedRuntime}
       />
 
       <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 p-2">
@@ -477,8 +524,30 @@ const InferencePanel = () => {
         )}
       </div>
 
-      {/* Task Instruction — only shown for language-conditioned policies.
-          Whitelist lives in constants/policyCapabilities.js. */}
+      {/* Policy Path */}
+      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
+        <span className={clsx(classLabel, 'pt-2')}>Policy Path</span>
+        <div className="flex flex-row items-start gap-2 flex-1 min-w-0">
+          <textarea
+            className={classPolicyPathTextarea}
+            value={info.policyPath || ''}
+            onChange={(e) => handleChange('policyPath', e.target.value)}
+            disabled={!isEditable}
+            placeholder="Enter Policy Path or Repo ID"
+          />
+          <button
+            type="button"
+            onClick={() => setShowPolicyBrowser(true)}
+            disabled={!isEditable}
+            className="flex items-center justify-center w-9 h-9 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            aria-label="Browse for policy model folder"
+          >
+            <MdFolderOpen className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Task Instruction is shown when the selected catalog model requires it. */}
       {showInstruction && (
         <>
           <div className={clsx('flex', 'items-start', 'mb-1')}>
@@ -514,69 +583,30 @@ const InferencePanel = () => {
         </>
       )}
 
-      {/* Policy Path */}
-      <div className={clsx('flex', 'items-start', 'mb-2.5')}>
-        <span className={clsx(classLabel, 'pt-2')}>Policy Path</span>
-        <div className="flex flex-row items-start gap-2 flex-1 min-w-0">
-          <textarea
-            className={classPolicyPathTextarea}
-            value={info.policyPath || ''}
-            onChange={(e) => handleChange('policyPath', e.target.value)}
-            disabled={!isEditable}
-            placeholder="Enter Policy Path or Repo ID"
-          />
-          <button
-            type="button"
-            onClick={() => setShowPolicyBrowser(true)}
-            disabled={!isEditable}
-            className="flex items-center justify-center w-9 h-9 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-            aria-label="Browse for policy model folder"
-          >
-            <MdFolderOpen className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
+      <PolicyParameterFields
+        model={selectedPolicy}
+        info={info}
+        disabled={!isEditable}
+        labelClassName={classLabel}
+        onTaskInfoChange={handleChange}
+        onPolicyParametersChange={(value) => handleChange('policyParameters', value)}
+        excludedBindings={isTensorRtCapable ? ['task_info.accelerationEnginePath'] : []}
+      />
 
-      {isGrootModel && (
+      {isTensorRtCapable && isTensorRtEnabled && (
         <>
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-              <Tooltip content="Run GR00T with DiT TensorRT acceleration." position="bottom">
-                <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
-              </Tooltip>
-              <span>TensorRT</span>
-            </div>
-            <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
-              <input
-                type="checkbox"
-                className={clsx('w-4 h-4', {
-                  'cursor-not-allowed opacity-50': !isEditable,
-                  'cursor-pointer': isEditable,
-                })}
-                checked={isTensorRtEnabled}
-                onChange={(e) => handleChange(
-                  'accelerationMode',
-                  e.target.checked ? 'tensorrt_dit' : 'pytorch'
-                )}
-                disabled={!isEditable}
-              />
-              <span className="text-gray-500">Enable</span>
-            </label>
-          </div>
-          {isTensorRtEnabled && (
-            <TrtEngineControl
-              modelPath={info.policyPath}
-              enginePath={info.accelerationEnginePath}
-              robotType={robotType}
-              taskInstruction={trtTaskInstruction}
-              disabled={!isEditable}
-              labelClassName={classLabel}
-            />
-          )}
+          <TrtEngineControl
+            modelPath={info.policyPath}
+            enginePath={info.accelerationEnginePath}
+            robotType={robotType}
+            taskInstruction={trtTaskInstruction}
+            disabled={!isEditable}
+            labelClassName={classLabel}
+          />
         </>
       )}
 
-      <div className="w-full h-1 my-2 border-t border-gray-300"></div>
+      <hr className="my-2 border-gray-300" />
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -586,7 +616,7 @@ const InferencePanel = () => {
           <span>Action Request</span>
         </div>
         <div className="grid grid-cols-2 gap-1 flex-1 min-w-0">
-          <button
+          {actionRequestModes.includes('async') && <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'async')}
             disabled={!isEditable}
@@ -596,8 +626,8 @@ const InferencePanel = () => {
           >
             <MdSync size={16} className="shrink-0" />
             <span className="truncate">Async</span>
-          </button>
-          <button
+          </button>}
+          {actionRequestModes.includes('sync') && <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'sync')}
             disabled={!isEditable}
@@ -607,60 +637,9 @@ const InferencePanel = () => {
           >
             <MdHourglassEmpty size={16} className="shrink-0" />
             <span className="truncate">Sync</span>
-          </button>
+          </button>}
         </div>
       </div>
-
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-          <Tooltip
-            content="Move slowly to the first predicted robot pose before inference."
-            position="bottom"
-          >
-            <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
-          </Tooltip>
-          <span>Initial Pose Sync</span>
-        </div>
-        <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
-          <input
-            type="checkbox"
-            className={clsx('w-4 h-4', {
-              'cursor-not-allowed opacity-50': !isEditable || !isRobotMode,
-              'cursor-pointer': isEditable && isRobotMode,
-            })}
-            checked={initialPoseSyncEnabled}
-            onChange={(e) => handleChange('initialPoseSync', e.target.checked)}
-            disabled={!isEditable || !isRobotMode}
-            aria-label="Initial Pose Sync"
-          />
-          <span className="text-gray-500">Enable</span>
-        </label>
-      </div>
-
-      {initialPoseSyncEnabled && (
-        <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-          <span className={classLabel}>Duration (s)</span>
-          <input
-            className={clsx(classTextInput, {
-              'bg-gray-100 cursor-not-allowed': !isEditable || !isRobotMode,
-            })}
-            type="number"
-            step="0.5"
-            min="1"
-            max="60"
-            value={info.initialPoseSyncDurationS ?? 5.0}
-            onChange={(e) => {
-              const value = e.target.value;
-              handleChange(
-                'initialPoseSyncDurationS',
-                value === '' ? '' : Number(value)
-              );
-            }}
-            disabled={!isEditable || !isRobotMode}
-            aria-label="Initial Pose Sync duration"
-          />
-        </div>
-      )}
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -709,6 +688,52 @@ const InferencePanel = () => {
         />
       </div>
 
+      <div className="flex items-center mb-2.5">
+        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+          <Tooltip
+            content={actionStepsHelp}
+            position="bottom"
+          >
+            <MdInfoOutline aria-label="About Action Steps" className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
+          </Tooltip>
+          <label htmlFor="inference-action-steps">Action Steps</label>
+        </div>
+        <div className={clsx(
+          'flex items-center min-w-0 w-full h-8 border border-gray-300 rounded-md',
+          'focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent',
+          canEditActionSteps ? 'bg-white' : 'bg-gray-100'
+        )}>
+          <input
+            id="inference-action-steps"
+            className="min-w-0 flex-1 w-full h-full p-2 text-sm bg-transparent rounded-md focus:outline-none disabled:cursor-not-allowed"
+            type="number"
+            min="1"
+            max="2147483647"
+            step="1"
+            placeholder={selectedPolicy?.execution_mode ? 'All' : 'Unknown'}
+            aria-describedby={hasObservedChunk ? 'inference-action-steps-limit' : undefined}
+            value={actionStepsSupported ? (info.actionSteps || '') : ''}
+            onChange={(event) => {
+              const value = event.target.value === '' ? 0 : Number(event.target.value);
+              if (Number.isInteger(value) && value >= 0 && value <= 2147483647) {
+                handleChange('actionSteps', value);
+              }
+            }}
+            disabled={!canEditActionSteps}
+          />
+          {hasObservedChunk && (
+            <Tooltip
+              className="shrink-0 pr-2"
+              content={`Latest model chunk: ${observedChunkSize} steps, independent of the selected Action Steps. Future chunk lengths may differ.`}
+            >
+              <span id="inference-action-steps-limit" className="text-xs text-gray-500 whitespace-nowrap tabular-nums">
+                Max {observedChunkSize}
+              </span>
+            </Tooltip>
+          )}
+        </div>
+      </div>
+
       {timingWarnings.length > 0 && (
         <div className="mb-2.5 space-y-1" role="status" aria-label="Timing warnings">
           {timingWarnings.map((warning) => (
@@ -721,6 +746,68 @@ const InferencePanel = () => {
             </div>
           ))}
         </div>
+      )}
+
+      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+          <Tooltip
+            content="Move slowly to the first predicted robot pose before inference."
+            position="bottom"
+          >
+            <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
+          </Tooltip>
+          <span>Slow Start</span>
+        </div>
+        <label className={clsx('flex', 'items-center', 'gap-2', 'text-sm')}>
+          <input
+            type="checkbox"
+            className={clsx('w-4 h-4', {
+              'cursor-not-allowed opacity-50': !isEditable || !isRobotMode,
+              'cursor-pointer': isEditable && isRobotMode,
+            })}
+            checked={initialPoseSyncEnabled}
+            onChange={(e) => handleChange('initialPoseSync', e.target.checked)}
+            disabled={!isEditable || !isRobotMode}
+            aria-label="Slow Start"
+          />
+          <span className="text-gray-500">Enable</span>
+        </label>
+      </div>
+
+      {initialPoseSyncEnabled && (
+        <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+          <span className={classLabel}>Duration (s)</span>
+          <input
+            className={clsx(classTextInput, {
+              'bg-gray-100 cursor-not-allowed': !isEditable || !isRobotMode,
+            })}
+            type="number"
+            step="0.5"
+            min="1"
+            max="60"
+            value={info.initialPoseSyncDurationS ?? 5.0}
+            onChange={(e) => {
+              const value = e.target.value;
+              handleChange(
+                'initialPoseSyncDurationS',
+                value === '' ? '' : Number(value)
+              );
+            }}
+            disabled={!isEditable || !isRobotMode}
+            aria-label="Slow Start duration"
+          />
+        </div>
+      )}
+
+      {(isRobotMode || poseReturning) && <hr className="my-2 border-gray-300" />}
+      <SavedPoseControlPanel />
+
+      {isRobotMode && (
+        <>
+          <hr className="my-2 border-gray-300" />
+          <InferenceRecordingControls />
+          <InferenceTryResults />
+        </>
       )}
 
       <FileBrowserModal

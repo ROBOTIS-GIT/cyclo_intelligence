@@ -1,39 +1,43 @@
 # Common Policy Runtime
 
-Policy-agnostic two-process container runtime. Each opensource policy backend
-(LeRobot, GR00T, OpenVLA, ...) plugs in by providing a backend engine package
-such as `<policy>_engine`. The Main process, Engine process, and s6 supervisor
-are shared.
+This directory contains the two framework-independent halves of Cyclo policy
+inference. They are deployed in different images.
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Container                                                        │
-│                                                                  │
-│  ┌──────────────────────┐  EngineCommand srv  ┌────────────────┐│
-│  │ main-runtime         │ ───────────────────▶│ engine-process ││
-│  │ external service     │                     │ policy deps    ││
-│  │ control loop         │◀────────────────────│ RobotClient obs││
-│  │ RobotClient command  │     action_list     │ inference      ││
-│  └──────────────────────┘                     └────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
+```text
+cyclo_intelligence image                  Worker image
+┌──────────────────────────────┐          ┌──────────────────────────┐
+│ launch-managed runtime       │  Zenoh   │ engine-process s6 service│
+│                              │          │                          │
+│ ServiceHandler               │ request  │ EngineWorker             │
+│ SessionState                 │─────────>│ <backend>_engine          │
+│ WorkerRegistry               │<─────────│ model + observations     │
+│ ControlLoop                  │ actions  │                          │
+│ ActionChunkProcessor         │          └──────────────────────────┘
+│ RobotClient command path     │
+└──────────────────────────────┘
 ```
 
-`main_runtime` and `engine_process` are never edited per policy. The
-per-policy code lives in the backend engine package.
+## Directory Ownership
 
-## Engine contract
+- `catalog/`: strict loader for `policy/<runtime>/manifest.yaml`.
+- `runtime/main_runtime/`: central Policy Runtime. The package name is kept for
+  compatibility; it is not installed as a Worker `main-runtime` service.
+- `runtime/engine_process/`: framework-neutral Worker service and Engine wire
+  protocol.
+- `runtime/engine.py`: `InferenceEngine` contract implemented by each adapter.
+- `s6-services/engine-process/`: the only application longrun copied into a
+  Worker image.
 
-Implement `cyclo_brain.policy.common.runtime.engine.InferenceEngine`:
+## InferenceEngine Contract
 
 ```python
 from engine import InferenceEngine
 
 class MyEngine(InferenceEngine):
-    def load_policy(self, request): ...        # weights + RobotClient
-    def get_action_chunk(self, request): ...   # one (T, D) chunk
+    def load_policy(self, request): ...
+    def get_action_chunk(self, request): ...
     def cleanup(self): ...
+
     @property
     def is_ready(self): ...
 
@@ -41,75 +45,136 @@ def create_engine() -> InferenceEngine:
     return MyEngine()
 ```
 
-See `cyclo_brain/policy/lerobot/lerobot_engine/` for a worked example.
+The adapter subscribes to model observations through `RobotClient` and returns
+one `(T, D)` action chunk. It must not publish robot commands.
 
-## Container layout
+## Runtime Contracts
 
-| Path | Source | Mount mode |
-|---|---|---|
-| `/policy_runtime/` | `cyclo_brain/policy/common/runtime/` | bind, ro |
-| `/app/<policy>_engine/` | `cyclo_brain/policy/<policy>/<policy>_engine/` | bind, ro |
-| `/etc/s6-overlay/s6-rc.d/` | `cyclo_brain/policy/common/s6-services/` | baked in image |
-| `/zenoh_sdk/`, `/robot_client_sdk/`, `/action_chunk_processing_sdk/` | `cyclo_brain/sdk/...` | bind, ro |
-| `/orchestrator_config/` | `shared/shared/robot_configs/` | bind, ro |
-| `/policy_checkpoints/<policy>/` | `cyclo_brain/policy/<policy>/checkpoints/` | bind, rw |
+### Action Steps Availability
 
-For LeRobot, user-trained models can be placed under
-`cyclo_brain/policy/lerobot/checkpoints/` on the host and loaded from
-`/policy_checkpoints/lerobot/...` inside the container.
+Manifests declare `runtime.capabilities.execution_mode: chunk` or `step`.
+A model may override it with `models[].execution_mode`. The catalog exposes the
+resolved mode per model without importing model frameworks. An absent declaration
+is unknown, not implicitly chunk-compatible.
 
-## Required environment
+Only chunk policies allow a numeric Action Steps selection. Step policies own
+their action queue and use All (`0`). Orchestrator canonicalizes stale numeric
+settings for step policies to `0` and publishes the shared setting to all UIs.
+Runtime rejects unsupported numeric LOAD requests before loading weights and
+checks the actual Worker contract against the declaration after LOAD, rolling
+back on mismatch. Adapter regression tests must keep declarations and contracts
+in agreement; never enable numeric selection by adding UI model-name exceptions.
 
-| Variable | Required | Default | Used by |
-|---|---|---|---|
-| `POLICY_BACKEND` | yes | - | both processes |
-| `POLICY_ENGINE_MODULE` | no | `${POLICY_BACKEND}_engine` | Engine process |
-| `POLICY_ENGINE_FACTORY` | no | `create_engine` | Engine process |
-| `GET_ACTION_TIMEOUT_S` | no | `5.0` | Main -> Engine request |
-| `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` | no | `1.0` | Maximum joint-state age allowed for initial pose sync and interruption hold |
-| `LOAD_POLICY_TIMEOUT_S` | no | `7200.0` | Main -> Engine request |
-| `INFERENCE_HZ` | no | `15.0` | Main action waypoint timing |
-| `CONTROL_HZ` | no | `100.0` | Main robot command loop |
-| `TARGET_CHUNK_SIZE` | no | `none` | Fixed-size resampling override; `none` keeps chunk duration |
-| `REFILL_MARGIN_S` | no | `0.2` | Extra buffer time after observed GET_ACTION latency |
-| `REFILL_LATENCY_WARMUP_SAMPLES` | no | `1` | Initial GET_ACTION latency samples ignored for warmup |
-| `REFILL_LATENCY_SAMPLE_MAX_S` | no | `2.0` | Ignore longer latency samples; `none` disables filtering |
-| `ROS_DOMAIN_ID` / `RMW_IMPLEMENTATION` / `ZENOH_CONFIG_OVERRIDE` | no | set in `/root/.bashrc` | both |
+After changing declarations, restart Supervisor API, Orchestrator and Policy
+Runtime so their process-local catalogs agree, and refresh the UI. No ROS field
+changes are required for this metadata.
 
-`main-runtime` and `engine-process` source `/root/.bashrc` before applying
-these defaults. Enter the policy container, edit the Cyclo ROS/Zenoh block near
-the top of `/root/.bashrc` when the robot's Zenoh router or ROS domain changes.
-Add an `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` export there only when the one-second
-joint-state freshness limit needs to be adjusted for the target robot.
-For a remote router, comment the local `ZENOH_CONFIG_OVERRIDE` line and uncomment
-the remote example with the router's IP, then restart the policy container so s6
-processes read the new values.
-`docker restart` preserves the edit; recreating or updating the container
-resets `/root/.bashrc` to the image default.
+External callers use `interfaces/srv/InferenceCommand` at
+`/policy/inference_command`. The Runtime chooses a Worker from the namespaced
+`policy_id` and calls `interfaces/srv/EngineCommand` at
+`/<runtime>/engine_command`.
 
-For GR00T N1.7, the trained checkpoint may reference the gated
-`nvidia/Cosmos-Reason2-2B` backbone instead of vendoring those weights. Register
-a Hugging Face token for an approved account before first inference, or pre-cache
-the Cosmos files under the shared Hugging Face cache. Policy containers sync the
-Cyclo endpoint token store to the standard Hugging Face token file on startup.
+`EngineCommand` supports:
 
-## Adding a new policy
+- `DESCRIBE`: protocol version, runtime ID, instance ID, policies, capabilities.
+- `LOAD`: checkpoint and validated policy parameters.
+- `GET_ACTION`: one action chunk.
+- `UNLOAD`: release model resources.
+- `STATUS`: current Worker metadata and engine state.
 
-1. Create `cyclo_brain/policy/<policy>/<policy>_engine/` implementing the ABC.
-2. Create `cyclo_brain/policy/<policy>/Dockerfile.{amd64,arm64}` — install
-   the policy's deps; **do not** copy `runtime/` (it's bind-mounted).
-   Copy `common/s6-services/` into `/etc/s6-overlay/s6-rc.d/`.
-3. Add a service to `docker/docker-compose.yml` mounting `common/runtime/`
-   at `/policy_runtime` and `<policy>_engine/` at `/app/`. Set
-   `POLICY_BACKEND` env.
-4. The same orchestrator yaml (`shared/shared/robot_configs/<robot>_config.yaml`)
-   is reused for any backend — no per-policy yaml required.
+Worker heartbeats are published at `/<runtime>/worker_heartbeat`. During an
+active session, a stale heartbeat, Worker instance change, Orchestrator
+heartbeat loss, or GET_ACTION failure causes the Runtime to clear buffered
+actions and enter `error`. In robot mode it also attempts zero Twist and a
+fresh-current-joint hold.
 
-## Main <-> Engine contract
+The Supervisor uses `/run/cyclo/policy-runtime.sock` to reserve Worker
+start/stop/recreate operations. A Worker used by a loaded session, or one with
+a pending hold, cannot be changed through the Supervisor API.
 
-- `/<backend>/inference_command` (interfaces/srv/InferenceCommand) - external -> Main.
-- `/<backend>/engine_command` (interfaces/srv/EngineCommand) - Main -> Engine.
-- `EngineCommand.seq_id` is echoed in the response so Main can discard stale
-  responses after timeout.
+### Worker Status Snapshots
 
-These are stable across policies; the engine never sees them.
+Supervisor's `worker_status` request reads a shared, nonblocking snapshot from
+WorkerRegistry. Network `DESCRIBE` probes run on a separate status client, at most
+one probe loop per runtime, approximately once per second while readers remain
+interested. Ten seconds without a read stops that loop. A slow or disconnected
+Worker must not occupy the serial Unix lifecycle handler or block another Worker.
+SDK client construction also occurs outside the heartbeat/status lock; concurrent
+requests for the same client share one construction.
+
+Descriptor snapshots expire after three seconds. Reading a snapshot does not
+extend its lifetime. Heartbeat age and engine state are read from the latest
+matching Worker instance; a new or unidentified instance cannot reuse old
+compatibility results. Expired/unavailable snapshots report waiting, and a probe's
+compatibility failure replaces any previous ready result.
+
+These snapshots are UI diagnostics, not authority to execute or mutate a Worker.
+LOAD still performs a fresh descriptor handshake. The active-session heartbeat
+watchdog and mutation reservation/hold checks retain their independent paths.
+No frontend polling request directly triggers a second simultaneous Worker probe.
+
+## Environment
+
+The common `cyclo_intelligence` ROS launch starts Runtime first and starts its
+ROS clients only after the ready marker identifies the new Runtime PID.
+Runtime and Orchestrator remain separate processes but inherit the same launch
+environment. The s6-managed common launch and Worker services use interactive
+bash; manual launch inherits the current shell's environment:
+
+```bash
+export ROS_DOMAIN_ID=30
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
+```
+
+After editing `/root/.bashrc`, use a new shell (or source it) and restart the
+**common launch**, not only `orchestrator_node`. The component-only
+`orchestrator` and `cyclo_data` launch commands do not start Policy Runtime.
+All policy Workers, including ABot, LingBot-VLA, and RLDX, also read
+`/root/.bashrc` when their engine service starts. Configure ROS/Zenoh there,
+not in a second Compose environment override. Restart the Worker after editing
+its configuration, once inference is stopped and cleared. A container restart
+preserves the edits; recreating the container restores the image defaults.
+Model asset paths such as `ABOT_BASE_VLM` and `QWEN3VL_PATH` remain separate
+from the ROS/Zenoh settings.
+Do not run the manual common launch while the s6 `cyclo_intelligence` unit is
+already running. A process lock rejects a second Runtime before it can replace
+the existing control socket or publish robot commands.
+
+Runtime exit shuts down the common launch; Orchestrator exit also shuts down
+its launch. There is no Runtime-only respawn or automatic inference resume.
+Runtime shutdown rejects new lifecycle requests and Worker mutations, clears
+the action plan, and retries failed holds while retaining robot I/O. Launch
+allows 30 seconds before SIGTERM and another 5 before SIGKILL. A controller
+command watchdog is mandatory: SIGKILL, missing joint feedback and power loss
+cannot guarantee a successful software hold.
+
+Docker health checks cover the always-on UI/management services; they do not
+mean inference is ready. With the common launch stopped, Supervisor reports
+Runtime unavailable and still denies Worker mutations whose safety cannot be
+verified. Start the common launch before managing Workers through the UI.
+
+Runtime fallbacks include:
+
+| Variable | Default | Owner |
+|---|---:|---|
+| `GET_ACTION_TIMEOUT_S` | `5.0` | Runtime -> Worker request |
+| `LOAD_POLICY_TIMEOUT_S` | `7200.0` | Runtime -> Worker LOAD |
+| `CONTROL_HZ` | `100.0` | command loop |
+| `INFERENCE_HZ` | `15.0` | source action waypoint rate |
+| `CHUNK_ALIGN_WINDOW_S` | `0.3` | chunk alignment |
+| `INITIAL_POSE_SYNC_STATE_MAX_AGE_S` | `1.0` | joint-state freshness |
+| `WORKER_HEARTBEAT_TIMEOUT_S` | `2.0` | active Worker watchdog |
+| `WORKER_READY_TIMEOUT_S` | `120.0` | Continuous unanswered readiness probes before showing an error; not a startup delay. A fresh `loading` heartbeat uses `LOAD_POLICY_TIMEOUT_S` instead. |
+| `ORCHESTRATOR_HEARTBEAT_TIMEOUT_S` | `3.0` | active owner watchdog |
+
+## Adding A Runtime
+
+1. Add `policy/<runtime>/manifest.yaml`.
+2. Implement `<runtime>_engine/create_engine()`.
+3. Build an Engine-only image with the common `engine_process` package.
+4. Add one explicit Compose service with the same runtime ID.
+5. Add adapter and image smoke tests.
+
+The catalog then exposes the runtime to UI, BT, Supervisor, and central
+Runtime validation without adding another model list to those components.

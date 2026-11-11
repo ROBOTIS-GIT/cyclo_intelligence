@@ -1,0 +1,7 @@
+# Images remain RGB; RobotClient camera rotation follows the robot configuration.
+# ABot_M0.predict_action applies the image size saved in config.yaml, then Qwen
+# and optional VGGT preprocessing. Do not repeat these transforms in Cyclo.
+image_preprocessing: identity
+rotation: robot_config
+observation_offsets: [0]
+max_observation_age_s: 1.0

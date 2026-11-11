@@ -4,16 +4,16 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""Internal Main <-> Engine service contract.
+"""Internal Policy Runtime <-> Engine service contract.
 
-External users still call ``/<backend>/inference_command``. This protocol is
-only for the two Python processes inside a policy container:
+External users call ``/policy/inference_command``. This protocol crosses the
+Cyclo container boundary to one selected model Worker:
 
-    Main process  -- EngineCommand srv -->  Engine process
+    Policy Runtime  -- EngineCommand srv -->  Engine process
 
 ``seq_id`` is intentionally part of both request and response. Timeouts mean
-"Main stopped waiting", not necessarily "Engine stopped computing", so a late
-Engine response can become stale and must be discarded by the requester.
+"Runtime stopped waiting", not necessarily "Engine stopped computing", so a
+late Engine response can become stale and must be discarded by the requester.
 """
 
 from __future__ import annotations
@@ -27,6 +27,10 @@ import numpy as np
 CMD_LOAD_POLICY = 0
 CMD_GET_ACTION = 1
 CMD_UNLOAD_POLICY = 2
+CMD_DESCRIBE = 3
+CMD_STATUS = 4
+CMD_UPDATE_CONTEXT = 5
+ENGINE_PROTOCOL_VERSION = "3.1"
 
 
 ENGINE_COMMAND_REQUEST_DEF = """\
@@ -38,6 +42,9 @@ string robot_type
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
+string policy_id
+string policy_parameters_json
+string execution_context_json
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -48,6 +55,12 @@ string[] action_keys
 int32 chunk_size
 int32 action_dim
 float64[] action_list
+string protocol_version
+string runtime_id
+string worker_instance_id
+string[] supported_policy_ids
+string capabilities_json
+string engine_state
 """
 
 
@@ -61,6 +74,9 @@ class EngineCommandRequest:
     task_instruction: str = ""
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
+    policy_id: str = ""
+    policy_parameters_json: str = ""
+    execution_context_json: str = ""
 
 
 @dataclass
@@ -72,6 +88,12 @@ class EngineCommandResponse:
     chunk_size: int = 0
     action_dim: int = 0
     action_list: List[float] = field(default_factory=list)
+    protocol_version: str = ""
+    runtime_id: str = ""
+    worker_instance_id: str = ""
+    supported_policy_ids: List[str] = field(default_factory=list)
+    capabilities_json: str = "{}"
+    engine_state: str = ""
 
 
 def request_from_message(message: Any) -> EngineCommandRequest:
@@ -87,6 +109,11 @@ def request_from_message(message: Any) -> EngineCommandRequest:
         acceleration_engine_path=str(
             getattr(message, "acceleration_engine_path", "") or ""
         ),
+        policy_id=str(getattr(message, "policy_id", "") or ""),
+        policy_parameters_json=str(
+            getattr(message, "policy_parameters_json", "") or ""
+        ),
+        execution_context_json=str(getattr(message, "execution_context_json", "") or ""),
     )
 
 
@@ -94,6 +121,7 @@ def response_from_message(message: Any) -> EngineCommandResponse:
     """Normalize a ROS/Zenoh response object into a dataclass."""
     action_keys = getattr(message, "action_keys", None)
     action_list = getattr(message, "action_list", None)
+    supported_policy_ids = getattr(message, "supported_policy_ids", None)
     return EngineCommandResponse(
         success=bool(getattr(message, "success", False)),
         seq_id=int(getattr(message, "seq_id", 0)),
@@ -102,6 +130,14 @@ def response_from_message(message: Any) -> EngineCommandResponse:
         chunk_size=int(getattr(message, "chunk_size", 0)),
         action_dim=int(getattr(message, "action_dim", 0)),
         action_list=[float(v) for v in list(action_list)] if action_list is not None else [],
+        protocol_version=str(getattr(message, "protocol_version", "") or ""),
+        runtime_id=str(getattr(message, "runtime_id", "") or ""),
+        worker_instance_id=str(getattr(message, "worker_instance_id", "") or ""),
+        supported_policy_ids=(
+            list(supported_policy_ids) if supported_policy_ids is not None else []
+        ),
+        capabilities_json=str(getattr(message, "capabilities_json", "{}") or "{}"),
+        engine_state=str(getattr(message, "engine_state", "") or ""),
     )
 
 
@@ -115,6 +151,12 @@ def response_to_message_kwargs(response: EngineCommandResponse) -> dict:
         "chunk_size": int(response.chunk_size),
         "action_dim": int(response.action_dim),
         "action_list": np.asarray(response.action_list, dtype=np.float64),
+        "protocol_version": str(response.protocol_version),
+        "runtime_id": str(response.runtime_id),
+        "worker_instance_id": str(response.worker_instance_id),
+        "supported_policy_ids": list(response.supported_policy_ids),
+        "capabilities_json": str(response.capabilities_json or "{}"),
+        "engine_state": str(response.engine_state),
     }
 
 
@@ -129,6 +171,9 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "task_instruction": str(request.task_instruction),
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),
+        "policy_id": str(request.policy_id),
+        "policy_parameters_json": str(request.policy_parameters_json),
+        "execution_context_json": str(request.execution_context_json),
     }
 
 

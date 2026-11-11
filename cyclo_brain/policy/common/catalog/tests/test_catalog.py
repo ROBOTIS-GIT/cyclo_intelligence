@@ -1,0 +1,455 @@
+from pathlib import Path
+
+import pytest
+
+from catalog import CatalogError, load_catalog, normalize_policy_parameters, resolve_policy, resolve_policy_id
+
+
+POLICY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_execution_modes_are_inherited_or_overridden_per_model():
+    catalog = load_catalog(POLICY_ROOT)
+    assert resolve_policy(catalog, 'lerobot:diffusion')[1]['execution_mode'] == 'step'
+    for policy in ('lerobot:act', 'groot:n17', 'abot:m0', 'rldx:rldx1', 'lingbot_vla:v2'):
+        assert resolve_policy(catalog, policy)[1]['execution_mode'] == 'chunk'
+
+
+@pytest.mark.parametrize('value', ['invalid', True, {}, []])
+def test_invalid_execution_declarations_are_rejected(tmp_path, value):
+    import yaml
+    from catalog import load_manifest
+    manifest = yaml.safe_load((POLICY_ROOT / 'lerobot' / 'manifest.yaml').read_text())
+    for target in (manifest['runtime']['capabilities'], manifest['models'][0]):
+        target['execution_mode'] = value
+        path = tmp_path / 'manifest.yaml'
+        path.write_text(yaml.safe_dump(manifest))
+        with pytest.raises(CatalogError, match='execution_mode'):
+            load_manifest(path)
+        target.pop('execution_mode')
+
+
+def test_legacy_manifests_do_not_assume_chunk_support(tmp_path):
+    import yaml
+    from catalog import load_manifest
+    manifest = yaml.safe_load((POLICY_ROOT / 'lerobot' / 'manifest.yaml').read_text())
+    manifest['runtime']['capabilities'].pop('execution_mode')
+    path = tmp_path / 'manifest.yaml'
+    path.write_text(yaml.safe_dump(manifest))
+    assert load_manifest(path)['models'][0]['execution_mode'] is None
+
+
+def test_repository_catalog_matches_compose_services():
+    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+
+    assert [runtime["id"] for runtime in catalog["runtimes"]] == ["abot", "groot", "lerobot", "lingbot_vla", "rldx"]
+    policy_ids = {
+        model["policy_id"]
+        for runtime in catalog["runtimes"]
+        for model in runtime["models"]
+    }
+    assert "lerobot:act" in policy_ids
+    assert "groot:n17" in policy_ids
+    assert "rldx:rldx1" in policy_ids
+    assert "lingbot_vla:v2" in policy_ids
+    runtime, model = resolve_policy(catalog, "lingbot_vla_v2")
+    assert model["requires_instruction"] is True
+    assert runtime["checkpoint_root"] == "/workspace/model/lingbot_vla"
+    assert runtime["compose_service"] == "lingbot_vla"
+    assert "abot:m0" in policy_ids
+    runtime, policy = resolve_policy(catalog, "abot_m0")
+    assert runtime["compose_service"] == runtime["service_prefix"] == "abot"
+    assert runtime["checkpoint_root"] == "/workspace/model/abot"
+    assert policy["requires_instruction"] is True
+
+
+@pytest.mark.parametrize("model", ["wall_x", "groot", "pi0", "pi05"])
+def test_new_lerobot_policies_are_resolved_from_checkpoint(tmp_path, model):
+    import json
+
+    catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+    (tmp_path / "config.json").write_text(json.dumps({"type": model}))
+    policy_id = f"lerobot:{model}"
+    assert resolve_policy_id(catalog, "lerobot", "", tmp_path) == policy_id
+    runtime, policy = resolve_policy(catalog, policy_id)
+    assert policy["requires_instruction"] is True
+    assert runtime["checkpoint_root"] == "/workspace/model/lerobot"
+    assert normalize_policy_parameters(catalog, policy_id, "{}") == "{}"
+
+
+def test_groot_and_pi0_legacy_routes_remain_unambiguous(tmp_path):
+    catalog = load_catalog(POLICY_ROOT)
+    assert resolve_policy(catalog, "groot")[1]["policy_id"] == "groot:n17"
+    assert resolve_policy(catalog, "lerobot:groot")[0]["id"] == "lerobot"
+    assert resolve_policy(catalog, "pi0")[1]["policy_id"] == "lerobot:pi0"
+    (tmp_path / "config.json").write_text('{"type":"pi0"}')
+    assert resolve_policy_id(catalog, "lerobot", "lerobot:pi0", tmp_path) == "lerobot:pi0"
+
+
+@pytest.mark.parametrize("model", ["eo1", "evo1", "pi0_fast", "lingbot_va", "multi_task_dit"])
+def test_removed_policies_cannot_resolve_from_id_alias_or_checkpoint(tmp_path, model):
+    import json
+
+    catalog = load_catalog(POLICY_ROOT)
+    for policy_id in (model, f"lerobot:{model}"):
+        with pytest.raises(CatalogError, match="unknown policy id"):
+            resolve_policy(catalog, policy_id)
+    (tmp_path / "config.json").write_text(json.dumps({"type": model}))
+    with pytest.raises(CatalogError, match="not supported"):
+        resolve_policy_id(catalog, "lerobot", "", tmp_path)
+
+
+def test_policy_parameter_payload_defaults_and_canonicalizes(tmp_path):
+    policy_root = tmp_path / "policy"
+    runtime = policy_root / "sample"
+    runtime.mkdir(parents=True)
+    (runtime / "manifest.yaml").write_text(
+        """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+models:
+  - id: base
+    label: Base
+    parameters:
+      - key: temperature
+        label: Temperature
+        control: number
+        binding: policy_parameters.temperature
+        default: 0.5
+        min: 0.0
+        max: 1.0
+""",
+        encoding="utf-8",
+    )
+    catalog = load_catalog(policy_root, compose_services={"sample"})
+
+    assert normalize_policy_parameters(catalog, "sample:base", "") == '{"temperature":0.5}'
+    assert normalize_policy_parameters(
+        catalog, "sample:base", '{"temperature":0.25}'
+    ) == '{"temperature":0.25}'
+
+    with pytest.raises(CatalogError, match="unknown policy parameters"):
+        normalize_policy_parameters(catalog, "sample:base", '{"typo":1}')
+    with pytest.raises(CatalogError, match="exceeds its maximum"):
+        normalize_policy_parameters(catalog, "sample:base", '{"temperature":2}')
+
+
+def _write_manifest(policy_root: Path, runtime_id: str, body: str) -> Path:
+    runtime = policy_root / runtime_id
+    runtime.mkdir(parents=True)
+    path = runtime / "manifest.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _parameter_catalog(tmp_path: Path):
+    root = tmp_path / "policy"
+    _write_manifest(root, "sample", """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+models:
+  - id: base
+    label: Base
+    parameters:
+      - key: mode
+        label: Mode
+        control: select
+        binding: policy_parameters.mode
+        default: safe
+        options: [safe, fast]
+      - key: count
+        label: Count
+        control: integer
+        binding: policy_parameters.count
+        required: true
+        min: 1
+        max: 4
+      - key: gain
+        label: Gain
+        control: number
+        binding: policy_parameters.gain
+        default: 0.5
+        min: 0.0
+        max: 1.0
+        visible_when: {mode: fast}
+""")
+    return load_catalog(root, compose_services={"sample"})
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("[]", "must contain a JSON object"),
+        ('{"count":"two"}', "must be an integer"),
+        ('{"count":5}', "exceeds its maximum"),
+        ('{"count":2,"mode":"turbo"}', "must be one of"),
+        ('{"count":2,"unknown":true}', "unknown policy parameters"),
+        ('{"count":2,"gain":NaN}', "invalid JSON"),
+    ],
+)
+def test_policy_parameter_payload_rejects_invalid_values(tmp_path, payload, message):
+    catalog = _parameter_catalog(tmp_path)
+
+    with pytest.raises(CatalogError, match=message):
+        normalize_policy_parameters(catalog, "sample:base", payload)
+
+
+def test_policy_parameter_payload_enforces_required_and_size(tmp_path):
+    catalog = _parameter_catalog(tmp_path)
+
+    with pytest.raises(CatalogError, match="missing required"):
+        normalize_policy_parameters(catalog, "sample:base", "{}")
+    with pytest.raises(CatalogError, match="exceeds 65536 bytes"):
+        normalize_policy_parameters(
+            catalog,
+            "sample:base",
+            '{"count":2,"padding":"' + ("x" * 65536) + '"}',
+        )
+
+
+def test_policy_parameter_visibility_drops_hidden_values(tmp_path):
+    catalog = _parameter_catalog(tmp_path)
+
+    assert normalize_policy_parameters(
+        catalog,
+        "sample:base",
+        '{"gain":0.9,"count":2,"mode":"safe"}',
+    ) == '{"count":2,"mode":"safe"}'
+
+
+def test_required_text_parameter_rejects_empty_string(tmp_path):
+    root = tmp_path / "policy"
+    _write_manifest(root, "sample", """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+models:
+  - id: base
+    label: Base
+    parameters:
+      - key: prompt
+        label: Prompt
+        control: text
+        binding: policy_parameters.prompt
+        required: true
+""")
+    catalog = load_catalog(root, compose_services={"sample"})
+
+    with pytest.raises(CatalogError, match="cannot be empty"):
+        normalize_policy_parameters(catalog, "sample:base", '{"prompt":""}')
+
+
+def test_catalog_rejects_missing_compose_service(tmp_path):
+    root = tmp_path / "policy"
+    _write_manifest(root, "sample", """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+models: [{id: base, label: Base}]
+""")
+
+    with pytest.raises(CatalogError, match="missing Compose service"):
+        load_catalog(root, compose_services={"other"})
+
+
+def test_catalog_rejects_unimplemented_action_request_mode(tmp_path):
+    root = tmp_path / "policy"
+    _write_manifest(root, "sample", """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+  capabilities:
+    action_request_modes: [async, rtc]
+models: [{id: base, label: Base}]
+""")
+
+    with pytest.raises(CatalogError, match="action_request_modes is invalid"):
+        load_catalog(root, compose_services={"sample"})
+
+
+def test_catalog_rejects_duplicate_bare_alias(tmp_path):
+    root = tmp_path / "policy"
+    template = """
+schema_version: 1
+runtime:
+  id: {runtime}
+  label: {runtime}
+  compose_service: {runtime}
+  service_prefix: {runtime}
+  checkpoint_root: /workspace/model/{runtime}
+  source: {{kind: package, location: {runtime}==1.0.0}}
+models:
+  - id: base
+    label: Base
+    aliases: [legacy]
+"""
+    _write_manifest(root, "one", template.format(runtime="one"))
+    _write_manifest(root, "two", template.format(runtime="two"))
+
+    with pytest.raises(CatalogError, match="duplicate policy alias"):
+        load_catalog(root, compose_services={"one", "two"})
+
+
+@pytest.mark.parametrize(
+    ("parameter", "message"),
+    [
+        (
+            "{key: gain, label: Gain, control: number, "
+            "binding: policy_parameters.other}",
+            "must end with the parameter key",
+        ),
+        (
+            "{key: gain, label: Gain, control: number, "
+            "binding: policy_parameters.gain, surprise: true}",
+            "unknown fields",
+        ),
+        (
+            "{key: mode, label: Mode, control: select, "
+            "binding: policy_parameters.mode, options: [safe], default: bad}",
+            "must be one of",
+        ),
+        (
+            "{key: mode, label: Mode, control: select, "
+            "binding: policy_parameters.mode, options: [1]}",
+            "options must contain strings",
+        ),
+        (
+            "{key: gain, label: Gain, control: number, "
+            "binding: policy_parameters.gain, visible_when: {missing: true}}",
+            "references unknown parameters",
+        ),
+        (
+            "{key: prompt, label: Prompt, control: text, "
+            "binding: policy_parameters.prompt, min: 1}",
+            "only valid for numeric controls",
+        ),
+        (
+            "{key: gain, label: Gain, control: number, "
+            "binding: policy_parameters.gain, step: 0}",
+            "step must be positive",
+        ),
+        (
+            "{key: prompt, label: Prompt, control: text, "
+            "binding: policy_parameters.prompt, required: 'false'}",
+            "required must be boolean",
+        ),
+    ],
+)
+def test_catalog_rejects_malformed_parameter_schema(tmp_path, parameter, message):
+    root = tmp_path / "policy"
+    _write_manifest(root, "sample", f"""
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {{kind: package, location: sample-policy==1.0.0}}
+models:
+  - id: base
+    label: Base
+    parameters:
+      - {parameter}
+""")
+
+    with pytest.raises(CatalogError, match=message):
+        load_catalog(root, compose_services={"sample"})
+
+
+@pytest.mark.parametrize(
+    ("fragment", "message"),
+    [
+        ("runtime:\n  surprise: true", "unknown fields"),
+        ("capabilities:\n    typo: true", "unknown fields"),
+        ("model_extra: true", "unknown fields"),
+    ],
+)
+def test_catalog_rejects_unknown_manifest_fields(tmp_path, fragment, message):
+    root = tmp_path / "policy"
+    if fragment.startswith("runtime:"):
+        runtime_extra = "  surprise: true\n"
+        capabilities = ""
+        model_extra = ""
+    elif fragment.startswith("capabilities:"):
+        runtime_extra = ""
+        capabilities = "  capabilities:\n    typo: true\n"
+        model_extra = ""
+    else:
+        runtime_extra = ""
+        capabilities = ""
+        model_extra = "    model_extra: true\n"
+    _write_manifest(root, "sample", f"""
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {{kind: package, location: sample-policy==1.0.0}}
+{runtime_extra}{capabilities}models:
+  - id: base
+    label: Base
+{model_extra}""")
+
+    with pytest.raises(CatalogError, match=message):
+        load_catalog(root, compose_services={"sample"})
+
+
+def test_catalog_rejects_unknown_task_info_binding_and_duplicate_alias(tmp_path):
+    root = tmp_path / "policy"
+    path = _write_manifest(root, "sample", """
+schema_version: 1
+runtime:
+  id: sample
+  label: Sample
+  compose_service: sample
+  service_prefix: sample
+  checkpoint_root: /workspace/model/sample
+  source: {kind: package, location: sample-policy==1.0.0}
+models:
+  - id: base
+    label: Base
+    parameters:
+      - key: typo
+        label: Typo
+        control: text
+        binding: task_info.typo
+""")
+    with pytest.raises(CatalogError, match="unknown task_info field"):
+        load_catalog(root, compose_services={"sample"})
+
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "    parameters:\n",
+        "    aliases: [legacy, legacy]\n    parameters:\n",
+    ), encoding="utf-8")
+    with pytest.raises(CatalogError, match="aliases contains duplicates"):
+        load_catalog(root, compose_services={"sample"})

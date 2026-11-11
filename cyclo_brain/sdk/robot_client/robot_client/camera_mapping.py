@@ -20,16 +20,11 @@ def resolve_camera_feature_sources(
 ) -> Dict[str, str]:
     """Map model camera keys to RobotClient camera names.
 
-    The behavior-10k / Task_99999 canonical dataset keys are full LeRobot-style
-    keys such as ``observation.images.rgb.cam_left_head``. Robot configs keep
-    the shorter source names, e.g. ``cam_left_head``. This resolver keeps the
-    model key unchanged while finding the robot source that should feed it.
-
-    Legacy swapped names like ``cam_head_left`` are accepted as aliases for
-    ``cam_left_head`` so older checkpoints still run on canonical robot YAMLs.
-    Older single-head checkpoints may also use ``cam_head``; Cyclo maps that
-    to the left head stream, which is the historical default monocular head
-    camera.
+    Checkpoints may use full feature keys such as
+    ``observation.images.rgb.cam_left_head``, while robot configs use shorter
+    source names. The checkpoint key remains unchanged; this resolver only
+    selects the robot source that feeds it. Generic side/part ordering variants
+    are retained for legacy checkpoint metadata.
     """
     model_keys = _unique(model_camera_keys)
     camera_names = _unique(robot_camera_names)
@@ -94,16 +89,13 @@ def resolve_camera_mappings(
     return {source: feature for feature, source in feature_sources.items()}
 
 
-def camera_key_aliases(key: str) -> set[str]:
-    """Return comparable aliases for a model feature key or robot camera name."""
+def camera_key_variants(key: str) -> set[str]:
+    """Return comparable forms of a model feature key or robot camera name."""
     body = _strip_image_feature_prefix(key)
     suffix = body.split(".")[-1]
     aliases = {key, body, suffix}
 
     semantic_names = {suffix}
-    if suffix == "cam_head":
-        semantic_names.add("cam_left_head")
-
     match = _CAMERA_SEMANTIC_RE.match(suffix)
     if match:
         first = match.group("a")
@@ -113,6 +105,8 @@ def camera_key_aliases(key: str) -> set[str]:
         if side in {"left", "right"} and part in {"head", "wrist"}:
             semantic_names.add(f"cam_{side}_{part}")
             semantic_names.add(f"cam_{part}_{side}")
+            semantic_names.add(f"{side}_{part}")
+            semantic_names.add(f"{part}_{side}")
 
     for name in semantic_names:
         aliases.add(name)
@@ -140,7 +134,7 @@ def _camera_match_score(model_key: str, camera_name: str) -> Optional[int]:
         return 90
     if model_suffix == camera_suffix:
         return 89
-    if camera_key_aliases(model_key) & camera_key_aliases(camera_name):
+    if camera_key_variants(model_key) & camera_key_variants(camera_name):
         return 70
     return None
 

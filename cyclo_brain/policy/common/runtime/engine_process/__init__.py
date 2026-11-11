@@ -1,8 +1,8 @@
 """Engine process runtime.
 
 The Engine process owns policy dependencies, RobotClient sensor reads, and one
-synchronous inference call. The Main process talks to it through the internal
-EngineCommand service.
+synchronous inference call. The Policy Runtime talks to it through the
+internal EngineCommand service.
 """
 
 from .protocol import (

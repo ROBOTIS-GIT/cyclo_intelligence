@@ -1,349 +1,309 @@
-# cyclo_brain — Target Structure
+# cyclo_brain Runtime Structure
 
-`cyclo_brain` consists of **two Python processes**.
-Each process is split internally into multiple classes/modules.
+This is the textual reference for Cyclo policy inference. The visual reference
+is [`docs/architecture.html`](docs/architecture.html).
 
-- Visual map: [`cyclo_brain/docs/architecture.html`](docs/architecture.html)
-- Rule: when the runtime structure changes, update this file as the textual reference and `cyclo_brain/docs/architecture.html` as the visual reference.
-
-- **Main process**: coordinates services, sessions, command publishing, and the control loop.
-- **Engine process**: owns model loading, inference execution, and inference-time sensor/state subscriptions.
-
----
-
-## 1. Big Picture
+## 1. Deployment Topology
 
 ```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Host / cyclo_intelligence                                                    │
-│                                                                              │
-│  UI / Orchestrator or Standalone CLI                                         │
-│      │                                                                       │
-│      │  same command shape: args or /<backend>/inference_command             │
-│      │  LOAD / START / PAUSE / RESUME / STOP / UNLOAD                        │
-│      ▼                                                                       │
-│  External ROS2 / Zenoh                                                       │
-└──────┬───────────────────────────────────────────────────────────────────────┘
-       │
-       │ service call
-       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Policy Container: <backend>_server                                           │
-│                                                                              │
-│  Process 1: Main process                                                     │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ main_runtime package                                                   │  │
-│  │ one Python process, multiple classes/modules                           │  │
-│  │                                                                        │  │
-│  │  ┌───────────────────────┐       ┌──────────────────────────────────┐  │  │
-│  │  │ ServiceHandler        │       │ SessionState                     │  │  │
-│  │  │                       │       │                                  │  │  │
-│  │  │ - LOAD                │──────▶│ - unloaded / loaded / running    │  │  │
-│  │  │ - START / PAUSE       │       │ - paused / stopped               │  │  │
-│  │  │ - RESUME / STOP       │       │ - gate inference + publish       │  │  │
-│  │  │ - UNLOAD              │       └──────────────────────────────────┘  │  │
-│  │  └───────────────────────┘                                             │  │
-│  │                                                                        │  │
-│  │  ┌───────────────────────┐       ┌──────────────────────────────────┐  │  │
-│  │  │ RobotClient           │       │ InferenceRequester               │  │  │
-│  │  │                       │       │                                  │  │  │
-│  │  │ - publish robot cmds  │       │ - request model load             │  │  │
-│  │  │ - command topic setup │       │ - request one inference step     │  │  │
-│  │  │ - Main uses publish   │       │ - receive action list            │  │  │
-│  │  └───────────▲───────────┘       └────────────────┬─────────────────┘  │  │
-│  │              │                                   │ action_list         │  │
-│  │              │ publish_action                     ▼                    │  │
-│  │  ┌───────────┴───────────┐       ┌──────────────────────────────────┐  │  │
-│  │  │ ControlLoop           │◀──────│ ActionChunkProcessor             │  │  │
-│  │  │                       │ pop   │                                  │  │  │
-│  │  │ - timer-like loop     │       │ - action list buffer             │  │  │
-│  │  │ - one action per tick │       │ - optional post-processing       │  │  │
-│  │  │ - cadence follows ACP │       │ - pop one action per tick        │  │  │
-│  │  └───────────────────────┘       └──────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                  │                                           │
-│                                  │ LOAD_POLICY / GET_ACTION / UNLOAD_POLICY  │
-│                                  ▼                                           │
-│  Process 2: Engine process                                                   │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ <backend>Engine                                                        │  │
-│  │                                                                        │  │
-│  │ ┌─────────────────────┐  ┌───────────────────────────────────────────┐ │  │
-│  │ │ PolicyLoader         │  │ Optimizer                                │ │  │
-│  │ │ - load policy        │  │ - optional area                          │ │  │
-│  │ │ - weights/processors │  │ - TensorRT / GPU / runtime optimization  │ │  │
-│  │ └─────────────────────┘  └───────────────────────────────────────────┘ │  │
-│  │ ┌─────────────────────┐  ┌───────────────────────────────────────────┐ │  │
-│  │ │ Preprocessor         │  │ Predictor                                 │ │  │
-│  │ │ - use RobotClient    │  │ - run inference once per request          │ │  │
-│  │ │ - build model input  │  │ - return action list (T, D)               │ │  │
-│  │ └─────────────────────┘  └───────────────────────────────────────────┘ │  │
-│  │                                                                        │  │
-│  │ Engine uses RobotClient for sensor/state topics.                       │  │
-│  │ Engine never publishes robot commands.                                 │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                                                              │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       │ RobotClient publish
-                                       │ /cmd_vel
-                                       │ /leader/*/joint_trajectory
-                                       ▼
-                                  ┌───────────┐
-                                  │   Robot   │
-                                  └───────────┘
+┌──────────────────────── cyclo_intelligence ────────────────────────┐
+│ UI -> Orchestrator -> /policy/inference_command                    │
+│                              │                                     │
+│                    policy-runtime (s6)                             │
+│                    - one global session                            │
+│                    - lifecycle and safety                          │
+│                    - ControlLoop / ActionChunkProcessor             │
+│                    - RobotClient command publisher                 │
+│                              │                                     │
+│             /<runtime>/engine_command over ROS2/Zenoh              │
+└──────────────────────────────┼─────────────────────────────────────┘
+                               │
+              ┌────────────────┴────────────────┐
+              v                                 v
+┌──────── lerobot_server ────────┐  ┌──────── groot_server ──────────┐
+│ engine-process (s6)            │  │ engine-process (s6)            │
+│ LeRobot model + observations   │  │ GR00T model + observations     │
+│ /lerobot/engine_command        │  │ /groot/engine_command          │
+│ /lerobot/worker_heartbeat      │  │ /groot/worker_heartbeat        │
+└────────────────────────────────┘  └────────────────────────────────┘
 ```
 
----
+The Engine reads camera, state, and sensor topics directly. The Policy Runtime
+receives only action chunks from the selected Engine. There is no additional
+observation relay.
 
-## 2. Target Directory Shape
+## 2. Module Responsibilities
+
+### PolicyRuntime
+
+Path: `policy/common/runtime/main_runtime/main.py`
+
+Creates the catalog, Worker registry, one SessionState, ControlLoop, external
+services, heartbeat subscribers, and the local Supervisor control socket. It
+hosts the canonical `/policy/inference_command` service and temporary
+`/<runtime>/inference_command` aliases. It also monitors the active Worker and
+Orchestrator.
+
+### ServiceHandler
+
+Path: `policy/common/runtime/main_runtime/service_handler.py`
+
+Serializes all lifecycle commands with one re-entrant lock.
+
+- LOAD resolves and validates `policy_id` and parameters, verifies Worker
+  `DESCRIBE`, asks the Worker to load, then configures the robot control path.
+- START/RESUME start initial-pose sync or the normal control loop.
+- PAUSE/STOP require a successful current-pose hold when one is needed.
+- UNLOAD is rejected while a hold is pending and clears the session only after
+  the Worker confirms unload.
+- STATUS returns the central session snapshot.
+- Faults clear action output and move the session to `error`.
+
+The same lock protects Worker mutation reservations, closing the race between a
+LOAD request and a Supervisor start/stop/recreate operation.
+
+### SessionState
+
+Path: `policy/common/runtime/main_runtime/session_state.py`
+
+Stores only logical state: loaded/running/paused/error, runtime and policy IDs,
+checkpoint, canonical parameters, instruction, action keys, and publish mode.
+It does not perform I/O.
+
+### WorkerRegistry
+
+Path: `policy/common/runtime/main_runtime/worker_registry.py`
+
+Creates one Engine client per runtime and routes by namespaced policy ID. Before
+LOAD it compares Worker `DESCRIBE` with the repository catalog:
+
+- protocol major version;
+- runtime ID;
+- complete supported policy ID set;
+- complete capability object;
+- selected policy support.
+
+It records heartbeat timestamps and Worker instance IDs. A changed instance,
+missing/stale heartbeat, or stale Orchestrator heartbeat becomes a fail-safe
+reason during an active session.
+
+### InferenceRequester
+
+Path: `policy/common/runtime/main_runtime/inference_requester.py`
+
+Builds EngineCommand requests and owns LOAD/GET_ACTION/UNLOAD/DESCRIBE/STATUS
+timeouts. Sequence IDs reject late responses after a timeout. Only one
+GET_ACTION request may be active at a time.
+
+### ControlLoop
+
+Path: `policy/common/runtime/main_runtime/control_loop.py`
+
+Owns command timing and action buffering.
+
+- Requests action chunks using sync or async-prefetch scheduling.
+- Pushes chunks into `ActionChunkProcessor`.
+- Pops one processed action per output tick.
+- Always publishes trajectory preview when available.
+- Publishes robot commands only in robot mode.
+- Runs initial-pose synchronization before normal inference when enabled.
+- Clears buffered and in-flight generations on pause, stop, mode changes, and
+  faults.
+- On a safety stop, publishes zero Twist and holds fresh current joint values.
+  Missing or stale joint state does not count as a successful hold.
+
+### RuntimeControlServer
+
+Path: `policy/common/runtime/main_runtime/runtime_control.py`
+
+Small JSON API over `/run/cyclo/policy-runtime.sock`. It is local to the Cyclo
+container and is used by Supervisor to atomically reserve Worker lifecycle
+changes. It is not a public network API.
+
+### RobotClient
+
+Path: `sdk/robot_client/robot_client/robot_client.py`
+
+Maps shared robot config to ROS2/Zenoh I/O. Subscription groups can be enabled
+independently.
+
+- Engine: images + state + sensors.
+- Policy Runtime, simulation: no observation subscriptions.
+- Policy Runtime, robot mode: state only for initial sync and safety hold.
+
+Robot configs remain the owner of camera topics/names and joint order.
+
+### ActionChunkProcessor
+
+Path: `sdk/action_chunk_processing/`
+
+Resamples, aligns, buffers, and pops model actions according to Dataset FPS,
+control rate, and align window. It is installed only in the Cyclo image after
+this refactor.
+
+### EngineWorker
+
+Path: `policy/common/runtime/engine_process/worker.py`
+
+Framework-neutral Worker process. It exposes DESCRIBE, LOAD, GET_ACTION,
+UNLOAD, and STATUS, publishes heartbeat payloads, and manages the ready marker.
+It loads the concrete adapter through `POLICY_ENGINE_MODULE` and
+`create_engine()`.
+
+### Backend Engine
+
+Paths:
+
+- `policy/lerobot/lerobot_engine/`
+- `policy/groot/groot_engine/`
+
+Owns model-specific loading, optimization, preprocessing, inference, and action
+shape. It receives validated policy parameters. It must return a finite
+`(chunk_size, action_dim)` array and must never command the robot.
+
+## 3. Lifecycle Flow
+
+### LOAD
+
+```text
+UI / BT
+  -> TaskInfo(policy_id, parameters, checkpoint, timing)
+  -> Orchestrator canonical JSON check
+  -> /policy/inference_command LOAD
+  -> ServiceHandler catalog validation
+  -> WorkerRegistry DESCRIBE compatibility check
+  -> /<runtime>/engine_command LOAD
+  -> Engine configures observation subscriptions and loads checkpoint
+  <- action_keys
+  -> Policy Runtime configures command-only RobotClient and action processor
+  -> central session = loaded
+```
+
+A failed Worker LOAD does not create a central loaded session.
+
+### START And Action Flow
+
+```text
+START
+  -> optional initial-pose target
+  -> central session = running/syncing
+
+ControlLoop refill
+  -> Worker GET_ACTION
+  -> Engine reads latest model observations directly
+  -> model returns action chunk
+  -> ActionChunkProcessor align/resample/buffer
+  -> ControlLoop preview
+  -> optional robot command
+```
+
+Only one global inference session exists, so a second model cannot LOAD until
+the current policy is unloaded.
+
+### PAUSE, STOP, And UNLOAD
+
+PAUSE and STOP immediately stop the loop, clear the buffer, invalidate in-flight
+results, and perform a required hold. A failed hold leaves the session in a
+retryable safety state. UNLOAD is blocked until the hold succeeds. The Worker
+and central state are cleared only after Worker UNLOAD succeeds.
+
+### Faults
+
+During an active session, these faults are fail-closed:
+
+- GET_ACTION failure or timeout;
+- Worker heartbeat missing/stale;
+- Worker instance ID changes after restart;
+- Orchestrator heartbeat stale.
+
+The Runtime clears the action buffer, stops publication, attempts zero Twist
+and current-pose hold, records the error, and rejects unsafe Worker mutation.
+
+## 4. Catalog And UI Flow
+
+```text
+policy/<runtime>/manifest.yaml
+  -> strict catalog validation
+  -> Supervisor GET /api/policies/catalog
+  -> Inference UI and BT selector
+  -> TaskInfo policy_id + parameters
+  -> Runtime re-validates before Engine LOAD
+```
+
+Manifest data owns model names and capabilities. Compose owns images,
+containers, and mounts. Catalog loading fails when a runtime references a
+missing Compose service or violates the schema.
+
+## 5. Container Lifecycle
+
+- `cyclo_intelligence`: s6 starts `policy-runtime` automatically. Health
+  requires the service and `/run/cyclo/policy-runtime.ready`.
+- Worker containers: s6 starts only `engine-process`. The old Worker
+  `main-runtime` service is removed.
+- Worker container health checks s6 and the Engine ready marker.
+- Supervisor additionally checks Worker DESCRIBE compatibility and heartbeat
+  freshness before the UI reports `Backend ready`.
+- Supervisor start, stop, restart, recreate, and pull paths acquire a local
+  Runtime mutation lease.
+- A normal Cyclo shutdown runs the safety stop before closing Runtime resources.
+  Power loss still requires the robot controller command watchdog.
+
+## 6. Container Deployment
+
+`docker/docker-compose.yml` is the single deployment definition. Runtime, Worker adapter, SDK,
+Supervisor, UI, robot config, and URDF files come from the image. Only data,
+model cache, devices, and operational sockets are mounted.
+
+```bash
+./docker/container.sh start --build
+./docker/container.sh start-policy lerobot --build
+./docker/container.sh build-ui
+```
+
+## 7. Source Layout
 
 ```text
 cyclo_brain/
-├── sdk/
-│   ├── robot_client/                  # robot topic client for command or observation
-│   ├── action_chunk_processing/       # action_list post-processing
-│   └── zenoh_ros2_sdk/                # ROS2-over-Zenoh transport SDK
-│
-└── policy/
-    ├── common/
-    │   ├── runtime/
-    │   │   ├── engine.py              # InferenceEngine ABC
-    │   │   ├── main_runtime/          # Process 1 package
-    │   │   │   ├── main.py            # starts one Main Python process
-    │   │   │   ├── service_handler.py # ServiceHandler class
-    │   │   │   ├── session_state.py   # SessionState class
-    │   │   │   ├── inference_requester.py
-    │   │   │   ├── control_loop.py    # ControlLoop class, uses RobotClient
-    │   │   │   └── zenoh_client.py    # internal EngineCommand service client
-    │   │   ├── engine_process/        # Process 2 package
-    │   │   │   ├── worker.py
-    │   │   │   └── protocol.py
-    │   └── s6-services/
-    │       ├── main-runtime/
-    │       └── engine-process/
-    │
-    ├── lerobot/
-    │   ├── Dockerfile.{arm64,amd64}
-    │   ├── lerobot/
-    │   └── lerobot_engine/
-    │       ├── engine.py
-    │       ├── loading.py                # PolicyLoader convention
-    │       ├── optimization.py           # optional TensorRT/GPU/runtime optimization
-    │       ├── io_mapping.py
-    │       ├── preprocessing.py          # Preprocessor convention
-    │       ├── prediction.py             # Predictor convention
-    │       └── constants.py
-    │
-    └── groot/
-        ├── Dockerfile.{arm64,amd64}
-        ├── Isaac-GR00T/
-        └── groot_engine/
-            ├── engine.py
-            ├── loading.py                # PolicyLoader convention
-            ├── optimization.py           # optional TensorRT GPU optimizer
-            ├── io_mapping.py
-            ├── preprocessing.py
-            └── prediction.py
+├── policy/
+│   ├── common/
+│   │   ├── catalog/
+│   │   ├── runtime/
+│   │   │   ├── main_runtime/      # central Policy Runtime implementation
+│   │   │   ├── engine_process/    # Worker implementation
+│   │   │   └── engine.py          # adapter ABC
+│   │   └── s6-services/
+│   │       └── engine-process/    # Worker longrun only
+│   ├── lerobot/
+│   │   ├── manifest.yaml
+│   │   ├── lerobot/
+│   │   └── lerobot_engine/
+│   └── groot/
+│       ├── manifest.yaml
+│       ├── Isaac-GR00T/
+│       └── groot_engine/
+└── sdk/
+    ├── action_chunk_processing/
+    ├── robot_client/
+    └── zenoh_ros2_sdk/
+
+docker/
+├── s6-services/policy-runtime/    # central longrun
+├── supervisor_api/
+└── docker-compose.yml             # deployment definition
 ```
 
----
+## 8. Extension Rule
 
-## 3. Runtime Data Flow
+A LeRobot policy already supported by the pinned fork stays in the LeRobot
+Worker image. Add its manifest entry and adapter logic only if needed.
 
-```text
-1. LOAD
+A framework with incompatible Python, CUDA, JAX, or system dependencies gets a
+new Engine-only Worker image:
 
-External or standalone CLI
-  └─ InferenceCommand(LOAD, model_path, robot_type, task_instruction, publish_to_robot)
-       └─▶ Main process
-             ├─ RobotClient.configure(robot_type) for command + preview publish
-             ├─ Engine process.load_policy(model_path, robot_type)
-             │    └─ RobotClient.configure(robot_type) for observation
-             ├─ ActionChunkProcessor.clear()
-             └─ session = loaded, output mode = simulation or robot
+1. add `policy/<runtime>/manifest.yaml`;
+2. implement `<runtime>_engine/create_engine()`;
+3. add AMD64/ARM64 Dockerfiles;
+4. add one explicit Compose service;
+5. validate catalog, DESCRIBE, heartbeat, LOAD, and inference.
 
-
-2. START + RUN
-
-External
-  └─ InferenceCommand(START, publish_to_robot)
-       └─▶ Main process
-             └─ session = running, action buffer cleared if output mode changed
-
-Main control loop
-  ├─ action = ActionChunkProcessor.pop_action()
-  ├─ if action exists:
-  │    ├─ RobotClient.publish_action_preview(action) to /inference/trajectory_preview
-  │    └─ if publish_to_robot:
-  │          └─ RobotClient.publish_action(action)
-  ├─ if action is empty:
-  │    └─ publish nothing; never repeat the previous action
-  │
-  └─ if buffer is low and no request is in flight:
-       ├─ Engine process.get_action(task_instruction)
-       │    ├─ RobotClient.get_observation()
-       │    ├─ run policy inference
-       │    └─ return action_list
-       └─ ActionChunkProcessor.push_actions(action_list)
-
-Control loop cadence
-  ├─ post-processing enabled:
-  │    ├─ ActionChunkProcessor converts model action list to control actions
-  │    ├─ matching / RTC aligner / future smoothing can run here
-  │    ├─ example: 16 model actions → 100 control actions
-  │    └─ ControlLoop runs at processed output cadence, normally 100Hz
-  │
-  └─ post-processing disabled:
-       ├─ ActionChunkProcessor buffers raw action list as-is
-       └─ ControlLoop runs at model/action-list cadence, not forced to 100Hz
-
-
-3. PAUSE / RESUME / STOP / UNLOAD
-
-PAUSE
-  External ─▶ Main ─▶ session = paused
-  ActionChunkProcessor.clear()
-  in-flight action requests are discarded by generation id
-
-RESUME
-  External ─▶ Main ─▶ session = running, output mode may change
-  ActionChunkProcessor.clear() if output mode changed
-  control loop requests fresh actions before publishing again
-
-STOP
-  External ─▶ Main ─▶ session = stopped
-  ActionChunkProcessor.clear()
-
-UNLOAD
-  External ─▶ Main
-     ├─ Engine process.cleanup()
-     │    └─ RobotClient.close() for observation
-     ├─ RobotClient.close() for command publish
-     ├─ ActionChunkProcessor.clear()
-     └─ session = unloaded
-```
-
----
-
-## 4. Responsibility Boundary
-
-| Area | Owner |
-|---|---|
-| External command service | Main process |
-| Session state | Main process |
-| Control loop | Main process |
-| Robot sensor/state input | Engine process uses RobotClient |
-| Robot command output | Main process uses RobotClient |
-| Action list buffer/post-processing | ActionChunkProcessor |
-| Model load/inference | Engine process |
-| Optional optimization | Engine process optimizer class |
-| Backend-specific policy code | `<backend>_engine/` |
-
----
-
-## 5. Stable Contracts
-
-| Contract | Shape |
-|---|---|
-| External service | `/<backend>/inference_command` |
-| Internal engine service | `/<backend>/engine_command` via `zenoh_ros2_sdk` service |
-| Main → Engine | `LOAD_POLICY`, `GET_ACTION`, `UNLOAD_POLICY` |
-| Main → RobotClient | `configure`, `publish_action`, `close` |
-| Engine → RobotClient | `configure`, `get_observation`, `close` |
-| Engine output | `action_list` shaped `(T, D)` |
-| Processor output | one action vector per control tick |
-| Runtime processes | `main-runtime`, `engine-process` |
-| Main internal modules | classes inside one Main process, not extra processes |
-
-### 5.1 Internal engine service
-
-```text
-GET_ACTION request:
-  seq_id
-  task_instruction
-
-GET_ACTION response:
-  seq_id
-  success
-  message
-  action_list
-  chunk_size
-  action_dim
-
-Main rules:
-  - one GET_ACTION in-flight by default
-  - timeout is configurable per backend/model/deployment
-  - timeout means "response not received in time", not "inference failed"
-  - late/stale responses are discarded by seq_id
-  - only the latest accepted response enters ActionChunkProcessor
-```
-
-### 5.2 Timeout policy
-
-```text
-LOAD_POLICY timeout:
-  backend-specific and can be long
-  includes model load, processor load, optimizer build/load
-
-GET_ACTION timeout:
-  runtime safety timeout
-  configurable; default is a fallback, not a performance guarantee
-  should account for model size and user hardware
-```
-
-### 5.3 Backend integration contract
-
-```text
-policy/<backend>/
-├── Dockerfile.{arm64,amd64}        # per-opensource dependency isolation
-├── <opensource-submodule>/         # git submodule
-└── <backend>_engine/
-    ├── engine.py                   # implements InferenceEngine ABC
-    ├── loading.py                  # PolicyLoader convention
-    ├── optimization.py             # optional TensorRT/GPU/runtime optimization
-    ├── io_mapping.py               # robot/model key mapping
-    ├── preprocessing.py            # RobotClient observation → model input
-    └── prediction.py               # model input → action_list
-```
-
-The `InferenceEngine` ABC in `common/runtime/engine.py` is the required process-boundary contract.
-`loading.py`, `optimization.py`, `preprocessing.py`, and `prediction.py` are the standard backend-internal layout, but they do not require separate abstract base classes.
-
-`optimization.py` is optional. Backends that do not need TensorRT/GPU/runtime optimization can keep it as a no-op or omit the file.
-
-### 5.4 Action list contract
-
-```text
-action_list:
-  shape: (T, D)
-  T: model action steps
-  D: flattened robot action dimension
-  action_keys: model output modality order
-
-ActionChunkProcessor:
-  does not reorder action dimensions
-  may match / RTC-align / interpolate / blend / smooth over time
-
-Robot publish path:
-  splits final action vector by robot command schema
-```
-
----
-
-## 6. Design Rule
-
-```text
-Main owns session flow.
-Main owns the control loop.
-Main can be split into ServiceHandler, SessionState, InferenceRequester, ControlLoop classes.
-RobotClient is the common robot I/O client.
-Main process uses RobotClient to publish robot commands.
-Engine process uses RobotClient to read sensor/state topics for inference.
-Engine implements InferenceEngine ABC.
-Engine may split internally into PolicyLoader, Optimizer, Preprocessor, Predictor.
-Optimizer is optional.
-ActionChunkProcessor owns optional action-list post-processing and buffering.
-If post-processing converts 16 actions to 100 actions, the loop can run at 100Hz.
-If post-processing is disabled, the loop cadence must follow the raw action list.
-```
+No new model list should be added to UI, Supervisor, BT, or Orchestrator.

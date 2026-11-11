@@ -24,25 +24,33 @@ class PredictionMixin:
     def _predict_chunk(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Return a chunk tensor of shape (1, T, A)."""
         assert self._policy is not None
-        try:
-            action = self._policy.predict_action_chunk(batch)
+        predictor = getattr(self, "_chunk_predictor", None)
+        if predictor is not None:
+            action = predictor(batch)
+            return action.unsqueeze(1) if action.dim() == 2 else action
+        chunk_method = getattr(self._policy, "predict_action_chunk", None)
+        if callable(chunk_method):
+            action = chunk_method(batch)
             if action.dim() == 2:
                 action = action.unsqueeze(1)
             return action
-        except (NotImplementedError, AttributeError):
-            logger.debug(
-                "predict_action_chunk unavailable; falling back to select_action"
-            )
-            action = self._policy.select_action(batch)
-            if action.dim() == 1:
-                action = action.unsqueeze(0)
-            return action.unsqueeze(1)
+        logger.debug(
+            "predict_action_chunk unavailable; falling back to select_action"
+        )
+        action = self._policy.select_action(batch)
+        if action.dim() == 1:
+            action = action.unsqueeze(0)
+        return action.unsqueeze(1)
 
     @staticmethod
     def _to_numpy_chunk(action: torch.Tensor) -> np.ndarray:
-        """(B, T, A) or (B, A) tensor -> (T, A) float64 numpy."""
-        chunk = action.detach().cpu()
+        """Single-batch chunk or unbatched (T, A)/(A,) -> float64 numpy."""
+        chunk = action.detach()
         if chunk.dim() == 3:
+            if chunk.shape[0] != 1:
+                raise ValueError(
+                    f"Expected a single batch for one robot, got {tuple(chunk.shape)}"
+                )
             chunk = chunk[0]
         elif chunk.dim() == 2:
             pass
@@ -52,4 +60,4 @@ class PredictionMixin:
             raise ValueError(
                 f"Unexpected action tensor shape: {tuple(chunk.shape)}"
             )
-        return chunk.to(torch.float64).numpy()
+        return chunk.cpu().to(torch.float64).numpy()

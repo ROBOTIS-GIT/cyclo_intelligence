@@ -34,9 +34,8 @@ import {
   markLocalTaskInfoEdited,
   selectInferenceTaskInfo,
   setInferenceMode,
-  setInferenceStatus,
 } from '../features/tasks/taskSlice';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import { findPolicy, usePolicyCatalog } from '../contexts/PolicyCatalogContext';
 import usePolicyBackendStatus, {
   getPolicyBackendReadiness,
 } from '../hooks/usePolicyBackendStatus';
@@ -50,13 +49,13 @@ const phaseGuideMessages = {
   [InferencePhase.SYNCING]: 'Synchronizing initial robot pose...',
 };
 
-const buildRequiredFields = (serviceType, policyType) => {
+const buildRequiredFields = (model) => {
   const fields = [
     { key: 'policyPath', label: 'Policy Path' },
     { key: 'inferenceHz', label: 'Dataset FPS' },
     { key: 'controlHz', label: 'Control Hz' },
   ];
-  if (requiresInstruction(serviceType, policyType)) {
+  if (model?.requires_instruction) {
     fields.unshift({ key: 'taskInstruction', label: 'Task Instruction' });
   }
   return fields;
@@ -86,15 +85,32 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const recordingActive = useSelector((state) => Boolean(state.tasks.recordStatus?.running));
+  const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
+  const robotType = useSelector((state) => state.tasks.robotType);
+  const poseDeviceId = useSelector((state) => state.tasks.robotPoseStatus?.device_id);
+  const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  const poseRequestGeneration = useRef(0);
+  useEffect(() => {
+    poseRequestGeneration.current += 1;
+    return () => { poseRequestGeneration.current += 1; };
+  }, [robotType, poseDeviceId, rosbridgeUrl]);
   const rosHost = useSelector((state) => state.ros.rosHost);
+  const { catalog, status: catalogStatus, error: catalogError } = usePolicyCatalog();
+  const selectedPolicy = findPolicy(
+    catalog,
+    taskInfo.policyId,
+    taskInfo.serviceType,
+    taskInfo.policyType
+  );
+  const selectedRuntime = selectedPolicy?.runtime;
 
   const [hovered, setHovered] = useState(null);
   const [pressed, setPressed] = useState(null);
-  const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand, sendRobotPoseCommand } = useRosServiceCaller();
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -105,14 +121,25 @@ export default function InferenceControlPanel() {
   const isInferencing = phase === InferencePhase.INFERENCING;
   const isPaused = phase === InferencePhase.PAUSED;
   const isSyncing = phase === InferencePhase.SYNCING;
+  const isStatusKnown = Boolean(inferenceStatus.topicReceived);
+  const runtimeState = String(inferenceStatus.runtimeState || 'unknown');
+  const isPreparing = runtimeState === 'preparing';
+  const hasRuntimeError = runtimeState === 'error';
+  const loadedModelPath = String(inferenceStatus.loadedModelPath || '');
   const inferencePhaseRef = useRef(phase);
-  const isModelLoaded = isInferencing || isPaused || isSyncing;
-  const shouldCheckBackend = isIdle || isPaused;
+  const isModelLoaded = ['loaded', 'preparing', 'syncing', 'running', 'paused', 'error'].includes(
+    runtimeState
+  ) || isInferencing || isPaused || isSyncing;
+  const canResume = isPaused &&
+    runtimeState === 'paused' &&
+    taskInfo.policyPath === loadedModelPath;
+  const shouldCheckBackend = isStatusKnown && (isIdle || isPaused) &&
+    catalogStatus === 'ready' && Boolean(selectedPolicy);
 
   const {
     readiness: backendReadiness,
     refreshStatus: refreshBackendStatus,
-  } = usePolicyBackendStatus(taskInfo.serviceType, {
+  } = usePolicyBackendStatus(selectedRuntime?.id || taskInfo.serviceType, {
     enabled: shouldCheckBackend,
     intervalMs: 2000,
   });
@@ -150,7 +177,7 @@ export default function InferenceControlPanel() {
 
   const validateTaskInfo = useCallback(() => {
     const missingFields = [];
-    const fields = buildRequiredFields(taskInfo.serviceType, taskInfo.policyType);
+    const fields = buildRequiredFields(selectedPolicy);
     for (const field of fields) {
       const value = taskInfo[field.key];
       if (
@@ -176,12 +203,28 @@ export default function InferenceControlPanel() {
         missingFields.push(field.label);
       }
     }
+    const parameterValues = Object.fromEntries(
+      (selectedPolicy?.parameters || []).map((parameter) => {
+        const value = parameter.binding.startsWith('task_info.')
+          ? taskInfo[parameter.binding.slice('task_info.'.length)]
+          : taskInfo.policyParameters?.[parameter.key];
+        return [parameter.key, value];
+      })
+    );
+    (selectedPolicy?.parameters || []).forEach((parameter) => {
+      const isVisible = Object.entries(parameter.visible_when || {})
+        .every(([key, expected]) => parameterValues[key] === expected);
+      const value = parameterValues[parameter.key];
+      if (isVisible && parameter.required && (value === '' || value == null)) {
+        missingFields.push(parameter.label);
+      }
+    });
     return { isValid: missingFields.length === 0, missingFields };
-  }, [taskInfo]);
+  }, [selectedPolicy, taskInfo]);
 
   const ensureTensorRtReady = useCallback(async () => {
     if (
-      taskInfo.serviceType !== 'groot' ||
+      !selectedRuntime?.capabilities?.operations?.includes('groot_trt') ||
       taskInfo.accelerationMode !== 'tensorrt_dit'
     ) {
       return true;
@@ -209,7 +252,7 @@ export default function InferenceControlPanel() {
       return false;
     }
   }, [
-    taskInfo.serviceType,
+    selectedRuntime,
     taskInfo.accelerationMode,
     taskInfo.policyPath,
     taskInfo.accelerationEnginePath,
@@ -222,10 +265,6 @@ export default function InferenceControlPanel() {
         String(message).toLowerCase().includes('timeout') &&
         inferencePhaseRef.current === InferencePhase.LOADING
       );
-      const shouldPreserveSyncAfterFailure = () => (
-        inferencePhaseRef.current === InferencePhase.SYNCING &&
-        ['stop_inference', 'finish'].includes(commandString)
-      );
 
       try {
         const result = await sendRecordCommand(commandString, options);
@@ -235,19 +274,15 @@ export default function InferenceControlPanel() {
             return result;
           }
           toast.error(`Command failed: ${result.message || 'Unknown error'}`);
-          // Backend may have left phase in LOADING/INFERENCING after a failed
-          // setup; force the local phase back to READY so the panel becomes
-          // editable and the user can retry.
-          if (!shouldPreserveSyncAfterFailure()) {
-            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-          }
         } else if (result && result.success === true) {
-          toast.success(`${commandName} executed successfully`);
+          if (commandString === 'finish') {
+            // FINISH acknowledges a request; STOP/UNLOAD complete asynchronously.
+            toast('Clear requested. Waiting for model unload.');
+          } else {
+            toast.success(`${commandName} executed successfully`);
+          }
         } else {
           toast.error(`${commandName} completed with uncertain status`);
-          if (!shouldPreserveSyncAfterFailure()) {
-            dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-          }
         }
         return result;
       } catch (error) {
@@ -268,21 +303,14 @@ export default function InferenceControlPanel() {
         } else {
           toast.error(`Command failed [${commandName}]: ${errorMessage}`);
         }
-        // Same reasoning as the success===false branch above.
-        if (!shouldPreserveSyncAfterFailure()) {
-          dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
-        }
         return null;
       }
     },
-    [sendRecordCommand, rosHost, dispatch]
+    [sendRecordCommand, rosHost]
   );
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {
     if (!intent) return;
-    if (intent.policyPath) {
-      setLastPolicyPath(intent.policyPath);
-    }
     await executeCommand(intent.commandName, intent.commandString, {
       inferenceMode,
     });
@@ -305,7 +333,7 @@ export default function InferenceControlPanel() {
     }
 
     let startIntent;
-    if (isPaused && taskInfo.policyPath === lastPolicyPath) {
+    if (canResume) {
       startIntent = {
         commandName: 'Resume',
         commandString: 'resume_inference',
@@ -339,7 +367,7 @@ export default function InferenceControlPanel() {
     if (inferenceMode === 'robot' && willRunInitialPoseSync) {
       const durationS = Number(taskInfo.initialPoseSyncDurationS);
       if (!Number.isFinite(durationS) || durationS < 1 || durationS > 60) {
-        toast.error('Initial Pose Sync duration must be between 1 and 60 seconds');
+        toast.error('Slow Start duration must be between 1 and 60 seconds');
         return;
       }
     }
@@ -363,14 +391,13 @@ export default function InferenceControlPanel() {
   }, [
     backendReadiness,
     refreshBackendStatus,
-    isPaused,
+    canResume,
     taskInfo.policyPath,
     taskInfo.inferenceMode,
     taskInfo.initialPoseSync,
     taskInfo.initialPoseSyncDurationS,
     taskInfo.inferenceHz,
     taskInfo.controlHz,
-    lastPolicyPath,
     executeStartIntent,
     ensureTensorRtReady,
     validateTaskInfo,
@@ -394,30 +421,64 @@ export default function InferenceControlPanel() {
     setPendingRobotDeployIntent(null);
   }, []);
 
+  const stopPoseReturn = useCallback(async () => {
+    const generation = poseRequestGeneration.current;
+    try {
+      const result = await sendRobotPoseCommand(3, robotType);
+      if (!result || generation !== poseRequestGeneration.current) return false;
+      if (!result.success) throw new Error(result.message);
+      return true;
+    } catch (error) {
+      if (generation === poseRequestGeneration.current) {
+        toast.error(error.message || 'Could not stop pose return');
+      }
+      return false;
+    }
+  }, [robotType, sendRobotPoseCommand]);
+
   const handleStop = useCallback(async () => {
+    if (poseReturning) { await stopPoseReturn(); return; }
     await executeCommand('Stop', 'stop_inference');
-  }, [executeCommand]);
+  }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const handleClear = useCallback(async () => {
-    const result = await executeCommand('Clear', 'finish');
-    if (result && result.success === true) {
-      setLastPolicyPath('');
-    }
-  }, [executeCommand]);
+    if (recordingActive) return;
+    if (poseReturning && !(await stopPoseReturn())) return;
+    await executeCommand('Clear', 'finish');
+  }, [executeCommand, poseReturning, stopPoseReturn, recordingActive]);
 
-  const startEnabled = shouldCheckBackend && backendReadiness.ready;
-  const stopEnabled = isInferencing || isSyncing;
-  const clearEnabled = isModelLoaded;
-  const startDescription = isBackendStartBlocked
+  const catalogReady = catalogStatus === 'ready' && Boolean(selectedPolicy);
+  const catalogBlockingMessage = catalogStatus === 'ready'
+    ? 'Selected policy is not available in the policy catalog'
+    : (catalogError || 'Policy catalog is unavailable');
+  const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
+    backendReadiness.ready && !hasRuntimeError && !poseReturning;
+  const stopEnabled = isInferencing || isSyncing || isPreparing || poseReturning;
+  const clearEnabled = isModelLoaded && !recordingActive;
+  const startDescription = !isStatusKnown
+    ? 'Checking inference session status'
+    : !catalogReady
+    ? catalogBlockingMessage
+    : hasRuntimeError
+    ? 'Clear the failed policy session before restarting'
+    : isBackendStartBlocked
     ? backendReadiness.message
-    : isPaused
+    : canResume
       ? 'Resume inference'
       : 'Start inference';
-  const guideMessage = isBackendStartBlocked
+  const guideMessage = poseReturning ? 'Returning to saved pose...'
+    : !isStatusKnown
+    ? 'Checking inference session...'
+    : !catalogReady
+    ? catalogBlockingMessage
+    : hasRuntimeError
+    ? (inferenceStatus.error || 'Policy Runtime failed. Clear the session before restarting.')
+    : isBackendStartBlocked
     ? backendReadiness.message
+    : isPreparing ? 'Preparing first action...'
     : phaseGuideMessages[phase] || '';
   const showGuideSpinner =
-    isInferencing || isLoading || isSyncing || isBackendWarming;
+    !isStatusKnown || isInferencing || isLoading || isSyncing || isBackendWarming;
 
   const handleKeyAction = useCallback(
     (e) => {
@@ -538,7 +599,7 @@ export default function InferenceControlPanel() {
       color: '#d32f2f',
       enabled: clearEnabled,
       handler: handleClear,
-      description: 'Stop inference and unload model',
+      description: recordingActive ? 'Save or Discard recording before Clear' : 'Stop inference and unload model',
       shortcut: 'Escape',
     },
   ];
@@ -638,7 +699,7 @@ export default function InferenceControlPanel() {
               </p>
               {pendingRobotDeployIntent.willRunInitialPoseSync && (
                 <p className="font-semibold text-orange-800">
-                  Initial Pose Sync: {Number(taskInfo.initialPoseSyncDurationS || 5).toFixed(1)} s
+                  Slow Start: {Number(taskInfo.initialPoseSyncDurationS || 5).toFixed(1)} s
                 </p>
               )}
               {pendingRobotDeployIntent.timingWarnings?.length > 0 && (

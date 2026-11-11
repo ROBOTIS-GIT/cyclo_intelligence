@@ -21,6 +21,7 @@ spec.loader.exec_module(inference_mode)
 inference_runtime_signature = inference_mode.inference_runtime_signature
 inference_timing_from_task_info = inference_mode.inference_timing_from_task_info
 publish_to_robot_from_task_info = inference_mode.publish_to_robot_from_task_info
+canonical_policy_parameters_json = inference_mode.canonical_policy_parameters_json
 
 
 class InferenceModeTests(unittest.TestCase):
@@ -59,6 +60,16 @@ class InferenceModeTests(unittest.TestCase):
             inference_timing_from_task_info(SimpleNamespace()),
             (100, 15, 0.3),
         )
+
+    def test_policy_parameters_are_canonical_and_strict_json(self) -> None:
+        self.assertEqual(
+            canonical_policy_parameters_json('{"z":1,"a":{"b":2}}'),
+            '{"a":{"b":2},"z":1}',
+        )
+        with self.assertRaisesRegex(ValueError, "must contain a JSON object"):
+            canonical_policy_parameters_json("[]")
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            canonical_policy_parameters_json('{"value":NaN}')
         self.assertEqual(
             inference_timing_from_task_info(SimpleNamespace(
                 control_hz=0,
@@ -127,6 +138,27 @@ class InferenceModeTests(unittest.TestCase):
             inference_runtime_signature(
                 "/models/policy", "pytorch", "", "async", 100, 15, 0.3,
                 True, 7.5,
+            ),
+        )
+
+    def test_runtime_signature_changes_with_policy_or_parameters(self) -> None:
+        base = inference_runtime_signature(
+            "/models/policy", "pytorch", "", "async", 100, 15, 0.3,
+            False, 5.0, "lerobot:act", '{"gain":0.5}',
+        )
+
+        self.assertNotEqual(
+            base,
+            inference_runtime_signature(
+                "/models/policy", "pytorch", "", "async", 100, 15, 0.3,
+                False, 5.0, "lerobot:diffusion", '{"gain":0.5}',
+            ),
+        )
+        self.assertNotEqual(
+            base,
+            inference_runtime_signature(
+                "/models/policy", "pytorch", "", "async", 100, 15, 0.3,
+                False, 5.0, "lerobot:act", '{"gain":0.6}',
             ),
         )
 

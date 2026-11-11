@@ -82,6 +82,14 @@ Record-side status (cyclo_data → UI direct on `/data/recording/status`).
 
 Inference-side status (orchestrator → UI direct on `/task/inference_status`).
 
+One Orchestrator monitor queries the global Policy Runtime regardless of browser
+count. It republishes the complete snapshot every 2 seconds (0.1 seconds during
+Initial Pose Sync, plus request latency) and immediately on lifecycle progress.
+UI subscribers do not poll the Runtime; legacy GET status requests read this
+cache. Unknown status preserves the last phase but cannot authorize a new start
+or complete a BT stage. The UI expires a silent publisher after 8 seconds.
+Docker readiness polling and Runtime safety watchdogs are independent.
+
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `READY` | 0 | Idle |
@@ -95,6 +103,23 @@ Inference-side status (orchestrator → UI direct on `/task/inference_status`).
 | `robot_type` | string | Robot type |
 | `inference_phase` | uint8 | Current inference-side phase |
 | `error` | string | Error message |
+| `status_known` | bool | Whether the snapshot is currently authoritative |
+| `runtime_state` | string | Runtime state, loading command progress, or unknown |
+| `model_path` | string | Active checkpoint path |
+| `policy_id` | string | Active namespaced policy ID |
+| `publish_to_robot` | bool | Active robot publishing mode |
+| `source_id` | string | Orchestrator process instance identifier |
+| `sequence` | uint64 | Increasing snapshot sequence within that process |
+| `has_task_info` | bool | Whether editable inference settings have been saved |
+| `task_info_revision` | uint64 | Settings revision within `source_id`, independent of status sequence |
+| `task_info` | TaskInfo | Saved editable settings, not necessarily the active policy settings |
+
+Inference `SET_TASK_INFO` saves a separate Orchestrator-owned copy without
+reconfiguring the recording session. Snapshots restore it after a browser
+refresh or on another PC. Clients ignore older revisions and protect unsent
+local edits. Settings live for the Orchestrator process lifetime; disk persistence
+across backend restarts is not provided. Rebuild Cyclo interfaces and UI together;
+the EngineCommand and InferenceCommand contracts are unchanged.
 
 ---
 

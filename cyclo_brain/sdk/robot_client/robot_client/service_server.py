@@ -20,8 +20,8 @@
 RobotServiceServer - Decorator-based service framework for training executors.
 
 Inference lifecycle moved to InferenceCommand.srv hosted directly by
-cyclo_brain/policy/common/runtime/main_runtime. This framework now only covers
-training + status.
+the central Policy Runtime in cyclo_intelligence. This framework now only
+covers training + status.
 
 Usage:
     server = RobotServiceServer(name="lerobot", domain_id=30)

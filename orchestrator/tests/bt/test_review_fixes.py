@@ -16,10 +16,13 @@
 #
 # Author: Seongwoo Kim
 
+import io
 import sys
 import threading
 import time
 import types
+from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -70,6 +73,8 @@ def _install_ros_stubs():
         action_request_mode = ''
         acceleration_mode = ''
         acceleration_engine_path = ''
+        policy_id = ''
+        policy_parameters_json = ''
 
     class _SendCommandRequest:
         START_INFERENCE = 1
@@ -126,6 +131,7 @@ from orchestrator.bt.actions.joint_control import (  # noqa: E402
     _coerce_positions,
 )
 from orchestrator.bt.actions.send_command import SendCommand  # noqa: E402
+from shared.policy_catalog import _policy_root_candidates  # noqa: E402
 from orchestrator.bt.bt_core import NodeStatus  # noqa: E402
 from orchestrator.bt.node_registry import (  # noqa: E402
     _annotation_to_port_type,
@@ -137,6 +143,25 @@ from orchestrator.bt.node_registry import catalog_payload  # noqa: E402
 class _DummyServiceClient:
     def service_is_ready(self):
         return True
+
+
+def test_policy_catalog_candidates_include_baked_image_path():
+    assert Path('/opt/cyclo/policy') in _policy_root_candidates()
+
+
+def test_unknown_runtime_snapshot_cannot_complete_a_bt_stage():
+    import threading
+    action = SendCommand.__new__(SendCommand)
+    action._phase_lock = threading.Lock()
+    action._status_callback(types.SimpleNamespace(
+        inference_phase=2, status_known=True, error='',
+    ))
+    assert action._latest_phase == 2
+    action._status_callback(types.SimpleNamespace(
+        inference_phase=2, status_known=False, error='runtime offline',
+    ))
+    assert action._latest_phase is None
+    assert action._latest_error == 'runtime offline'
 
 
 class _DummyNode:
@@ -248,8 +273,8 @@ def _ready_backend_status(backend='groot'):
         'image_pulled': True,
         'container_state': 'running',
         'raw_state': 'running',
+        'worker_compatible': True,
         'services': [
-            {'name': 'main-runtime', 'state': 'up'},
             {'name': 'engine-process', 'state': 'up'},
         ],
     }
@@ -297,6 +322,41 @@ def test_load_send_command_sets_acceleration_mode():
     assert action.acceleration_mode == 'tensorrt_dit'
     assert task_info.acceleration_mode == 'tensorrt_dit'
     assert task_info.acceleration_engine_path == 'custom.trt'
+    if hasattr(task_info, 'policy_id'):
+        assert task_info.policy_id == 'groot:n17'
+
+
+def test_action_steps_bt_load_and_resume_defaults():
+    context = types.SimpleNamespace(node=_DummyNode())
+    for params, expected in (
+        ({'command': 'LOAD'}, 0),
+        ({'command': 'LOAD', 'action_steps': '10'}, 10),
+        ({'command': 'RESUME'}, -1),
+        ({'command': 'RESUME', 'action_steps': '0'}, 0),
+    ):
+        action = SendCommand.from_xml_params(context, 'test', params)
+        assert action._build_task_info().action_steps == expected
+
+
+@pytest.mark.parametrize('action_steps', [-1, '-2', 2147483648, '1.5', True])
+def test_action_steps_bt_rejects_invalid_explicit_values(action_steps):
+    with pytest.raises(ValueError, match='action_steps|invalid literal'):
+        SendCommand(_DummyNode(), action_steps=action_steps)
+
+
+def test_load_send_command_resolves_legacy_bare_policy_alias():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {'command': 'LOAD', 'model': 'act'},
+    )
+    task_info = action._build_task_info()
+
+    assert task_info.service_type == 'lerobot'
+    if hasattr(task_info, 'policy_id'):
+        assert task_info.policy_id == 'lerobot:act'
 
 
 def test_load_send_command_sets_action_request_mode():
@@ -357,7 +417,6 @@ def test_docker_start_waits_for_all_declared_services(monkeypatch):
         status = _ready_backend_status()
         if status_calls == 1:
             status['services'] = [
-                {'name': 'main-runtime', 'state': 'up'},
                 {'name': 'engine-process', 'state': 'down'},
             ]
         return status
@@ -375,7 +434,7 @@ def test_docker_start_waits_for_all_declared_services(monkeypatch):
     assert status_calls == 2
     assert calls[0][0:2] == (
         'POST',
-        'http://127.0.0.1:7100/backends/groot/start?auto_provision=true',
+        'http://127.0.0.1:7100/backends/groot/start',
     )
     assert calls[-1][0:2] == (
         'GET',
@@ -409,10 +468,126 @@ def test_docker_start_waits_for_ros_inference_service(monkeypatch):
     assert node.backend_client.checked.wait(2.0)
     assert action._backend_job.snapshot()[0] is None
     assert action.tick() == NodeStatus.RUNNING
-    assert node.backend_service_name == '/groot/inference_command'
+    assert node.backend_service_name == '/policy/inference_command'
 
     service_ready.set()
     assert _tick_until_terminal(action) == NodeStatus.SUCCESS
+
+
+@pytest.mark.parametrize('model,backend,policy_id', [
+    ('abot_m0', 'abot', 'abot:m0'),
+    ('rldx:rldx1', 'rldx', 'rldx:rldx1'),
+    ('lingbot_vla', 'lingbot_vla', ''),
+])
+@pytest.mark.parametrize('command', ['START', 'RESTART', 'STOP'])
+def test_docker_lifecycle_uses_catalog_backends(
+    monkeypatch, model, backend, policy_id, command,
+):
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append((method, url))
+        if method == 'POST':
+            return {'ok': True}
+        if command == 'STOP':
+            return {'container_state': 'exited', 'services': []}
+        return _ready_backend_status(backend)
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand(_DummyNode(), target='DOCKER', command=command, model=model)
+
+    assert _tick_until_terminal(action) == NodeStatus.SUCCESS
+    assert calls == [
+        ('POST', f'http://127.0.0.1:7100/backends/{backend}/{command.lower()}'),
+        ('GET', f'http://127.0.0.1:7100/backends/{backend}/status'),
+    ]
+    task_info = action._build_task_info()
+    assert task_info.service_type == backend
+    assert task_info.policy_id == policy_id
+    assert task_info.policy_parameters_json == '{}'
+    if command != 'STOP':
+        assert action._backend_service_name == '/policy/inference_command'
+
+
+def test_docker_readiness_uses_services_from_new_catalog_runtime(monkeypatch):
+    module, _ = send_command_module._load_policy_catalog()
+    catalog = {'runtimes': [{
+        'id': 'test_worker',
+        'services': ['engine-process', 'adapter'],
+        'models': [{'policy_id': 'test_worker:test', 'aliases': ['test_alias']}],
+    }]}
+    monkeypatch.setattr(send_command_module, '_load_policy_catalog', lambda: (module, catalog))
+    action = SendCommand(_DummyNode(), target='DOCKER', command='START', model='test_alias')
+    status = _ready_backend_status('test_worker')
+
+    assert action._configuration_error() == ''
+    assert not action._backend_reached_target('START', status)
+    status['services'].append({'name': 'adapter', 'state': 'up'})
+    assert action._backend_reached_target('START', status)
+    assert action._build_task_info().policy_id == 'test_worker:test'
+
+
+@pytest.mark.parametrize('compatible', [False, None, 'missing'])
+def test_docker_readiness_requires_worker_handshake(compatible):
+    action = SendCommand(_DummyNode(), target='DOCKER', command='START')
+    status = _ready_backend_status('lerobot')
+    if compatible == 'missing':
+        status.pop('worker_compatible')
+    else:
+        status['worker_compatible'] = compatible
+
+    assert not action._backend_reached_target('START', status)
+
+
+def test_docker_rechecks_worker_health_while_waiting_for_runtime(monkeypatch):
+    status_calls = 0
+    service_ready = threading.Event()
+    node = _ControlledReadinessNode(service_ready)
+
+    def fake_http(method, url, timeout):
+        nonlocal status_calls
+        if method == 'POST':
+            return {'ok': True}
+        status_calls += 1
+        status = _ready_backend_status()
+        if status_calls == 2:
+            status['worker_compatible'] = False
+        return status
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    monkeypatch.setattr(send_command_module, '_BACKEND_STATUS_POLL_SEC', 0.001)
+    monkeypatch.setattr(send_command_module, '_BACKEND_SERVICE_POLL_SEC', 0.001)
+    action = SendCommand(node, target='DOCKER', command='START', model='groot')
+    assert action.tick() == NodeStatus.RUNNING
+    assert node.backend_client.checked.wait(2.0)
+    service_ready.set()
+
+    assert _tick_until_terminal(action) == NodeStatus.SUCCESS
+    assert status_calls >= 3
+
+
+@pytest.mark.parametrize('target,command', [
+    ('DOCKER', 'START'), ('DOCKER', 'RESTART'), ('DOCKER', 'STOP'),
+    ('INFERENCE', 'LOAD'),
+])
+def test_supervisor_rejection_has_no_build_pull_or_mutation_fallback(
+    monkeypatch, target, command,
+):
+    calls = []
+
+    def reject(request, timeout):
+        calls.append((request.method, request.full_url))
+        raise HTTPError(
+            request.full_url, 409, 'Conflict', {},
+            io.BytesIO(b'{"detail":"Worker mutation denied"}'),
+        )
+
+    monkeypatch.setattr(send_command_module, 'urlopen', reject)
+    action = SendCommand(_DummyNode(), target=target, command=command, model='abot:m0')
+    operation = 'start' if command == 'LOAD' else command.lower()
+    assert _tick_until_terminal(action) == NodeStatus.FAILURE
+    expected = ('GET', 'status') if command == 'LOAD' else ('POST', operation)
+    assert calls == [(expected[0], f'http://127.0.0.1:7100/backends/abot/{expected[1]}')]
 
 
 def test_docker_stop_waits_until_container_is_stopped(monkeypatch):
@@ -443,13 +618,16 @@ def test_docker_stop_waits_until_container_is_stopped(monkeypatch):
     )
 
 
-def test_inference_load_prepares_backend_before_ros_stages(monkeypatch):
+@pytest.mark.parametrize('container_state', ['exited', 'not_created'])
+def test_inference_load_prepares_backend_before_ros_stages(monkeypatch, container_state):
     calls = []
 
     def fake_http(method, url, timeout):
         calls.append((method, url, timeout))
         if method == 'POST':
             return {'ok': True, 'message': 'ready'}
+        if len(calls) == 1:
+            return {'container_state': container_state}
         return _ready_backend_status('lerobot')
 
     monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
@@ -468,10 +646,180 @@ def test_inference_load_prepares_backend_before_ros_stages(monkeypatch):
 
     assert action.target_str == 'INFERENCE'
     assert action._state == action._STATE_BEGIN_STAGE
-    assert calls[0][1].endswith(
-        '/backends/lerobot/start?auto_provision=true'
-    )
+    assert [(method, url.rsplit('/', 1)[-1]) for method, url, _ in calls] == [
+        ('GET', 'status'), ('POST', 'start'), ('GET', 'status'),
+    ]
     action.reset()
+
+
+@pytest.mark.parametrize('runtime_state', ['loaded', 'paused', 'running'])
+@pytest.mark.parametrize('policy_path', ['/workspace/model/abot', '/workspace/model/abot-new'])
+def test_inference_load_preserves_stages_fields_and_known_phase_gate(
+    monkeypatch, runtime_state, policy_path,
+):
+    calls = []
+    requests = []
+
+    def fake_http(method, url, timeout):
+        calls.append((method, url))
+        if method != 'GET':
+            raise RuntimeError('UNLOAD the active policy before changing its worker')
+        status = _ready_backend_status('abot')
+        status['worker_message'] = f'state {runtime_state}'
+        return status
+
+    def call_async(request):
+        requests.append(request)
+        return types.SimpleNamespace(
+            done=lambda: True,
+            result=lambda: types.SimpleNamespace(success=True, message='accepted'),
+        )
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand.from_xml_params(
+        types.SimpleNamespace(node=_DummyNode()), 'Load', {
+            'command': 'LOAD', 'model': 'abot_m0', 'action_steps': '7',
+            'inference_mode': 'robot', 'action_request_mode': 'sync',
+            'acceleration_mode': 'tensorrt', 'acceleration_engine_path': '/workspace/test.trt',
+            'policy_path': policy_path, 'task_instruction': ['pick', 'place'],
+            'inference_hz': '20', 'control_hz': '80', 'chunk_align_window_s': '0.25',
+        },
+    )
+    action._client.call_async = call_async
+    assert action.tick() == NodeStatus.RUNNING
+    job = action._backend_job
+    job.thread.join(timeout=2.0)
+    assert not job.thread.is_alive()
+    assert requests == []
+    assert action.tick() == NodeStatus.RUNNING
+    assert action._state == action._STATE_BEGIN_STAGE
+
+    for stage_index, phase in enumerate((2, 3)):
+        for _ in range(3):
+            assert action.tick() == NodeStatus.RUNNING
+        assert action._state == action._STATE_WAITING_PHASE
+        action._status_callback(types.SimpleNamespace(
+            inference_phase=phase, status_known=False, error='',
+        ))
+        assert action.tick() == NodeStatus.RUNNING
+        assert action._stage_idx == stage_index
+        action._status_callback(types.SimpleNamespace(
+            inference_phase=phase, status_known=True, error='',
+        ))
+        assert action.tick() == NodeStatus.RUNNING
+        assert action._stage_idx == stage_index + 1
+
+    assert action.tick() == NodeStatus.SUCCESS
+    assert [req.command for req in requests] == [
+        send_command_module.SendCommandSrv.Request.START_INFERENCE,
+        send_command_module.SendCommandSrv.Request.STOP_INFERENCE,
+    ]
+    task_info = requests[0].task_info
+    assert task_info.service_type == 'abot'
+    assert task_info.policy_id == 'abot:m0'
+    assert task_info.policy_parameters_json == '{}'
+    assert task_info.action_steps == 7
+    assert task_info.inference_mode == 'robot'
+    assert task_info.action_request_mode == 'sync'
+    assert task_info.acceleration_mode == 'tensorrt_dit'
+    assert task_info.acceleration_engine_path == '/workspace/test.trt'
+    assert task_info.policy_path == policy_path
+    assert task_info.task_instruction == ['pick, place']
+    assert task_info.tags == ['inference_mode:robot']
+    assert (task_info.inference_hz, task_info.control_hz) == (20, 80)
+    assert task_info.chunk_align_window_s == 0.25
+    assert calls == [
+        ('GET', 'http://127.0.0.1:7100/backends/abot/status'),
+    ]
+
+
+@pytest.mark.parametrize('status', [
+    {}, {'container_state': 'unknown'}, {'container_state': 'restarting'},
+])
+def test_inference_load_unknown_status_fails_without_start(monkeypatch, status):
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append(method)
+        return status
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand(_DummyNode(), command='LOAD')
+    assert _tick_until_terminal(action) == NodeStatus.FAILURE
+    assert calls == ['GET']
+
+
+def test_inference_load_booting_worker_only_polls(monkeypatch):
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append(method)
+        status = _ready_backend_status('lerobot')
+        if len(calls) == 1:
+            status['worker_compatible'] = False
+            status['services'][0]['state'] = 'down'
+        return status
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    monkeypatch.setattr(send_command_module, '_BACKEND_STATUS_POLL_SEC', 0.001)
+    action = SendCommand(_DummyNode(), command='LOAD')
+    assert action.tick() == NodeStatus.RUNNING
+    job = action._backend_job
+    job.thread.join(timeout=2.0)
+    assert not job.thread.is_alive()
+    assert job.snapshot()[0] is True
+    assert action.tick() == NodeStatus.RUNNING
+    assert action._state == action._STATE_BEGIN_STAGE
+    assert calls == ['GET', 'GET']
+
+
+@pytest.mark.parametrize('waiting_for', ['status', 'worker', 'ros'])
+def test_inference_load_readiness_only_cancel_never_stops_worker(monkeypatch, waiting_for):
+    entered = threading.Event()
+    release_status = threading.Event()
+    node = _ControlledReadinessNode(threading.Event())
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append((method, url))
+        entered.set()
+        if waiting_for == 'status':
+            assert release_status.wait(2.0)
+        status = _ready_backend_status('lerobot')
+        status['worker_compatible'] = waiting_for != 'worker'
+        return status
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand(node, command='LOAD')
+    assert action.tick() == NodeStatus.RUNNING
+    job = action._backend_job
+    try:
+        assert entered.wait(2.0)
+        if waiting_for == 'ros':
+            assert node.backend_client.checked.wait(2.0)
+    finally:
+        action.reset()
+        release_status.set()
+        job.thread.join(timeout=2.0)
+    assert not job.thread.is_alive()
+    assert job.snapshot()[0] is False
+    assert all(method == 'GET' for method, _ in calls)
+
+
+def test_inference_load_start_denial_does_not_reach_ros(monkeypatch):
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append((method, url.rsplit('/', 1)[-1]))
+        if method == 'GET':
+            return {'container_state': 'exited'}
+        raise RuntimeError('Worker mutation denied')
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand(_DummyNode(), command='LOAD')
+    assert _tick_until_terminal(action) == NodeStatus.FAILURE
+    assert calls == [('GET', 'status'), ('POST', 'start')]
+    assert action._stage_idx == 0
 
 
 def test_inference_load_waits_for_ros_service_before_ros_stages(monkeypatch):
@@ -550,7 +898,7 @@ def test_backend_service_readiness_timeout_fails_job(monkeypatch):
 
     assert not job.thread.is_alive()
     assert job.snapshot()[0] is False
-    assert '/groot/inference_command' in job.snapshot()[1]
+    assert '/policy/inference_command' in job.snapshot()[1]
     assert action.tick() == NodeStatus.FAILURE
 
 
@@ -558,9 +906,12 @@ def test_backend_service_readiness_timeout_fails_job(monkeypatch):
     ('target', 'command', 'model'),
     [
         ('DOCKER', 'LOAD', 'groot:n17'),
+        ('DOCKER', 'BUILD', 'groot:n17'),
+        ('DOCKER', 'PULL', 'groot:n17'),
         ('DOCKER', 'START', 'unknown:model'),
         ('UNKNOWN', 'START', 'groot:n17'),
         ('INFERENCE', 'LOAD', 'unknown:model'),
+        ('DOCKER', 'START', '../groot'),
     ],
 )
 def test_send_command_rejects_unapproved_backend_actions(
@@ -585,7 +936,7 @@ def test_send_command_rejects_unapproved_backend_actions(
 
 def test_docker_http_error_fails_action(monkeypatch):
     def fail_http(method, url, timeout):
-        raise RuntimeError('registry authentication failed')
+        raise RuntimeError('image missing; build explicitly through Supervisor')
 
     monkeypatch.setattr(send_command_module, '_http_json_request', fail_http)
     action = SendCommand(
@@ -616,7 +967,24 @@ def test_backend_http_timeout_environment_is_bounded(monkeypatch):
     ) == send_command_module._MIN_BACKEND_READY_TIMEOUT_SEC
 
 
-def test_reset_during_start_issues_compensating_stop(monkeypatch):
+def test_backend_http_default_allows_local_start_without_build_timeout(monkeypatch):
+    monkeypatch.delenv('CYCLO_BT_BACKEND_HTTP_TIMEOUT_SEC', raising=False)
+    calls = []
+
+    def fake_http(method, url, timeout):
+        calls.append((method, timeout))
+        return {'ok': True} if method == 'POST' else _ready_backend_status()
+
+    monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
+    action = SendCommand(_DummyNode(), target='DOCKER', command='START', model='groot')
+
+    assert _tick_until_terminal(action) == NodeStatus.SUCCESS
+    assert calls[0] == ('POST', 120.0)
+    assert send_command_module._MAX_BACKEND_HTTP_TIMEOUT_SEC == 300.0
+
+
+@pytest.mark.parametrize('target,command', [('DOCKER', 'START'), ('INFERENCE', 'LOAD')])
+def test_reset_during_start_issues_compensating_stop(monkeypatch, target, command):
     start_entered = threading.Event()
     release_start = threading.Event()
     compensating_stop = threading.Event()
@@ -624,20 +992,22 @@ def test_reset_during_start_issues_compensating_stop(monkeypatch):
 
     def fake_http(method, url, timeout):
         calls.append((method, url, timeout))
-        if '/start?' in url:
+        if url.endswith('/start'):
             start_entered.set()
             assert release_start.wait(2.0)
             return {'ok': True, 'message': 'started after reset'}
         if url.endswith('/stop'):
             compensating_stop.set()
             return {'ok': True, 'message': 'stopped'}
+        if not start_entered.is_set():
+            return {'container_state': 'not_created'}
         return _ready_backend_status()
 
     monkeypatch.setattr(send_command_module, '_http_json_request', fake_http)
     action = SendCommand(
         _DummyNode(),
-        target='DOCKER',
-        command='START',
+        target=target,
+        command=command,
         model='groot:n17',
     )
 
@@ -700,7 +1070,7 @@ def test_old_reset_job_does_not_stop_newer_backend_generation(monkeypatch):
 
     def fake_http(method, url, timeout):
         nonlocal start_count, stop_count
-        if '/start?' in url:
+        if url.endswith('/start'):
             with call_lock:
                 start_count += 1
                 current_start = start_count

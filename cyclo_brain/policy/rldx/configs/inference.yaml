@@ -1,0 +1,9 @@
+# Cyclo only rotates live RGB images using the robot configuration.
+# RLDXPolicy's saved eval processor owns resizing, normalization and decoding.
+# This first integration accepts single-image PT-IMG checkpoints only.
+image_preprocessing: identity
+rotation: robot_config
+video_offsets_frames: [0]
+state_offsets_frames: [0]
+max_observation_age_s: 1.0
+embodiment: GENERAL_EMBODIMENT

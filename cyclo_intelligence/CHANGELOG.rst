@@ -2,6 +2,19 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.0 (2026-11-11)
+------------------
+* Added a central Policy Runtime with manifest-discovered Workers and ABot-M0, LingBot-VLA, and RLDX integrations.
+* Added explicit action-step selection, saved initial poses, inference recording folder reuse, and per-model evaluation manifests.
+* Switched all model Workers, including LeRobot and GR00T, to local source builds through CLI and UI; only the Cyclo core image is published by the release workflows.
+* Integrated main's Autonomy Studio and navigation workflows with Runtime lifecycle and Worker maintenance guards.
+* Preserved interrupted recording data and waited for recorder STOP acknowledgement before closing ROS during graceful shutdown, with a bounded wait and warnings on failure.
+* Updated Cyclo packages, UI, and the default core image tag to 1.5.0. Rebuild generated interfaces and compatible Worker images together; older service-interface images are not a supported mixed deployment.
+* Initialize only the common SDK during installation; selected Worker builds require their pinned sources but not optional simulation benchmarks. See docker/README.md for setup and upgrade instructions.
+* Integrated main's 1.4.5 fixes and Discord release notifications while preserving the published changelog history.
+* Protected episode deletion against background video conversion and prevented unrelated deletion from delaying recording STOP.
+* Contributors: Seungwoo Lim, Taehyeong Kim
+
 1.4.5 (2026-11-09)
 ------------------
 * Fixed stale recording episode numbers after dataset deletion by rescanning the selected task and immediately publishing the updated recording status.

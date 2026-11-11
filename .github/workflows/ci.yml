@@ -15,17 +15,18 @@ jobs:
     name: Submodule check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with submodules
+      - name: Checkout with top-level submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Nested simulation benchmarks are not required by Cyclo workers.
+          submodules: true
 
       - name: Verify submodules are pinned and clean
         shell: bash
         run: |
           set -euo pipefail
-          git submodule status --recursive
-          if git submodule status --recursive | grep -E '^[+-]'; then
+          git submodule status
+          if git submodule status | grep -E '^[+U-]'; then
             echo "Submodule checkout is missing or not at the pinned commit." >&2
             exit 1
           fi
@@ -135,6 +136,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout pinned LeRobot test sources
+        # Profile tests read the pinned source metadata; other model repos
+        # are not needed and may require separate credentials.
+        run: git submodule update --init -- cyclo_brain/policy/lerobot/lerobot
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -160,7 +166,7 @@ jobs:
             'pyarrow==24.0.0' \
             pytest \
             pyyaml
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           # Catch binary compatibility errors before collecting the test suites.
           python -c 'import cv2, numpy, pandas, pyarrow; print(cv2.__version__, numpy.__version__, pandas.__version__, pyarrow.__version__)'
 
@@ -186,6 +192,7 @@ jobs:
             orchestrator/tests/bt/test_package_boundary.py \
             orchestrator/tests/bt/test_review_fixes.py \
             orchestrator/tests/test_inference_mode.py \
+            orchestrator/tests/test_orchestrator_entrypoint_shutdown.py \
             orchestrator/tests/data_processing/test_metadata_manager.py \
             orchestrator/tests/data_processing/test_video_metadata_extractor.py \
             orchestrator/tests/data_processing/test_episode_editor.py \
@@ -200,11 +207,14 @@ jobs:
           python -m pytest cyclo_data/tests/converter
           python -m pytest orchestrator/tests/data_processing/test_rosbag_to_lerobot_converter.py
 
-      - name: Run shared policy runtime tests
+      - name: Run shared policy catalog and runtime tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONPATH: cyclo_brain/policy/common
-        run: python -m pytest cyclo_brain/policy/common/runtime/tests
+        run: |
+          python -m pytest \
+            cyclo_brain/policy/common/catalog/tests \
+            cyclo_brain/policy/common/runtime/tests
 
       - name: Run GR00T policy tests
         env:
@@ -221,6 +231,17 @@ jobs:
           python -m pytest \
             cyclo_brain/policy/lerobot/tests \
             cyclo_brain/policy/lerobot/lerobot_engine/tests
+
+      - name: Run policy SDK tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            cyclo_brain/sdk/action_chunk_processing/tests \
+            cyclo_brain/sdk/robot_client/tests/test_camera_feature_mapping.py \
+            cyclo_brain/sdk/robot_client/tests/test_inference_command_definition.py \
+            cyclo_brain/sdk/robot_client/tests/test_initial_pose_sync.py
 
   docker-supervisor-tests:
     name: Docker supervisor tests
@@ -242,15 +263,15 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -r docker/supervisor_api/requirements.txt pytest
+          python -m pip install -r docker/supervisor_api/requirements.txt pytest httpx
 
       - name: Run Docker helper tests
-        run: python -m pytest docker/test_dockerfiles.py docker/test_container_sh.py
+        run: python -m pytest test_install_sh.py docker/test_dockerfiles.py docker/test_container_sh.py
 
       - name: Run supervisor API tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-        run: python -m pytest docker/supervisor_api/test_app.py
+        run: python -m pytest docker/supervisor_api/test_app.py docker/supervisor_api/test_worker_build.py
 
   ui-build:
     name: UI build
@@ -272,6 +293,10 @@ jobs:
       - name: Install dependencies
         working-directory: orchestrator/ui
         run: npm ci --legacy-peer-deps
+
+      - name: Test UI
+        working-directory: orchestrator/ui
+        run: npm test -- --runInBand --watchAll=false
 
       - name: Build UI
         working-directory: orchestrator/ui

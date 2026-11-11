@@ -209,7 +209,7 @@ describe('chartUtils', () => {
 
         it('should not use Korean locale markers', () => {
             const result = formatDateTime('2025-01-12T14:30:00Z');
-            expect(result).not.toMatch(/[가-힣]/);
+            expect(result).not.toMatch(/[\uAC00-\uD7A3]/);
         });
 
         it('should return original string for invalid date', () => {

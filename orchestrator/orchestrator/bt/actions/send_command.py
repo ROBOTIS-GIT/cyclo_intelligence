@@ -34,10 +34,12 @@ mid-transition policy.
 
 ``target=DOCKER`` reuses the same node for START / STOP / RESTART of the
 selected model backend. Docker operations go through the local supervisor API
-on a worker thread, so even a first-use image pull or compose build never
-blocks the BT executor tick. ``target=INFERENCE`` remains the default for
+on a worker thread without blocking the BT executor tick. START and RESTART
+use existing images; builds are explicit Supervisor operations, never a BT
+side effect. ``target=INFERENCE`` remains the default for
 compatibility with trees saved before the target port existed. Its LOAD command
-now ensures the selected backend is ready before the existing ROS stages.
+checks readiness without mutating a running Worker, starting only a known
+stopped backend before the existing ROS stages.
 """
 
 import json
@@ -54,6 +56,10 @@ from urllib.request import urlopen
 from interfaces.msg import InferenceStatus, TaskInfo
 from interfaces.srv import InferenceCommand as InferenceCommandSrv
 from interfaces.srv import SendCommand as SendCommandSrv
+
+from shared.policy_catalog import (
+    load_policy_catalog as _load_policy_catalog,
+)
 
 from orchestrator.bt.actions.base_action import BaseAction
 from orchestrator.bt.bt_core import NodeStatus
@@ -113,18 +119,35 @@ COMMAND_STAGES = {
 
 SERVICE_CALL_TIMEOUT_SEC = 30.0
 
+
+def _policy_selection_from_model(model: str) -> tuple[str, str]:
+    """Resolve namespaced IDs and legacy bare aliases through manifests."""
+    value = (model or '').strip().lower()
+    if not value:
+        return '', ''
+    module, catalog = _load_policy_catalog()
+    for runtime in catalog['runtimes']:
+        if runtime['id'] == value:
+            return runtime['id'], ''
+    try:
+        runtime, policy = module.resolve_policy(catalog, value)
+        return runtime['id'], policy['policy_id']
+    except module.CatalogError:
+        pass
+    if ':' in value:
+        return value.split(':', 1)[0].strip(), value
+    return value, ''
+
+
 ALLOWED_TARGETS = frozenset({'INFERENCE', 'DOCKER'})
 DOCKER_COMMANDS = frozenset({'START', 'STOP', 'RESTART'})
-ALLOWED_BACKENDS = frozenset({'groot', 'lerobot'})
-BACKEND_SERVICES = {
-    'groot': frozenset({'main-runtime', 'engine-process'}),
-    'lerobot': frozenset({'main-runtime', 'engine-process'}),
-}
 
 _DEFAULT_SUPERVISOR_PORT = 7100
-_DEFAULT_BACKEND_HTTP_TIMEOUT_SEC = 7260.0
+# Supervisor bounds local Compose startup at 60s; allow preflight overhead.
+# Worker readiness has its own deadline, and builds are never run here.
+_DEFAULT_BACKEND_HTTP_TIMEOUT_SEC = 120.0
 _MIN_BACKEND_HTTP_TIMEOUT_SEC = 1.0
-_MAX_BACKEND_HTTP_TIMEOUT_SEC = 21660.0
+_MAX_BACKEND_HTTP_TIMEOUT_SEC = 300.0
 _DEFAULT_BACKEND_READY_TIMEOUT_SEC = 300.0
 _MIN_BACKEND_READY_TIMEOUT_SEC = 1.0
 _MAX_BACKEND_READY_TIMEOUT_SEC = 1800.0
@@ -134,45 +157,11 @@ _BACKEND_STATUS_HTTP_TIMEOUT_SEC = 10.0
 _COMPENSATING_STOP_TIMEOUT_SEC = 30.0
 
 _BACKEND_GENERATION_LOCK = threading.Lock()
-_BACKEND_GENERATIONS = {backend: 0 for backend in ALLOWED_BACKENDS}
-
-MODEL_SERVICE_TYPES = {
-    'groot': 'groot',
-    'groot:n17': 'groot',
-    'n17': 'groot',
-    'n1.7': 'groot',
-    'lerobot': 'lerobot',
-    'lerobot:act': 'lerobot',
-    'lerobot:diffusion': 'lerobot',
-    'lerobot:smolvla': 'lerobot',
-    'lerobot:xvla': 'lerobot',
-    'lerobot:pi0': 'lerobot',
-    'lerobot:pi05': 'lerobot',
-    'lerobot:molmoact2': 'lerobot',
-    'lerobot:vla_jepa': 'lerobot',
-    'lerobot:fastwam': 'lerobot',
-    'act': 'lerobot',
-    'diffusion': 'lerobot',
-    'smolvla': 'lerobot',
-    'xvla': 'lerobot',
-    'pi0': 'lerobot',
-    'pi05': 'lerobot',
-    'molmoact2': 'lerobot',
-    'vla_jepa': 'lerobot',
-    'fastwam': 'lerobot',
-}
+_BACKEND_GENERATIONS = {}
 
 
 def _service_type_from_model(model: str) -> str:
-    """Map UI model selections onto TaskInfo.service_type backends."""
-    value = (model or '').strip().lower()
-    if not value:
-        return ''
-    if value in MODEL_SERVICE_TYPES:
-        return MODEL_SERVICE_TYPES[value]
-    if ':' in value:
-        return value.split(':', 1)[0].strip()
-    return value
+    return _policy_selection_from_model(model)[0]
 
 
 def _normalize_action_request_mode(value: str) -> str:
@@ -353,6 +342,7 @@ class SendCommand(BaseAction):
             inference_hz=params.get('inference_hz', 15),
             control_hz=params.get('control_hz', 100),
             chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
+            action_steps=params.get('action_steps'),
             inference_mode=inference_mode,
             action_request_mode=action_request_mode,
             acceleration_mode=acceleration_mode,
@@ -370,10 +360,8 @@ class SendCommand(BaseAction):
         command: str = 'LOAD',
         target: str = 'INFERENCE',
         # BT-facing name "model" matches the Inference UI's labeling.
-        # Values may be legacy backend names ("groot" / "lerobot") or
-        # Inference UI composite choices ("lerobot:act", "groot:n17").
-        # Internally this is normalized to TaskInfo.service_type, which
-        # orchestrator reads to pick the backend container.
+        # Resolve runtime IDs, policy IDs and legacy aliases from manifests.
+        # The central Runtime uses TaskInfo to select an engine-only Worker.
         model: str = 'lerobot:act',
         policy_path: str = '',
         task_instruction: str = '',
@@ -385,6 +373,7 @@ class SendCommand(BaseAction):
         acceleration_mode: str = 'pytorch',
         acceleration_engine_path: str = '',
         service_name: str = '/task/command',
+        action_steps: int | None = None,
     ):
         """Initialize an inference or Docker lifecycle action."""
         super().__init__(node, name='SendCommand')
@@ -392,10 +381,22 @@ class SendCommand(BaseAction):
         self.target_str = (target or 'INFERENCE').strip().upper()
         self.model = model
         self.backend = _service_type_from_model(model)
+        _, catalog = _load_policy_catalog()
+        self._backend_spec = next(
+            (runtime for runtime in catalog['runtimes']
+             if runtime['id'] == self.backend),
+            None,
+        )
         self.policy_path = policy_path
         self.task_instruction = task_instruction
         self.inference_hz = int(inference_hz) if inference_hz else 0
         self.control_hz = int(control_hz) if control_hz else 0
+        self.action_steps = (
+            (0 if self.command_str == 'LOAD' else -1)
+            if action_steps is None else int(str(action_steps))
+        )
+        if not 0 <= self.action_steps <= 2147483647 and not (action_steps is None and self.action_steps == -1):
+            raise ValueError('action_steps must be a non-negative int32')
         self.chunk_align_window_s = (
             float(chunk_align_window_s) if chunk_align_window_s else 0.0
         )
@@ -430,19 +431,14 @@ class SendCommand(BaseAction):
                 service_name,
             )
 
-        # supervisor readiness only proves that the container and its s6
-        # processes are up. The main runtime advertises this service later,
-        # after its engine handshake and Zenoh initialization complete. Keep
-        # the Docker worker pending until ROS discovery sees the real command
-        # endpoint, otherwise orchestrator's immediate RESUME/LOAD can race it.
+        # Worker containers run only their manifest-declared engine services.
+        # Inference commands are always served by the central Policy Runtime.
         backend_operation = self._backend_operation()
         if (
-            self.backend in ALLOWED_BACKENDS
+            self._backend_spec is not None
             and backend_operation in {'START', 'RESTART'}
         ):
-            self._backend_service_name = (
-                f'/{self.backend}/inference_command'
-            )
+            self._backend_service_name = '/policy/inference_command'
             self._backend_service_client = self.node.create_client(
                 InferenceCommandSrv,
                 self._backend_service_name,
@@ -477,7 +473,7 @@ class SendCommand(BaseAction):
 
     def _status_callback(self, msg: InferenceStatus):
         with self._phase_lock:
-            self._latest_phase = msg.inference_phase
+            self._latest_phase = msg.inference_phase if msg.status_known else None
             self._latest_error = getattr(msg, 'error', '')
 
     def _reset_phase_cache(self):
@@ -501,7 +497,7 @@ class SendCommand(BaseAction):
                     f'Unknown Docker command: {self.command_str}. '
                     f'Expected one of {sorted(DOCKER_COMMANDS)}'
                 )
-            if self.backend not in ALLOWED_BACKENDS:
+            if self._backend_spec is None:
                 return (
                     f'Unsupported Docker backend from model {self.model!r}: '
                     f'{self.backend or "<empty>"}'
@@ -511,7 +507,7 @@ class SendCommand(BaseAction):
             return f'Unknown inference command: {self.command_str}'
         if (
             self.command_str == 'LOAD'
-            and self.backend not in ALLOWED_BACKENDS
+            and self._backend_spec is None
         ):
             return (
                 f'Unsupported inference backend from model {self.model!r}: '
@@ -526,9 +522,8 @@ class SendCommand(BaseAction):
             return 'START'
         return None
 
-    @staticmethod
     def _backend_reached_target(
-        backend: str,
+        self,
         operation: str,
         status: dict,
     ) -> bool:
@@ -537,8 +532,12 @@ class SendCommand(BaseAction):
             return state in {'exited', 'not_created'}
         if state != 'running':
             return False
+        # A central ROS service can be ready while this Worker is still
+        # starting, incompatible, or missing its heartbeat.
+        if status.get('worker_compatible') is not True:
+            return False
 
-        required = BACKEND_SERVICES[backend]
+        required = self._backend_spec['services']
         service_states = {
             str(service.get('name') or ''): str(
                 service.get('state') or ''
@@ -554,10 +553,7 @@ class SendCommand(BaseAction):
         backend: str,
         operation: str,
     ) -> str:
-        url = f'{base_url}/backends/{backend}/{operation.lower()}'
-        if operation in {'START', 'RESTART'}:
-            url += '?auto_provision=true'
-        return url
+        return f'{base_url}/backends/{backend}/{operation.lower()}'
 
     def _compensating_stop(self, base_url: str, job: _BackendJob) -> str:
         """Best-effort STOP after reset races with START/RESTART completion."""
@@ -608,28 +604,44 @@ class SendCommand(BaseAction):
                 _MAX_BACKEND_READY_TIMEOUT_SEC,
             )
 
-            action_url = self._supervisor_action_url(
-                base_url,
-                self.backend,
-                operation,
-            )
-            lifecycle_may_have_started = operation in {'START', 'RESTART'}
-            response = _http_json_request('POST', action_url, http_timeout)
-            if response.get('ok') is False:
-                raise RuntimeError(
-                    str(
-                        response.get('message')
-                        or 'supervisor rejected action'
-                    )
+            status_url = f'{base_url}/backends/{self.backend}/status'
+            inference_load = self.target_str == 'INFERENCE' and self.command_str == 'LOAD'
+            pending_status = None
+            needs_action = True
+            response = {}
+            if inference_load:
+                pending_status = _http_json_request(
+                    'GET', status_url,
+                    min(_BACKEND_STATUS_HTTP_TIMEOUT_SEC, ready_timeout),
                 )
+                state = str(pending_status.get('container_state') or '').strip().lower()
+                if state not in {'running', 'exited', 'not_created'}:
+                    raise RuntimeError(f'Cannot prepare Worker with unknown container state: {state!r}')
+                needs_action = state != 'running'
+
+            if job.cancel_event.is_set():
+                raise _BackendJobCancelled()
+            if needs_action:
+                action_url = self._supervisor_action_url(
+                    base_url,
+                    self.backend,
+                    operation,
+                )
+                lifecycle_may_have_started = operation in {'START', 'RESTART'}
+                response = _http_json_request('POST', action_url, http_timeout)
+                if response.get('ok') is False:
+                    raise RuntimeError(
+                        str(
+                            response.get('message')
+                            or 'supervisor rejected action'
+                        )
+                    )
+                pending_status = None
             if job.cancel_event.is_set():
                 raise _BackendJobCancelled()
 
             deadline = time.monotonic() + ready_timeout
-            status_url = f'{base_url}/backends/{self.backend}/status'
             latest_state = 'not reported'
-            supervisor_state = latest_state
-            supervisor_ready = False
             while True:
                 if job.cancel_event.is_set():
                     raise _BackendJobCancelled()
@@ -639,23 +651,30 @@ class SendCommand(BaseAction):
                         f'(last state: {latest_state})'
                     )
 
-                if not supervisor_ready:
+                status = pending_status
+                pending_status = None
+                if status is None:
                     status = _http_json_request(
                         'GET',
                         status_url,
                         min(_BACKEND_STATUS_HTTP_TIMEOUT_SEC, ready_timeout),
                     )
-                    latest_state = str(
-                        status.get('raw_state')
-                        or status.get('container_state')
-                        or 'unknown'
-                    )
-                    supervisor_state = latest_state
-                    supervisor_ready = self._backend_reached_target(
-                        self.backend,
-                        operation,
-                        status,
-                    )
+                if job.cancel_event.is_set():
+                    raise _BackendJobCancelled()
+                if inference_load:
+                    state = str(status.get('container_state') or '').strip().lower()
+                    if state not in {'running', 'exited', 'not_created'}:
+                        raise RuntimeError(f'Cannot prepare Worker with unknown container state: {state!r}')
+                latest_state = str(
+                    status.get('worker_message')
+                    or status.get('raw_state')
+                    or status.get('container_state')
+                    or 'unknown'
+                )
+                supervisor_ready = self._backend_reached_target(
+                    operation,
+                    status,
+                )
 
                 if supervisor_ready and operation in {'START', 'RESTART'}:
                     if self._backend_service_client is None:
@@ -674,7 +693,7 @@ class SendCommand(BaseAction):
                         ) from exc
                     if not service_ready:
                         latest_state = (
-                            f'{supervisor_state}; waiting for ROS service '
+                            f'{latest_state}; waiting for ROS service '
                             f'{self._backend_service_name}'
                         )
                         job.cancel_event.wait(_BACKEND_SERVICE_POLL_SEC)
@@ -684,7 +703,8 @@ class SendCommand(BaseAction):
                     result = True
                     message = (
                         response.get('message')
-                        or f'{self.backend} Docker {operation} completed'
+                        or (f'{self.backend} Worker ready' if inference_load
+                            else f'{self.backend} Docker {operation} completed')
                     )
                     break
                 job.cancel_event.wait(_BACKEND_STATUS_POLL_SEC)
@@ -713,6 +733,9 @@ class SendCommand(BaseAction):
                     'cancelled; compensating STOP skipped because a newer '
                     'backend generation is active'
                 )
+            elif job.cancel_event.is_set():
+                result = False
+                message = 'Worker readiness wait cancelled by tree reset'
             job.finish(result, message)
 
     def _start_backend_job(self, operation: str):
@@ -927,8 +950,14 @@ class SendCommand(BaseAction):
     def _build_task_info(self) -> TaskInfo:
         ti = TaskInfo()
         ti.task_type = 'inference'
+        ti.action_steps = self.action_steps
         ti.policy_path = self.policy_path
-        ti.service_type = _service_type_from_model(self.model)
+        service_type, policy_id = _policy_selection_from_model(self.model)
+        ti.service_type = service_type
+        if hasattr(ti, 'policy_id'):
+            ti.policy_id = policy_id
+        if hasattr(ti, 'policy_parameters_json'):
+            ti.policy_parameters_json = '{}'
         if self.command_str == 'LOAD' and hasattr(ti, 'inference_mode'):
             ti.inference_mode = self.inference_mode
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):
@@ -965,8 +994,8 @@ class SendCommand(BaseAction):
         if backend_job is not None:
             backend_result, _ = backend_job.snapshot()
             if backend_result is None:
-                # Do not join here: a first-use pull/build can legitimately run
-                # for minutes. The isolated job notices cancellation and, when
+                # Do not block the executor on an in-flight Supervisor request.
+                # The isolated job notices cancellation and, when
                 # START/RESTART may already have succeeded, issues a
                 # compensating STOP before publishing its terminal result.
                 backend_job.cancel_event.set()

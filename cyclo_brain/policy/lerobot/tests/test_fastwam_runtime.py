@@ -9,9 +9,11 @@ import sys
 import tempfile
 import types
 import unittest
+import weakref
 from unittest import mock
 
 import torch
+from inference_context.contract import ExecutionContract
 
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / "lerobot_engine"
@@ -60,7 +62,245 @@ with mock.patch.dict(
 ):
     loading = load_module("loading")
 
-optimization = load_module("optimization")
+engine_base = types.ModuleType("engine")
+engine_base.InferenceEngine = type("InferenceEngine", (), {})
+robot_stub = types.ModuleType("robot_client")
+robot_stub.RobotClient = object
+camera_stub = types.ModuleType("robot_client.camera_mapping")
+camera_stub.resolve_camera_mappings = mock.Mock()
+with mock.patch.dict(sys.modules, {
+    "engine": engine_base,
+    "robot_client": robot_stub,
+    "robot_client.camera_mapping": camera_stub,
+    "lerobot.policies.pretrained": lerobot_pretrained,
+    f"{PACKAGE_NAME}.loading": loading,
+}):
+    engine_module = load_module("engine")
+
+
+class EngineModelLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(engine_module, "load_input_pipeline", return_value=object())
+        self.input_loader = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_engine(self):
+        engine = engine_module.LeRobotEngine()
+        engine._resolve_model_dir = lambda path: path
+        engine._init_robot = mock.Mock()
+        return engine
+
+    @staticmethod
+    def request(path):
+        return types.SimpleNamespace(model_path=path, robot_type="robot")
+
+    def test_previous_policy_is_collected_before_replacement_is_constructed(self):
+        engine = self.make_engine()
+        old = FakePolicy(types.SimpleNamespace(type="act"))
+        old.cycle = old
+        reference = weakref.ref(old)
+        engine._policy = old
+        engine._chunk_predictor = lambda batch, held=old: held
+        engine._loaded_model_path = "/old"
+        del old
+
+        def load(path, device):
+            self.assertIsNone(reference(), "old policy still lives during replacement LOAD")
+            return FakePolicy(types.SimpleNamespace(type="act")), object(), object()
+
+        engine._load_policy_assets = mock.Mock(side_effect=load)
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            self.assertTrue(engine.load_policy(self.request("/new"))["success"])
+            engine.cleanup()
+
+    def test_same_checkpoint_reuses_weights_without_loading_again(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._loaded_model_path = "/same"
+        engine._load_policy_assets = mock.Mock(side_effect=AssertionError("unexpected reload"))
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        engine._load_policy_assets.assert_not_called()
+        self.input_loader.assert_called_once_with("/same")
+        self.assertIs(engine._input_pipeline_config, self.input_loader.return_value)
+
+    def test_invalid_yaml_blocks_load_before_weights(self):
+        engine = self.make_engine()
+        engine._load_policy_assets = mock.Mock()
+        self.input_loader.side_effect = ValueError("Invalid input preprocessing config")
+        result = engine.load_policy(self.request("/new"))
+        self.assertFalse(result["success"])
+        engine._load_policy_assets.assert_not_called()
+        self.assertIsNone(engine._input_pipeline_config)
+
+    def test_predictor_is_prepared_once_and_retained_on_cached_load(self):
+        engine = self.make_engine()
+        policy = FakePolicy(types.SimpleNamespace(type="act"))
+        predictor = mock.Mock()
+        factory = mock.Mock(return_value=predictor)
+        engine._load_policy_assets = mock.Mock(return_value=(policy, object(), object()))
+        request = self.request("/same")
+        with mock.patch.object(loading, "resolve_adapter", return_value=types.SimpleNamespace(predictor_factory=factory)), \
+                mock.patch.object(torch.cuda, "is_available", return_value=False):
+            try:
+                self.assertTrue(engine.load_policy(request)["success"])
+                self.assertTrue(engine.load_policy(request)["success"])
+                factory.assert_called_once_with(policy, torch.device("cpu"), request)
+                self.assertIs(engine._chunk_predictor, predictor)
+            finally:
+                engine.cleanup()
+        self.assertIsNone(engine._chunk_predictor)
+
+    def test_invalid_predictor_factory_result_fails_load_and_cleans_up(self):
+        engine = self.make_engine()
+        policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._load_policy_assets = mock.Mock(return_value=(policy, object(), object()))
+        definition = types.SimpleNamespace(predictor_factory=lambda *_: None)
+        with mock.patch.object(loading, "resolve_adapter", return_value=definition), \
+                mock.patch.object(torch.cuda, "is_available", return_value=False):
+            result = engine.load_policy(self.request("/new"))
+        self.assertFalse(result["success"])
+        self.assertIn("predictor_factory must return a callable", result["message"])
+        self.assertIsNone(engine._policy)
+        self.assertIsNone(engine._chunk_predictor)
+
+    def test_cached_chunk_load_resets_session_state_without_reloading_weights(self):
+        engine = self.make_engine()
+        policy = FakePolicy(types.SimpleNamespace(type="act"))
+        policy.reset = mock.Mock()
+        preprocessor, postprocessor = mock.Mock(), mock.Mock()
+        engine._policy = policy
+        engine._preprocessor, engine._postprocessor = preprocessor, postprocessor
+        engine._loaded_model_path = "/same"
+        engine._load_policy_assets = mock.Mock(side_effect=AssertionError("unexpected reload"))
+        for expected in (1, 2):
+            self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+            self.assertIs(engine._policy, policy)
+            self.assertEqual(policy.reset.call_count, expected)
+            self.assertEqual(preprocessor.reset.call_count, expected)
+            self.assertEqual(postprocessor.reset.call_count, expected)
+        engine._load_policy_assets.assert_not_called()
+
+    def test_cached_chunk_reset_failure_rejects_load_and_releases_cached_state(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._policy.reset = mock.Mock(side_effect=RuntimeError("cache reset failed"))
+        engine._loaded_model_path = "/same"
+        result = engine.load_policy(self.request("/same"))
+        self.assertFalse(result["success"])
+        self.assertIn("cache reset failed", result["message"])
+        self.assertIsNone(engine._policy)
+        self.assertIsNone(engine._loaded_model_path)
+
+    def test_cached_load_reads_new_snapshot_and_cleanup_clears_it(self):
+        engine = self.make_engine()
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._loaded_model_path = "/same"
+        first, second = object(), object()
+        self.input_loader.side_effect = [first, second]
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        self.assertIs(engine._input_pipeline_config, first)
+        engine._input_plans = {False: object(), True: object()}
+        self.assertTrue(engine.load_policy(self.request("/same"))["success"])
+        self.assertIs(engine._input_pipeline_config, second)
+        self.assertEqual(engine._input_plans, {})
+        engine.cleanup()
+        self.assertIsNone(engine._input_pipeline_config)
+
+    def test_missing_observations_cannot_report_successful_load(self):
+        engine = self.make_engine()
+        engine._load_policy_assets = mock.Mock(return_value=(
+            FakePolicy(types.SimpleNamespace(type="act")), object(), object(),
+        ))
+        engine._init_robot.side_effect = RuntimeError("Required observations: joint:arm")
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            result = engine.load_policy(self.request("/new"))
+        self.assertFalse(result["success"])
+        self.assertIn("joint:arm", result["message"])
+        self.assertIsNone(engine._policy)
+
+    def test_saved_processor_precedes_shape_validation_and_prediction(self):
+        engine = self.make_engine()
+        engine._channel_mapping = types.SimpleNamespace(action=lambda chunk: chunk)
+        engine._policy = FakePolicy(types.SimpleNamespace(type="act"))
+        engine._robot = object()
+        engine._input_pipeline_config = object()
+        raw, processed = {"raw": True}, {"processed": True}
+        action = torch.zeros(1, 2, 3)
+        engine._build_observation = mock.Mock(return_value=raw)
+        engine._preprocessor = mock.Mock(return_value=processed)
+        engine._validate_camera_shapes = mock.Mock()
+        engine._predict_chunk = mock.Mock(return_value=action)
+        engine._postprocessor = mock.Mock(side_effect=lambda value: value)
+        result = engine.get_action_chunk(types.SimpleNamespace(task_instruction="pick"))
+        self.assertTrue(result["success"])
+        engine._preprocessor.assert_called_once_with(raw)
+        engine._validate_camera_shapes.assert_called_once_with(processed)
+        engine._predict_chunk.assert_called_once_with(processed)
+        engine._postprocessor.assert_called_once_with(action)
+
+        engine._validate_camera_shapes.side_effect = ValueError("bad camera sizes")
+        engine._predict_chunk.reset_mock()
+        result = engine.get_action_chunk(types.SimpleNamespace(task_instruction="pick"))
+        self.assertFalse(result["success"])
+        engine._predict_chunk.assert_not_called()
+        self.assertNotIn("action_chunk", result)
+
+    def test_step_engine_negotiates_and_requires_receipt_before_next_public_call(self):
+        from dataclasses import replace
+        from inference_context.execution import ActionRecord, ExecutionContext
+        from lerobot_engine.input_pipeline import InputPipelineConfig
+
+        self.input_loader.return_value = InputPipelineConfig({
+            "sources": {"state": {"source": "joint:follower_arm", "max_age_s": 1.}},
+            "nodes": {},
+            "outputs": {"before": {"state": "state"}, "after": {"*": "processed"}},
+        }, {}, Path("step_test.yaml"))
+
+        engine = self.make_engine()
+        config = types.SimpleNamespace(type="diffusion", image_features={},
+            input_features={"observation.state": types.SimpleNamespace(shape=(2,))},
+            output_features={"action": types.SimpleNamespace(shape=(2,))})
+        policy = mock.Mock(config=config)
+        policy.select_action.return_value = torch.tensor([[1., 2.]])
+        pre, post = mock.Mock(side_effect=lambda x: x), mock.Mock(side_effect=lambda x: x)
+        pre.steps = ()
+        engine._load_policy_assets = mock.Mock(return_value=(policy, pre, post))
+        robot = mock.Mock()
+        robot.get_joint_names.return_value = ["a", "b"]
+        robot._action_groups = {"arm": {"msg_type": "trajectory_msgs/msg/JointTrajectory", "joint_names": ["a", "b"]}}
+
+        def init_robot(_):
+            engine._robot = robot
+            engine._state_modalities = ["arm"]
+            engine._action_keys = ["arm"]
+
+        engine._init_robot.side_effect = init_robot
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            result = engine.load_policy(self.request("/step"))
+        self.assertTrue(result["success"])
+        self.assertEqual(result["execution_contract"], ExecutionContract("step", pending_command_count=0))
+        context = ExecutionContext("step", 0, 0, "ready")
+        engine.update_execution_context(context)
+        engine.update_execution_context(replace(context, revision=1, phase="running"))
+        engine._build_observation = mock.Mock(return_value={"observation.state": torch.ones(1, 2)})
+        engine._predict_chunk = mock.Mock(side_effect=AssertionError("legacy chunk path"))
+        request = types.SimpleNamespace(task_instruction="pick", prediction_id=1)
+        first = engine.get_action_chunk(request)
+        self.assertTrue(first["success"])
+        self.assertEqual((first["chunk_size"], first["action_dim"]), (1, 2))
+        engine._build_observation.assert_called_once_with("pick", require_received=True, observation_after_s=None)
+        engine._predict_chunk.assert_not_called()
+        request.prediction_id = 2
+        self.assertFalse(engine.get_action_chunk(request)["success"])
+        self.assertEqual(policy.select_action.call_count, 1)
+        engine.update_execution_context(replace(context, revision=2, phase="running", latest_event_id=1,
+            actions=(ActionRecord("1", "published", "command", (1., 2.), command_id=1, event_id=1, recorded_s=10.),)))
+        self.assertTrue(engine.get_action_chunk(request)["success"])
+        engine._build_observation.assert_called_with("pick", require_received=True, observation_after_s=10.)
+        self.assertEqual(pre.call_count, 2)
+        self.assertEqual(post.call_count, 2)
+        engine.cleanup()
+        self.assertIsNone(engine._step_adapter)
 
 
 class FakePolicy:
@@ -141,6 +381,49 @@ class FastWamLoadingTest(unittest.TestCase):
         self.assertEqual(policy.to_calls, ["cuda"])
         self.assertEqual(policy.eval_calls, 1)
 
+    def test_pi05_checkpoint_selects_its_own_class(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            self.write_config(model_path, "pi05")
+            loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        loading.get_policy_class.assert_called_with("pi05")
+
+    def test_molmoact2_preserves_explicit_action_mode_and_defaults_only_when_missing(self):
+        for mode in (None, "discrete", "continuous"):
+            policy = FakePolicy(types.SimpleNamespace(type="molmoact2", inference_action_mode=mode))
+            policy_class = mock.Mock()
+            policy_class.from_pretrained.return_value = policy
+            with tempfile.TemporaryDirectory() as model_path, \
+                    mock.patch.object(loading, "get_policy_class", return_value=policy_class):
+                self.write_config(model_path, "molmoact2")
+                loaded, _, _ = loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+            self.assertIs(loaded, policy)
+            self.assertEqual(policy.config.inference_action_mode, mode or "continuous")
+            self.assertEqual(policy.to_calls, ["cpu"])
+
+    def test_new_loader_hook_requires_no_common_model_name_branch(self):
+        definition = loading.resolve_adapter("act").__class__
+        policy = FakePolicy(types.SimpleNamespace(type="custom_loader"))
+        loader = mock.Mock(return_value=policy)
+        with tempfile.TemporaryDirectory() as model_path, \
+                mock.patch.object(loading, "resolve_adapter", return_value=definition(policy_loader=loader)):
+            self.write_config(model_path, "custom_loader")
+            loaded, _, _ = loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        self.assertIs(loaded, policy)
+        loader.assert_called_once_with(FakePolicy, FakeConfigLoader, model_path, torch.device("cpu"))
+        self.assertEqual(policy.to_calls, [])  # The custom loader owns device placement.
+
+    def test_invalid_wall_x_is_rejected_before_constructing_model(self):
+        loading.get_policy_class.reset_mock()
+        with tempfile.TemporaryDirectory() as model_path:
+            (Path(model_path) / "config.json").write_text(json.dumps({
+                "type": "wall_x",
+                "input_features": {"observation.state": {"shape": [22]}},
+                "output_features": {"action": {"shape": [22]}},
+            }))
+            with self.assertRaisesRegex(ValueError, "WALL-X"):
+                loading.LoadingMixin._load_policy_assets(model_path, torch.device("cpu"))
+        loading.get_policy_class.assert_not_called()
+
 
 class FakeChild:
     def __init__(self):
@@ -192,21 +475,23 @@ class FastWamContextTest(unittest.TestCase):
             config=config,
             predict_action_chunk=predict_action_chunk,
         )
-        runtime = optimization.OptimizationMixin()
+        runtime = loading.LoadingMixin()
         runtime._policy = policy
         runtime._device = torch.device("cpu")
         return runtime, policy, model, captured_batches
 
     def test_context_is_reused_then_refreshed_when_instruction_changes(self):
         runtime, policy, model, captured_batches = self.make_runtime()
-        runtime._offload_fastwam(types.SimpleNamespace(task_instruction="pick"))
+        original = policy.predict_action_chunk
+        runtime._prepare_policy_predictor(types.SimpleNamespace(task_instruction="pick"))
+        self.assertIs(policy.predict_action_chunk, original)
 
-        policy.predict_action_chunk(
+        runtime._chunk_predictor(
             {"task": ["pick"], "observation.state": torch.tensor([[1.0, 2.0]])}
         )
         self.assertEqual(model.encoded, [(["do pick"], "cpu")])
 
-        policy.predict_action_chunk(
+        runtime._chunk_predictor(
             {"task": ["place"], "observation.state": torch.tensor([[1.0, 2.0]])}
         )
 
@@ -226,7 +511,7 @@ class FastWamContextTest(unittest.TestCase):
         runtime, _, _, _ = self.make_runtime()
 
         with self.assertRaisesRegex(RuntimeError, "task instruction"):
-            runtime._offload_fastwam(types.SimpleNamespace(task_instruction=""))
+            runtime._prepare_policy_predictor(types.SimpleNamespace(task_instruction=""))
 
 
 if __name__ == "__main__":

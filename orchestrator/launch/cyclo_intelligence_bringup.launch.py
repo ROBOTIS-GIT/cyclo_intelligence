@@ -10,10 +10,9 @@
 
 """Single-command bringup for cyclo_intelligence.
 
-Launches orchestrator (+ rosbridge / rosbag_recorder / web_video_server)
-and cyclo_data_node together so cyclo_manager / s6-agent can treat the
-pair as one unit. ``cyclo_data`` and ``orchestrator`` aliases still work
-when only one half needs to come up (debugging).
+Launches Policy Runtime, orchestrator and cyclo_data_node as one unit.
+Runtime readiness gates startup of the ROS clients. Component-only
+launches remain available for debugging, without an inference runtime.
 """
 
 import os
@@ -23,6 +22,7 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from orchestrator.policy_runtime_launch import managed_runtime_actions
 
 
 def generate_launch_description():
@@ -41,7 +41,7 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription([
+    return LaunchDescription(managed_runtime_actions([
         orchestrator_bringup,
         cyclo_data_node,
-    ])
+    ]))

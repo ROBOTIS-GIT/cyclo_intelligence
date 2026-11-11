@@ -30,3 +30,4 @@ To access datasets and pre-trained models for our open-source platforms, see:
 
 To use Docker images for running Cyclo Intelligence, visit:
   - [Docker Images](https://hub.docker.com/u/robotis)
+  - [Source-mounted development and applying code changes](docker/README.md)

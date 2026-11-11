@@ -6,6 +6,7 @@
 #   - hosts named ffw* install the repository under /mnt/ssd/cyclo_intelligence
 #     and bind-mount it at ~/cyclo_intelligence.
 #   - other hosts install under ~/cyclo_intelligence.
+#   - only the common SDK is initialized; model sources are opt-in.
 #   - the user starts the main container explicitly after installation.
 
 set -euo pipefail
@@ -88,8 +89,10 @@ assert_available_path() {
     if path_exists_or_symlink "$path"; then
         echo "Error: ${label} already exists: $path" >&2
         echo "Refusing to modify an existing Cyclo checkout automatically." >&2
-        echo "Update it manually with:" >&2
-        echo "  cd $path && git pull --ff-only && git submodule update --init --recursive" >&2
+        echo "Stop active work, then update it manually with:" >&2
+        echo "  cd \"$path\" && git pull --ff-only" >&2
+        echo "  git submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" >&2
+        echo "Update selected model sources as described in docker/README.md (Selective Source Checkout)." >&2
         exit 1
     fi
 }
@@ -229,8 +232,9 @@ clone_repo() {
     mkdir -p "$parent_dir"
 
     echo "[install] Cloning ${REPO_URL} (${REF}) into ${install_dir}"
-    if ! git clone --recurse-submodules --branch "$REF" "$REPO_URL" "$install_dir"; then
-        echo "[install] Clone failed; removing incomplete checkout: $install_dir" >&2
+    if ! git clone --no-recurse-submodules --branch "$REF" "$REPO_URL" "$install_dir" \
+        || ! git -C "$install_dir" submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk; then
+        echo "[install] Source setup failed; removing incomplete checkout: $install_dir" >&2
         rm -rf "$install_dir"
         exit 1
     fi
@@ -268,3 +272,5 @@ echo "[install] Installed Cyclo Intelligence at: $INSTALL_DIR"
 echo "[install] Start Cyclo Intelligence manually with:"
 echo "  cd ${HOME_LINK}"
 echo "  ./docker/container.sh start"
+echo "[install] Model sources were not downloaded. Before building a Worker, follow"
+echo "  ${HOME_LINK}/docker/README.md (Selective Source Checkout)."

@@ -45,8 +45,9 @@ class FakeProcessor:
         self._actions.clear()
         self.buffer_size = 0
 
-    def push_actions(self, chunk, scheduled_start_delay_s=None, align=True):
+    def push_actions(self, chunk, scheduled_start_delay_s=None, align=True, action_steps=0):
         data = np.asarray(chunk, dtype=np.float64)
+        data = data[:action_steps or None]
         self.pushed_chunks.append(data.copy())
         self.scheduled_delays.append(scheduled_start_delay_s)
         self.align_flags.append(bool(align))
@@ -62,6 +63,7 @@ class FakeRobot:
         self.sync_targets = []
         self.holds = []
         self.hold_failures_remaining = 0
+        self.state_subscription_changes = []
         self.action_keys = ["arm"]
 
     def publish_action(self, action, action_keys) -> None:
@@ -83,6 +85,9 @@ class FakeRobot:
             self.hold_failures_remaining -= 1
             raise RuntimeError("hold publish failed")
         self.holds.append((list(action_keys), float(duration_s)))
+
+    def set_state_subscription(self, enabled) -> None:
+        self.state_subscription_changes.append(bool(enabled))
 
     def close(self) -> None:
         pass
@@ -129,7 +134,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     control_loop_module, "RobotClient", return_value=FakeRobot()
-                ),
+                ) as robot_factory,
                 mock.patch.object(
                     control_loop_module,
                     "ActionChunkProcessor",
@@ -142,6 +147,15 @@ class ControlLoopSafetyTests(unittest.TestCase):
                     inference_hz=20,
                     chunk_align_window_s=0.25,
                 )
+
+        robot_factory.assert_called_once_with(
+            "ffw",
+            enable_command_publishers=True,
+            enable_preview_publisher=True,
+            subscribe_images=False,
+            subscribe_state=False,
+            subscribe_sensors=False,
+        )
 
         processor_factory.assert_called_once_with(
             inference_hz=20.0,
@@ -156,6 +170,83 @@ class ControlLoopSafetyTests(unittest.TestCase):
             "\n".join(logs.output),
         )
         self.assertEqual(loop._tick_period(), 1.0 / processor.output_hz)
+
+    def test_configure_subscribes_only_state_for_initial_pose_sync(self) -> None:
+        loop = ControlLoop(requester=object())
+        with (
+            mock.patch.object(
+                control_loop_module, "RobotClient", return_value=FakeRobot()
+            ) as robot_factory,
+            mock.patch.object(
+                control_loop_module,
+                "ActionChunkProcessor",
+                return_value=FakeProcessor(),
+            ),
+        ):
+            loop.configure(
+                robot_type="ffw",
+                initial_pose_sync=True,
+                publish_to_robot=True,
+            )
+
+        robot_factory.assert_called_once_with(
+            "ffw",
+            enable_command_publishers=True,
+            enable_preview_publisher=True,
+            subscribe_images=False,
+            subscribe_state=True,
+            subscribe_sensors=False,
+        )
+
+    def test_configure_does_not_subscribe_state_for_simulation_sync_flag(self) -> None:
+        loop = ControlLoop(requester=object())
+        with (
+            mock.patch.object(
+                control_loop_module, "RobotClient", return_value=FakeRobot()
+            ) as robot_factory,
+            mock.patch.object(
+                control_loop_module,
+                "ActionChunkProcessor",
+                return_value=FakeProcessor(),
+            ),
+        ):
+            loop.configure(
+                robot_type="ffw",
+                initial_pose_sync=True,
+                publish_to_robot=False,
+            )
+
+        self.assertFalse(robot_factory.call_args.kwargs["subscribe_state"])
+
+    def test_switching_to_robot_publish_enables_state_subscription(self) -> None:
+        loop = ControlLoop(requester=object())
+        robot = FakeRobot()
+        with (
+            mock.patch.object(control_loop_module, "RobotClient", return_value=robot),
+            mock.patch.object(
+                control_loop_module,
+                "ActionChunkProcessor",
+                return_value=FakeProcessor(),
+            ),
+        ):
+            loop.configure(robot_type="ffw", publish_to_robot=False)
+            loop.set_publish_to_robot(True)
+            loop.set_publish_to_robot(False)
+
+        self.assertEqual(robot.state_subscription_changes, [True, False])
+
+    def test_emergency_stop_clears_buffer_and_holds_current_pose(self) -> None:
+        robot = FakeRobot()
+        processor = FakeProcessor(actions=[[1.0]], buffer_size=1)
+        loop = self._make_loop(processor, robot)
+        loop._publish_to_robot = True
+
+        result = loop.emergency_stop("worker disconnected")
+
+        self.assertTrue(result)
+        self.assertFalse(loop._running)
+        self.assertEqual(processor.clear_count, 1)
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
 
     def test_configure_invalid_timing_uses_constructor_defaults(self) -> None:
         loop = ControlLoop(
@@ -250,6 +341,101 @@ class ControlLoopSafetyTests(unittest.TestCase):
         loop.tick()
 
         self.assertEqual(len(robot.previews), 1)
+        self.assertFalse(loop._running)
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_stop_and_pause_hold_even_without_execution_feedback(self):
+        for command in ("stop", "pause"):
+            with self.subTest(command=command):
+                robot = FakeRobot()
+                loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+                loop._publish_to_robot = True
+                loop.tick()
+                self.assertTrue(getattr(loop, command)())
+                for _ in range(10):
+                    loop.tick()
+                self.assertFalse(loop._running)
+                self.assertEqual(len(robot.commands), 1)
+                self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_ordinary_stop_hold_failure_blocks_restart_until_retry_succeeds(self):
+        robot = FakeRobot()
+        robot.hold_failures_remaining = 2
+        loop = self._make_loop(FakeProcessor(actions=[[1.0]]), robot)
+        loop._publish_to_robot = True
+        for _ in range(2):
+            self.assertFalse(loop.stop())
+            self.assertFalse(loop._running)
+            self.assertTrue(loop.initial_pose_sync_hold_required())
+            with self.assertRaisesRegex(RuntimeError, "hold is still pending"):
+                loop.start()
+        self.assertTrue(loop.stop())
+        self.assertFalse(loop.initial_pose_sync_hold_required())
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+
+    def test_publish_failures_stop_clear_and_report_even_without_feedback(self):
+        for kind in ("action", "idle", "sync_idle"):
+            for hold_fails in (False, True):
+                with self.subTest(kind=kind, hold_fails=hold_fails):
+                    robot = FakeRobot()
+                    robot.hold_failures_remaining = int(hold_fails)
+                    processor = FakeProcessor(actions=[[1.0], [2.0]] if kind == "action" else [])
+                    loop = self._make_loop(processor, robot)
+                    loop._publish_to_robot = True
+                    callback = mock.Mock()
+                    loop.set_fault_callback(callback)
+                    if kind == "sync_idle":
+                        loop._initial_pose_sync_in_progress = True
+                        loop._initial_pose_sync_deadline = float('inf')
+                    publisher = mock.Mock(side_effect=RuntimeError("injected failure"))
+                    if kind == "action":
+                        robot.publish_action = publisher
+                    else:
+                        robot.publish_idle_action = publisher
+                    loop.tick()
+                    self.assertFalse(loop._running)
+                    self.assertGreater(processor.clear_count, 0)
+                    callback.assert_called_once()
+                    self.assertIn("injected failure", callback.call_args.args[0])
+                    self.assertEqual(callback.call_args.args[1], not hold_fails)
+                    for _ in range(10):
+                        loop.tick()
+                    publisher.assert_called_once()
+                    self.assertEqual(loop.initial_pose_sync_hold_required(), hold_fails)
+                    if hold_fails:
+                        with self.assertRaisesRegex(RuntimeError, "hold is still pending"):
+                            loop.start()
+                        self.assertTrue(loop.stop())
+                        self.assertFalse(loop.initial_pose_sync_hold_required())
+
+    def test_partial_publication_failure_stops_remaining_buffered_actions(self):
+        robot = FakeRobot()
+        emitted = []
+
+        def partial_publish(action, keys):
+            emitted.append("first group")
+            raise RuntimeError("second group publication failed")
+
+        robot.publish_action = partial_publish
+        loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+        loop._publish_to_robot = True
+        loop.tick()
+        loop.tick()
+        self.assertEqual(emitted, ["first group"])
+        self.assertEqual(robot.holds, [(["arm"], 0.1)])
+        self.assertFalse(loop._running)
+
+    def test_preview_failure_does_not_trigger_a_robot_command_or_hold(self):
+        robot = FakeRobot()
+        robot.publish_action_preview = mock.Mock(side_effect=RuntimeError("preview unavailable"))
+        loop = self._make_loop(FakeProcessor(actions=[[1.0], [2.0]]), robot)
+        loop._publish_to_robot = False
+        loop.tick()
+        loop.tick()
+        self.assertTrue(loop._running)
+        self.assertTrue(loop.stop())
+        self.assertEqual(robot.commands, [])
+        self.assertEqual(robot.holds, [])
 
     def test_robot_mode_publishes_idle_when_action_buffer_is_empty(self) -> None:
         processor = FakeProcessor(actions=[], buffer_size=100)
@@ -388,6 +574,70 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertIsNotNone(processor.scheduled_delays[-1])
         self.assertGreaterEqual(processor.scheduled_delays[-1], 0.5)
         self.assertEqual(processor.align_flags[-1], True)
+
+    def test_buffer_failure_stops_and_clears_partial_actions_in_both_modes(self):
+        for mode in ("sync", "async"):
+            for publish, hold_fails in ((False, False), (True, False), (True, True)):
+                with self.subTest(mode=mode, publish=publish, hold_fails=hold_fails):
+                    processor = FakeProcessor(actions=[[0.1]], buffer_size=1)
+                    robot = FakeRobot()
+                    robot.hold_failures_remaining = int(hold_fails)
+                    loop = self._make_loop(processor, robot)
+                    loop._publish_to_robot = publish
+                    loop._requester = FakeRequester(SimpleNamespace(
+                        success=True, chunk_size=2, action_dim=1, action_list=[0.2, 0.3],
+                    ))
+                    fault_callback = mock.Mock()
+                    loop.set_fault_callback(fault_callback)
+                    generation = loop._generation
+                    loop._request_reserved = True
+
+                    def fail_after_partial_write(*args, **kwargs):
+                        processor._actions.append(np.asarray([0.2]))
+                        processor.buffer_size += 1
+                        raise RuntimeError("buffer write failed")
+
+                    with mock.patch.object(processor, "push_actions", side_effect=fail_after_partial_write):
+                        loop._run_reserved_request("pick", generation, mode)
+
+                    self.assertFalse(loop._running)
+                    self.assertFalse(loop._request_reserved)
+                    self.assertGreater(loop._generation, generation)
+                    self.assertEqual(processor.buffer_size, 0)
+                    self.assertEqual(processor._actions, [])
+                    self.assertEqual(processor.clear_count, 1)
+                    fault_callback.assert_called_once_with("action buffering failed: buffer write failed", not hold_fails)
+                    self.assertEqual(loop.initial_pose_sync_hold_required(), hold_fails)
+                    self.assertEqual(len(robot.holds), int(publish and not hold_fails))
+                    loop.tick()
+                    self.assertEqual(robot.commands, [])
+                    self.assertEqual(robot.previews, [])
+                    if hold_fails:
+                        self.assertTrue(loop.stop())
+                        self.assertFalse(loop.initial_pose_sync_hold_required())
+                        self.assertEqual(len(robot.holds), 1)
+
+    def test_obsolete_response_does_not_reach_failing_buffer(self):
+        processor = FakeProcessor()
+        robot = FakeRobot()
+        loop = self._make_loop(processor, robot)
+        fault_callback = mock.Mock()
+        loop.set_fault_callback(fault_callback)
+        old_generation = loop._generation
+
+        def stale_result(*args, **kwargs):
+            loop._generation += 1
+            return SimpleNamespace(success=True, chunk_size=1, action_dim=1, action_list=[0.2])
+
+        with (
+            mock.patch.object(loop, "_get_action_with_feedback", side_effect=stale_result),
+            mock.patch.object(processor, "push_actions", side_effect=RuntimeError("must not run")) as push,
+        ):
+            loop._request_and_buffer("pick", old_generation)
+        push.assert_not_called()
+        fault_callback.assert_not_called()
+        self.assertTrue(loop._running)
+        self.assertEqual(robot.holds, [])
 
     def test_initial_pose_sync_discards_first_chunk_and_requests_fresh_chunk(self) -> None:
         first = SimpleNamespace(

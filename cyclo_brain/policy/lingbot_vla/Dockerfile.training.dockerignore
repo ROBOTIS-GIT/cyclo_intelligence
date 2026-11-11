@@ -1,0 +1,11 @@
+**
+!cyclo_brain/
+!cyclo_brain/policy/
+!cyclo_brain/policy/lingbot_vla/
+!cyclo_brain/policy/lingbot_vla/**
+**/.git
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.pyo
+cyclo_brain/policy/lingbot_vla/tests/

@@ -8,9 +8,9 @@
 #                                         orchestrator / cyclo_data nodes
 #
 # Build context: cyclo_intelligence/ (repo root)
-#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:1.4.5-arm64 .
+#   docker build -f docker/Dockerfile.arm64 -t robotis/cyclo-intelligence:1.5.0-arm64 .
 #
-# lerobot / groot are separate containers (PLAN §4.8 on-demand pull);
+# lerobot / groot are separate, locally built containers;
 # this image intentionally does NOT bundle PyTorch / CUDA / LeRobot.
 
 # ============================================================
@@ -39,6 +39,8 @@ FROM robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0 AS runtime
 # ARM64 wheels — so override at the env level so every subsequent pip
 # command bypasses the broken default.
 ENV PIP_INDEX_URL=https://pypi.org/simple
+# Scope config isolation to build commands: the base's pip.conf also adds a
+# stale NGC extra index. Keep runtime user pip configuration usable.
 
 ARG S6_OVERLAY_VERSION=3.2.1.0
 
@@ -71,6 +73,7 @@ RUN apt-get update && apt-get install -y \
     nginx \
     docker.io \
     docker-compose-v2 \
+    docker-buildx \
     python3-pip \
     ros-${ROS_DISTRO}-rmw-zenoh-cpp \
     ros-${ROS_DISTRO}-rosbridge-server \
@@ -151,10 +154,28 @@ RUN apt-get update && \
 # compiled against 1.x. Keep pyarrow below 25.0.0: that release has
 # crashed in the aarch64 dataset-backed Parquet reader while serving
 # replay sidecars.
-RUN pip install --no-cache-dir --break-system-packages \
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages \
         setuptools==68.1.2 'numpy<2' \
         psutil matplotlib pandas huggingface_hub \
-        mcap mcap-ros2-support pyarrow==24.0.0
+        mcap mcap-ros2-support pyarrow==24.0.0 \
+        "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" \
+        "GitPython>=3.1.18" "json5>=0.9.14" pyyaml
+
+# Keep one source tree: Compose replaces it with the host checkout.
+# Model frameworks remain in their worker images.
+COPY cyclo_brain/policy/common ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/common
+COPY cyclo_brain/policy/lerobot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/lerobot/manifest.yaml
+COPY cyclo_brain/policy/groot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/groot/manifest.yaml
+COPY cyclo_brain/policy/rldx/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/rldx/manifest.yaml
+COPY cyclo_brain/policy/lingbot_vla/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/lingbot_vla/manifest.yaml
+COPY cyclo_brain/policy/abot/manifest.yaml ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy/abot/manifest.yaml
+COPY cyclo_brain/sdk/zenoh_ros2_sdk ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/zenoh_ros2_sdk
+COPY cyclo_brain/sdk/robot_client ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/robot_client
+COPY cyclo_brain/sdk/action_chunk_processing ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk/action_chunk_processing
+RUN mkdir -p /opt/cyclo /run/cyclo && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/policy /opt/cyclo/policy && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/cyclo_brain/sdk /opt/cyclo/sdk && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/shared/shared/robot_configs /orchestrator_config
 
 # colcon build the full workspace.
 # Use --paths (explicit package list) instead of --base-paths
@@ -220,12 +241,15 @@ RUN mkdir -p /var/run/agent && chmod 777 /var/run/agent
 # to align with the cyclo_* family). Provides the FastAPI app that the
 # s6-agent service wraps.
 RUN git clone -b main https://github.com/ROBOTIS-GIT/cyclo_manager.git /opt/cyclo_manager
-ENV PYTHONPATH=/opt/cyclo_manager:${PYTHONPATH}
-RUN pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
+ENV PYTHONPATH=/opt/cyclo_manager
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages -r /opt/cyclo_manager/requirements.txt
 
 # UI static build from stage 1
 COPY --from=ui-builder /ui/build /usr/share/nginx/html
 COPY orchestrator/ui/nginx.conf /etc/nginx/conf.d/default.conf
+COPY shared/shared/robot_configs/urdf/ /usr/share/nginx/html/urdf/urdf/
+COPY shared/shared/robot_configs/ffw_description/ /usr/share/nginx/html/urdf/ffw_description/
+COPY shared/shared/robot_configs/open_manipulator_description/ /usr/share/nginx/html/urdf/open_manipulator_description/
 RUN rm -f /etc/nginx/sites-enabled/default
 
 # s6 services — s6-agent + orchestrator + cyclo_data longruns with
@@ -251,8 +275,11 @@ RUN mkdir -p /var/log/orchestrator /var/log/cyclo_data /var/log/cyclo_intelligen
 # reverse-proxies to (port 7100 by default). Registered as an s6 longrun; the
 # /api/backends/* endpoints for lerobot / groot lifecycle are still
 # 501 stubs until the §4.8 follow-up adds docker-py.
-COPY docker/supervisor_api /opt/supervisor_api
-RUN pip install --no-cache-dir --break-system-packages \
+COPY docker/supervisor_api ${COLCON_WS}/src/cyclo_intelligence/docker/supervisor_api
+COPY docker/docker-compose.yml docker/docker-compose.override.yml ${COLCON_WS}/src/cyclo_intelligence/docker/
+RUN ln -s ${COLCON_WS}/src/cyclo_intelligence/docker/supervisor_api /opt/supervisor_api && \
+    ln -s ${COLCON_WS}/src/cyclo_intelligence/docker /opt/cyclo/docker
+RUN PIP_CONFIG_FILE=/dev/null pip install --no-cache-dir --break-system-packages \
         -r /opt/supervisor_api/requirements.txt
 
 # nginx must start from s6; disable the systemd daemon pidfile

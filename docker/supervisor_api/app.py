@@ -47,16 +47,22 @@ Environment overrides:
 from __future__ import annotations
 
 import asyncio
+import csv
+from contextlib import asynccontextmanager
+import hashlib
+import io
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
@@ -64,7 +70,7 @@ from typing import Dict, List, Literal, Optional
 import docker
 from docker.errors import DockerException, ImageNotFound, NotFound
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Tests load this file directly under the synthetic module name
@@ -74,6 +80,8 @@ from pydantic import BaseModel, Field
 _PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
 if _PACKAGE_PARENT not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT)
+
+from supervisor_api.worker_build import WorkerBuilds
 
 def _load_sibling_module(module_name: str, filename: str):
     path = Path(__file__).resolve().with_name(filename)
@@ -267,6 +275,10 @@ class BackendStatus(BaseModel):
     container_id: Optional[str] = None
     raw_state: Optional[str] = None
     services: List[ServiceStatus] = Field(default_factory=list)
+    worker_compatible: Optional[bool] = None
+    worker_message: str = ""
+    worker_readiness: Optional[Literal["waiting", "error", "ready"]] = None
+    build: dict = Field(default_factory=lambda: {"state": "idle", "message": "", "log_tail": []})
 
 
 class TrtBuildRequest(BaseModel):
@@ -294,24 +306,16 @@ class TrtEngineStatus(BaseModel):
 # -- Backend (policy container) wiring -----------------------------------------
 
 
-# Compose file + repo-mount paths inside this container — the cyclo_intelligence
-# service bind-mounts the repo root at /root/ros2_ws/src/cyclo_intelligence by
-# default (live edits during dev). Override both with env vars when the mount
-# point differs (e.g. running supervisor_api on the host for debugging).
+# Image paths link to the workspace, which Compose binds to the host checkout.
+# Without that mount, the image's source snapshot remains usable.
 _CYCLO_REPO_MOUNT = os.environ.get(
     "CYCLO_SUPERVISOR_API_REPO_MOUNT",
     "/root/ros2_ws/src/cyclo_intelligence",
 )
 _COMPOSE_FILE_IN_CONTAINER = os.environ.get(
     "CYCLO_SUPERVISOR_API_COMPOSE_FILE",
-    f"{_CYCLO_REPO_MOUNT}/docker/docker-compose.yml",
+    "/opt/cyclo/docker/docker-compose.yml",
 )
-_COMPOSE_OVERRIDE_IN_CONTAINER = os.path.join(
-    os.path.dirname(_COMPOSE_FILE_IN_CONTAINER),
-    "docker-compose.override.yml",
-)
-
-
 def _detect_arch() -> str:
     machine = os.uname().machine
     return "arm64" if machine in ("aarch64", "arm64") else "amd64"
@@ -319,92 +323,176 @@ def _detect_arch() -> str:
 
 _BACKEND_ARCH = os.environ.get("ARCH", _detect_arch())
 
+_LOCAL_REPO_ROOT = Path(__file__).resolve().parents[2]
+_POLICY_ROOT = Path(
+    os.environ.get(
+        "CYCLO_POLICY_ROOT",
+        "/opt/cyclo/policy",
+    )
+)
+try:
+    _policy_root_available = _POLICY_ROOT.is_dir()
+except OSError:
+    _policy_root_available = False
+if not _policy_root_available:
+    _POLICY_ROOT = _LOCAL_REPO_ROOT / "cyclo_brain" / "policy"
 
-# Image versions are hardcoded per backend below since each service has
-# its own release cadence. ARCH still falls back to a uname-based sniff
-# because compose only interpolates env vars on the host invocation, so
-# inside the container the env var isn't set.
-_BACKENDS: Dict[str, Dict[str, str]] = {
-    "lerobot": {
-        "service": "lerobot",
-        "container": "lerobot_server",
-        "image": f"robotis/lerobot-zenoh:1.4.2-{_BACKEND_ARCH}",
-        "services": ["main-runtime", "engine-process"],
-    },
-    "groot": {
-        "service": "groot",
-        "container": "groot_server",
-        "image": f"robotis/groot-zenoh:1.3.5-{_BACKEND_ARCH}",
-        "services": ["main-runtime", "engine-process"],
-    },
-}
+_CATALOG_PATH = _POLICY_ROOT / "common" / "catalog" / "catalog.py"
+_CATALOG_SPEC = importlib.util.spec_from_file_location(
+    "cyclo_policy_catalog_impl",
+    _CATALOG_PATH,
+)
+if _CATALOG_SPEC is None or _CATALOG_SPEC.loader is None:
+    raise ImportError(f"Cannot load policy catalog from {_CATALOG_PATH}")
+_catalog_module = importlib.util.module_from_spec(_CATALOG_SPEC)
+sys.modules[_CATALOG_SPEC.name] = _catalog_module
+_CATALOG_SPEC.loader.exec_module(_catalog_module)
 
 
-def _bounded_env_timeout(
-    name: str,
-    default: float,
-    minimum: float,
-    maximum: float,
-) -> float:
-    """Read a positive timeout while keeping operator overrides bounded."""
-    raw = os.environ.get(name, "").strip()
+def _catalog_compose_path() -> Path:
+    path = Path(_COMPOSE_FILE_IN_CONTAINER)
     try:
-        value = float(raw) if raw else default
-    except ValueError:
-        logger.warning("invalid %s=%r; using %.0fs", name, raw, default)
-        value = default
-    return max(minimum, min(maximum, value))
+        available = path.is_file()
+    except OSError:
+        available = False
+    if available:
+        return path
+    return _LOCAL_REPO_ROOT / "docker" / "docker-compose.yml"
 
 
-# Policy images can take substantially longer to build than a normal compose
-# lifecycle call. Keep the override long enough for CUDA-heavy builds, but do
-# not permit an accidentally unbounded HTTP-triggered subprocess.
-_BACKEND_BUILD_TIMEOUT_SEC = _bounded_env_timeout(
-    "CYCLO_BACKEND_BUILD_TIMEOUT_S",
-    default=7200.0,
-    minimum=300.0,
-    maximum=21600.0,
+def _compose_paths() -> List[Path]:
+    compose_path = _catalog_compose_path()
+    paths = [compose_path]
+    override_path = compose_path.with_name("docker-compose.override.yml")
+    if override_path.is_file():
+        paths.append(override_path)
+    return paths
+
+
+def _load_compose_configuration() -> dict:
+    command = ["docker", "compose"]
+    for compose_path in _compose_paths():
+        command.extend(["-f", str(compose_path)])
+    # Keep relative bind sources so they can later be resolved against the
+    # HOST project directory, not this container's baked /opt/cyclo tree.
+    command.extend(["config", "--format", "json", "--no-path-resolution"])
+
+    env = os.environ.copy()
+    env.setdefault("ARCH", _BACKEND_ARCH)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"could not render Docker Compose configuration: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            "could not render Docker Compose configuration"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        compose = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"docker compose config returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(compose, dict) or not isinstance(compose.get("services"), dict):
+        raise RuntimeError("docker compose config did not contain a services mapping")
+    return compose
+
+
+def _interpolate_compose_value(value: str) -> str:
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+    def replace(match):
+        name, default = match.group(1), match.group(2)
+        if name == "ARCH":
+            return _BACKEND_ARCH
+        return os.environ.get(name, default or "")
+
+    return pattern.sub(replace, value)
+
+
+def _compose_mount_targets(service: dict) -> tuple[str, ...]:
+    targets = []
+    for volume in service.get("volumes", []) or []:
+        if isinstance(volume, dict):
+            target = volume.get("target")
+        else:
+            parts = str(volume).split(":")
+            target = parts[1] if len(parts) >= 2 else parts[0]
+        if target and target not in targets:
+            targets.append(target)
+    return tuple(targets)
+
+
+def _load_backend_configuration():
+    compose_services = _load_compose_configuration()["services"]
+    catalog = _catalog_module.load_catalog(
+        _POLICY_ROOT,
+        compose_services=compose_services,
+    )
+    backends = {}
+    required_mounts = {}
+    for runtime in catalog["runtimes"]:
+        service_name = runtime["compose_service"]
+        service = compose_services[service_name]
+        container_name = service.get("container_name")
+        image = service.get("image")
+        if not container_name or not image:
+            raise RuntimeError(
+                f"Compose service {service_name!r} requires container_name and image"
+            )
+        backends[runtime["id"]] = {
+            "service": service_name,
+            "container": _interpolate_compose_value(str(container_name)),
+            "image": _interpolate_compose_value(str(image)),
+            "services": list(runtime["services"]),
+            "checkpoint_root": runtime["checkpoint_root"],
+            "capabilities": dict(runtime["capabilities"]),
+            "config_mounts": {
+                volume["target"]: volume["source"]
+                for volume in service.get("volumes", []) or []
+                if isinstance(volume, dict)
+                and volume.get("type") == "bind"
+                and (
+                    str(volume.get("target", "")).startswith("/app/configs/")
+                    or str(volume.get("source", "")).startswith("../")
+                )
+                and volume.get("source")
+            },
+        }
+        required_mounts[runtime["id"]] = _compose_mount_targets(service)
+    return catalog, backends, required_mounts
+
+
+_POLICY_CATALOG, _BACKENDS, _REQUIRED_BACKEND_MOUNTS = (
+    _load_backend_configuration()
 )
 
-# FastAPI serves lifecycle requests from one asyncio loop. Lazily recreate the
-# lock set when direct-function tests use a fresh asyncio.run() loop, while
-# keeping independent backends free to provision in parallel in production.
-_BACKEND_LIFECYCLE_LOCK_LOOP: Optional[asyncio.AbstractEventLoop] = None
-_BACKEND_LIFECYCLE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+def _runtime_with_operation(operation: str) -> dict:
+    matches = [
+        runtime
+        for runtime in _POLICY_CATALOG["runtimes"]
+        if operation in runtime["capabilities"].get("operations", [])
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one policy runtime with operation {operation!r}"
+        )
+    return matches[0]
 
 
-def _backend_lifecycle_lock(name: str) -> asyncio.Lock:
-    """Return the current event loop's lock for an allowlisted backend."""
-    _require_known_backend(name)
-    loop = asyncio.get_running_loop()
-    global _BACKEND_LIFECYCLE_LOCK_LOOP
-    global _BACKEND_LIFECYCLE_LOCKS
-    if _BACKEND_LIFECYCLE_LOCK_LOOP is not loop:
-        _BACKEND_LIFECYCLE_LOCK_LOOP = loop
-        _BACKEND_LIFECYCLE_LOCKS = {}
-    return _BACKEND_LIFECYCLE_LOCKS.setdefault(name, asyncio.Lock())
-
-_REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
-    "lerobot": (
-        "/workspace",
-        "/robot_client_sdk",
-        "/action_chunk_processing_sdk",
-        "/policy_runtime",
-        "/app/lerobot_engine",
-        "/orchestrator_config",
-    ),
-    "groot": (
-        "/workspace",
-        "/robot_client_sdk",
-        "/action_chunk_processing_sdk",
-        "/policy_runtime",
-        "/app/groot_engine",
-        "/app/runtime",
-        "/orchestrator_config",
-    ),
-}
-
-_GROOT_MODEL_ROOT = "/workspace/model/groot"
+_GROOT_RUNTIME = _runtime_with_operation("groot_trt")
+_GROOT_BACKEND_ID = _GROOT_RUNTIME["id"]
+_GROOT_MODEL_ROOT = _GROOT_RUNTIME["checkpoint_root"]
 
 
 @dataclass
@@ -426,6 +514,82 @@ _TRT_BUILD_LOCK = threading.Lock()
 
 def _docker_client() -> docker.DockerClient:
     return docker.from_env()
+
+
+class PolicyRuntimeUnavailable(RuntimeError):
+    """No runtime listener, not evidence that a model worker has failed."""
+
+
+def _runtime_control_request(payload: dict, timeout_s: float = 2.5) -> dict:
+    path = os.environ.get(
+        "POLICY_RUNTIME_CONTROL_SOCKET",
+        "/run/cyclo/policy-runtime.sock",
+    )
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout_s)
+    try:
+        client.connect(path)
+        client.sendall(json.dumps(payload).encode("utf-8"))
+        client.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        raise PolicyRuntimeUnavailable(
+            "Cyclo Policy Runtime is not running or is starting. "
+            "Start cyclo_intelligence and wait for runtime readiness. "
+            "Worker safety could not be verified."
+        ) from exc
+    except (OSError, socket.timeout) as exc:
+        raise RuntimeError(f"Policy Runtime control socket unavailable: {exc}") from exc
+    finally:
+        client.close()
+    try:
+        response = json.loads(b"".join(chunks).decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Policy Runtime returned invalid control data") from exc
+    if not isinstance(response, dict):
+        raise RuntimeError("Policy Runtime returned invalid control data")
+    if not response.get("ok"):
+        raise RuntimeError(str(response.get("error", "Policy Runtime request failed")))
+    return response
+
+
+def _begin_worker_mutation(runtime_id: str) -> str:
+    try:
+        response = _runtime_control_request(
+            {"operation": "begin_worker_mutation", "runtime_id": runtime_id}
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            503,
+            f"Cannot change {runtime_id} worker: safety check unavailable. {exc}",
+        ) from exc
+    if not response.get("allowed"):
+        raise HTTPException(
+            409,
+            f"Cannot change {runtime_id} worker: {response.get('reason', 'in use')}",
+        )
+    token = str(response.get("token", ""))
+    if not token:
+        raise HTTPException(503, "Policy Runtime did not issue a mutation token")
+    return token
+
+
+def _end_worker_mutation(runtime_id: str, token: str) -> None:
+    try:
+        _runtime_control_request(
+            {
+                "operation": "end_worker_mutation",
+                "runtime_id": runtime_id,
+                "token": token,
+            }
+        )
+    except Exception as exc:
+        logger.error("failed to release %s worker mutation token: %s", runtime_id, exc)
 
 
 def _require_known_backend(name: str) -> Dict[str, str]:
@@ -522,15 +686,22 @@ def _host_project_dir() -> Optional[str]:
         except DockerException as e:
             logger.warning("self-inspect failed for %s: %s", own_id, e)
             continue
+        mounts = ctr.attrs.get("Mounts", [])
         host_repo = _mount_source_for_destination(
-            ctr.attrs.get("Mounts", []),
+            mounts,
             _CYCLO_REPO_MOUNT,
         )
         if host_repo:
             _HOST_PROJECT_DIR_CACHE = os.path.join(host_repo, "docker")
             return _HOST_PROJECT_DIR_CACHE
+        host_workspace = _mount_source_for_destination(mounts, "/workspace")
+        if host_workspace:
+            # The canonical data mount is <repo>/docker/workspace. Its parent
+            # is therefore the host project directory needed by Compose.
+            _HOST_PROJECT_DIR_CACHE = os.path.dirname(host_workspace)
+            return _HOST_PROJECT_DIR_CACHE
     logger.warning(
-        "no mount found for %s — compose CLI relative paths will resolve "
+        "no mount found for %s or /workspace — compose CLI relative paths will resolve "
         "against the in-container path, which the host docker daemon "
         "cannot satisfy",
         _CYCLO_REPO_MOUNT,
@@ -629,9 +800,8 @@ def _compose_base_cmd() -> List[str]:
     project_dir = _host_project_dir()
     if project_dir:
         cmd += ["--project-directory", project_dir]
-    cmd += ["-f", _COMPOSE_FILE_IN_CONTAINER]
-    if os.path.exists(_COMPOSE_OVERRIDE_IN_CONTAINER):
-        cmd += ["-f", _COMPOSE_OVERRIDE_IN_CONTAINER]
+    for compose_path in _compose_paths():
+        cmd += ["-f", str(compose_path)]
     return cmd
 
 
@@ -930,7 +1100,7 @@ def _start_trt_build_job(
     cmd = [
         "docker",
         "exec",
-        _BACKENDS["groot"]["container"],
+        _BACKENDS[_GROOT_BACKEND_ID]["container"],
         "python3",
         "-m",
         "runtime.prepare_trt_engine",
@@ -1041,6 +1211,18 @@ def _backend_container_stale_reason(
         expected_workspace_dir,
     ):
         return "workspace_mount_mismatch"
+    config_mounts = spec.get("config_mounts", {})
+    project_dir = _host_project_dir() if config_mounts else None
+    for destination, source in config_mounts.items():
+        if not os.path.isabs(source):
+            if not project_dir:
+                return "config_mount_source_unverified=" + destination
+            source = os.path.normpath(os.path.join(project_dir, source))
+        actual_source = _mount_source_for_destination(
+            container.attrs.get("Mounts", []), destination,
+        )
+        if _normalized_host_path(actual_source) != _normalized_host_path(source):
+            return "config_mount_source_mismatch=" + destination
     if _backend_container_image_mismatch(client, container, spec):
         return "image_mismatch"
     return None
@@ -1057,7 +1239,7 @@ def _backend_service_statuses(
     raw_state: str,
     service_names: List[str],
 ) -> List[ServiceStatus]:
-    """Inspect the two s6-managed policy runtime processes."""
+    """Inspect the s6-managed services declared by one Worker manifest."""
     if raw_state != "running":
         return []
 
@@ -1153,19 +1335,25 @@ def _parse_svstat(raw: str) -> dict:
 # -- FastAPI app ---------------------------------------------------------------
 
 
+_WORKER_BUILDS = WorkerBuilds()
+
+
 @asynccontextmanager
-async def _app_lifespan(_app: FastAPI):
-    # Stay subscribed before Nav2 starts. Its global costmap publishes one
-    # full snapshot followed by incremental dirty rectangles.
-    _navigation_module.ensure_ros_grid_subscriber_started()
-    yield
+async def _lifespan(_app):
+    global _WORKER_BUILDS
+    _WORKER_BUILDS = WorkerBuilds()
+    try:
+        _navigation_module.ensure_ros_grid_subscriber_started()
+        yield
+    finally:
+        await asyncio.to_thread(_WORKER_BUILDS.close)
 
 
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.4.5",
-    lifespan=_app_lifespan,
+    version="1.5.0",
+    lifespan=_lifespan,
 )
 
 _include_router_with_eager_routes(app, navigation_router)
@@ -1174,11 +1362,388 @@ _include_router_with_eager_routes(app, navigation_missions_router)
 _include_router_with_eager_routes(app, bt_trees_router)
 
 
+# Inference trial results share the existing API and persistent workspace.
+_TRIAL_RESULTS_DIR = Path("/workspace/inference_results")
+_TRIAL_MODEL_ROOT = Path("/workspace/model")
+_TRIAL_RESULTS_LOCK = threading.RLock()
+_TRIAL_FIELDS = ["try", "result", "created_at", "updated_at", "model_path"]
+_TRIAL_TIMEZONE = timezone(timedelta(hours=9))
+
+
+class TrialResultRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=4096)
+    robot_type: str = Field(default="", max_length=128)
+    result: Optional[Literal["success", "fail"]] = None
+    trial: Optional[int] = Field(default=None, alias="try", ge=1)
+    tries: Optional[List[int]] = Field(default=None, max_length=10000)
+    revision: Optional[str] = Field(default=None, max_length=64)
+
+
+def _trial_file(model: str, create: bool = False) -> Optional[Path]:
+    model = model.strip().rstrip("/")
+    if not model:
+        raise HTTPException(400, "Select a model first")
+    # Keep one filename per full model path, including after all rows are deleted.
+    with _TRIAL_RESULTS_LOCK:
+        index_path = _TRIAL_RESULTS_DIR / "files.json"
+        index = json.loads(index_path.read_text()) if index_path.exists() else {}
+        if model in index:
+            name = index[model]
+            if not isinstance(name, str) or Path(name).name != name or not name.endswith(".csv"):
+                raise HTTPException(500, "Invalid trial history index")
+            return _TRIAL_RESULTS_DIR / name
+        legacy_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:]
+        digest = hashlib.sha256(model.encode()).hexdigest()[:16]
+        legacy = _TRIAL_RESULTS_DIR / f"{legacy_name}_{digest}.csv"
+        if not create and not legacy.exists():
+            return None
+        when = datetime.now().astimezone()
+        if legacy.exists():
+            rows = _read_trials(legacy)
+            when = (datetime.fromisoformat(rows[0]["created_at"]).astimezone() if rows
+                    else datetime.fromtimestamp(legacy.stat().st_mtime).astimezone())
+        model_path = Path(model)
+        label = model_path.parent.parent.name if model_path.parent.name == "checkpoints" else model_path.name
+        label = re.sub(r"[^a-zA-Z0-9_.-]", "_", label)[:120].strip(".") or "model"
+        name = f"{label}_{when.strftime('%Y%m%d_%H%M%S')}.csv"
+        if name in index.values() or (_TRIAL_RESULTS_DIR / name).exists():
+            name = f"{label}_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S%f')}.csv"
+        _TRIAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = _TRIAL_RESULTS_DIR / name
+        if legacy.exists():
+            legacy.rename(path)
+        index[model] = name
+        temporary = index_path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(index, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(index_path)
+        return path
+
+
+def _old_evaluation_file(model: str, robot_type: str = "") -> Path:
+    label = Path(model).name or "model"
+    label = re.sub(r"[^a-zA-Z0-9_.-]", "_", label)[:100].strip(".") or "model"
+    digest = hashlib.sha256(json.dumps([model, robot_type]).encode()).hexdigest()[:20]
+    return _TRIAL_RESULTS_DIR / f"{label}_{digest}.json"
+
+
+def _model_directory(model: str) -> Path:
+    candidate = Path(model)
+    if not candidate.is_absolute():
+        raise HTTPException(400, "Select a model folder under /workspace/model")
+    try:
+        directory = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(404, "Model folder not found") from exc
+    root = _TRIAL_MODEL_ROOT.resolve()
+    if not directory.is_dir() or directory == root or not directory.is_relative_to(root):
+        raise HTTPException(400, "Select a model folder under /workspace/model")
+    return directory
+
+
+def _evaluation_file(model: str) -> Path:
+    return _model_directory(model) / "evaluation_manifest.json"
+
+
+def _model_provenance(model: str) -> tuple[dict, dict]:
+    path = Path(model)
+    try:
+        if not path.resolve().is_relative_to(_TRIAL_MODEL_ROOT.resolve()):
+            return {}, {}
+        manifest_path = path / "training_manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink() or manifest_path.stat().st_size > 2_000_000:
+            return {}, {}
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            return {}, {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        logger.warning("Cannot read training manifest for %s: %s", model, exc)
+        return {}, {}
+    model_info = {
+        key: manifest[key] for key in ("model_id", "run_id", "source_artifact")
+        if isinstance(manifest.get(key), str) and manifest[key]
+    }
+    dataset = manifest.get("dataset")
+    context = {}
+    if isinstance(dataset, dict):
+        repo_id = dataset.get("repo_id") or dataset.get("dataset_id")
+        if isinstance(repo_id, str) and repo_id:
+            context["dataset_repo_id"] = repo_id
+    return model_info, context
+
+
+def _new_evaluation(model: str, robot_type: str) -> dict:
+    provenance, context = _model_provenance(model)
+    return {
+        "schema_version": 1,
+        "model": provenance,
+        "context": {"mode": "real_robot", **({"robot_type": robot_type} if robot_type else {}), **context},
+        "trials": [],
+    }
+
+
+def _read_json_document(path: Path) -> Optional[dict]:
+    if path.is_symlink():
+        raise HTTPException(500, "Invalid evaluation history")
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HTTPException(500, "Invalid evaluation history") from exc
+    if not isinstance(document, dict):
+        raise HTTPException(500, "Invalid evaluation history")
+    return document
+
+
+def _validate_evaluation(document: dict, model: str) -> None:
+    if (
+        document.get("schema_version") != 1
+        or not isinstance(document.get("model"), dict)
+        or document["model"].get("local_path", model) != model
+        or not isinstance(document.get("context"), dict)
+        or document["context"].get("mode") != "real_robot"
+        or not isinstance(document["context"].get("robot_type", ""), str)
+        or not isinstance(document.get("trials"), list)
+        or any(
+            not isinstance(trial, dict)
+            or isinstance(trial.get("trial_id"), bool)
+            or not (
+                isinstance(trial.get("trial_id"), int) and trial["trial_id"] > 0
+                or isinstance(trial.get("trial_id"), str) and bool(trial["trial_id"])
+            )
+            or trial.get("result") not in {"success", "fail"}
+            or not isinstance(trial.get("recorded_at"), str) or not trial["recorded_at"]
+            for trial in document["trials"]
+        )
+    ):
+        raise HTTPException(500, "Invalid evaluation history")
+    trial_ids = [trial["trial_id"] for trial in document["trials"]]
+    if len(trial_ids) != len(set(trial_ids)):
+        raise HTTPException(500, "Invalid evaluation history")
+
+
+def _read_model_evaluation(path: Path, model: str) -> Optional[dict]:
+    document = _read_json_document(path)
+    if document is None:
+        return None
+    if "evaluations" in document:
+        evaluations = document["evaluations"]
+        if not isinstance(evaluations, list) or len(evaluations) != 1:
+            raise HTTPException(409, "Multiple robot evaluations require manual separation")
+        document = evaluations[0]
+        if not isinstance(document, dict):
+            raise HTTPException(500, "Invalid evaluation history")
+    _validate_evaluation(document, model)
+    return document
+
+
+def _evaluation_rows(document: dict, model: str) -> list:
+    return [
+        {
+            "try": str(number), "result": trial["result"],
+            "created_at": trial["recorded_at"],
+            "updated_at": trial.get("updated_at", trial["recorded_at"]),
+            "model_path": model,
+        }
+        for number, trial in enumerate(document["trials"], start=1)
+    ]
+
+
+def _number_trials(document: dict) -> None:
+    document["model"].pop("local_path", None)
+    for number, trial in enumerate(document["trials"], start=1):
+        trial["trial_id"] = number
+
+
+def _write_evaluation(path: Path, document: dict) -> None:
+    document.pop("evaluation_id", None)
+    document.pop("uploaded", None)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _legacy_evaluation(model: str) -> Optional[dict]:
+    path = _trial_file(model)
+    rows = _read_trials(path)
+    if not rows:
+        return None
+    # Old CSV rows do not identify the model version or robot used at record time.
+    document = {
+        "schema_version": 1,
+        "model": {}, "context": {"mode": "real_robot"},
+        "trials": [],
+    }
+    document["trials"] = [
+        {
+            "trial_id": number, "result": row["result"],
+            "recorded_at": row["created_at"],
+            **({"updated_at": row["updated_at"]} if row["updated_at"] != row["created_at"] else {}),
+        }
+        for number, row in enumerate(rows, start=1)
+    ]
+    return document
+
+
+def _current_evaluation(model: str, robot_type: str) -> tuple[Optional[dict], Optional[Path], list]:
+    path = _evaluation_file(model)
+    evaluation = _read_model_evaluation(path, model)
+    if evaluation is None:
+        old_path = _old_evaluation_file(model, robot_type)
+        evaluation = _read_json_document(old_path)
+        if evaluation is not None:
+            _validate_evaluation(evaluation, model)
+        elif not robot_type:
+            evaluation = _legacy_evaluation(model)
+    if evaluation is not None and evaluation["context"].get("robot_type", "") != robot_type:
+        raise HTTPException(409, "This model already has an evaluation for a different robot")
+    return evaluation, path if evaluation is not None else None, (
+        _evaluation_rows(evaluation, model) if evaluation is not None else []
+    )
+
+
+def _read_trials(path: Optional[Path]) -> list:
+    if path is None or not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _write_trials(path: Path, rows: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_TRIAL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def _trial_revision(rows: list) -> str:
+    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+
+
+def _trial_response(path: Optional[Path], rows: list) -> dict:
+    return {"rows": rows, "file": str(path) if path else "", "revision": _trial_revision(rows)}
+
+
+def _check_trial_revision(body: TrialResultRequest, rows: list) -> None:
+    # Deletion renumbers trials, so edits must refer to the snapshot the UI saw.
+    if body.revision != _trial_revision(rows):
+        raise HTTPException(409, "Trial history changed. Refresh and try again.")
+
+
+def _trial_selection(model: str, robot_type: str) -> tuple[str, str]:
+    model = model.strip().rstrip("/")
+    if not model:
+        raise HTTPException(400, "Select a model first")
+    return str(_model_directory(model)), robot_type.strip()
+
+
+@app.get("/try-results")
+def get_trial_results(response: Response, model: str, download: bool = False, robot_type: str = ""):
+    response.headers["Cache-Control"] = "no-store"
+    model, robot_type = _trial_selection(model, robot_type)
+    with _TRIAL_RESULTS_LOCK:
+        _, path, rows = _current_evaluation(model, robot_type)
+    if download:
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=_TRIAL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+        filename = f"{path.stem}.csv" if path else "inference_results.csv"
+        return Response(output.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                 "Cache-Control": "no-store"})
+    return _trial_response(path, rows)
+
+
+@app.post("/try-results")
+def add_trial_result(body: TrialResultRequest):
+    if body.result is None:
+        raise HTTPException(400, "Select success or fail")
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
+    now = datetime.now(_TRIAL_TIMEZONE).isoformat()
+    with _TRIAL_RESULTS_LOCK:
+        evaluation, _, _ = _current_evaluation(model, robot_type)
+        if evaluation is None:
+            evaluation = _new_evaluation(model, robot_type)
+        evaluation["trials"].append({
+            "trial_id": len(evaluation["trials"]) + 1, "result": body.result, "recorded_at": now,
+        })
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
+    return _trial_response(path, rows)
+
+
+@app.patch("/try-results")
+def edit_trial_result(body: TrialResultRequest):
+    if body.trial is None or body.result is None:
+        raise HTTPException(400, "Select a trial and result")
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
+    with _TRIAL_RESULTS_LOCK:
+        evaluation, _, rows = _current_evaluation(model, robot_type)
+        if evaluation is None or body.trial > len(rows):
+            raise HTTPException(404, "Trial not found")
+        _check_trial_revision(body, rows)
+        trial = evaluation["trials"][body.trial - 1]
+        trial.update(result=body.result, updated_at=datetime.now(_TRIAL_TIMEZONE).isoformat())
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
+    return _trial_response(path, rows)
+
+
+@app.delete("/try-results")
+def delete_trial_results(body: TrialResultRequest):
+    if not body.tries or any(number < 1 for number in body.tries):
+        raise HTTPException(400, "Select trials to delete")
+    model, robot_type = _trial_selection(body.model, body.robot_type)
+    path = _evaluation_file(model)
+    targets = set(body.tries)
+    with _TRIAL_RESULTS_LOCK:
+        evaluation, _, rows = _current_evaluation(model, robot_type)
+        if evaluation is None:
+            raise HTTPException(404, "Model history not found")
+        _check_trial_revision(body, rows)
+        if not targets.intersection(range(1, len(rows) + 1)):
+            return _trial_response(path, rows)
+        evaluation["trials"] = [
+            trial for number, trial in enumerate(evaluation["trials"], start=1)
+            if number not in targets
+        ]
+        _number_trials(evaluation)
+        _write_evaluation(path, evaluation)
+        rows = _evaluation_rows(evaluation, model)
+    return _trial_response(path, rows)
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     container = os.environ.get("HOSTNAME", "unknown")
     s6_ready = os.path.isdir("/run/service")
     return HealthResponse(ok=True, container=container, s6_ready=s6_ready)
+
+
+@app.get("/policies/catalog")
+async def policy_catalog() -> dict:
+    """Return the validated policy/runtime catalog used by this process."""
+    return _POLICY_CATALOG
 
 
 @app.get("/workspace", response_model=WorkspaceMountResponse)
@@ -1263,18 +1828,17 @@ async def service_stop(name: str) -> ActionResult:
 
 
 # -- Backend container endpoints — PLAN §4.8 -----------------------------------
-# Hybrid wiring (matches PLAN §4.8 example):
-#   - pull   → docker-py client.api.pull(stream=True), SSE per layer
-#   - start  → leave an existing running container alone, start an existing
+# Worker builds are explicit and never start/recreate a container.
+#   - build  → shared container.sh build-policy, background job with status/logs
+#   - start  → keep an existing running container, start an existing
 #              stopped container, or 'docker compose up -d --no-build
-#              <service>' when the container does not exist.
+#              <service>' when the container does not exist. No build is
+#              attempted by ON; build a missing image first.
 #   - stop   → docker-py container.stop(), keeping the container for reuse.
 #   - restart → hard reset an existing backend, or create/start it when absent.
 #   - status → docker-py images.get + containers.get
 #
-# Start/restart preserve the Inference UI's explicit Pull flow by default.
-# Callers such as task actions may opt into auto_provision=true, which tries
-# the allowlisted registry image first and the allowlisted compose build second.
+# UI and BT callers share the same explicit Build and guarded lifecycle paths.
 
 
 @app.get("/backends/groot/trt/status", response_model=TrtEngineStatus)
@@ -1300,8 +1864,12 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
     if not os.path.isdir(model):
         raise HTTPException(404, f"model_path does not exist: {model}")
 
-    spec = _require_known_backend("groot")
-    await asyncio.to_thread(_assert_backend_container_running, "groot", spec)
+    spec = _require_known_backend(_GROOT_BACKEND_ID)
+    await asyncio.to_thread(
+        _assert_backend_container_running,
+        _GROOT_BACKEND_ID,
+        spec,
+    )
 
     current = _trt_status(model, engine)
     if current.status == "ready" and not request.force:
@@ -1320,73 +1888,74 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
 
 
 @app.post("/backends/{name}/pull")
-async def backend_pull(name: str) -> StreamingResponse:
+async def backend_pull(name: str):
+    _require_known_backend(name)
+    raise HTTPException(410, "Worker images are built locally. Use the Build action.")
+
+
+def _worker_build_command(name: str) -> list[str]:
+    _require_known_backend(name)
+    root = Path(_CYCLO_REPO_MOUNT).resolve()
+    script = root / "docker/container.sh"
+    if not script.is_file() or not (root / ".git").exists():
+        raise HTTPException(409, "Worker builds require the full Cyclo Git checkout mounted in the Cyclo container.")
+    return ["bash", str(script), "build-policy", name]
+
+
+@app.post("/backends/{name}/build", status_code=202)
+async def backend_build(name: str):
     spec = _require_known_backend(name)
-    image = spec["image"]
+    command = _worker_build_command(name)
+    env = os.environ.copy()
+    env["CYCLO_EXPECTED_WORKER_IMAGE"] = spec["image"]
+    builds = _WORKER_BUILDS
 
-    def generate():
+    def start():
+        # Keep acquisition and ownership transfer together even if HTTP is cancelled.
+        token = _begin_worker_mutation(name)
         try:
-            client = _docker_client()
-        except DockerException as e:
-            payload = json.dumps({"message": f"docker init failed: {e}"})
-            yield f"event: error\ndata: {payload}\n\n"
-            return
-
-        try:
-            for chunk in client.api.pull(image, stream=True, decode=True):
-                yield f"data: {json.dumps(chunk)}\n\n"
-        except DockerException as e:
-            payload = json.dumps({"image": image, "message": str(e)})
-            yield f"event: error\ndata: {payload}\n\n"
-            return
-
-        # Verify the image is actually present after the pull stream ends —
-        # the daemon sometimes ends the stream on a 'manifest unknown' error
-        # without raising on the iterator side.
-        try:
-            client.images.get(image)
-            done = json.dumps({"image": image, "ok": True})
-            yield f"event: done\ndata: {done}\n\n"
-        except ImageNotFound:
-            payload = json.dumps(
-                {"image": image, "message": "pull stream ended but image missing"}
+            return builds.start(
+                name, command, env,
+                lambda: _docker_client().images.get(spec["image"]),
+                lambda: _end_worker_mutation(name, token),
             )
-            yield f"event: error\ndata: {payload}\n\n"
+        except Exception as exc:
+            _end_worker_mutation(name, token)
+            raise HTTPException(409, str(exc)) from exc
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return await asyncio.to_thread(start)
+
+
+@app.get("/backends/{name}/build")
+async def backend_build_status(name: str):
+    _require_known_backend(name)
+    return _WORKER_BUILDS.status(name)
 
 
 @app.post("/backends/{name}/start", response_model=ActionResult)
-async def backend_start(
-    name: str,
-    auto_provision: bool = False,
-) -> ActionResult:
+async def backend_start(name: str) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(
-        name,
-        spec,
-        restart_existing=False,
-        auto_provision=auto_provision,
-    )
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
+    try:
+        return await _ensure_backend_running(name, spec, restart_running=False)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/restart", response_model=ActionResult)
-async def backend_restart(
-    name: str,
-    auto_provision: bool = False,
-) -> ActionResult:
+async def backend_restart(name: str) -> ActionResult:
     spec = _require_known_backend(name)
-    return await _ensure_backend_running(
-        name,
-        spec,
-        restart_existing=True,
-        auto_provision=auto_provision,
-    )
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
+    try:
+        return await _ensure_backend_running(name, spec, restart_running=True)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/recreate", response_model=ActionResult)
 async def backend_recreate(name: str) -> ActionResult:
     spec = _require_known_backend(name)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
 
     def _remove_existing() -> tuple[str, str]:
         try:
@@ -1399,7 +1968,7 @@ async def backend_recreate(name: str) -> ActionResult:
             raise HTTPException(
                 409,
                 f"No local image for {name}. Expected one of: {images}. "
-                f"Connect internet and call /backends/{name}/pull first.",
+                f"Build the Worker image with /backends/{name}/build first.",
             )
         try:
             ctr = client.containers.get(spec["container"])
@@ -1415,22 +1984,26 @@ async def backend_recreate(name: str) -> ActionResult:
                 raise HTTPException(500, f"remove failed: {e}")
         return local_image, removed
 
-    local_image, removed = await asyncio.to_thread(_remove_existing)
-    cmd = _compose_base_cmd() + ["create", "--no-build", spec["service"]]
-    result = await _run(*cmd, timeout=60.0, env=_compose_env())
-    ok = result.rc == 0
-    msg = result.stderr or result.stdout or f"rc={result.rc}"
-    if ok:
-        msg = (
-            f"{spec['container']} recreated from {local_image} "
-            f"({removed}). {msg}"
-        )
-    return ActionResult(ok=ok, message=msg)
+    try:
+        local_image, removed = await asyncio.to_thread(_remove_existing)
+        cmd = _compose_base_cmd() + ["create", "--no-build", "--pull", "never", spec["service"]]
+        result = await _run(*cmd, timeout=60.0, env=_compose_env())
+        ok = result.rc == 0
+        msg = result.stderr or result.stdout or f"rc={result.rc}"
+        if ok:
+            msg = (
+                f"{spec['container']} recreated from {local_image} "
+                f"({removed}). {msg}"
+            )
+        return ActionResult(ok=ok, message=msg)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 @app.post("/backends/{name}/stop", response_model=ActionResult)
 async def backend_stop(name: str) -> ActionResult:
     spec = _require_known_backend(name)
+    token = await asyncio.to_thread(_begin_worker_mutation, name)
     container_name = spec["container"]
 
     def _stop_existing() -> tuple[bool, str]:
@@ -1456,155 +2029,23 @@ async def backend_stop(name: str) -> ActionResult:
         except DockerException as e:
             return False, f"stop failed: {e}"
 
-    ok, msg = await asyncio.to_thread(_stop_existing)
-    return ActionResult(ok=ok, message=msg)
-
-
-def _pull_backend_image_for_provision(
-    client: docker.DockerClient,
-    spec: Dict[str, str],
-) -> str:
-    """Pull and verify the exact allowlisted image for an auto-provision call."""
-    image = spec["image"]
     try:
-        for chunk in client.api.pull(image, stream=True, decode=True):
-            if not isinstance(chunk, dict):
-                continue
-            detail = chunk.get("errorDetail") or {}
-            detail_message = (
-                detail.get("message") if isinstance(detail, dict) else str(detail)
-            )
-            error = chunk.get("error") or detail_message
-            if error:
-                raise DockerException(str(error))
-    except DockerException:
-        raise
-    except Exception as e:
-        raise DockerException(str(e)) from e
-
-    local_image = _local_backend_image(client, spec)
-    if not local_image:
-        raise DockerException(
-            f"pull stream ended but expected image is still missing: {image}"
-        )
-    return local_image
-
-
-async def _auto_provision_backend_image(
-    name: str,
-    spec: Dict[str, str],
-) -> tuple[str, str]:
-    """Install an allowlisted backend image by pull, then compose build."""
-    spec = _require_allowlisted_backend_spec(name, spec)
-    pull_error = ""
-    try:
-        client = _docker_client()
-        local_image = await asyncio.to_thread(
-            _pull_backend_image_for_provision,
-            client,
-            spec,
-        )
-        return local_image, "registry pull"
-    except Exception as e:
-        pull_error = str(e) or type(e).__name__
-        logger.warning(
-            "backend %s registry pull failed; trying local build: %s",
-            name,
-            pull_error,
-        )
-
-    cmd = _compose_base_cmd() + ["build", spec["service"]]
-    try:
-        result = await _run(
-            *cmd,
-            timeout=_BACKEND_BUILD_TIMEOUT_SEC,
-            env=_compose_env(),
-        )
-    except Exception as e:
-        build_error = str(getattr(e, "detail", e)) or type(e).__name__
-        raise HTTPException(
-            502,
-            f"Auto-provision failed for {name}: registry pull failed: "
-            f"{pull_error}; local build failed: {build_error}",
-        ) from e
-
-    build_output = result.stderr or result.stdout or f"rc={result.rc}"
-    if result.rc != 0:
-        raise HTTPException(
-            502,
-            f"Auto-provision failed for {name}: registry pull failed: "
-            f"{pull_error}; local build failed (rc={result.rc}): "
-            f"{build_output}",
-        )
-
-    try:
-        local_image = await asyncio.to_thread(
-            lambda: _local_backend_image(_docker_client(), spec)
-        )
-    except DockerException as e:
-        raise HTTPException(
-            502,
-            f"Auto-provision failed for {name}: registry pull failed: "
-            f"{pull_error}; local build completed but image verification "
-            f"failed: {e}",
-        ) from e
-    if not local_image:
-        raise HTTPException(
-            502,
-            f"Auto-provision failed for {name}: registry pull failed: "
-            f"{pull_error}; local build completed but expected image is "
-            f"missing: {spec['image']}",
-        )
-    return local_image, f"local build after registry pull failed ({pull_error})"
+        ok, msg = await asyncio.to_thread(_stop_existing)
+        return ActionResult(ok=ok, message=msg)
+    finally:
+        await asyncio.to_thread(_end_worker_mutation, name, token)
 
 
 async def _ensure_backend_running(
     name: str,
     spec: Dict[str, str],
     *,
-    restart_existing: bool = False,
-    auto_provision: bool = False,
+    restart_running: bool,
 ) -> ActionResult:
-    """Start an allowlisted backend, optionally provisioning its image."""
+    """Start a policy backend without building it."""
 
     spec = _require_allowlisted_backend_spec(name, spec)
-    async with _backend_lifecycle_lock(name):
-        return await _ensure_backend_running_locked(
-            name,
-            spec,
-            restart_existing=restart_existing,
-            auto_provision=auto_provision,
-        )
-
-
-async def _ensure_backend_running_locked(
-    name: str,
-    spec: Dict[str, str],
-    *,
-    restart_existing: bool = False,
-    auto_provision: bool = False,
-) -> ActionResult:
-    """Run one serialized backend start/restart lifecycle operation."""
     container_name = spec["container"]
-
-    def _find_local_image() -> Optional[str]:
-        try:
-            return _local_backend_image(_docker_client(), spec)
-        except DockerException:
-            return None
-
-    # Opt-in callers asked for the current allowlisted image, even if an older
-    # or untagged container still exists. Provision before stale-container
-    # inspection so an image-ID mismatch triggers a clean compose recreation.
-    local_image = None
-    provision_source = "local image"
-    if auto_provision:
-        local_image = await asyncio.to_thread(_find_local_image)
-        if not local_image:
-            local_image, provision_source = await _auto_provision_backend_image(
-                name,
-                spec,
-            )
 
     def _start_or_restart_existing() -> tuple[Optional[bool], str]:
         try:
@@ -1635,7 +2076,7 @@ async def _ensure_backend_running_locked(
                 ctr.unpause()
                 state = "running"
             if state == "running":
-                if restart_existing:
+                if restart_running:
                     ctr.restart(timeout=10)
                     return True, f"{container_name} restarted"
                 return True, f"{container_name} already running"
@@ -1649,36 +2090,25 @@ async def _ensure_backend_running_locked(
         return ActionResult(ok=handled, message=msg)
     compose_reason = msg
 
-    # Container is absent or stale. Pre-flight the image so compose up never
-    # starts an implicit pull/build path from a normal Inference UI ON click.
-    if not local_image:
-        local_image = await asyncio.to_thread(_find_local_image)
-    if not local_image:
-        if auto_provision:
-            local_image, provision_source = await _auto_provision_backend_image(
-                name,
-                spec,
-            )
-        else:
-            images = ", ".join(_backend_image_candidates(spec))
-            raise HTTPException(
-                409,
-                f"No local image for {name}. Expected one of: {images}. "
-                f"Connect internet and call /backends/{name}/pull first, or "
-                "retry start/restart with auto_provision=true.",
-            )
+    # Container is absent. Pre-flight the image so compose up never starts an
+    # implicit pull/build path from a simple ON click.
+    def _find_local_image() -> Optional[str]:
+        try:
+            return _local_backend_image(_docker_client(), spec)
+        except DockerException:
+            return None
 
-    cmd = _compose_base_cmd() + ["up", "-d", "--no-build", spec["service"]]
-    try:
-        result = await _run(*cmd, timeout=60.0, env=_compose_env())
-    except Exception as e:
-        detail = str(getattr(e, "detail", e)) or type(e).__name__
-        status_code = getattr(e, "status_code", 502)
+    local_image = await asyncio.to_thread(_find_local_image)
+    if not local_image:
+        images = ", ".join(_backend_image_candidates(spec))
         raise HTTPException(
-            status_code,
-            f"{spec['container']} create/start failed using "
-            f"{provision_source} {local_image}: {detail}",
-        ) from e
+            409,
+            f"No local image for {name}. Expected one of: {images}. "
+            f"Build the Worker image with /backends/{name}/build first.",
+        )
+
+    cmd = _compose_base_cmd() + ["up", "-d", "--no-build", "--pull", "never", spec["service"]]
+    result = await _run(*cmd, timeout=60.0, env=_compose_env())
     ok = result.rc == 0
     msg = result.stderr or result.stdout or f"rc={result.rc}"
     if ok:
@@ -1687,12 +2117,7 @@ async def _ensure_backend_running_locked(
             reason = f" after recreating stale container ({compose_reason})"
         msg = (
             f"{spec['container']} created/started{reason} "
-            f"using {provision_source} {local_image}. {msg}"
-        )
-    else:
-        msg = (
-            f"{spec['container']} create/start failed using "
-            f"{provision_source} {local_image} (rc={result.rc}): {msg}"
+            f"using local image {local_image}. {msg}"
         )
     return ActionResult(ok=ok, message=msg)
 
@@ -1736,11 +2161,48 @@ async def backend_status(name: str) -> BackendStatus:
             mapped = "exited"
         else:
             mapped = "unknown"
-        service_names = spec.get("services", ["main-runtime", "engine-process"])
+        service_names = spec.get("services", ["engine-process"])
         services = _backend_service_statuses(ctr, raw, service_names)
         return pulled, image_status, mapped, ctr.id, raw, services
 
     pulled, image_status, container_state, container_id, raw, services = await asyncio.to_thread(_inspect)
+    worker_compatible: Optional[bool] = None
+    worker_message = ""
+    worker_readiness = None
+    if container_state == "running" and all(
+        service.state == "up" for service in services
+    ):
+        try:
+            worker = await asyncio.to_thread(
+                _runtime_control_request,
+                {"operation": "worker_status", "runtime_id": name},
+            )
+            heartbeat_age = worker.get("heartbeat_age_s")
+            timeout_s = float(os.environ.get("WORKER_HEARTBEAT_TIMEOUT_S", "2.0"))
+            if worker.get("readiness") in ("waiting", "error"):
+                worker_compatible = False
+                worker_readiness = worker["readiness"]
+                worker_message = worker["message"]
+            elif heartbeat_age is None:
+                worker_compatible = False
+                worker_message = "Worker heartbeat has not been received"
+            elif float(heartbeat_age) > timeout_s:
+                worker_compatible = False
+                worker_message = f"Worker heartbeat is stale ({heartbeat_age:.2f}s)"
+            else:
+                worker_compatible = True
+                worker_message = (
+                    f"Protocol {worker.get('protocol_version', '')}; "
+                    f"state {worker.get('engine_state', '')}"
+                )
+        except PolicyRuntimeUnavailable as exc:
+            worker_compatible = False
+            worker_readiness = "waiting"
+            worker_message = str(exc)
+        except Exception as exc:
+            worker_compatible = False
+            worker_readiness = "error"
+            worker_message = str(exc)
     return BackendStatus(
         name=name,
         image=spec["image"],
@@ -1750,4 +2212,8 @@ async def backend_status(name: str) -> BackendStatus:
         container_id=container_id,
         raw_state=raw,
         services=services,
+        worker_compatible=worker_compatible,
+        worker_message=worker_message,
+        worker_readiness=worker_readiness,
+        build=_WORKER_BUILDS.status(name),
     )

@@ -1,5 +1,5 @@
 #!/command/with-contenv bash
-# cyclo_intelligence service — bring up orchestrator + cyclo_data in
+# cyclo_intelligence service — bring up Policy Runtime + orchestrator + cyclo_data in
 # a single launch. Used as the default unit cyclo_manager / s6-agent
 # starts and stops; the per-component services (orchestrator,
 # cyclo_data) are kept for debugging when only one half is wanted.
