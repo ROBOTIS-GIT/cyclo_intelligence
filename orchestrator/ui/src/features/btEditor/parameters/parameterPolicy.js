@@ -24,7 +24,7 @@ export const NUMBER_PARAMS = new Set([
   'duration', 'angle_deg', 'lift_position', 'control_hz', 'inference_hz',
   'chunk_align_window_s', 'max_iterations', 'joint_threshold',
   'gripper_closed_value', 'gripper_open_value', 'gripper_threshold',
-  'timeout_sec',
+  'timeout_sec', 'ttrtc_prefix_steps',
 ]);
 
 // Per-param helper text shown beneath the input. Keep these short — they
@@ -35,7 +35,9 @@ export const HELP_TEXT = {
   initial_pose_sync: 'Align to the first predicted pose before RESUME. Enabled by default for robot output.',
   initial_pose_sync_duration_s: 'Pose alignment duration in seconds (1–60).',
   vla_rail_enabled: 'VLA-RAIL cubic smoothing and dual-quintic transitions for ordinary GR00T Async. Off by default.',
-  control_hz: 'Sync only. Async and VLA-RAIL publish at inference_hz.',
+  ttrtc_enabled: 'Requires a TT-RTC trained checkpoint. Async at 15 Hz with PyTorch; executes 24 new actions from the trained 32-action horizon. First inference uses no prefix.',
+  ttrtc_prefix_steps: 'Queued actions retained during inference (0–8). Default: 7. The initial request always uses 0.',
+  control_hz: 'Sync only. Async, VLA-RAIL and TT-RTC publish at inference_hz.',
   max_iterations: '0 = loop forever',
 };
 
@@ -43,6 +45,7 @@ export const HELP_TEXT = {
 export const BOOL_PARAMS = new Set([
   'initial_pose_sync',
   'vla_rail_enabled',
+  'ttrtc_enabled',
   'enable_head',
   'enable_arms',
   'enable_lift',
@@ -52,7 +55,7 @@ export const BOOL_PARAMS = new Set([
 
 // Drop unsupported flags when opening nodes saved by earlier Canvas versions.
 export const RETIRED_INFERENCE_PARAMS = new Set([
-  'ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+  'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
   'chunk_endpoint_interpolation', 'remac_enabled',
 ]);
 
@@ -81,7 +84,8 @@ export function normalizeSendCommandParams(params, nodeType) {
     Object.entries(next).filter(([key]) => key !== 'target' && key !== 'command' && !RETIRED_INFERENCE_PARAMS.has(key)),
   );
   return {
-    target, command, vla_rail_enabled: 'false', initial_pose_sync: 'true',
+    target, command, vla_rail_enabled: 'false', ttrtc_enabled: 'false',
+    ttrtc_prefix_steps: '7', initial_pose_sync: 'true',
     initial_pose_sync_duration_s: '5', ...remaining,
   };
 }
@@ -130,7 +134,8 @@ export function enumOptionsFor(nodeType, key, params) {
 export const SEND_COMMAND_ACTIVE_FIELDS = {
   LOAD: new Set([
     'target', 'command', 'model', 'policy_path', 'task_instruction',
-    'inference_mode', 'action_request_mode', 'vla_rail_enabled', 'inference_hz', 'control_hz',
+    'inference_mode', 'action_request_mode', 'vla_rail_enabled', 'ttrtc_enabled',
+    'ttrtc_prefix_steps', 'inference_hz', 'control_hz',
     'chunk_align_window_s', 'acceleration_mode', 'acceleration_engine_path',
   ]),
   // Resume can re-condition language mid-run; output mode is fixed by LOAD.
@@ -152,8 +157,12 @@ export function isSendCommandFieldDisabled(nodeType, key, params) {
     return !SEND_COMMAND_DOCKER_ACTIVE_FIELDS.has(key);
   }
   if (key === 'control_hz' && String(params.action_request_mode || 'async') === 'async') return true;
-  if (key === 'vla_rail_enabled' && (!String(params.model || '').startsWith('groot')
+  if (['vla_rail_enabled', 'ttrtc_enabled', 'ttrtc_prefix_steps'].includes(key)
+    && (!String(params.model || '').startsWith('groot')
     || String(params.action_request_mode || 'async') !== 'async')) return true;
+  if (key === 'ttrtc_prefix_steps' && !truthy(params.ttrtc_enabled)) return true;
+  if (truthy(params.ttrtc_enabled)
+    && ['inference_hz', 'acceleration_mode', 'acceleration_engine_path', 'chunk_align_window_s'].includes(key)) return true;
   const cmd = String(params.command || 'LOAD').toUpperCase();
   const active = SEND_COMMAND_ACTIVE_FIELDS[cmd];
   if (!active) return false;

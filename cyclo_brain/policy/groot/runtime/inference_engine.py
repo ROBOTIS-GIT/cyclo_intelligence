@@ -317,6 +317,8 @@ class GR00TInference:
         self._sensor_max_skew_s = _env_positive_float("GROOT_SENSOR_MAX_SKEW_S", None)
         self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
         self._loaded_acceleration_engine_path: str = ""
+        self._ttrtc_enabled = False
+        self._ttrtc_prefix_steps = 7
         self.policy_info: dict = {
             "video": [],       # e.g. ["cam_left_head", "cam_left_wrist", ...]
             "state": [],       # e.g. ["arm_left", "arm_right"]
@@ -350,6 +352,7 @@ class GR00TInference:
             acceleration_mode, acceleration_engine_path, strict_acceleration = (
                 self._resolve_acceleration_request(request, model_path)
             )
+            self._validate_ttrtc_load(request, acceleration_mode)
             if acceleration_mode == ACCELERATION_TENSORRT_FULL_PIPELINE:
                 raise RuntimeError(
                     "acceleration_mode=tensorrt_full_pipeline is not wired into "
@@ -373,6 +376,7 @@ class GR00TInference:
                     self.robot.close()
                     self.robot = None
                 self.init_policy_info(model_path)
+                self._validate_ttrtc_processor()
                 self.init_robot_info(robot_type)
                 self._validate_robot_contract()
                 self._wait_for_model_observation(timeout=10.0)
@@ -414,6 +418,7 @@ class GR00TInference:
                 )
 
             self.init_policy_info(model_path)
+            self._validate_ttrtc_processor()
             self.init_robot_info(robot_type)
             self._validate_robot_contract()
             self._wait_for_model_observation(timeout=10.0)
@@ -453,9 +458,116 @@ class GR00TInference:
             self._loaded_model_path = None
             self._loaded_acceleration_mode = ACCELERATION_PYTORCH
             self._loaded_acceleration_engine_path = ""
+            self._ttrtc_enabled = False
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
             return self.fail(message)
+
+    def _validate_ttrtc_load(self, request, acceleration_mode):
+        """Check local checkpoint metadata before allocating a second GPU model."""
+        enabled = bool(getattr(request, "ttrtc_enabled", False))
+        config_path = os.path.join(request.model_path, "config.json")
+        config = {}
+        if os.path.isfile(config_path):
+            with open(config_path, encoding="utf-8") as stream:
+                config = json.load(stream)
+        checkpoint_ttrtc = bool(config.get("training_time_rtc", False))
+        if enabled != checkpoint_ttrtc:
+            raise ValueError("TT-RTC mode must match the checkpoint's training_time_rtc setting")
+        if not enabled:
+            self._ttrtc_enabled = False
+            return
+        if acceleration_mode != ACCELERATION_PYTORCH:
+            raise ValueError("TT-RTC tokenwise timesteps currently require PyTorch acceleration mode")
+        if getattr(request, "vla_rail_enabled", False):
+            raise ValueError("TT-RTC and VLA-RAIL cannot be enabled together")
+        prefix_steps = getattr(request, "ttrtc_prefix_steps", 7)
+        if (isinstance(prefix_steps, bool) or not isinstance(prefix_steps, (int, np.integer))
+                or not 0 <= prefix_steps <= 8):
+            raise ValueError("ttrtc_prefix_steps must be an integer from 0 to 8")
+        if self._requested_chunk_size not in (0, 32):
+            raise ValueError("TT-RTC requires action_chunk_size=0 (model default) or 32")
+        expected = {"logical_action_horizon": 32, "logical_action_dim": 16,
+                    "action_horizon": 40, "max_action_dim": 132,
+                    "state_history_length": 1, "tt_rtc_max_delay_steps": 8,
+                    "tt_rtc_min_postfix_steps": 24, "num_timestep_buckets": 1000,
+                    "num_inference_timesteps": 4}
+        # Hugging Face can omit unchanged Gr00tN1d7Config defaults from JSON.
+        # Custom TT-RTC fields above still have to be explicitly present.
+        defaults = {"action_horizon": 40, "max_action_dim": 132,
+                    "state_history_length": 1, "num_timestep_buckets": 1000,
+                    "num_inference_timesteps": 4}
+        for key, value in expected.items():
+            if config.get(key, defaults.get(key)) != value:
+                raise ValueError(f"TT-RTC requires checkpoint {key}={value}")
+        manifest_path = os.path.join(request.model_path, "experiment_cfg", "tt_rtc_training_manifest.json")
+        with open(manifest_path, encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        mock_checkpoint = config.get("mock_checkpoint", False)
+        if (not isinstance(mock_checkpoint, bool)
+                or manifest.get("mock_checkpoint", False) is not mock_checkpoint):
+            raise ValueError("TT-RTC mock markers must agree in config and manifest")
+        if mock_checkpoint:
+            if (manifest.get("trained") is not False or manifest.get("step") != 0
+                    or manifest.get("complete") is not False):
+                raise ValueError("TT-RTC mock manifest must declare trained=false, step=0, complete=false")
+        elif manifest.get("trained") is not True:
+            raise ValueError("TT-RTC training manifest must declare trained=true")
+        contract = manifest.get("inference_contract", {})
+        if (manifest.get("schema") != "cyclo.tt-rtc-training/v1"
+                or not manifest.get("training_time_rtc")
+                or manifest.get("prefix_choices") != list(range(9))
+                or manifest.get("normalization") != "train-only-min-max-clipped"
+                or contract.get("action_fps") != 15
+                or contract.get("num_inference_timesteps") != 4
+                or contract.get("prefix_coordinates") != "normalized-logical"
+                or contract.get("first_prefix_length") != 0):
+            raise ValueError("Unsupported or missing TT-RTC training manifest contract")
+        if mock_checkpoint:
+            self.logger.warning("Loading TT-RTC mock checkpoint (0 TT-RTC training steps): %s",
+                                request.model_path)
+        self._ttrtc_enabled = True
+        self._ttrtc_prefix_steps = int(prefix_steps)
+
+    def _validate_ttrtc_processor(self):
+        if not self._ttrtc_enabled:
+            return
+        trained_keys = list(self.policy.modality_configs["action"].modality_keys)
+        processor = self.policy.processor.state_action_processor
+        action_config = self.policy.modality_configs["action"]
+        action_representations = [getattr(item.rep, "value", item.rep)
+                                  for item in (action_config.action_configs or [])]
+        if (set(self.policy_info["action"]) != set(trained_keys)
+                or sum(self._model_modality_dim("action", key) for key in trained_keys) != 16
+                or self._modality_horizon("action") != 32
+                or processor.use_percentiles or processor.use_relative_action
+                or not processor.clip_outliers or action_config.mean_std_embedding_keys
+                or any(str(value).lower() != "absolute" for value in action_representations)):
+            raise ValueError("TT-RTC requires full 16D absolute actions, H32 and checkpoint min/max clipping")
+
+    def _ttrtc_options(self, request):
+        enabled = bool(getattr(request, "ttrtc_enabled", False))
+        if enabled != self._ttrtc_enabled:
+            raise ValueError("Inference request TT-RTC mode differs from the loaded model mode")
+        if not enabled:
+            if (getattr(request, "ttrtc_prefix_steps", 0)
+                    or len(getattr(request, "ttrtc_prefix_actions", []))):
+                raise ValueError("TT-RTC prefix requires TT-RTC execution mode")
+            return None
+        steps = getattr(request, "ttrtc_prefix_steps", 0)
+        if (isinstance(steps, bool) or not isinstance(steps, (int, np.integer))
+                or not 0 <= steps <= self._ttrtc_prefix_steps):
+            raise ValueError("TT-RTC prefix length exceeds the configured 0..8 range")
+        values = np.asarray(getattr(request, "ttrtc_prefix_actions", []), dtype=np.float32)
+        if values.ndim != 1 or values.size != steps * 16 or not np.isfinite(values).all():
+            raise ValueError("TT-RTC prefix must be a finite flattened d x 16 physical action array")
+        values = values.reshape(1, steps, 16)
+        prefix, offset = {}, 0
+        for key in self.policy_info["action"]:
+            dim = self._model_modality_dim("action", key)
+            prefix[key] = values[:, :, offset:offset + dim]
+            offset += dim
+        return {"ttrtc_enabled": True, "ttrtc_prefix_actions": prefix}
 
 
     @staticmethod
@@ -904,12 +1016,13 @@ class GR00TInference:
             time.sleep(min(0.1, remaining))
 
     def get_action_chunk(self, request) -> dict:
-        """Build the sensor observation and run standard GR00T inference."""
+        """Build an observation and run standard or clean-prefix GR00T inference."""
         if not self.is_ready:
             return self.fail("Not in inference mode")
 
         timing = {}
         try:
+            options = self._ttrtc_options(request)
             task = request.task_instruction
             self._wait_for_subtask_observation(task)
             preprocess_started = time.monotonic()
@@ -922,8 +1035,11 @@ class GR00TInference:
 
             t0 = time.monotonic()
             self.logger.info("Running GR00T inference...")
-            action, _info = self.policy.get_action(observation)
-            timing["mode"] = "standard"
+            if options is None:
+                action, _info = self.policy.get_action(observation)
+            else:
+                action, _info = self.policy.get_action(observation, options=options)
+            timing["mode"] = "ttrtc" if options else "standard"
             timing["policy_duration_s"] = time.monotonic() - t0
             self.logger.info("GR00T inference completed in %.3fs", timing["policy_duration_s"])
             result = self.postprocess_action(action)

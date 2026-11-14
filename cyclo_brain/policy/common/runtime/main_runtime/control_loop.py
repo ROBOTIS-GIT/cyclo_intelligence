@@ -37,6 +37,7 @@ from robot_client import RobotClient  # noqa: E402
 from .confirmed_hold import hold_current_pose
 from .latency_trace import AsyncLatencyTrace, BufferedActionTrace
 from .rail_execution import RailExecution
+from .ttrtc_execution import TtrtcExecution
 from .rail_kinematics import RailKinematics
 from .latest_preview import LatestPreview
 from .rail_trajectory import validate_rail_keys
@@ -151,6 +152,7 @@ class ControlLoop:
         self._buffer_trace = BufferedActionTrace(self._trace)
         self._trace_request_count = 0
         self._rail = None
+        self._ttrtc = None
         self._preview = LatestPreview()
 
     def configure(
@@ -161,6 +163,8 @@ class ControlLoop:
         publish_to_robot: bool = False,
         action_request_mode: Optional[str] = None,
         vla_rail_enabled: bool = False,
+        ttrtc_enabled: bool = False,
+        ttrtc_prefix_steps: int = 7,
         control_hz: Optional[float] = None,
         inference_hz: Optional[float] = None,
         chunk_align_window_s: Optional[float] = None,
@@ -181,7 +185,7 @@ class ControlLoop:
                 control_hz, self._default_control_hz
             )
             self._inference_hz = positive_finite_or_default(
-                inference_hz, self._default_inference_hz
+                inference_hz, 15. if ttrtc_enabled else self._default_inference_hz
             )
             self._chunk_align_window_s = positive_finite_or_default(
                 chunk_align_window_s, self._default_chunk_align_window_s
@@ -192,6 +196,18 @@ class ControlLoop:
                 else self._default_action_request_mode
             )
             self._rail = None
+            self._ttrtc = None
+            if ttrtc_enabled:
+                if self._action_request_mode != ACTION_REQUEST_MODE_ASYNC:
+                    raise ValueError('TT-RTC requires asynchronous action requests')
+                if vla_rail_enabled:
+                    raise ValueError('TT-RTC and VLA-RAIL cannot be enabled together')
+                if self._target_chunk_size not in (None, 32) or per_step_actions:
+                    raise ValueError('TT-RTC requires the original GR00T policy horizon')
+                self._ttrtc = TtrtcExecution(
+                    self._requester, self._lock, self._trace,
+                    policy_hz=self._inference_hz, prefix_steps=ttrtc_prefix_steps,
+                )
             if vla_rail_enabled:
                 if self._action_request_mode != ACTION_REQUEST_MODE_ASYNC:
                     raise ValueError("VLA-RAIL requires asynchronous action requests")
@@ -251,7 +267,7 @@ class ControlLoop:
                 self._rail.reset(self._inference_hz)
             config_message = (
                 "configured RobotClient command path for %s "
-                "(publish_to_robot=%s action_request_mode=%s vla_rail=%s "
+                "(publish_to_robot=%s action_request_mode=%s vla_rail=%s ttrtc=%s "
                 "control_hz=%g inference_hz=%g chunk_align_window_s=%g output_hz=%g "
                 "initial_pose_sync=%s initial_pose_sync_duration_s=%g)"
                 % (
@@ -259,6 +275,7 @@ class ControlLoop:
                     self._publish_to_robot,
                     self._action_request_mode,
                     self._rail is not None,
+                    self._ttrtc is not None,
                     self._control_hz,
                     self._inference_hz,
                     self._chunk_align_window_s,
@@ -294,6 +311,8 @@ class ControlLoop:
             self._preview.reset()
             if self._rail:
                 self._rail.reset(self._inference_hz)
+            if self._ttrtc:
+                self._ttrtc.reset()
             if self._robot is not None:
                 self._robot.close()
                 self._robot = None
@@ -352,7 +371,10 @@ class ControlLoop:
         timing = {}
         status = "ok"
         try:
-            response = self._requester.get_action(task_instruction)
+            response = self._requester.get_action(
+                task_instruction,
+                **({'ttrtc_prefix_actions': np.empty((0, 16))} if self._ttrtc else {}),
+            )
             try:
                 timing = json.loads(getattr(response, "timing_json", "") or "{}")
                 if not isinstance(timing, dict):
@@ -362,6 +384,8 @@ class ControlLoop:
             if not response.success:
                 status = "timeout" if timing.get("status") == "timeout" else "error"
             chunk = self._decode_action_response(response)
+            if self._ttrtc and chunk.shape != (32, 16):
+                raise ValueError('TT-RTC response must have logical shape [32, 16]')
         except Exception as exc:
             if status == "ok":
                 status = "timeout" if isinstance(exc, TimeoutError) else "error"
@@ -381,6 +405,8 @@ class ControlLoop:
             ):
                 raise RuntimeError("initial pose sync cancelled")
             processor.clear()
+            if self._ttrtc:
+                self._ttrtc.reset()
             self._buffer_trace.reset(time.monotonic())
             try:
                 robot.publish_initial_pose_sync(
@@ -433,6 +459,8 @@ class ControlLoop:
             self._preview.reset()
             if self._rail:
                 self._rail.reset(self._inference_hz)
+            if self._ttrtc:
+                self._ttrtc.reset()
             if should_hold:
                 self._initial_pose_sync_hold_pending = True
             else:
@@ -486,14 +514,19 @@ class ControlLoop:
         self._preview.reset()
         if self._rail:
             self._rail.reset(self._inference_hz)
+        if self._ttrtc:
+            self._ttrtc.reset()
 
     def set_task_instruction(self, task_instruction: str) -> None:
         with self._lock:
             updated = task_instruction or ""
-            if self._rail and updated != self._task_instruction:
+            if (self._rail or self._ttrtc) and updated != self._task_instruction:
                 self._generation += 1
                 self._preview.reset()
-                self._rail.reset(self._inference_hz)
+                if self._rail:
+                    self._rail.reset(self._inference_hz)
+                if self._ttrtc:
+                    self._ttrtc.reset()
             self._task_instruction = updated
 
     def transition_subtask(self, task_instruction: str) -> None:
@@ -515,6 +548,8 @@ class ControlLoop:
             self._buffer_trace.reset(time.monotonic())
             if self._rail:
                 self._rail.reset(self._inference_hz)
+            if self._ttrtc:
+                self._ttrtc.reset()
             self._reset_request_latency_locked()
             if self._publish_to_robot:
                 try:
@@ -623,12 +658,14 @@ class ControlLoop:
                     logger.error('VLA-RAIL output rejected; stopping: %s', exc)
                     threading.Thread(target=self.pause, kwargs={'expected_generation': generation}, daemon=True).start()
                     return
+            elif self._ttrtc:
+                action = self._ttrtc.tick(time.monotonic(), task_instruction, action_keys, generation)
             else:
                 action = processor.pop_action()
                 self._buffer_trace.popped(action is not None, time.monotonic(), generation)
             if action is not None:
                 preview = getattr(robot, "publish_action_preview", None)
-                if executor:
+                if executor or self._ttrtc:
                     rail_preview = (preview, action.copy(), action_keys)
                 elif callable(preview):
                     try:
@@ -645,11 +682,14 @@ class ControlLoop:
                         if executor:
                             executor.record_command(action_sample_time, generation,
                                                        published_at=time.monotonic(), action=action)
+                        elif self._ttrtc:
+                            self._trace.emit('command_published', mode='ttrtc', generation=generation,
+                                             published_monotonic_s=time.monotonic())
                         else:
                             self._buffer_trace.published()
                     except Exception as e:
                         logger.error("failed to publish robot action: %s", e)
-                        if executor:
+                        if executor or self._ttrtc:
                             self._running = False
                             self._initial_pose_sync_hold_pending = True
                             self._trace.emit("command_publish_failed", generation=generation, error=str(e))
@@ -663,7 +703,7 @@ class ControlLoop:
                     except Exception as e:
                         logger.error("failed to publish idle robot action: %s", e)
 
-            should_request = not executor and self._should_request_actions(processor)
+            should_request = not executor and self._ttrtc is None and self._should_request_actions(processor)
 
             # One worker keeps only the latest preview. Slow UI serialization
             # cannot delay the next hardware command or accumulate old poses.
@@ -862,6 +902,8 @@ class ControlLoop:
         with self._lock:
             if self._rail is not None:
                 return self._rail.output_dt
+            if self._ttrtc is not None:
+                return self._ttrtc.output_dt
             elif self._processor is None:
                 hz = self._control_hz
             else:

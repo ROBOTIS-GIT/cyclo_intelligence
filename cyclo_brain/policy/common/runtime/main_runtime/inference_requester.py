@@ -12,6 +12,7 @@ import json
 import threading
 import time
 from typing import Any
+import numpy as np
 
 from engine_process.protocol import (
     CMD_GET_ACTION,
@@ -61,6 +62,8 @@ class InferenceRequester:
                 getattr(request, "acceleration_engine_path", "") or ""
             ),
             action_chunk_size=getattr(request, "action_chunk_size", 0),
+            ttrtc_enabled=bool(getattr(request, "ttrtc_enabled", False)),
+            ttrtc_prefix_steps=getattr(request, "ttrtc_prefix_steps", 7),
         )
         return self._call(
             engine_request,
@@ -68,8 +71,15 @@ class InferenceRequester:
         )
 
     def get_action(
-        self, task_instruction: str, timeout_s: float | None = None
+        self, task_instruction: str, timeout_s: float | None = None, *,
+        ttrtc_prefix_actions=None,
     ) -> EngineCommandResponse:
+        prefix = None
+        if ttrtc_prefix_actions is not None:
+            prefix = np.asarray(ttrtc_prefix_actions, dtype=np.float64)
+            if (prefix.ndim != 2 or prefix.shape[1] != 16 or len(prefix) > 8
+                    or not np.isfinite(prefix).all()):
+                raise ValueError('TT-RTC prefix must be finite [0..8, 16] physical actions')
         with self._lock:
             if self._get_action_in_flight:
                 return EngineCommandResponse(
@@ -83,6 +93,9 @@ class InferenceRequester:
             command=CMD_GET_ACTION,
             seq_id=seq_id,
             task_instruction=task_instruction or "",
+            ttrtc_enabled=prefix is not None,
+            ttrtc_prefix_steps=len(prefix) if prefix is not None else 0,
+            ttrtc_prefix_actions=prefix.ravel().tolist() if prefix is not None else [],
         )
         try:
             return self._call(

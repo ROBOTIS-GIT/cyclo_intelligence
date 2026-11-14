@@ -321,7 +321,7 @@ class SendCommand(BaseAction):
         command = params.get('command', 'LOAD')
         command_str = str(command or '').strip().upper()
         # Reject enabled retired flags in raw XML; re-saving a Canvas node removes them.
-        retired = ('ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+        retired = ('ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
                    'chunk_endpoint_interpolation', 'remac_enabled')
         enabled = [key for key in retired if str(params.get(key, False)).strip().lower() in {'true', '1'}]
         if command_str == 'LOAD' and enabled:
@@ -356,6 +356,8 @@ class SendCommand(BaseAction):
             initial_pose_sync=params.get('initial_pose_sync', True),
             initial_pose_sync_duration_s=params.get('initial_pose_sync_duration_s', 5.0),
             vla_rail_enabled=params.get('vla_rail_enabled', False),
+            ttrtc_enabled=params.get('ttrtc_enabled', False),
+            ttrtc_prefix_steps=params.get('ttrtc_prefix_steps', 7),
             acceleration_mode=acceleration_mode,
             acceleration_engine_path=params.get(
                 'acceleration_engine_path',
@@ -389,6 +391,8 @@ class SendCommand(BaseAction):
         initial_pose_sync: bool = True,
         initial_pose_sync_duration_s: float = 5.0,
         service_name: str = '/task/command',
+        ttrtc_enabled: bool = False,
+        ttrtc_prefix_steps: int = 7,
     ):
         """Initialize an inference or Docker lifecycle action."""
         super().__init__(node, name='SendCommand')
@@ -425,6 +429,17 @@ class SendCommand(BaseAction):
             if self.command_str == 'LOAD'
             else ''
         )
+        self.ttrtc_enabled = self.command_str == 'LOAD' and str(ttrtc_enabled).strip().lower() in {'true', '1'}
+        self.ttrtc_prefix_steps = 7
+        if self.ttrtc_enabled:
+            if (self.backend != 'groot' or self.action_request_mode != 'async'
+                    or self.vla_rail_enabled or self.acceleration_mode != 'pytorch'
+                    or self.inference_hz not in (0, 15)):
+                raise ValueError('TT-RTC requires GR00T Async, PyTorch, 15 Hz and VLA-RAIL disabled')
+            if str(ttrtc_prefix_steps) not in {str(i) for i in range(9)}:
+                raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
+            self.ttrtc_prefix_steps = int(ttrtc_prefix_steps)
+            self.inference_hz = 15
         self.acceleration_engine_path = (
             str(acceleration_engine_path or '').strip()
             if self.command_str == 'LOAD'
@@ -959,6 +974,12 @@ class SendCommand(BaseAction):
                 raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
             if hasattr(ti, 'vla_rail_enabled'):
                 ti.vla_rail_enabled = self.vla_rail_enabled
+            if self.ttrtc_enabled and not all(hasattr(ti, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
+                raise RuntimeError('Rebuild interfaces to enable TT-RTC')
+            if hasattr(ti, 'ttrtc_enabled'):
+                ti.ttrtc_enabled = self.ttrtc_enabled
+            if hasattr(ti, 'ttrtc_prefix_steps'):
+                ti.ttrtc_prefix_steps = self.ttrtc_prefix_steps if self.ttrtc_enabled else 0
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):
             ti.action_request_mode = self.action_request_mode
         ti.tags = (

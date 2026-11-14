@@ -82,9 +82,25 @@ class InferenceSupervisor:
                 raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
             if hasattr(request, 'vla_rail_enabled'):
                 request.vla_rail_enabled = rail
+            ttrtc = bool(getattr(owner, 'ttrtc_enabled', False))
+            prefix = getattr(owner, 'ttrtc_prefix_steps', 7)
+            if ttrtc:
+                if (owner.backend != 'groot' or owner.action_request_mode != 'async' or rail
+                        or owner.acceleration_mode not in ('', 'pytorch') or owner.inference_hz not in (0, 15)):
+                    raise ValueError('TT-RTC requires GR00T Async, PyTorch, 15 Hz and VLA-RAIL disabled')
+                if str(prefix) not in {str(i) for i in range(9)}:
+                    raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
+                if not all(hasattr(request, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
+                    raise RuntimeError('Rebuild interfaces to enable TT-RTC')
+            if hasattr(request, 'ttrtc_enabled'):
+                request.ttrtc_enabled = ttrtc
+            if hasattr(request, 'ttrtc_prefix_steps'):
+                request.ttrtc_prefix_steps = int(prefix) if ttrtc else 0
             for field in ('action_request_mode', 'acceleration_mode', 'acceleration_engine_path',
                           'control_hz', 'inference_hz', 'chunk_align_window_s'):
                 setattr(request, field, getattr(owner, field))
+            if ttrtc:
+                request.inference_hz = 15
         elif command == START and owner is not None:
             request.initial_pose_sync = getattr(owner, 'initial_pose_sync', True)
             request.initial_pose_sync_duration_s = getattr(owner, 'initial_pose_sync_duration_s', 5.0)

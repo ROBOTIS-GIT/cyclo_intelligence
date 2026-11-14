@@ -33,6 +33,9 @@ string inference_mode
 string action_request_mode
 # Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
 bool vla_rail_enabled
+# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
 # "tensorrt_dit" enables GR00T DiT-only TensorRT acceleration when supported.

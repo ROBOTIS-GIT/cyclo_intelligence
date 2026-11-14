@@ -23,6 +23,11 @@ string acceleration_mode
 string acceleration_engine_path
 
 uint16 action_chunk_size
+# LOAD: configured prefix limit; GET_ACTION: actual committed prefix length.
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
+# GET_ACTION only, row-major physical actions in LOAD action_keys order.
+float64[] ttrtc_prefix_actions
 ---
 uint64 seq_id
 bool success

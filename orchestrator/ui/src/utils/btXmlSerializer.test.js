@@ -55,6 +55,10 @@ describe('btXmlSerializer', () => {
   it.each([
     ['vla_rail_enabled', 'true'],
     ['vla_rail_enabled', 'false'],
+    ['ttrtc_enabled', 'true'],
+    ['ttrtc_enabled', 'false'],
+    ['ttrtc_prefix_steps', '0'],
+    ['ttrtc_prefix_steps', '8'],
   ])('preserves %s=%s on GR00T LOAD through XML round trip', (param, value) => {
     const node = { id: 'load', type: 'btAction', position: { x: 0, y: 0 }, data: {
       nodeType: 'SendCommand', label: 'Load', params: {
@@ -79,17 +83,29 @@ describe('btXmlSerializer', () => {
   ])('omits chunk postprocessors for %s %s %s', (target, command, model) => {
     const node = { id: 'command', position: { x: 0, y: 0 } };
     const params = {
-      target, command, model, vla_rail_enabled: 'true',
+      target, command, model, vla_rail_enabled: 'true', ttrtc_enabled: 'true', ttrtc_prefix_steps: '7',
     };
     const xml = serializeFromGraph([node], [], new Map([
       ['command', { tag: 'SendCommand', name: 'Command', params }],
     ]));
     expect(xml).not.toContain('vla_rail_enabled=');
+    expect(xml).not.toContain('ttrtc_enabled=');
+    expect(xml).not.toContain('ttrtc_prefix_steps=');
+  });
+
+  it('omits TT-RTC options from synchronous LOAD', () => {
+    const params = { command: 'LOAD', model: 'groot:n17', action_request_mode: 'sync',
+      ttrtc_enabled: 'true', ttrtc_prefix_steps: '7' };
+    const xml = serializeFromGraph([{ id: 'load', position: { x: 0, y: 0 } }], [], new Map([
+      ['load', { tag: 'SendCommand', name: 'Load', params }],
+    ]));
+    expect(xml).not.toContain('ttrtc_enabled=');
+    expect(xml).not.toContain('ttrtc_prefix_steps=');
   });
 
   it('drops all retired inference flags from a saved GR00T LOAD', () => {
     const { nodes, edges, nodeDataMap } = sampleGraph();
-    const retired = ['ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+    const retired = ['ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
       'chunk_endpoint_interpolation', 'remac_enabled'];
     nodeDataMap.set('bt_1', { tag: 'SendCommand', name: 'Load', params: {
       command: 'LOAD', model: 'groot:n17', vla_rail_enabled: 'true',

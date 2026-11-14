@@ -71,8 +71,12 @@ class InferenceEngine(ABC):
     def get_action_chunk(self, request: Any) -> Dict[str, Any]:
         """Build observation from RobotClient, run inference once.
 
-        ``request`` is a ``SimpleNamespace`` with ``.task_instruction``
-        only — model_path / robot_type are baked in by ``load_policy``.
+        ``request.task_instruction`` selects the task; model_path / robot_type
+        are baked in by ``load_policy``. TT-RTC requests additionally carry
+        ``ttrtc_enabled``, actual ``ttrtc_prefix_steps`` (including zero), and
+        flattened physical ``ttrtc_prefix_actions`` in the loaded action order.
+        The GR00T adapter returns the complete 32-step logical prediction with
+        the committed prefix preserved; Main installs only its 24 new steps.
         """
 
     @abstractmethod

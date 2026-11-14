@@ -64,6 +64,9 @@ string task_instruction
 bool publish_to_robot
 string action_request_mode
 bool vla_rail_enabled
+# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
 string acceleration_mode
 string acceleration_engine_path
 uint16 control_hz
@@ -93,6 +96,9 @@ string task_instruction
 string acceleration_mode
 string acceleration_engine_path
 uint16 action_chunk_size
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
+float64[] ttrtc_prefix_actions
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\

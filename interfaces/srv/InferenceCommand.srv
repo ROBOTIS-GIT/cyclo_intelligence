@@ -44,6 +44,9 @@ bool publish_to_robot
 string action_request_mode
 # Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
 bool vla_rail_enabled
+# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
 # Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
 # PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
 # supported by the backend.

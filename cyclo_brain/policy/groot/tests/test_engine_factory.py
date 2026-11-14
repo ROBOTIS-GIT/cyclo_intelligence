@@ -31,6 +31,126 @@ def _install_stub(name: str, **attrs) -> types.ModuleType:
 
 
 class GR00TEngineFactoryTests(unittest.TestCase):
+    def test_ttrtc_load_checks_checkpoint_and_manifest_before_loading_weights(self):
+        module, engine, _images, _joints = self._right_arm_engine()
+        engine._requested_chunk_size = 0
+        config = dict(training_time_rtc=True, logical_action_horizon=32, logical_action_dim=16,
+                      action_horizon=40, max_action_dim=132, state_history_length=1,
+                      tt_rtc_max_delay_steps=8, tt_rtc_min_postfix_steps=24,
+                      num_timestep_buckets=1000, num_inference_timesteps=4)
+        manifest = dict(schema="cyclo.tt-rtc-training/v1", trained=True, training_time_rtc=True,
+                        prefix_choices=list(range(9)), normalization="train-only-min-max-clipped",
+                        inference_contract=dict(action_fps=15, num_inference_timesteps=4,
+                                                prefix_coordinates="normalized-logical", first_prefix_length=0))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "config.json").write_text(json.dumps(config))
+            (path / "experiment_cfg").mkdir()
+            record = path / "experiment_cfg/tt_rtc_training_manifest.json"
+            record.write_text(json.dumps(manifest))
+            request = types.SimpleNamespace(model_path=directory, ttrtc_enabled=True, ttrtc_prefix_steps=7)
+            engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            self.assertTrue(engine._ttrtc_enabled)
+            self.assertEqual(engine._ttrtc_prefix_steps, 7)
+            # HF serialization can omit unchanged Gr00tN1d7Config defaults.
+            defaults = ("action_horizon", "max_action_dim", "state_history_length",
+                        "num_timestep_buckets", "num_inference_timesteps")
+            serialized = {key: value for key, value in config.items() if key not in defaults}
+            (path / "config.json").write_text(json.dumps(serialized))
+            engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            for key in defaults:
+                with self.subTest(nondefault=key):
+                    (path / "config.json").write_text(json.dumps({**serialized, key: -1}))
+                    with self.assertRaisesRegex(ValueError, key):
+                        engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            (path / "config.json").write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "PyTorch"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_TENSORRT_DIT)
+            engine._requested_chunk_size = 24
+            with self.assertRaisesRegex(ValueError, "chunk_size"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            engine._requested_chunk_size = 0
+            request.ttrtc_enabled = False
+            with self.assertRaisesRegex(ValueError, "match"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            request.ttrtc_enabled = True
+            manifest["inference_contract"]["action_fps"] = 30
+            record.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            (path / "config.json").write_text('{}')
+            with self.assertRaisesRegex(ValueError, "match"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+
+    def test_ttrtc_mock_load_requires_explicit_untrained_metadata_and_allows_robot_mode(self):
+        module, engine, _images, _joints = self._right_arm_engine()
+        engine._requested_chunk_size = 0
+        config = dict(training_time_rtc=True, mock_checkpoint=True,
+                      logical_action_horizon=32, logical_action_dim=16,
+                      action_horizon=40, max_action_dim=132, state_history_length=1,
+                      tt_rtc_max_delay_steps=8, tt_rtc_min_postfix_steps=24,
+                      num_timestep_buckets=1000, num_inference_timesteps=4)
+        manifest = dict(schema="cyclo.tt-rtc-training/v1", mock_checkpoint=True,
+                        trained=False, step=0, complete=False, training_time_rtc=True,
+                        prefix_choices=list(range(9)), normalization="train-only-min-max-clipped",
+                        inference_contract=dict(action_fps=15, num_inference_timesteps=4,
+                                                prefix_coordinates="normalized-logical", first_prefix_length=0))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "experiment_cfg").mkdir()
+            record = path / "experiment_cfg/tt_rtc_training_manifest.json"
+            (path / "config.json").write_text(json.dumps(config))
+            record.write_text(json.dumps(manifest))
+            request = types.SimpleNamespace(model_path=directory, ttrtc_enabled=True,
+                                            ttrtc_prefix_steps=7, publish_to_robot=True)
+            with self.assertLogs(engine.logger, level="WARNING") as logs:
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            self.assertTrue(engine._ttrtc_enabled)
+            self.assertIn("mock", " ".join(logs.output).lower())
+            # A mock still needs the same action contract as a trained model.
+            invalid_records = [dict(mock_checkpoint=False), dict(mock_checkpoint="true"),
+                               dict(trained=True), dict(step=1), dict(complete=True),
+                               dict(inference_contract={})]
+            for change in invalid_records:
+                with self.subTest(change=change):
+                    record.write_text(json.dumps({**manifest, **change}))
+                    with self.assertRaisesRegex(ValueError, "manifest"):
+                        engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            record.write_text(json.dumps(manifest))
+            (path / "config.json").write_text(json.dumps({**config, "mock_checkpoint": False}))
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+            record.write_text(json.dumps({**manifest, "mock_checkpoint": False}))
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                engine._validate_ttrtc_load(request, module.ACCELERATION_PYTORCH)
+
+    def test_ttrtc_physical_prefix_is_mapped_using_output_order_and_validated(self):
+        _module, engine, _images, _joints = self._right_arm_engine()
+        engine._ttrtc_enabled = True
+        engine._ttrtc_prefix_steps = 7
+        engine.policy_info["action"] = ["arm_right", "arm_left"]
+        params = engine.policy.processor.state_action_processor.norm_params["new_embodiment"]["action"]
+        params["arm_left"] = {"dim": np.array(8)}
+        prefix = np.arange(7 * 16).reshape(7, 16)
+        request = types.SimpleNamespace(ttrtc_enabled=True, ttrtc_prefix_steps=7,
+                                        ttrtc_prefix_actions=prefix.flatten())
+        options = engine._ttrtc_options(request)
+        np.testing.assert_array_equal(options["ttrtc_prefix_actions"]["arm_right"][0], prefix[:, :8])
+        np.testing.assert_array_equal(options["ttrtc_prefix_actions"]["arm_left"][0], prefix[:, 8:])
+        request.ttrtc_prefix_steps = 0
+        request.ttrtc_prefix_actions = []
+        self.assertEqual(engine._ttrtc_options(request)["ttrtc_prefix_actions"]["arm_left"].shape, (1, 0, 8))
+        for count, values in ((8, [0.] * 128), (1, [float("nan")] * 16), (1, [0.] * 15)):
+            request.ttrtc_prefix_steps, request.ttrtc_prefix_actions = count, values
+            with self.assertRaises(ValueError):
+                engine._ttrtc_options(request)
+        request.ttrtc_enabled = False
+        with self.assertRaisesRegex(ValueError, "mode"):
+            engine._ttrtc_options(request)
+        engine._ttrtc_enabled = False
+        with self.assertRaisesRegex(ValueError, "requires"):
+            engine._ttrtc_options(request)
+
     def test_output_action_config_selects_right_decoded_chunk_without_changing_model(self):
         _module, engine, _images, _joints = self._right_arm_engine()
         action_config = engine.policy.modality_configs["action"]

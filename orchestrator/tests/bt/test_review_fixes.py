@@ -69,6 +69,8 @@ def _install_ros_stubs():
 
     class _TaskInfo:
         vla_rail_enabled = False
+        ttrtc_enabled = False
+        ttrtc_prefix_steps = 0
         inference_mode = ''
         action_request_mode = ''
         acceleration_mode = ''
@@ -105,6 +107,11 @@ def _install_ros_stubs():
     sys.modules.setdefault('interfaces', interfaces_mod)
     sys.modules.setdefault('interfaces.msg', interfaces_msg_mod)
     sys.modules.setdefault('interfaces.srv', interfaces_srv_mod)
+    std_srvs = types.ModuleType('std_srvs')
+    std_srvs_srv = types.ModuleType('std_srvs.srv')
+    std_srvs_srv.Trigger = type('Trigger', (), {'Request': types.SimpleNamespace})
+    sys.modules.setdefault('std_srvs', std_srvs)
+    sys.modules.setdefault('std_srvs.srv', std_srvs_srv)
 
 
 def _real_ros_modules_available():
@@ -977,7 +984,7 @@ def test_rail_is_load_only_and_old_task_info_requires_rebuild(monkeypatch):
         action._build_task_info()
 
 
-@pytest.mark.parametrize('field', ['ttrtc_enabled', 'ttrtc_rate_limit_enabled',
+@pytest.mark.parametrize('field', ['ttrtc_rate_limit_enabled',
     'chunk_spline_smoothing', 'chunk_endpoint_interpolation', 'remac_enabled'])
 def test_old_raw_xml_cannot_silently_enable_retired_processing(field):
     context = types.SimpleNamespace(node=_DummyNode())
@@ -987,3 +994,34 @@ def test_old_raw_xml_cannot_silently_enable_retired_processing(field):
     action = SendCommand.from_xml_params(context, 'Load', {
         'command': 'LOAD', 'model': 'groot:n17', field: 'false'})
     assert not hasattr(action, field)
+
+
+@pytest.mark.parametrize('prefix', [0, 7, 8])
+def test_ttrtc_canvas_load_forwards_prefix(prefix):
+    action = SendCommand.from_xml_params(types.SimpleNamespace(node=_DummyNode()), 'Load', {
+        'command': 'LOAD', 'model': 'groot:n17', 'ttrtc_enabled': 'true',
+        'ttrtc_prefix_steps': str(prefix)})
+    ti = action._build_task_info()
+    assert ti.ttrtc_enabled
+    assert ti.ttrtc_prefix_steps == prefix
+
+
+@pytest.mark.parametrize('extra', [{'model': 'lerobot:act'}, {'action_request_mode': 'sync'},
+    {'vla_rail_enabled': 'true'}, {'inference_hz': 30}, {'ttrtc_prefix_steps': '9'},
+    {'ttrtc_prefix_steps': '1.5'}, {'acceleration_mode': 'tensorrt_dit'}])
+def test_ttrtc_canvas_rejects_incompatible_load(extra):
+    with pytest.raises(ValueError):
+        SendCommand.from_xml_params(types.SimpleNamespace(node=_DummyNode()), 'Load', {
+            'command': 'LOAD', 'model': 'groot:n17', 'ttrtc_enabled': 'true', **extra})
+
+
+def test_ttrtc_requires_new_interface_only_when_enabled(monkeypatch):
+    context = types.SimpleNamespace(node=_DummyNode())
+    action = SendCommand.from_xml_params(context, 'Load', {
+        'command': 'LOAD', 'model': 'groot:n17', 'ttrtc_enabled': 'true'})
+    monkeypatch.setattr(send_command_module, 'TaskInfo', type('OldTaskInfo', (), {}))
+    with pytest.raises(RuntimeError, match='Rebuild interfaces to enable TT-RTC'):
+        action._build_task_info()
+    resume = SendCommand.from_xml_params(context, 'Resume', {
+        'command': 'RESUME', 'model': 'groot:n17', 'ttrtc_enabled': 'true'})
+    assert not resume.ttrtc_enabled

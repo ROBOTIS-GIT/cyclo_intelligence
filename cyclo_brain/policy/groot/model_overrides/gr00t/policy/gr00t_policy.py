@@ -391,7 +391,8 @@ class Gr00tPolicy(BasePolicy):
 
         Args:
             observation: Batched observation dictionary
-            options: Optional parameters (currently unused)
+            options: TT-RTC requests provide ttrtc_enabled and a physical action
+                prefix dict with arrays [B,d,D_key], including empty d=0 arrays.
 
         Returns:
             Tuple of (actions_dict, info_dict)
@@ -413,8 +414,17 @@ class Gr00tPolicy(BasePolicy):
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
 
         # Step 4: Run model inference to predict actions
+        model_options = None
+        rtc_enabled = bool(getattr(self.model.config, "training_time_rtc", False))
+        if rtc_enabled:
+            model_options = self._ttrtc_model_options(options, states)
+        elif options and (options.get("ttrtc_enabled") or "ttrtc_prefix_actions" in options):
+            raise ValueError("TT-RTC inference requires a training_time_rtc checkpoint")
         with torch.inference_mode():
-            model_pred = self.model.get_action(**collated_inputs)
+            if rtc_enabled:
+                model_pred = self.model.get_action(**collated_inputs, options=model_options)
+            else:
+                model_pred = self.model.get_action(**collated_inputs)
         normalized_action = model_pred["action_pred"].float()
 
         # Step 5: Decode actions from normalized space back to physical units
@@ -429,7 +439,45 @@ class Gr00tPolicy(BasePolicy):
         casted_action = {
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
+        if rtc_enabled:
+            # Preserve commands already committed by the execution queue despite
+            # normalization clipping and BF16 rounding inside the network.
+            for key, prefix in options["ttrtc_prefix_actions"].items():
+                casted_action[key][:, :prefix.shape[1]] = prefix
         return casted_action, {}
+
+    def _ttrtc_model_options(self, options, states):
+        if not options or options.get("ttrtc_enabled") is not True:
+            raise ValueError("TT-RTC checkpoint requires the explicit TT-RTC execution mode")
+        prefix = options.get("ttrtc_prefix_actions")
+        keys = self.modality_configs["action"].modality_keys
+        if not isinstance(prefix, dict) or set(prefix) != set(keys):
+            raise ValueError("TT-RTC prefix must contain every trained action key")
+        processor = self.processor.state_action_processor
+        tag = self.embodiment_tag.value
+        delay = None
+        for key in keys:
+            values = prefix[key]
+            dim = int(processor.norm_params[tag]["action"][key]["dim"])
+            if (not isinstance(values, np.ndarray) or values.ndim != 3
+                    or values.shape[0] != len(states) or values.shape[2] != dim
+                    or not 0 <= values.shape[1] <= 8 or not np.isfinite(values).all()):
+                raise ValueError("TT-RTC physical prefix must be finite [B,d,D_key], d=0..8")
+            if delay is None:
+                delay = values.shape[1]
+            elif delay != values.shape[1]:
+                raise ValueError("TT-RTC action keys must have the same prefix length")
+        normalized = []
+        for index, state in enumerate(states):
+            sample = {key: prefix[key][index] for key in keys}
+            # Use checkpoint statistics and its exact min/max clipping transform,
+            # in the processor's trained key order, without re-estimating stats.
+            sample = processor.apply_action(sample, tag, state=state)
+            normalized.append(np.concatenate([sample[key] for key in keys], axis=-1))
+        result = np.stack(normalized).astype(np.float32)
+        if result.shape[-1] != 16:
+            raise ValueError("TT-RTC requires the trained 16-dimensional action space")
+        return {"ttrtc_prefix": result}
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

@@ -335,7 +335,7 @@ test.each(['action_request_mode', 'model'])('changing %s clears incompatible RAI
 });
 
 test('retired options are hidden in saved nodes and absent from the catalog', () => {
-  const retired = ['ttrtc_enabled', 'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
+  const retired = ['ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
     'chunk_endpoint_interpolation', 'remac_enabled'];
   const node = { id: 'old', data: { nodeType: 'SendCommand', params: {
     model: 'groot:n17', command: 'LOAD', ...Object.fromEntries(retired.map(key => [key, 'true'])),
@@ -350,4 +350,69 @@ test('retired options are hidden in saved nodes and absent from the catalog', ()
   expect(ports.find(port => port.name === 'vla_rail_enabled')).toEqual({ name: 'vla_rail_enabled', type: 'bool', default: 'false' });
   fireEvent.click(screen.getByRole('checkbox', { name: 'vla_rail_enabled' }));
   expect(change.mock.calls).toEqual([['old', 'vla_rail_enabled', 'true']]);
+});
+
+test('TT-RTC selects trained timing and PyTorch for GR00T Async LOAD', () => {
+  const change = jest.fn();
+  const node = { id: 'ttrtc', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'async',
+    inference_hz: '30', acceleration_mode: 'tensorrt_dit', acceleration_engine_path: '/old.engine',
+    vla_rail_enabled: 'true',
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="ttrtc" onParamChange={change} />);
+  const toggle = screen.getByRole('checkbox', { name: 'ttrtc_enabled' });
+  expect(toggle).toBeEnabled();
+  expect(toggle).not.toBeChecked();
+  expect(fieldControl('ttrtc_prefix_steps')).toHaveValue(7);
+  expect(fieldControl('ttrtc_prefix_steps')).toBeDisabled();
+  fireEvent.click(toggle);
+  expect(change).toHaveBeenCalledWith('ttrtc', 'ttrtc_enabled', 'true');
+  expect(change).toHaveBeenCalledWith('ttrtc', 'vla_rail_enabled', 'false');
+  expect(change).toHaveBeenCalledWith('ttrtc', 'inference_hz', '15');
+  expect(change).toHaveBeenCalledWith('ttrtc', 'acceleration_mode', 'pytorch');
+  expect(change).toHaveBeenCalledWith('ttrtc', 'acceleration_engine_path', '');
+  expect(fieldControl('inference_hz')).toHaveValue(15);
+  for (const name of ['inference_hz', 'acceleration_mode', 'acceleration_engine_path']) {
+    expect(fieldControl(name)).toBeDisabled();
+  }
+  expect(fieldControl('ttrtc_prefix_steps')).toBeEnabled();
+  expect(fieldControl('ttrtc_prefix_steps')).toHaveAttribute('min', '0');
+  expect(fieldControl('ttrtc_prefix_steps')).toHaveAttribute('max', '8');
+  expect(fieldControl('ttrtc_prefix_steps')).toHaveAttribute('step', '1');
+  for (const invalid of ['-1', '9', '1.5']) {
+    change.mockClear();
+    fireEvent.change(fieldControl('ttrtc_prefix_steps'), { target: { value: invalid } });
+    expect(change).not.toHaveBeenCalled();
+    expect(fieldControl('ttrtc_prefix_steps')).toHaveValue(7);
+  }
+  fireEvent.change(fieldControl('ttrtc_prefix_steps'), { target: { value: '0' } });
+  expect(change).toHaveBeenCalledWith('ttrtc', 'ttrtc_prefix_steps', '0');
+  expect(fieldControl('ttrtc_prefix_steps')).toHaveValue(0);
+  fireEvent.click(screen.getByRole('checkbox', { name: 'vla_rail_enabled' }));
+  expect(toggle).not.toBeChecked();
+  expect(fieldControl('ttrtc_prefix_steps')).toBeDisabled();
+});
+
+test.each([
+  { action_request_mode: 'sync' }, { model: 'lerobot:act' },
+  { command: 'RESUME' }, { command: 'STOP' }, { command: 'CLEAR' },
+  { target: 'DOCKER', command: 'START' },
+])('TT-RTC is unavailable outside GR00T Async LOAD: %j', (overrides) => {
+  const node = { id: 'disabled', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'async', ...overrides,
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="disabled" onParamChange={jest.fn()} />);
+  expect(screen.getByRole('checkbox', { name: 'ttrtc_enabled' })).toBeDisabled();
+  expect(fieldControl('ttrtc_prefix_steps')).toBeDisabled();
+});
+
+test.each(['action_request_mode', 'model'])('changing %s clears incompatible TT-RTC', (field) => {
+  const change = jest.fn();
+  const node = { id: 'ttrtc', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'async', ttrtc_enabled: 'true',
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="ttrtc" onParamChange={change} />);
+  fireEvent.change(fieldControl(field), { target: { value: field === 'model' ? 'lerobot:act' : 'sync' } });
+  expect(change).toHaveBeenCalledWith('ttrtc', 'ttrtc_enabled', 'false');
+  expect(screen.getByRole('checkbox', { name: 'ttrtc_enabled' })).not.toBeChecked();
 });

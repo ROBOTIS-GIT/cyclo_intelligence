@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -99,6 +100,22 @@ class ServiceHandler:
         ):
             raise ValueError("Select a trained subtask instruction before LOAD")
         chunk_size = requested_chunk_size(getattr(request, "action_chunk_size", 0))
+        ttrtc_enabled = bool(getattr(request, 'ttrtc_enabled', False))
+        if ttrtc_enabled:
+            if os.environ.get('POLICY_BACKEND', 'groot') != 'groot':
+                raise ValueError('TT-RTC requires the GR00T backend')
+            if getattr(request, 'action_request_mode', 'async') != 'async':
+                raise ValueError('TT-RTC requires asynchronous action requests')
+            if getattr(request, 'vla_rail_enabled', False):
+                raise ValueError('TT-RTC and VLA-RAIL cannot be enabled together')
+            if (float(getattr(request, 'inference_hz', 0)) or 15.) != 15.:
+                raise ValueError('TT-RTC requires the trained 15 Hz action rate')
+            prefix_steps = getattr(request, 'ttrtc_prefix_steps', 7)
+            if (isinstance(prefix_steps, bool) or not isinstance(prefix_steps, int)
+                    or not 0 <= prefix_steps <= 8):
+                raise ValueError('TT-RTC prefix steps must be an integer from 0 to 8')
+            if chunk_size not in (0, 32):
+                raise ValueError('TT-RTC requires the original 32-action model horizon')
         per_step_actions = config.get("type") == "act" and act_execution_steps(config, chunk_size) == 1
         if per_step_actions:
             contract_path = root / "inference_contract.json"
@@ -121,9 +138,11 @@ class ServiceHandler:
                 action_keys=action_keys,
                 publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
                 vla_rail_enabled=bool(getattr(request, "vla_rail_enabled", False)),
+                ttrtc_enabled=ttrtc_enabled,
+                ttrtc_prefix_steps=getattr(request, 'ttrtc_prefix_steps', 7),
                 action_request_mode=getattr(request, "action_request_mode", "async"),
                 control_hz=getattr(request, "control_hz", 0),
-                inference_hz=getattr(request, "inference_hz", 0),
+                inference_hz=15. if ttrtc_enabled else getattr(request, "inference_hz", 0),
                 chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
                 initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
                 initial_pose_sync_duration_s=(

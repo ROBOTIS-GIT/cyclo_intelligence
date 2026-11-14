@@ -111,6 +111,8 @@ export const FALLBACK_CATALOG = [
       { name: 'inference_mode', type: 'string', default: 'simulation' },
       { name: 'action_request_mode', type: 'string', default: 'async' },
       { name: 'vla_rail_enabled', type: 'bool', default: 'false' },
+      { name: 'ttrtc_enabled', type: 'bool', default: 'false' },
+      { name: 'ttrtc_prefix_steps', type: 'number', default: '7' },
       { name: 'initial_pose_sync', type: 'bool', default: 'true' },
       { name: 'initial_pose_sync_duration_s', type: 'number', default: '5' },
       { name: 'inference_hz', type: 'number', default: '15' },

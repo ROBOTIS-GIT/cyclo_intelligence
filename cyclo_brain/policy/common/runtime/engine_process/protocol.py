@@ -40,6 +40,9 @@ string task_instruction
 string acceleration_mode
 string acceleration_engine_path
 uint16 action_chunk_size
+bool ttrtc_enabled
+uint16 ttrtc_prefix_steps
+float64[] ttrtc_prefix_actions
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -65,6 +68,9 @@ class EngineCommandRequest:
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
     action_chunk_size: int = 0
+    ttrtc_enabled: bool = False
+    ttrtc_prefix_steps: int = 7
+    ttrtc_prefix_actions: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -93,6 +99,9 @@ def request_from_message(message: Any) -> EngineCommandRequest:
             getattr(message, "acceleration_engine_path", "") or ""
         ),
         action_chunk_size=getattr(message, "action_chunk_size", 0),
+        ttrtc_enabled=bool(getattr(message, "ttrtc_enabled", False)),
+        ttrtc_prefix_steps=int(getattr(message, "ttrtc_prefix_steps", 7)),
+        ttrtc_prefix_actions=list(getattr(message, "ttrtc_prefix_actions", [])),
     )
 
 
@@ -138,6 +147,9 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),
         "action_chunk_size": int(request.action_chunk_size),
+        "ttrtc_enabled": bool(request.ttrtc_enabled),
+        "ttrtc_prefix_steps": int(request.ttrtc_prefix_steps),
+        "ttrtc_prefix_actions": np.asarray(request.ttrtc_prefix_actions, dtype=np.float64),
     }
 
 

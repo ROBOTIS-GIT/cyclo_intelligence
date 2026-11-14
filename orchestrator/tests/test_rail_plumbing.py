@@ -20,6 +20,9 @@ def method(relative, class_name, method_name, namespace):
 
 class CurrentRequest:
     vla_rail_enabled = False
+    ttrtc_enabled = False
+    ttrtc_prefix_steps = 0
+    inference_hz = 0
 
 
 class OldRequest:
@@ -115,6 +118,62 @@ class RailLoadPlumbingTests(unittest.TestCase):
                                   for t in n.targets))
         sdk_definition = ast.literal_eval(assignment.value)
         service = (ROOT.parent / 'interfaces/srv/InferenceCommand.srv').read_text().split('---')[0]
+        fields = lambda text: [line.split('#', 1)[0].strip() for line in text.splitlines()
+                               if line.split('#', 1)[0].strip() and '=' not in line]
+        self.assertEqual(fields(sdk_definition), fields(service))
+
+    def test_ttrtc_service_forwards_prefix_and_rejects_incompatible_modes(self):
+        client, call, calls = self.client_call()
+        request = call(client, 0, ttrtc_enabled=True, ttrtc_prefix_steps=7, inference_hz=15)
+        self.assertTrue(request.ttrtc_enabled)
+        self.assertEqual(request.ttrtc_prefix_steps, 7)
+        self.assertEqual(call(client, 0, ttrtc_enabled=True).inference_hz, 15)
+        self.assertEqual(call(client, 0, ttrtc_enabled=True, ttrtc_prefix_steps=0).ttrtc_prefix_steps, 0)
+        for extra in ({'vla_rail_enabled': True}, {'action_request_mode': 'sync'},
+                      {'inference_hz': 30}, {'acceleration_mode': 'tensorrt_dit'},
+                      {'ttrtc_prefix_steps': 9}, {'ttrtc_prefix_steps': -1},
+                      {'ttrtc_prefix_steps': 1.5}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                call(client, 0, ttrtc_enabled=True, **extra)
+        with self.assertRaises(ValueError):
+            call(client, 1, ttrtc_enabled=True)
+        client, call, _ = self.client_call(OldRequest)
+        with self.assertRaisesRegex(RuntimeError, 'Rebuild interfaces'):
+            call(client, 0, ttrtc_enabled=True)
+        self.assertIsNotNone(call(client, 0))
+
+    def test_ttrtc_supervisor_forwards_and_rejects_old_schema(self):
+        supervisor, owner, submit, requests = self.supervisor_call()
+        owner.vla_rail_enabled = False
+        owner.ttrtc_enabled, owner.ttrtc_prefix_steps = True, 8
+        submit(supervisor, 0, owner)
+        self.assertTrue(requests[-1].ttrtc_enabled)
+        self.assertEqual(requests[-1].ttrtc_prefix_steps, 8)
+        supervisor, owner, submit, requests = self.supervisor_call(OldRequest)
+        owner.vla_rail_enabled, owner.ttrtc_enabled = False, True
+        with self.assertRaisesRegex(RuntimeError, 'Rebuild interfaces'):
+            submit(supervisor, 0, owner)
+        self.assertEqual(requests, [])
+
+    def test_signature_includes_ttrtc_mode_and_active_prefix(self):
+        path = ROOT / 'orchestrator/internal/communication/inference_mode.py'
+        namespace = {}
+        exec(compile(path.read_text(), str(path), 'exec'), namespace)
+        signature = namespace['inference_runtime_signature']
+        args = ('/model', 'pytorch', '', 'async', 100, 15, .3)
+        self.assertNotEqual(signature(*args), signature(*args, ttrtc_enabled=True))
+        self.assertNotEqual(signature(*args, ttrtc_enabled=True, ttrtc_prefix_steps=7),
+                            signature(*args, ttrtc_enabled=True, ttrtc_prefix_steps=8))
+        self.assertEqual(signature(*args), signature(*args, ttrtc_prefix_steps=8))
+
+    def test_engine_sdk_service_schema_matches_rosidl(self):
+        source = ROOT.parent / 'cyclo_brain/sdk/robot_client/robot_client/messages/__init__.py'
+        tree = ast.parse(source.read_text())
+        assignment = next(n for n in tree.body if isinstance(n, ast.Assign)
+                          and any(isinstance(t, ast.Name) and t.id == 'ENGINE_COMMAND_REQUEST_DEF'
+                                  for t in n.targets))
+        sdk_definition = ast.literal_eval(assignment.value)
+        service = (ROOT.parent / 'interfaces/srv/EngineCommand.srv').read_text().split('---')[0]
         fields = lambda text: [line.split('#', 1)[0].strip() for line in text.splitlines()
                                if line.split('#', 1)[0].strip() and '=' not in line]
         self.assertEqual(fields(sdk_definition), fields(service))

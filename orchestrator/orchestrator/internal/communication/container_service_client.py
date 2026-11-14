@@ -384,6 +384,8 @@ class ContainerServiceClient:
         initial_pose_sync_duration_s: float = 5.0,
         timeout_sec: Optional[float] = None,
         action_chunk_size: int = 0,
+        ttrtc_enabled: bool = False,
+        ttrtc_prefix_steps: int = 7,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
 
@@ -407,7 +409,20 @@ class ContainerServiceClient:
         if vla_rail_enabled and (int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
                                  or action_request_mode != 'async'):
             raise ValueError('VLA-RAIL requires ordinary GR00T Async LOAD')
+        if ttrtc_enabled:
+            if (int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
+                    or action_request_mode != 'async' or vla_rail_enabled
+                    or acceleration_mode not in ('', 'pytorch') or inference_hz not in (0, 15)):
+                raise ValueError('TT-RTC requires GR00T Async LOAD, PyTorch, 15 Hz and VLA-RAIL disabled')
+            if str(ttrtc_prefix_steps) not in {str(i) for i in range(9)}:
+                raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
         request = InferenceCommand.Request()
+        if ttrtc_enabled and not all(hasattr(request, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
+            raise RuntimeError('Rebuild interfaces to enable TT-RTC')
+        if hasattr(request, 'ttrtc_enabled'):
+            request.ttrtc_enabled = bool(ttrtc_enabled)
+        if hasattr(request, 'ttrtc_prefix_steps'):
+            request.ttrtc_prefix_steps = int(ttrtc_prefix_steps) if ttrtc_enabled else 0
         if vla_rail_enabled and not hasattr(request, 'vla_rail_enabled'):
             raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
         if hasattr(request, 'vla_rail_enabled'):
@@ -433,7 +448,7 @@ class ContainerServiceClient:
         if hasattr(request, "control_hz"):
             request.control_hz = _uint16_or_zero(control_hz)
         if hasattr(request, "inference_hz"):
-            request.inference_hz = _uint16_or_zero(inference_hz)
+            request.inference_hz = 15 if ttrtc_enabled else _uint16_or_zero(inference_hz)
         if hasattr(request, "chunk_align_window_s"):
             request.chunk_align_window_s = _positive_float_or_zero(
                 chunk_align_window_s

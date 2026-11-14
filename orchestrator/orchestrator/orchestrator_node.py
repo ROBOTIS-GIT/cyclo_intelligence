@@ -205,6 +205,8 @@ class OrchestratorNode(Node):
         self._loaded_inference_acceleration_engine_path: str = ''
         self._loaded_inference_action_request_mode: str = 'async'
         self._loaded_inference_vla_rail_enabled = False
+        self._loaded_inference_ttrtc_enabled = False
+        self._loaded_inference_ttrtc_prefix_steps = 7
         self._loaded_inference_control_hz: int = 100
         self._loaded_inference_inference_hz: int = 15
         self._loaded_inference_chunk_align_window_s: float = 0.3
@@ -426,6 +428,13 @@ class OrchestratorNode(Node):
             raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
         if hasattr(copied, 'vla_rail_enabled'):
             copied.vla_rail_enabled = rail
+        ttrtc = bool(getattr(task_info, 'ttrtc_enabled', False))
+        if ttrtc and not all(hasattr(copied, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
+            raise RuntimeError('Rebuild interfaces to enable TT-RTC')
+        if hasattr(copied, 'ttrtc_enabled'):
+            copied.ttrtc_enabled = ttrtc
+        if hasattr(copied, 'ttrtc_prefix_steps'):
+            copied.ttrtc_prefix_steps = int(getattr(task_info, 'ttrtc_prefix_steps', 7)) if ttrtc else 0
         return copied
 
     def _infer_conversion_robot_type(self, roots):
@@ -1512,6 +1521,8 @@ class OrchestratorNode(Node):
                     self._acceleration_from_task_info(task_info)
                 )
                 requested_vla_rail_enabled = bool(getattr(task_info, "vla_rail_enabled", False))
+                requested_ttrtc_enabled = bool(getattr(task_info, "ttrtc_enabled", False))
+                requested_ttrtc_prefix_steps = getattr(task_info, "ttrtc_prefix_steps", 7)
                 requested_action_request_mode = (
                     self._action_request_mode_from_task_info(task_info)
                 )
@@ -1552,6 +1563,8 @@ class OrchestratorNode(Node):
                         self._loaded_inference_acceleration_engine_path
                     )
                     loaded_vla_rail_enabled = getattr(self, "_loaded_inference_vla_rail_enabled", False)
+                    loaded_ttrtc_enabled = getattr(self, "_loaded_inference_ttrtc_enabled", False)
+                    loaded_ttrtc_prefix_steps = getattr(self, "_loaded_inference_ttrtc_prefix_steps", 7)
                     loaded_action_request_mode = (
                         self._loaded_inference_action_request_mode
                     )
@@ -1585,6 +1598,8 @@ class OrchestratorNode(Node):
                         loaded_initial_pose_sync_duration_s,
                         action_chunk_size=loaded_action_chunk_size,
                         vla_rail_enabled=loaded_vla_rail_enabled,
+                        ttrtc_enabled=loaded_ttrtc_enabled,
+                        ttrtc_prefix_steps=loaded_ttrtc_prefix_steps,
                     )
                     requested_signature = inference_runtime_signature(
                         requested_policy_path,
@@ -1598,6 +1613,8 @@ class OrchestratorNode(Node):
                         requested_initial_pose_sync_duration_s,
                         action_chunk_size=requested_action_chunk_size,
                         vla_rail_enabled=requested_vla_rail_enabled,
+                        ttrtc_enabled=requested_ttrtc_enabled,
+                        ttrtc_prefix_steps=requested_ttrtc_prefix_steps,
                     )
                     if (
                         requested_policy_path
@@ -1752,6 +1769,8 @@ class OrchestratorNode(Node):
                                     action_request_mode=requested_action_request_mode,
                                     action_chunk_size=requested_action_chunk_size,
                                     vla_rail_enabled=requested_vla_rail_enabled,
+                                    ttrtc_enabled=requested_ttrtc_enabled,
+                                    ttrtc_prefix_steps=requested_ttrtc_prefix_steps,
                                     control_hz=requested_control_hz,
                                     inference_hz=requested_inference_hz,
                                     chunk_align_window_s=(
@@ -1880,6 +1899,8 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     )
                                     self._loaded_inference_vla_rail_enabled = requested_vla_rail_enabled
+                                    self._loaded_inference_ttrtc_enabled = requested_ttrtc_enabled
+                                    self._loaded_inference_ttrtc_prefix_steps = requested_ttrtc_prefix_steps
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
@@ -2999,6 +3020,8 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
             self._loaded_inference_vla_rail_enabled = False
+            self._loaded_inference_ttrtc_enabled = False
+            self._loaded_inference_ttrtc_prefix_steps = 7
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
@@ -3096,6 +3119,8 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
             self._loaded_inference_vla_rail_enabled = False
+            self._loaded_inference_ttrtc_enabled = False
+            self._loaded_inference_ttrtc_prefix_steps = 7
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3

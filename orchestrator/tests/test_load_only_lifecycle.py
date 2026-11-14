@@ -115,6 +115,9 @@ class Node:
         self._loaded_inference_acceleration_engine_path = ''
         self._loaded_inference_action_request_mode = 'async'
         self._loaded_inference_vla_rail_enabled = False
+        self._loaded_inference_action_chunk_size = 0
+        self._loaded_inference_ttrtc_enabled = False
+        self._loaded_inference_ttrtc_prefix_steps = 7
         self._loaded_inference_control_hz, self._loaded_inference_inference_hz = 100, 15
         self._loaded_inference_chunk_align_window_s = .3
         self._loaded_inference_initial_pose_sync = False
@@ -227,6 +230,21 @@ class LoadOnlyLifecycleTests(unittest.TestCase):
         self.assertFalse(self.node._loaded_inference_vla_rail_enabled)
         self.command(Request.FINISH)
         self.assertFalse(self.node._loaded_inference_vla_rail_enabled)
+
+    def test_ttrtc_mode_and_prefix_changes_reload_and_finish_resets(self):
+        self.command(Request.START_INFERENCE, vla_rail_enabled=False,
+                     ttrtc_enabled=True, ttrtc_prefix_steps=7)
+        loads = [params for command, params in self.node.backend.requests if command == Client.CMD_LOAD]
+        self.assertTrue(loads[-1]['ttrtc_enabled'])
+        self.assertEqual(loads[-1]['ttrtc_prefix_steps'], 7)
+        self.command(Request.START_INFERENCE, vla_rail_enabled=False,
+                     ttrtc_enabled=True, ttrtc_prefix_steps=8)
+        loads = [params for command, params in self.node.backend.requests if command == Client.CMD_LOAD]
+        self.assertEqual(len(loads), 2)
+        self.assertEqual(loads[-1]['ttrtc_prefix_steps'], 8)
+        self.assertTrue(self.node._loaded_inference_ttrtc_enabled)
+        self.command(Request.FINISH)
+        self.assertFalse(self.node._loaded_inference_ttrtc_enabled)
 
     def test_bt_load_is_single_idle_stage(self):
         tree = ast.parse((ROOT / 'orchestrator/bt/actions/send_command.py').read_text())

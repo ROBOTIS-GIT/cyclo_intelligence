@@ -27,6 +27,8 @@ const SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND = {
     'inference_mode',
     'action_request_mode',
     'vla_rail_enabled',
+    'ttrtc_enabled',
+    'ttrtc_prefix_steps',
     'inference_hz',
     'control_hz',
     'chunk_align_window_s',
@@ -119,8 +121,10 @@ function paramsForXml(tag, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (key === 'target' || key === 'command' || !allowed.has(key)) return;
     if (value === undefined || value === null || value === '') return;
-    if (key === 'vla_rail_enabled'
+    if (['vla_rail_enabled', 'ttrtc_enabled', 'ttrtc_prefix_steps'].includes(key)
       && !String(params.model || '').startsWith('groot')) return;
+    if (['ttrtc_enabled', 'ttrtc_prefix_steps'].includes(key)
+      && String(params.action_request_mode || 'async') !== 'async') return;
     out[key] = value;
   });
 
