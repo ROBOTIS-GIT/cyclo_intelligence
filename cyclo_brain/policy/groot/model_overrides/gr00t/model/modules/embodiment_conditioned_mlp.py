@@ -192,21 +192,25 @@ class MultiEmbodimentActionEncoder(nn.Module):
         """
         Args:
             actions: [B, T, action_dim] action tensor
-            timesteps: [B] or [B,T] scalar or per-token timesteps
+            timesteps: [B,] for the original scalar-time path, or [B, T]
+                for Training-Time RTC per-action-token conditioning
             cat_ids: [B,] category/embodiment IDs
         Returns:
             [B, T, hidden_size] encoded action features
         """
         B, T, _ = actions.shape
 
-        # 1) Expand each batch's single scalar time 'tau' across all T steps
-        #    so that shape => (B, T)
-        #    e.g. if timesteps is (B,), replicate across T
+        # Preserve the original scalar-time path while allowing TT-RTC to
+        # supply a clean-endpoint time for each committed prefix token.
         if timesteps.dim() == 1 and timesteps.shape[0] == B:
-            # shape (B,) => (B,T)
             timesteps = timesteps.unsqueeze(1).expand(-1, T)
-        elif timesteps.shape != (B, T):
-            raise ValueError("Expected `timesteps` to have shape (B,) or (B,T).")
+        elif timesteps.dim() == 2 and tuple(timesteps.shape) == (B, T):
+            pass
+        else:
+            raise ValueError(
+                "Expected `timesteps` to have shape (B,) or (B, T), got "
+                f"{tuple(timesteps.shape)} for actions {tuple(actions.shape)}."
+            )
 
         # 2) Standard action MLP step for shape => (B, T, w)
         a_emb = self.W1(actions, cat_ids)

@@ -22,6 +22,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import traceback
@@ -68,6 +69,9 @@ from cyclo_data.recorder.replay_handler import ReplayDataHandler
 from orchestrator.internal.communication.container_service_client import (
     ContainerServiceClient,
 )
+from orchestrator.internal.communication.command_arbiter_client import (
+    CommandArbiterClient,
+)
 from orchestrator.internal.communication.inference_mode import (
     inference_runtime_signature,
     inference_timing_from_task_info,
@@ -83,6 +87,12 @@ import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 
 
 def _env_int(name, default):
@@ -96,6 +106,7 @@ class OrchestratorNode(Node):
     # Define operation modes (constants taken from Communicator)
 
     DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
+    INFERENCE_RECORD_ROOT = Path('/workspace/rosbag2')
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
     TRAINING_STATUS_TIMER_FREQUENCY = 0.5  # seconds
@@ -155,6 +166,8 @@ class OrchestratorNode(Node):
         self.robot_type = ''
         self.on_recording = False
         self.on_inference = False
+        self._inference_phase = InferenceStatus.READY
+        self._inference_error = ''
 
         self.robot_type_list = self.get_robot_type_list()
         self.start_recording_time: float = 0.0
@@ -172,6 +185,9 @@ class OrchestratorNode(Node):
         self._last_ui_task_info: Optional[TaskInfo] = None
         self._prepared_record_task_info: Optional[TaskInfo] = None
         self._prepared_inference_task_info: Optional[TaskInfo] = None
+        self._prepared_trigger_task_info: Optional[TaskInfo] = None
+        self._inference_record_session_id: Optional[str] = None
+        self._inference_record_robot_type: Optional[str] = None
         self._trigger_record_active_segment_index = 0
         self._trigger_record_next_segment_index = 0
 
@@ -205,17 +221,22 @@ class OrchestratorNode(Node):
         self._loaded_inference_acceleration_engine_path: str = ''
         self._loaded_inference_action_request_mode: str = 'async'
         self._loaded_inference_vla_rail_enabled = False
-        self._loaded_inference_ttrtc_enabled = False
-        self._loaded_inference_ttrtc_prefix_steps = 7
         self._loaded_inference_control_hz: int = 100
         self._loaded_inference_inference_hz: int = 15
         self._loaded_inference_chunk_align_window_s: float = 0.3
         self._loaded_inference_action_chunk_size: int = 0
+        self._loaded_inference_rlt_enabled: bool = False
+        self._loaded_inference_rlt_bundle_path: str = ''
+        self._loaded_inference_action_policy_mode: str = 'base'
         self._loaded_inference_initial_pose_sync: bool = False
         self._loaded_inference_initial_pose_sync_duration_s: float = 5.0
         self._initial_pose_sync_status_timer: Optional[threading.Timer] = None
         self._initial_pose_sync_status_generation: int = 0
         self._initial_pose_sync_hold_pending: bool = False
+        self._command_arbiter = CommandArbiterClient(
+            self,
+            callback_group=self._client_cb_group,
+        )
 
         # HF endpoint registry — orchestrator-owned because the
         # set/get/list/select_hf_endpoint services also read and mutate
@@ -310,7 +331,8 @@ class OrchestratorNode(Node):
 
     def _forward_recording(self, command: int, task_info=None,
                            include_topics: bool = False,
-                           segment_index: int = 0):
+                           segment_index: int = 0,
+                           episode_outcome: int = 0):
         """DRY helper for every recording forwarder site.
 
         Populates topics + urdf_path from orchestrator-owned state
@@ -346,6 +368,7 @@ class OrchestratorNode(Node):
                 urdf_path=urdf_path,
                 segment_index=segment_index,
                 timeout_sec=timeout_sec,
+                episode_outcome=episode_outcome,
             )
 
     @staticmethod
@@ -418,7 +441,14 @@ class OrchestratorNode(Node):
             'initial_pose_sync',
             'initial_pose_sync_duration_s',
             'action_chunk_size',
+            'rlt_enabled',
+            'rlt_bundle_path',
+            'action_policy_mode',
+            'rlt_robot_override',
+            'recording_folder',
         ):
+            if not hasattr(task_info, field_name):
+                continue
             value = getattr(task_info, field_name)
             if isinstance(value, list):
                 value = list(value)
@@ -428,13 +458,6 @@ class OrchestratorNode(Node):
             raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
         if hasattr(copied, 'vla_rail_enabled'):
             copied.vla_rail_enabled = rail
-        ttrtc = bool(getattr(task_info, 'ttrtc_enabled', False))
-        if ttrtc and not all(hasattr(copied, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
-            raise RuntimeError('Rebuild interfaces to enable TT-RTC')
-        if hasattr(copied, 'ttrtc_enabled'):
-            copied.ttrtc_enabled = ttrtc
-        if hasattr(copied, 'ttrtc_prefix_steps'):
-            copied.ttrtc_prefix_steps = int(getattr(task_info, 'ttrtc_prefix_steps', 7)) if ttrtc else 0
         return copied
 
     def _infer_conversion_robot_type(self, roots):
@@ -482,20 +505,209 @@ class OrchestratorNode(Node):
 
         return next(iter(robot_types.keys())), ''
 
+    @staticmethod
+    def _new_inference_record_session_id(
+        recording_root: Optional[Path] = None,
+    ) -> str:
+        timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+        root = recording_root or OrchestratorNode.INFERENCE_RECORD_ROOT
+        record_id = timestamp
+        suffix = 1
+        while (root / f'Task_{record_id}_inference_MCAP').exists():
+            record_id = f'{timestamp}_{suffix:02d}'
+            suffix += 1
+        return record_id
+
+    def _begin_inference_record_session(
+        self,
+        task_info: Optional[TaskInfo] = None,
+    ) -> None:
+        selected_session_id = ''
+        if task_info is not None and bool(
+            getattr(task_info, 'record_inference_mode', False)
+        ):
+            recording_folder = Path(str(
+                getattr(task_info, 'recording_folder', '') or ''
+            ).strip().rstrip('/')).name
+            match = re.fullmatch(
+                r'Task_([A-Za-z0-9][A-Za-z0-9_.-]{0,159})_inference_MCAP',
+                recording_folder,
+            )
+            selected_session_id = (
+                match.group(1)
+                if match
+                else str(getattr(task_info, 'task_num', '') or '').strip()
+            )
+        if selected_session_id or str(
+            getattr(task_info, 'recording_folder', '') or ''
+        ).strip():
+            selection_error = self._inference_record_folder_error(task_info)
+            if selection_error:
+                raise ValueError(selection_error)
+        with self._state_lock:
+            self._inference_record_session_id = (
+                selected_session_id
+                or self._new_inference_record_session_id(
+                    self.INFERENCE_RECORD_ROOT
+                )
+            )
+            self._inference_record_robot_type = self.robot_type or None
+            if task_info is not None:
+                self._prepared_inference_task_info = self._copy_task_info(
+                    task_info
+                )
+                self._prepared_trigger_task_info = self._copy_task_info(
+                    task_info
+                )
+
+    def _inference_record_folder_error(
+        self,
+        task_info: Optional[TaskInfo],
+    ) -> Optional[str]:
+        explicit_folder = str(
+            getattr(task_info, 'recording_folder', '') or ''
+        ).strip().rstrip('/')
+        session_id = str(
+            getattr(task_info, 'task_num', '') or ''
+        ).strip()
+        if (
+            not explicit_folder
+            and getattr(task_info, 'task_type', '') != 'inference'
+        ):
+            return None
+        if explicit_folder:
+            root = Path(os.path.abspath(str(self.INFERENCE_RECORD_ROOT)))
+            folder = Path(os.path.abspath(explicit_folder))
+            folder_name = folder.name
+            if (
+                folder.parent != root
+                or len(folder_name) > 240
+                or not re.fullmatch(r'Task_.+_MCAP', folder_name)
+                or '..' in folder_name
+                or any(
+                    ord(char) < 32 or ord(char) == 127
+                    for char in folder_name
+                )
+            ):
+                return (
+                    'Recording folder must be a Task_*_MCAP dataset '
+                    f'directly under {root}'
+                )
+            # A valid missing path is a new dataset target. Existing folders
+            # get the same robot-type safety check as inference datasets.
+            if not folder.exists():
+                return None
+        elif not session_id:
+            return None
+        else:
+            if (
+                not re.fullmatch(
+                    r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', session_id
+                )
+                or '..' in session_id
+            ):
+                return f'Invalid RL Recording folder session ID: {session_id!r}'
+
+            folder = self.INFERENCE_RECORD_ROOT / (
+                f'Task_{session_id}_inference_MCAP'
+            )
+            if not folder.is_dir():
+                return f'Selected RL Recording folder does not exist: {folder}'
+
+        if not folder.is_dir():
+            return f'Selected Recording folder is not a directory: {folder}'
+
+        recorded_robot_type, infer_error = self._infer_conversion_robot_type(
+            [folder]
+        )
+        if infer_error:
+            return infer_error
+        if (
+            not recorded_robot_type
+            and next(folder.rglob('episode_info.json'), None) is not None
+        ):
+            return (
+                'Cannot continue selected RL Recording folder because its '
+                'existing episodes do not identify robot_type'
+            )
+        if (
+            recorded_robot_type
+            and self.robot_type
+            and recorded_robot_type != self.robot_type
+        ):
+            return (
+                'Selected RL Recording folder uses robot_type '
+                f'{recorded_robot_type!r}, current robot_type is '
+                f'{self.robot_type!r}'
+            )
+        return None
+
     def _get_inference_record_task_info(self) -> Optional[TaskInfo]:
-        task_info = self._prepared_inference_task_info
-        if task_info is None:
-            task_info = self._last_ui_task_info
+        with self._state_lock:
+            task_info = (
+                self._prepared_inference_task_info
+                or self._last_ui_task_info
+            )
+            session_id = self._inference_record_session_id
         if task_info is None:
             return None
         if getattr(task_info, 'task_type', '') != 'inference':
-            task_info = self._copy_task_info(task_info)
-            task_info.task_type = 'inference'
-            task_info.subtask_instruction = []
-        task_info.record_inference_mode = True
-        self._prepared_inference_task_info = task_info
-        self._last_ui_task_info = task_info
-        return task_info
+            return None
+        if not bool(getattr(task_info, 'record_inference_mode', False)):
+            return None
+        if not session_id:
+            return None
+
+        copied = self._copy_task_info(task_info)
+        copied.task_num = session_id
+        copied.task_name = 'inference'
+        copied.task_type = 'inference'
+        copied.subtask_instruction = []
+        copied.record_inference_mode = True
+        with self._state_lock:
+            self._prepared_inference_task_info = copied
+        return copied
+
+    def _inference_record_start_error(
+        self,
+        task_info: TaskInfo,
+    ) -> Optional[str]:
+        with self._state_lock:
+            inference_active = self.on_inference
+            publish_to_robot = self._loaded_inference_publish_to_robot
+            session_robot_type = self._inference_record_robot_type
+        if not inference_active:
+            return 'No inference session active'
+        if not publish_to_robot:
+            return 'RL Recording is only available for Real Robot deploy'
+        if task_info.task_type != 'inference':
+            return 'START_INFERENCE_RECORD requires inference task_info'
+        if not task_info.record_inference_mode:
+            return 'RL Recording is not enabled'
+        if not self.robot_type:
+            return 'RL Recording requires robot_type'
+        if session_robot_type and session_robot_type != self.robot_type:
+            return (
+                'Robot type changed during inference; Clear and start a new '
+                'session'
+            )
+        return None
+
+    @staticmethod
+    def _inference_record_outcome_error(outcome: int) -> Optional[str]:
+        if int(outcome) not in (1, 2):
+            return 'STOP_INFERENCE_RECORD requires SUCCESS or FAILURE'
+        return None
+
+    def _inference_clear_error(self) -> Optional[str]:
+        with self._state_lock:
+            recording_active = getattr(self, 'on_recording', False)
+        if recording_active:
+            return (
+                'Clear blocked while inference recording is active; save it '
+                'as Success or Failed, or Cancel it first'
+            )
+        return None
 
     def _data_operation_status_callback(self, msg: DataOperationStatus):
         """Debug-log DataOperationStatus arrivals.
@@ -627,6 +839,10 @@ class OrchestratorNode(Node):
             node=self,
             robot_section=self.robot_section,
         )
+        # A newly created communicator has no command transition to trigger
+        # the first status message. Publish READY immediately so standby
+        # safety checks never depend on container startup order.
+        self._publish_inference_phase(InferenceStatus.READY)
 
         if self.heartbeat_timer is None:
             self.heartbeat_timer = TimerManager(node=self)
@@ -937,17 +1153,80 @@ class OrchestratorNode(Node):
                 self._inference_status_snapshot = msg
                 self._inference_status_publisher.publish(msg)
             return
-        if self.communicator is None:
-            return
-        self.communicator.publish_inference_status(
-            phase=phase,
-            robot_type=robot_type,
-            error=error,
+    def _requires_command_arbiter(self, task_info=None) -> bool:
+        if os.environ.get('CYCLO_COMMAND_ARBITER_ENABLED', '0').lower() not in {'1', 'true', 'yes'}:
+            return False
+        if str(getattr(self, 'robot_type', '') or '').strip().lower() not in {'f2', 'ffw_sg2_rev1'}:
+            return False
+        if task_info is None:
+            return True
+        return publish_to_robot_from_task_info(task_info)
+
+    def _select_policy_or_pause(
+        self,
+        client: ContainerServiceClient,
+        timeout_s: float = 5.0,
+    ):
+        result = self._command_arbiter.wait_select_policy(timeout_s=timeout_s)
+        if result.success:
+            return result
+        pause_result = self._pause_inference_client(client)
+        self._command_arbiter.call('select_none')
+        if not pause_result.success:
+            result.message = (
+                f'{result.message}; pause/hold failed: {pause_result.message}'
+            )
+        return result
+
+    def _activate_deferred_initial_pose_sync(
+        self,
+        client: ContainerServiceClient,
+        effective_duration_s: float,
+    ) -> tuple[bool, str, float]:
+        """Start the F2 sync clock after the arbiter forwards its cached target."""
+        if effective_duration_s <= 0.0:
+            return True, '', 0.0
+        result = client.inference_command(
+            ContainerServiceClient.CMD_START,
+            publish_to_robot=True,
         )
+        if not result.success:
+            pause_result = self._pause_inference_client(client)
+            self._command_arbiter.call('select_none')
+            message = result.message or 'Initial pose sync activation failed'
+            if not pause_result.success:
+                message = f'{message}; pause/hold failed: {pause_result.message}'
+            return False, message, 0.0
+        activated_duration_s = float(
+            result.data.get(
+                'initial_pose_sync_duration_s',
+                effective_duration_s,
+            ) or 0.0
+        )
+        if activated_duration_s <= 0.0:
+            self._pause_inference_client(client)
+            self._command_arbiter.call('select_none')
+            return False, 'Initial pose sync activation returned no duration', 0.0
+        return True, '', activated_duration_s
+
 
     def _republish_inference_phase(self) -> None:
         with self._inference_status_lock:
             self._inference_status_publisher.publish(self._inference_status_snapshot)
+
+    @staticmethod
+    def _effective_initial_pose_sync_duration(result, fallback_duration_s: float) -> float:
+        """Prefer runtime velocity-limited duration; retain ordinary-runtime fallback."""
+        data = getattr(result, 'data', None) or {}
+        try:
+            duration_s = float(data.get('initial_pose_sync_duration_s', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            duration_s = 0.0
+        if math.isfinite(duration_s) and duration_s > 0.0:
+            return duration_s
+        if str(getattr(result, 'message', '') or '').strip().lower() == 'syncing':
+            return float(fallback_duration_s)
+        return 0.0
 
     def _begin_initial_pose_sync_status(
         self,
@@ -1022,6 +1301,16 @@ class OrchestratorNode(Node):
                 return
             self._initial_pose_sync_hold_pending = True
         self._publish_inference_phase(InferenceStatus.SYNCING, error=message)
+
+    def _mark_initial_pose_sync_started(
+        self,
+        client: ContainerServiceClient,
+    ) -> None:
+        """Keep teardown fail-closed before the visible sync timer is armed."""
+        with self._state_lock:
+            if self.container_service_client is client:
+                self._initial_pose_sync_hold_pending = True
+
 
     def _clear_initial_pose_sync_hold_pending(
         self,
@@ -1321,7 +1610,15 @@ class OrchestratorNode(Node):
                     return response
 
                 task_info = request.task_info
+                folder_error = self._inference_record_folder_error(task_info)
+                if folder_error:
+                    response.success = False
+                    response.message = folder_error
+                    return response
                 self._cache_ui_task_info(task_info, 'PREPARE_SESSION')
+                self._prepared_trigger_task_info = self._copy_task_info(
+                    task_info
+                )
                 if self.timer_manager:
                     self.timer_manager.start(timer_name='collection')
 
@@ -1355,7 +1652,15 @@ class OrchestratorNode(Node):
                 # inference-side state (joint_order, control_hz, params)
                 # when the task identity changes.
                 task_info = request.task_info
+                folder_error = self._inference_record_folder_error(task_info)
+                if folder_error:
+                    response.success = False
+                    response.message = folder_error
+                    return response
                 self._last_ui_task_info = task_info
+                self._prepared_trigger_task_info = self._copy_task_info(
+                    task_info
+                )
                 task_name = f'{self.robot_type}_{task_info.task_name}'
 
                 need_new_config = (
@@ -1394,7 +1699,15 @@ class OrchestratorNode(Node):
 
             elif request.command == SendCommand.Request.START_SEGMENT:
                 task_info = request.task_info
+                folder_error = self._inference_record_folder_error(task_info)
+                if folder_error:
+                    response.success = False
+                    response.message = folder_error
+                    return response
                 self._last_ui_task_info = task_info
+                self._prepared_trigger_task_info = self._copy_task_info(
+                    task_info
+                )
                 task_name = f'{self.robot_type}_{task_info.task_name}'
 
                 need_new_config = (
@@ -1509,6 +1822,34 @@ class OrchestratorNode(Node):
                 self._cache_ui_task_info(
                     task_info, 'LOAD_INFERENCE' if load_only else 'START_INFERENCE'
                 )
+                with self._state_lock:
+                    recording_active = getattr(self, 'on_recording', False)
+                if recording_active:
+                    response.success = False
+                    response.message = (
+                        'Inference deploy change blocked while recording is active'
+                    )
+                    return response
+                if bool(getattr(task_info, 'record_inference_mode', False)):
+                    folder_error = self._inference_record_folder_error(
+                        task_info
+                    )
+                    if folder_error:
+                        response.success = False
+                        response.message = folder_error
+                        return response
+                requested_rlt_enabled = bool(
+                    getattr(task_info, 'rlt_enabled', False)
+                )
+                requested_rlt_bundle_path = self._normalize_policy_path(
+                    getattr(task_info, 'rlt_bundle_path', '')
+                )
+                if requested_rlt_enabled and not requested_rlt_bundle_path:
+                    response.success = False
+                    response.message = (
+                        'RLT Bundle Path is required when RLT is enabled'
+                    )
+                    return response
 
                 task_instruction = (
                     task_info.task_instruction[0]
@@ -1516,13 +1857,17 @@ class OrchestratorNode(Node):
                     else ''
                 )
                 publish_to_robot = publish_to_robot_from_task_info(task_info)
+                if self._requires_command_arbiter(task_info):
+                    none_result = self._command_arbiter.call('select_none')
+                    if not none_result.success:
+                        response.success = False
+                        response.message = none_result.message
+                        return response
                 service_prefix = self._determine_service_prefix(task_info)
                 requested_acceleration_mode, requested_acceleration_engine_path = (
                     self._acceleration_from_task_info(task_info)
                 )
                 requested_vla_rail_enabled = bool(getattr(task_info, "vla_rail_enabled", False))
-                requested_ttrtc_enabled = bool(getattr(task_info, "ttrtc_enabled", False))
-                requested_ttrtc_prefix_steps = getattr(task_info, "ttrtc_prefix_steps", 7)
                 requested_action_request_mode = (
                     self._action_request_mode_from_task_info(task_info)
                 )
@@ -1536,11 +1881,34 @@ class OrchestratorNode(Node):
                     requested_initial_pose_sync,
                     requested_initial_pose_sync_duration_s,
                 ) = self._initial_pose_sync_from_task_info(task_info)
+                requested_acceleration_mode, requested_acceleration_engine_path = (
+                    self._acceleration_for_service(task_info, service_prefix)
+                )
+                action_mode_error = self._action_request_mode_error(
+                    requested_action_request_mode,
+                    service_prefix,
+                    requested_acceleration_mode,
+                )
+                if action_mode_error:
+                    response.success = False
+                    response.message = action_mode_error
+                    return response
+                # TaskInfo is also cached and republished as UI status.  Store
+                # the backend-qualified values so a stale TensorRT selection
+                # can never appear active for ACT or another non-GR00T policy.
+                if hasattr(task_info, 'acceleration_mode'):
+                    task_info.acceleration_mode = requested_acceleration_mode
+                if hasattr(task_info, 'acceleration_engine_path'):
+                    task_info.acceleration_engine_path = (
+                        requested_acceleration_engine_path
+                    )
+                self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 # If the requested policy is already loaded on this
                 # container, treat START_INFERENCE as RESUME. If the user
-                # selected a different checkpoint on the same backend, tear
-                # down first so START performs a real fresh LOAD.
+                # selected a different checkpoint, deploy target, or another
+                # LOAD-time option on the same backend, tear down first so
+                # START performs a real fresh LOAD.
                 #
                 # The policy container may have been restarted outside
                 # orchestrator, though; in that case the cached client is
@@ -1556,6 +1924,9 @@ class OrchestratorNode(Node):
                 with self._state_lock:
                     existing_client = self.container_service_client
                     loaded_policy_path = self._loaded_inference_policy_path
+                    loaded_publish_to_robot = (
+                        self._loaded_inference_publish_to_robot
+                    )
                     loaded_acceleration_mode = (
                         self._loaded_inference_acceleration_mode
                     )
@@ -1563,8 +1934,6 @@ class OrchestratorNode(Node):
                         self._loaded_inference_acceleration_engine_path
                     )
                     loaded_vla_rail_enabled = getattr(self, "_loaded_inference_vla_rail_enabled", False)
-                    loaded_ttrtc_enabled = getattr(self, "_loaded_inference_ttrtc_enabled", False)
-                    loaded_ttrtc_prefix_steps = getattr(self, "_loaded_inference_ttrtc_prefix_steps", 7)
                     loaded_action_request_mode = (
                         self._loaded_inference_action_request_mode
                     )
@@ -1572,6 +1941,10 @@ class OrchestratorNode(Node):
                     loaded_inference_hz = self._loaded_inference_inference_hz
                     loaded_chunk_align_window_s = (
                         self._loaded_inference_chunk_align_window_s
+                    )
+                    loaded_rlt_enabled = getattr(self, '_loaded_inference_rlt_enabled', False)
+                    loaded_rlt_bundle_path = (
+                        getattr(self, '_loaded_inference_rlt_bundle_path', '')
                     )
                     loaded_initial_pose_sync = (
                         self._loaded_inference_initial_pose_sync
@@ -1581,6 +1954,7 @@ class OrchestratorNode(Node):
                     )
                     loaded_action_chunk_size = self._loaded_inference_action_chunk_size
                 start_handled = False
+                cleanup_thread = None
                 if (
                     not load_only
                     and existing_client is not None
@@ -1598,8 +1972,8 @@ class OrchestratorNode(Node):
                         loaded_initial_pose_sync_duration_s,
                         action_chunk_size=loaded_action_chunk_size,
                         vla_rail_enabled=loaded_vla_rail_enabled,
-                        ttrtc_enabled=loaded_ttrtc_enabled,
-                        ttrtc_prefix_steps=loaded_ttrtc_prefix_steps,
+                        rlt_enabled=loaded_rlt_enabled,
+                        rlt_bundle_path=loaded_rlt_bundle_path,
                     )
                     requested_signature = inference_runtime_signature(
                         requested_policy_path,
@@ -1613,43 +1987,103 @@ class OrchestratorNode(Node):
                         requested_initial_pose_sync_duration_s,
                         action_chunk_size=requested_action_chunk_size,
                         vla_rail_enabled=requested_vla_rail_enabled,
-                        ttrtc_enabled=requested_ttrtc_enabled,
-                        ttrtc_prefix_steps=requested_ttrtc_prefix_steps,
+                        rlt_enabled=requested_rlt_enabled,
+                        rlt_bundle_path=requested_rlt_bundle_path,
                     )
                     if (
                         requested_policy_path
                         and loaded_policy_path
-                        and requested_signature != loaded_signature
+                        and (
+                            requested_signature != loaded_signature
+                            or (
+                                (loaded_rlt_enabled or loaded_action_request_mode == 'tt_rtc')
+                                and publish_to_robot != loaded_publish_to_robot
+                            )
+                        )
                     ):
                         self.get_logger().info(
                             'Requested inference policy/runtime changed '
                             f'({loaded_signature} -> {requested_signature}); '
                             'reloading policy'
                         )
-                        self._teardown_inference_client()
+                        cleanup_thread = self._teardown_inference_client()
                     else:
                         resume_result = existing_client.inference_command(
                             ContainerServiceClient.CMD_RESUME,
                             task_instruction=task_instruction,
                             publish_to_robot=publish_to_robot,
+                            initial_pose_sync=requested_initial_pose_sync,
+                            initial_pose_sync_duration_s=requested_initial_pose_sync_duration_s,
                         )
                         if resume_result.success:
+                            effective_sync_duration_s = self._effective_initial_pose_sync_duration(
+                                resume_result, requested_initial_pose_sync_duration_s
+                            )
+                            if effective_sync_duration_s > 0.0:
+                                self._mark_initial_pose_sync_started(
+                                    existing_client
+                                )
+                            requires_arbiter = self._requires_command_arbiter(
+                                task_info
+                            )
+                            if requires_arbiter:
+                                policy_result = self._select_policy_or_pause(
+                                    existing_client
+                                )
+                                if not policy_result.success:
+                                    response.success = False
+                                    response.message = policy_result.message
+                                    start_handled = True
+                                    self._publish_inference_phase(
+                                        InferenceStatus.PAUSED,
+                                        error=policy_result.message,
+                                    )
+                                    continue_start = False
+                                else:
+                                    continue_start = True
+                            else:
+                                continue_start = True
+                            if (continue_start and requires_arbiter
+                                    and (loaded_rlt_enabled or loaded_action_request_mode == 'tt_rtc')):
+                                (
+                                    continue_start,
+                                    activation_message,
+                                    effective_sync_duration_s,
+                                ) = self._activate_deferred_initial_pose_sync(
+                                    existing_client,
+                                    effective_sync_duration_s,
+                                )
+                                if not continue_start:
+                                    response.success = False
+                                    response.message = activation_message
+                                    self._publish_inference_phase(
+                                        InferenceStatus.PAUSED,
+                                        error=activation_message,
+                                    )
+                            if not continue_start:
+                                self.get_logger().error(
+                                    'Policy command-source selection failed: '
+                                    f'{response.message}'
+                                )
+                                return response
                             with self._state_lock:
                                 self._loaded_inference_publish_to_robot = (
                                     publish_to_robot
                                 )
+                                needs_record_session = (
+                                    self._inference_record_session_id is None
+                                )
+                            if needs_record_session:
+                                self._begin_inference_record_session(task_info)
                             self._set_session_active(
                                 on_inference=True,
                                 start_time=time.perf_counter(),
                             )
-                            needs_initial_pose_sync = (
-                                (resume_result.message or '').strip().lower()
-                                == 'syncing'
-                            )
+                            needs_initial_pose_sync = effective_sync_duration_s > 0.0
                             if needs_initial_pose_sync:
                                 self._begin_initial_pose_sync_status(
                                     existing_client,
-                                    loaded_initial_pose_sync_duration_s,
+                                    effective_sync_duration_s,
                                 )
                             else:
                                 self._publish_inference_phase(
@@ -1712,12 +2146,12 @@ class OrchestratorNode(Node):
                     # Container start pattern used across policy backends.
                     with self._state_lock:
                         existing_client = self.container_service_client
-                    cleanup_thread = None
                     if existing_client is not None:
                         cleanup_thread = self._teardown_inference_client(
                             require_confirmed_stop=load_only,
                         )
 
+                    self._begin_inference_record_session(task_info)
                     self.init_robot_control_parameters_from_user_task(task_info)
 
                     new_client = ContainerServiceClient(
@@ -1769,16 +2203,23 @@ class OrchestratorNode(Node):
                                     action_request_mode=requested_action_request_mode,
                                     action_chunk_size=requested_action_chunk_size,
                                     vla_rail_enabled=requested_vla_rail_enabled,
-                                    ttrtc_enabled=requested_ttrtc_enabled,
-                                    ttrtc_prefix_steps=requested_ttrtc_prefix_steps,
                                     control_hz=requested_control_hz,
                                     inference_hz=requested_inference_hz,
                                     chunk_align_window_s=(
                                         requested_chunk_align_window_s
                                     ),
+                                    rlt_enabled=requested_rlt_enabled,
+                                    rlt_bundle_path=requested_rlt_bundle_path,
+                                    action_policy_mode='base',
                                     initial_pose_sync=requested_initial_pose_sync,
                                     initial_pose_sync_duration_s=(
                                         requested_initial_pose_sync_duration_s
+                                    ),
+                                    initial_pose_sync_defer_activation=(
+                                        requested_initial_pose_sync
+                                        and self._requires_command_arbiter(
+                                            task_info
+                                        )
                                     ),
                                 )
 
@@ -1882,6 +2323,53 @@ class OrchestratorNode(Node):
                                         )
                                         return
 
+                                effective_sync_duration_s = self._effective_initial_pose_sync_duration(
+                                    start_result, requested_initial_pose_sync_duration_s
+                                )
+                                if effective_sync_duration_s > 0.0:
+                                    self._mark_initial_pose_sync_started(client)
+                                requires_arbiter = self._requires_command_arbiter(
+                                    task_info
+                                )
+                                if requires_arbiter and not load_only:
+                                    policy_result = self._select_policy_or_pause(client)
+                                    if not policy_result.success:
+                                        self.get_logger().error(
+                                            'Policy command-source selection failed: '
+                                            f'{policy_result.message}'
+                                        )
+                                        self._teardown_inference_client(
+                                            expected_client=client
+                                        )
+                                        self._publish_inference_phase(
+                                            InferenceStatus.READY,
+                                            error=policy_result.message,
+                                        )
+                                        return
+                                    activation_success, activation_message = True, ''
+                                    if requested_rlt_enabled or requested_action_request_mode == 'tt_rtc':
+                                        (
+                                            activation_success,
+                                            activation_message,
+                                            effective_sync_duration_s,
+                                        ) = self._activate_deferred_initial_pose_sync(
+                                            client,
+                                            effective_sync_duration_s,
+                                        )
+                                    if not activation_success:
+                                        self.get_logger().error(
+                                            'Initial pose sync activation failed: '
+                                            f'{activation_message}'
+                                        )
+                                        self._teardown_inference_client(
+                                            expected_client=client
+                                        )
+                                        self._publish_inference_phase(
+                                            InferenceStatus.READY,
+                                            error=activation_message,
+                                        )
+                                        return
+
                                 with self._state_lock:
                                     if self.container_service_client is not client:
                                         return
@@ -1899,8 +2387,6 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     )
                                     self._loaded_inference_vla_rail_enabled = requested_vla_rail_enabled
-                                    self._loaded_inference_ttrtc_enabled = requested_ttrtc_enabled
-                                    self._loaded_inference_ttrtc_prefix_steps = requested_ttrtc_prefix_steps
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
@@ -1913,6 +2399,15 @@ class OrchestratorNode(Node):
                                     )
                                     self._loaded_inference_chunk_align_window_s = (
                                         requested_chunk_align_window_s
+                                    )
+                                    self._loaded_inference_rlt_enabled = (
+                                        requested_rlt_enabled
+                                    )
+                                    self._loaded_inference_rlt_bundle_path = (
+                                        requested_rlt_bundle_path
+                                    )
+                                    self._loaded_inference_action_policy_mode = (
+                                        'base'
                                     )
                                     self._loaded_inference_initial_pose_sync = (
                                         requested_initial_pose_sync
@@ -1927,13 +2422,10 @@ class OrchestratorNode(Node):
                                 )
                                 if load_only:
                                     self._publish_inference_phase(InferenceStatus.PAUSED)
-                                elif (
-                                    (start_result.message or '').strip().lower()
-                                    == 'syncing'
-                                ):
+                                elif effective_sync_duration_s > 0.0:
                                     self._begin_initial_pose_sync_status(
                                         client,
-                                        requested_initial_pose_sync_duration_s,
+                                        effective_sync_duration_s,
                                     )
                                 else:
                                     self._publish_inference_phase(
@@ -1964,6 +2456,57 @@ class OrchestratorNode(Node):
                         f'{service_prefix.strip("/").upper()} inference loading '
                         f'({"robot" if publish_to_robot else "simulation"} mode)'
                     )
+
+            elif request.command == SendCommand.Request.SET_ACTION_POLICY:
+                target_mode = str(
+                    getattr(request.task_info, 'action_policy_mode', '') or ''
+                ).strip().lower()
+                if target_mode not in {'base', 'rlt'}:
+                    response.success = False
+                    response.message = (
+                        'Action policy mode must be either "base" or "rlt"'
+                    )
+                    return response
+
+                with self._state_lock:
+                    client = self.container_service_client
+                    inference_active = self.on_inference
+                    rlt_preloaded = self._loaded_inference_rlt_enabled
+
+                if client is None or not inference_active:
+                    response.success = False
+                    response.message = 'No active inference session'
+                    return response
+                if target_mode == 'rlt' and not rlt_preloaded:
+                    response.success = False
+                    response.message = (
+                        'RLT action cannot be selected because no RLT bundle '
+                        'was preloaded for this inference session'
+                    )
+                    return response
+
+                result = client.inference_command(
+                    ContainerServiceClient.CMD_SET_ACTION_POLICY,
+                    action_policy_mode=target_mode,
+                    rlt_robot_override=bool(
+                        getattr(
+                            request.task_info,
+                            'rlt_robot_override',
+                            False,
+                        )
+                    ),
+                )
+                if result.success:
+                    with self._state_lock:
+                        if self.container_service_client is client:
+                            self._loaded_inference_action_policy_mode = (
+                                target_mode
+                            )
+                response.success = result.success
+                response.message = (
+                    result.message
+                    or f'Action policy switched to {target_mode}'
+                )
 
             elif request.command == SendCommand.Request.CONVERT_MP4:
                 # CONVERT_MP4 path resolution stays orchestrator-side
@@ -2056,6 +2599,12 @@ class OrchestratorNode(Node):
                 conversion_fps = int(getattr(request, 'conversion_fps', 0) or 0)
                 convert_v21 = bool(getattr(request, 'convert_v21', False))
                 convert_v30 = bool(getattr(request, 'convert_v30', False))
+                lerobot_output_root = str(
+                    getattr(request, 'lerobot_output_root', '') or ''
+                ).strip()
+                delete_source_after_success = bool(
+                    getattr(request, 'delete_source_after_success', False)
+                )
                 if not convert_v21 and not convert_v30:
                     convert_v21 = True
                     convert_v30 = True
@@ -2099,6 +2648,8 @@ class OrchestratorNode(Node):
                     fps=conversion_fps,
                     convert_v21=convert_v21,
                     convert_v30=convert_v30,
+                    lerobot_output_root=lerobot_output_root,
+                    delete_source_after_success=delete_source_after_success,
                     selected_cameras=list(
                         getattr(request, 'selected_cameras', []) or []
                     ),
@@ -2225,6 +2776,10 @@ class OrchestratorNode(Node):
                             loaded_initial_pose_sync_duration_s = (
                                 self._loaded_inference_initial_pose_sync_duration_s
                             )
+                            deferred_sync = (
+                                self._loaded_inference_rlt_enabled
+                                or self._loaded_inference_action_request_mode == 'tt_rtc'
+                            )
                         if client is not None:
                             task_instruction = (
                                 request.task_info.task_instruction[0]
@@ -2240,18 +2795,47 @@ class OrchestratorNode(Node):
                                 publish_to_robot=loaded_publish_to_robot,
                             )
                             if result.success:
-                                self.on_inference = True
-                                needs_initial_pose_sync = (
-                                    (result.message or '').strip().lower()
-                                    == 'syncing'
+                                effective_sync_duration_s = self._effective_initial_pose_sync_duration(
+                                    result,
+                                    resume_sync_duration if resume_sync else loaded_initial_pose_sync_duration_s,
                                 )
-                                if needs_initial_pose_sync:
-                                    with self._state_lock:
-                                        self._loaded_inference_initial_pose_sync = True
-                                        self._loaded_inference_initial_pose_sync_duration_s = resume_sync_duration
+                                if effective_sync_duration_s > 0.0:
+                                    self._mark_initial_pose_sync_started(client)
+                                if loaded_publish_to_robot and self._requires_command_arbiter():
+                                    policy_result = self._select_policy_or_pause(client)
+                                    if not policy_result.success:
+                                        response.success = False
+                                        response.message = policy_result.message
+                                        if not self._initial_pose_sync_is_active(client):
+                                            self._publish_inference_phase(
+                                                InferenceStatus.PAUSED, error=policy_result.message,
+                                            )
+                                        return response
+                                    if deferred_sync:
+                                        activated, message, effective_sync_duration_s = (
+                                            self._activate_deferred_initial_pose_sync(
+                                                client, effective_sync_duration_s,
+                                            )
+                                        )
+                                        if not activated:
+                                            response.success = False
+                                            response.message = message
+                                            if not self._initial_pose_sync_is_active(client):
+                                                self._publish_inference_phase(
+                                                    InferenceStatus.PAUSED, error=message,
+                                                )
+                                            return response
+                                with self._state_lock:
+                                    if self.container_service_client is not client:
+                                        response.success = False
+                                        response.message = 'Inference session changed while RESUME was pending'
+                                        return response
+                                    self._loaded_inference_initial_pose_sync = resume_sync
+                                    self._loaded_inference_initial_pose_sync_duration_s = resume_sync_duration
+                                self._set_session_active(on_inference=True)
+                                if effective_sync_duration_s > 0.0:
                                     self._begin_initial_pose_sync_status(
-                                        client,
-                                        resume_sync_duration if resume_sync else loaded_initial_pose_sync_duration_s,
+                                        client, effective_sync_duration_s,
                                     )
                                 else:
                                     self._publish_inference_phase(
@@ -2292,6 +2876,13 @@ class OrchestratorNode(Node):
                     elif request.command == SendCommand.Request.START_INFERENCE_RECORD:
                         self.get_logger().info(
                             'Starting recording during inference (forwarder)')
+                        start_error = self._inference_record_start_error(
+                            request.task_info
+                        )
+                        if start_error:
+                            response.success = False
+                            response.message = start_error
+                            return response
                         self._cache_ui_task_info(
                             request.task_info,
                             'START_INFERENCE_RECORD',
@@ -2323,9 +2914,20 @@ class OrchestratorNode(Node):
 
                     elif request.command == SendCommand.Request.STOP_INFERENCE_RECORD:
                         self.get_logger().info('Stopping recording during inference (forwarder)')
+                        outcome = int(
+                            getattr(request, 'episode_outcome', 0) or 0
+                        )
+                        outcome_error = self._inference_record_outcome_error(
+                            outcome
+                        )
+                        if outcome_error:
+                            response.success = False
+                            response.message = outcome_error
+                            return response
                         cd_result = self._forward_recording(
                             RecordingCommand.Request.STOP,
                             task_info=request.task_info,
+                            episode_outcome=outcome,
                         )
                         if (cd_result.success
                                 and cd_result.response is not None
@@ -2379,11 +2981,23 @@ class OrchestratorNode(Node):
                         is_inference_clear = (
                             request.task_info.task_type == 'inference'
                         )
+                        if is_inference_clear:
+                            clear_error = self._inference_clear_error()
+                            if clear_error:
+                                response.success = False
+                                response.message = clear_error
+                                return response
                         self.get_logger().info(
                             'Finishing '
                             f'{"inference session" if is_inference_clear else "recording"} '
                             '(forwarder)'
                         )
+                        clear_task_info = request.task_info
+                        if is_inference_clear:
+                            clear_task_info = (
+                                self._get_inference_record_task_info()
+                                or request.task_info
+                            )
                         sync_stop_verified_client = None
                         if is_inference_clear:
                             sync_stop_verified_client = (
@@ -2391,9 +3005,14 @@ class OrchestratorNode(Node):
                             )
                         cd_result = self._forward_recording(
                             RecordingCommand.Request.FINISH,
-                            task_info=request.task_info,
+                            task_info=clear_task_info,
                         )
                         if is_inference_clear:
+                            if (not cd_result.success or (
+                                    cd_result.response is not None
+                                    and not cd_result.response.success)):
+                                self._apply_cyclo_data_response(cd_result, response)
+                                return response
                             self._teardown_inference_client(
                                 stop_verified_client=sync_stop_verified_client,
                             )
@@ -2706,6 +3325,20 @@ class OrchestratorNode(Node):
 
     def set_robot_type_callback(self, request, response):
         try:
+            with self._state_lock:
+                session_id = self._inference_record_session_id
+                session_robot_type = self._inference_record_robot_type
+            if (
+                session_id
+                and session_robot_type
+                and request.robot_type != session_robot_type
+            ):
+                response.success = False
+                response.message = (
+                    'Robot type change blocked during inference session; '
+                    'Clear the session first'
+                )
+                return response
             self.get_logger().info(f'Setting robot type to: {request.robot_type}')
             self.robot_type = request.robot_type
             self.clear_parameters()
@@ -2866,6 +3499,7 @@ class OrchestratorNode(Node):
         'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
         'smolvla', 'xvla', 'gaussian_actor',
         'molmoact2', 'vla_jepa', 'fastwam',
+        'sac', 'multi_task_dit',
     }
 
     @staticmethod
@@ -2875,6 +3509,46 @@ class OrchestratorNode(Node):
         if not value:
             return ''
         return os.path.normpath(value)
+
+    @staticmethod
+    def _inference_runtime_signature(
+        *,
+        policy_path: str,
+        publish_to_robot: bool,
+        acceleration_mode: str,
+        acceleration_engine_path: str,
+        action_request_mode: str,
+        rlt_enabled: bool,
+        rlt_bundle_path: str,
+        initial_pose_sync: bool,
+        initial_pose_sync_duration_s: float,
+    ) -> tuple:
+        """Return every LOAD-time setting that requires a fresh deployment."""
+
+        return (
+            str(policy_path),
+            bool(publish_to_robot),
+            str(acceleration_mode),
+            str(acceleration_engine_path),
+            str(action_request_mode),
+            bool(rlt_enabled),
+            str(rlt_bundle_path),
+            bool(initial_pose_sync),
+            float(initial_pose_sync_duration_s),
+        )
+
+    @staticmethod
+    def _inference_runtime_is_inactive(message: str) -> bool:
+        value = str(message or '').strip().lower()
+        return value in {'not running', 'not running - start first', 'load first'}
+
+    @classmethod
+    def _inference_resume_requires_reload(cls, message: str) -> bool:
+        value = str(message or '').strip()
+        return (
+            cls._inference_runtime_is_inactive(value)
+            or 'deploy target differs from the loaded policy' in value.lower()
+        )
 
     @staticmethod
     def _is_policy_already_loaded_message(message: str) -> bool:
@@ -2938,11 +3612,27 @@ class OrchestratorNode(Node):
             engine_path = ''
         return mode, engine_path
 
+    @classmethod
+    def _acceleration_for_service(
+        cls,
+        task_info,
+        service_prefix: str,
+    ) -> tuple[str, str]:
+        """Return acceleration settings permitted by the selected backend.
+
+        TensorRT acceleration is a GR00T-specific contract.  Treat any stale
+        or malformed TensorRT fields on ACT/LeRobot requests as eager PyTorch
+        instead of forwarding them to a backend that cannot consume them.
+        """
+        if str(service_prefix or '').strip().rstrip('/') != '/groot':
+            return 'pytorch', ''
+        return cls._acceleration_from_task_info(task_info)
+
     @staticmethod
     def _normalize_action_request_mode(value: str) -> str:
         mode = str(value or '').strip().lower()
-        if mode == 'sync':
-            return 'sync'
+        if mode in {'sync', 'tt_rtc'}:
+            return mode
         return 'async'
 
     @classmethod
@@ -2950,6 +3640,20 @@ class OrchestratorNode(Node):
         return cls._normalize_action_request_mode(
             getattr(task_info, 'action_request_mode', '')
         )
+
+    @staticmethod
+    def _action_request_mode_error(
+        mode: str,
+        service_prefix: str,
+        acceleration_mode: str = 'pytorch',
+    ) -> str:
+        if mode == 'tt_rtc' and str(service_prefix or '').rstrip('/') != '/groot':
+            return 'TT-RTC action requests are supported only by GR00T N1.7'
+        if mode == 'tt_rtc' and acceleration_mode not in {'pytorch', 'tensorrt_dit'}:
+            return (
+                'TT-RTC supports PyTorch or DiT TensorRT only'
+            )
+        return ''
 
     @staticmethod
     def _initial_pose_sync_from_task_info(task_info) -> tuple[bool, float]:
@@ -3020,8 +3724,6 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
             self._loaded_inference_vla_rail_enabled = False
-            self._loaded_inference_ttrtc_enabled = False
-            self._loaded_inference_ttrtc_prefix_steps = 7
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
@@ -3119,8 +3821,6 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
             self._loaded_inference_vla_rail_enabled = False
-            self._loaded_inference_ttrtc_enabled = False
-            self._loaded_inference_ttrtc_prefix_steps = 7
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
@@ -3128,6 +3828,20 @@ class OrchestratorNode(Node):
             self._loaded_inference_initial_pose_sync = False
             self._loaded_inference_initial_pose_sync_duration_s = 5.0
             self._initial_pose_sync_hold_pending = False
+            self._loaded_inference_rlt_enabled = False
+            self._loaded_inference_rlt_bundle_path = ''
+            self._loaded_inference_action_policy_mode = 'base'
+            self._inference_record_session_id = None
+            self._inference_record_robot_type = None
+            self._prepared_inference_task_info = None
+            prepared_trigger = getattr(
+                self, '_prepared_trigger_task_info', None
+            )
+            if (
+                prepared_trigger is not None
+                and getattr(prepared_trigger, 'task_type', '') == 'inference'
+            ):
+                self._prepared_trigger_task_info = None
         if sync_timer is not None:
             sync_timer.cancel()
         if client is None:
@@ -3162,7 +3876,7 @@ class OrchestratorNode(Node):
         return cleanup_thread
 
     def _record_trigger_total_segments(self) -> int:
-        task_info = self._prepared_record_task_info
+        task_info = getattr(self, '_prepared_trigger_task_info', None)
         if task_info is None:
             return 1
         subtasks = [
@@ -3182,7 +3896,7 @@ class OrchestratorNode(Node):
         self._trigger_record_next_segment_index = next_index
 
     def _start_record_trigger_segment(self, segment_index: int) -> bool:
-        task_info = self._prepared_record_task_info
+        task_info = getattr(self, '_prepared_trigger_task_info', None)
         if task_info is None:
             self.get_logger().warning(
                 'Trigger record start ignored: prepare the Record session first')
@@ -3227,7 +3941,7 @@ class OrchestratorNode(Node):
         return False
 
     def _stop_record_trigger_segment(self) -> None:
-        task_info = self._prepared_record_task_info
+        task_info = getattr(self, '_prepared_trigger_task_info', None)
         if task_info is None:
             self.get_logger().warning(
                 'Trigger record save ignored: prepare the Record session first')
@@ -3278,7 +3992,7 @@ class OrchestratorNode(Node):
         self._start_record_trigger_segment(next_index)
 
     def _cancel_record_trigger_segment(self) -> None:
-        task_info = self._prepared_record_task_info
+        task_info = getattr(self, '_prepared_trigger_task_info', None)
         if task_info is None:
             self.get_logger().warning(
                 'Trigger record cancel ignored: prepare the Record session first')
@@ -3303,72 +4017,95 @@ class OrchestratorNode(Node):
         )
         self.get_logger().error(f'Trigger CANCEL_SEGMENT failed: {message}')
 
-    def _toggle_inference_trigger_recording(self, is_recording: bool) -> None:
+    def _start_inference_trigger_recording(self) -> None:
         task_info = self._get_inference_record_task_info()
         if task_info is None:
             self.get_logger().warning(
-                'Inference trigger ignored: no inference task info available')
-            return
-        if is_recording:
-            self.get_logger().info('Trigger: STOP inference recording')
-            cd_result = self._forward_recording(
-                RecordingCommand.Request.STOP,
-                task_info=task_info,
+                'Inference recording trigger ignored: prepare the Playground '
+                'session first'
             )
-            if (cd_result.success
-                    and cd_result.response is not None
-                    and cd_result.response.success):
-                self._set_session_active(on_recording=False)
-            else:
-                message = (
-                    cd_result.response.message
-                    if cd_result.response is not None else cd_result.message
-                )
-                self.get_logger().error(
-                    f'Trigger inference STOP failed: {message}')
             return
-
-        self.get_logger().info('Trigger: START inference recording')
+        start_error = self._inference_record_start_error(task_info)
+        if start_error:
+            self.get_logger().warning(
+                f'Inference recording trigger ignored: {start_error}'
+            )
+            return
         cd_result = self._forward_recording(
             RecordingCommand.Request.START,
             task_info=task_info,
             include_topics=True,
         )
-        if (cd_result.success
-                and cd_result.response is not None
-                and cd_result.response.success):
+        if (
+            cd_result.success
+            and cd_result.response is not None
+            and cd_result.response.success
+        ):
             self._set_session_active(
                 on_recording=True,
                 start_time=time.perf_counter(),
             )
-        else:
-            message = (
-                cd_result.response.message
-                if cd_result.response is not None else cd_result.message
+            return
+        message = (
+            cd_result.response.message
+            if cd_result.response is not None else cd_result.message
+        )
+        self.get_logger().error(
+            f'Inference trigger START failed: {message}'
+        )
+
+    def _stop_inference_trigger_recording(self) -> None:
+        task_info = self._get_inference_record_task_info()
+        if task_info is None:
+            self.get_logger().warning(
+                'Inference recording save ignored: no prepared task info'
             )
-            self.get_logger().error(f'Trigger inference START failed: {message}')
+            return
+        cd_result = self._forward_recording(
+            RecordingCommand.Request.STOP,
+            task_info=task_info,
+            episode_outcome=RecordingCommand.Request.SUCCESS,
+        )
+        if (
+            cd_result.success
+            and cd_result.response is not None
+            and cd_result.response.success
+        ):
+            self._set_session_active(on_recording=False)
+            return
+        message = (
+            cd_result.response.message
+            if cd_result.response is not None else cd_result.message
+        )
+        self.get_logger().error(
+            f'Inference trigger STOP failed: {message}'
+        )
 
     def _cancel_inference_trigger_recording(self) -> None:
         task_info = self._get_inference_record_task_info()
         if task_info is None:
             self.get_logger().warning(
-                'Inference trigger cancel ignored: no inference task info available')
+                'Inference recording cancel ignored: no prepared task info'
+            )
             return
-        self.get_logger().info('Trigger: CANCEL inference recording')
         cd_result = self._forward_recording(
             RecordingCommand.Request.CANCEL,
             task_info=task_info,
         )
-        if (cd_result.success
-                and cd_result.response is not None
-                and cd_result.response.success):
+        if (
+            cd_result.success
+            and cd_result.response is not None
+            and cd_result.response.success
+        ):
             self._set_session_active(on_recording=False)
-        else:
-            message = (
-                cd_result.response.message
-                if cd_result.response is not None else cd_result.message
-            )
-            self.get_logger().error(f'Trigger inference CANCEL failed: {message}')
+            return
+        message = (
+            cd_result.response.message
+            if cd_result.response is not None else cd_result.message
+        )
+        self.get_logger().error(
+            f'Inference trigger CANCEL failed: {message}'
+        )
 
     def handle_joystick_trigger(self, joystick_mode: str):
         """
@@ -3385,6 +4122,10 @@ class OrchestratorNode(Node):
             return
 
         if joystick_mode in ('right', 'left', 'left_gripper_out'):
+            if joystick_mode in ('right', 'left') and not getattr(
+                self.communicator, 'recording_trigger_enabled', lambda: True
+            )():
+                return
             snapshot_on_recording, snapshot_on_inference = (
                 self._snapshot_session_state()
             )
@@ -3396,15 +4137,15 @@ class OrchestratorNode(Node):
                         'Inference trigger ignored: no inference task info available')
                     return
                 if joystick_mode == 'right':
-                    self._toggle_inference_trigger_recording(snapshot_on_recording)
+                    if snapshot_on_recording:
+                        self._stop_inference_trigger_recording()
+                    else:
+                        self._start_inference_trigger_recording()
                 elif snapshot_on_recording:
                     self._cancel_inference_trigger_recording()
-                else:
-                    self.get_logger().debug(
-                        'Inference trigger cancel ignored: no active recording')
                 return
 
-            if self._prepared_record_task_info is None:
+            if getattr(self, '_prepared_trigger_task_info', None) is None:
                 self.get_logger().warning(
                     'Record trigger ignored: prepare the Record session first')
                 return

@@ -68,6 +68,13 @@ if TYPE_CHECKING:
 LOAD_INFERENCE_COMMAND = getattr(SendCommandSrv.Request, 'LOAD_INFERENCE', 25)
 
 # Each BT inference command waits for its acknowledged lifecycle phase.
+INITIAL_POSE_SYNC_MAX_DURATION_SEC = 60.0
+PHASE_COMPLETION_GRACE_SEC = 10.0
+RESUME_PHASE_TIMEOUT_SEC = (
+    INITIAL_POSE_SYNC_MAX_DURATION_SEC + PHASE_COMPLETION_GRACE_SEC
+)
+
+
 COMMAND_STAGES = {
     'LOAD': [
         {
@@ -81,7 +88,9 @@ COMMAND_STAGES = {
         {
             'command': SendCommandSrv.Request.RESUME_INFERENCE,
             'target_phase': InferenceStatus.INFERENCING,
-            'timeout': 10.0,
+            # RESUME may enter SYNCING before INFERENCING. The runtime can
+            # extend the pose transition to 60 seconds for velocity safety.
+            'timeout': RESUME_PHASE_TIMEOUT_SEC,
             'with_task_info': True,
         },
     ],
@@ -143,6 +152,7 @@ MODEL_SERVICE_TYPES = {
     'lerobot:molmoact2': 'lerobot',
     'lerobot:vla_jepa': 'lerobot',
     'lerobot:fastwam': 'lerobot',
+    'lerobot:multi_task_dit': 'lerobot',
     'act': 'lerobot',
     'diffusion': 'lerobot',
     'smolvla': 'lerobot',
@@ -152,6 +162,7 @@ MODEL_SERVICE_TYPES = {
     'molmoact2': 'lerobot',
     'vla_jepa': 'lerobot',
     'fastwam': 'lerobot',
+    'multi_task_dit': 'lerobot',
 }
 
 
@@ -169,8 +180,8 @@ def _service_type_from_model(model: str) -> str:
 
 def _normalize_action_request_mode(value: str) -> str:
     mode = str(value or '').strip().lower()
-    if mode == 'sync':
-        return 'sync'
+    if mode in {'sync', 'tt_rtc'}:
+        return mode
     return 'async'
 
 
@@ -429,16 +440,14 @@ class SendCommand(BaseAction):
             if self.command_str == 'LOAD'
             else ''
         )
-        self.ttrtc_enabled = self.command_str == 'LOAD' and str(ttrtc_enabled).strip().lower() in {'true', '1'}
-        self.ttrtc_prefix_steps = 7
-        if self.ttrtc_enabled:
-            if (self.backend != 'groot' or self.action_request_mode != 'async'
-                    or self.vla_rail_enabled or self.acceleration_mode != 'pytorch'
-                    or self.inference_hz not in (0, 15)):
-                raise ValueError('TT-RTC requires GR00T Async, PyTorch, 15 Hz and VLA-RAIL disabled')
-            if str(ttrtc_prefix_steps) not in {str(i) for i in range(9)}:
-                raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
-            self.ttrtc_prefix_steps = int(ttrtc_prefix_steps)
+        legacy_ttrtc_enabled = self.command_str == 'LOAD' and str(ttrtc_enabled).strip().lower() in {'true', '1'}
+        if legacy_ttrtc_enabled:
+            self.action_request_mode = 'tt_rtc'
+        if self.action_request_mode == 'tt_rtc':
+            if self.backend != 'groot' or self.vla_rail_enabled:
+                raise ValueError('TT-RTC requires GR00T and VLA-RAIL disabled')
+            if self.acceleration_mode not in ('pytorch', 'tensorrt_dit'):
+                raise ValueError('TT-RTC requires PyTorch or DiT TensorRT')
             self.inference_hz = 15
         self.acceleration_engine_path = (
             str(acceleration_engine_path or '').strip()
@@ -495,8 +504,6 @@ class SendCommand(BaseAction):
             else []
         )
         self._stages = [dict(stage) for stage in self._stages]
-        if self.target_str == 'INFERENCE' and self.command_str == 'RESUME' and self.initial_pose_sync:
-            self._stages[0]['timeout'] = self.initial_pose_sync_duration_s + 10.0
         self._stage_idx = 0
         self._future = None
         self._result = None
@@ -974,12 +981,9 @@ class SendCommand(BaseAction):
                 raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
             if hasattr(ti, 'vla_rail_enabled'):
                 ti.vla_rail_enabled = self.vla_rail_enabled
-            if self.ttrtc_enabled and not all(hasattr(ti, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
-                raise RuntimeError('Rebuild interfaces to enable TT-RTC')
-            if hasattr(ti, 'ttrtc_enabled'):
-                ti.ttrtc_enabled = self.ttrtc_enabled
-            if hasattr(ti, 'ttrtc_prefix_steps'):
-                ti.ttrtc_prefix_steps = self.ttrtc_prefix_steps if self.ttrtc_enabled else 0
+        if (self.command_str == 'LOAD' and self.action_request_mode == 'tt_rtc'
+                and not hasattr(ti, 'action_request_mode')):
+            raise RuntimeError('Rebuild interfaces to enable TT-RTC')
         if self.command_str == 'LOAD' and hasattr(ti, 'action_request_mode'):
             ti.action_request_mode = self.action_request_mode
         ti.tags = (

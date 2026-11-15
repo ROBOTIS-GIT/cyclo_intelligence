@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+
+
+GROOT_ROOT = Path(__file__).resolve().parents[1]
+if str(GROOT_ROOT) not in sys.path:
+    sys.path.insert(0, str(GROOT_ROOT))
+
+from runtime.tt_rtc import (  # noqa: E402
+    TTRTCCapability,
+    TTRTCContractError,
+    load_tt_rtc_capability,
+    parse_tt_rtc_request,
+    validate_tt_rtc_model_contract,
+    validate_tt_rtc_rlt_binding,
+)
+
+
+def _manifest(*, include_rlt: bool = True) -> dict:
+    payload = {
+        "schema": "cyclo.training-time-rtc/v1",
+        "training_time_rtc": {
+            "trained": True,
+            "action_horizon": 16,
+            "action_dimension": 19,
+            "action_hz": 15.0,
+            "max_delay_steps": 6,
+            "model_action_horizon": 40,
+            "model_action_dimension": 132,
+            "processor_action_horizon": 40,
+            "processor_action_dimension": 132,
+            "num_inference_timesteps": 4,
+            "num_timestep_buckets": 1000,
+            "delay_sampling": {
+                "type": "uniform_integer",
+                "min_inclusive": 0,
+                "max_inclusive": 6,
+            },
+            "prefix_input": "ground_truth_clean_action",
+            "loss_region": "postfix_only",
+            "per_action_timestep": True,
+            "flow_convention": {
+                "noise_endpoint": 0.0,
+                "clean_endpoint": 1.0,
+                "velocity_target": "action_minus_noise",
+            },
+        },
+    }
+    if include_rlt:
+        payload["rlt"] = {
+            "chunk_length": 10,
+            "reference_horizon": 16,
+            "reference_slice": "[d:d+10]",
+        }
+    return payload
+
+
+def _loaded_contract(**overrides) -> dict:
+    payload = {
+        "enabled": True,
+        "max_delay_steps": 6,
+        "action_hz": 15.0,
+        "action_horizon": 16,
+        "action_dimension": 19,
+        "model_action_horizon": 40,
+        "model_action_dimension": 132,
+        "processor_action_horizon": 40,
+        "processor_action_dimension": 132,
+        "num_inference_timesteps": 4,
+        "num_timestep_buckets": 1000,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _write_training_checkpoint(root: Path) -> None:
+    payload = _manifest(include_rlt=False)
+    rtc = payload["training_time_rtc"]
+    rtc.update(action_horizon=32, action_dimension=16, state_timestep="sampled_flow_time")
+    for key in ("action_hz", "num_inference_timesteps", "num_timestep_buckets",
+                "processor_action_horizon", "processor_action_dimension"):
+        rtc.pop(key)
+    (root / "experiment_cfg").mkdir()
+    (root / "experiment_cfg/tt_rtc_training_manifest.json").write_text(json.dumps(payload))
+    (root / "config.json").write_text(json.dumps({
+        "training_time_rtc": True, "tt_rtc_max_delay_steps": 6,
+        "tt_rtc_logical_action_horizon": 32, "tt_rtc_logical_action_dim": 16,
+        "action_horizon": 40, "max_action_dim": 132,
+        "num_inference_timesteps": 4, "num_timestep_buckets": 1000,
+    }))
+    (root / "processor_config.json").write_text(json.dumps({"processor_kwargs": {
+        "max_action_horizon": 40, "max_action_dim": 132,
+        "modality_configs": {"new_embodiment": {"action": {"delta_indices": list(range(32))}}},
+    }}))
+
+
+def _write_20x16_training_checkpoint(root: Path) -> None:
+    payload = _manifest(include_rlt=False)
+    payload["schema"] = "cyclo.tt-rtc-training/v1"
+    rtc = payload["training_time_rtc"]
+    rtc.update(
+        action_horizon=20,
+        action_dimension=16,
+        min_delay_steps=6,
+        max_delay_steps=8,
+        min_postfix_steps=12,
+        state_timestep="sampled_flow_time",
+        delay_sampling={
+            "type": "uniform_integer",
+            "min_inclusive": 6,
+            "max_inclusive": 8,
+        },
+    )
+    for key in (
+        "action_hz",
+        "num_inference_timesteps",
+        "num_timestep_buckets",
+        "processor_action_horizon",
+        "processor_action_dimension",
+    ):
+        rtc.pop(key)
+    (root / "experiment_cfg").mkdir()
+    (root / "experiment_cfg/tt_rtc_training_manifest.json").write_text(
+        json.dumps(payload)
+    )
+    (root / "config.json").write_text(json.dumps({
+        "training_time_rtc": True,
+        "tt_rtc_logical_action_horizon": 20,
+        "tt_rtc_logical_action_dim": 16,
+        "tt_rtc_min_delay_steps": 6,
+        "tt_rtc_max_delay_steps": 8,
+        "tt_rtc_min_postfix_steps": 12,
+        "action_horizon": 40,
+        "max_action_dim": 132,
+        "num_inference_timesteps": 4,
+        "num_timestep_buckets": 1000,
+    }))
+    (root / "processor_config.json").write_text(json.dumps({"processor_kwargs": {
+        "max_action_horizon": 40,
+        "max_action_dim": 132,
+        "modality_configs": {
+            "new_embodiment": {
+                "action": {"delta_indices": list(range(20))},
+            },
+        },
+    }}))
+
+
+class ExternalTrainingMetadataTests(unittest.TestCase):
+    def test_uniform_choice_training_record_is_adapted_to_uniform_integer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_training_checkpoint(root)
+            path = root / "experiment_cfg/tt_rtc_training_manifest.json"
+            payload = json.loads(path.read_text())
+            payload["schema"] = "cyclo.tt-rtc-training/v1"
+            payload["training_time_rtc"].update(
+                min_delay_steps=0,
+                min_postfix_steps=26,
+                delay_sampling={
+                    "type": "uniform_choice",
+                    "values": list(range(7)),
+                    "probabilities": [1.0 / 7.0] * 7,
+                },
+            )
+            config = json.loads((root / "config.json").read_text())
+            config.update(
+                tt_rtc_min_delay_steps=0,
+                tt_rtc_min_postfix_steps=26,
+            )
+            path.write_text(json.dumps(payload))
+            (root / "config.json").write_text(json.dumps(config))
+
+            capability = load_tt_rtc_capability(root)
+
+            self.assertEqual(
+                capability.payload["training_time_rtc"]["delay_sampling"],
+                {
+                    "type": "uniform_integer",
+                    "min_inclusive": 0,
+                    "max_inclusive": 6,
+                },
+            )
+
+    def test_20x16_training_record_schema_is_adapted_with_delay_range(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_20x16_training_checkpoint(root)
+
+            capability = load_tt_rtc_capability(root)
+
+            rtc = capability.payload["training_time_rtc"]
+            self.assertEqual(capability.payload["schema"], "cyclo.training-time-rtc/v1")
+            self.assertEqual(
+                capability.payload["training_record_schema"],
+                "cyclo.tt-rtc-training/v1",
+            )
+            self.assertEqual(
+                (rtc["action_horizon"], rtc["action_dimension"]),
+                (20, 16),
+            )
+            self.assertEqual(
+                (rtc["min_delay_steps"], rtc["max_delay_steps"]),
+                (6, 8),
+            )
+            validate_tt_rtc_model_contract(
+                capability,
+                _loaded_contract(
+                    max_delay_steps=8,
+                    action_horizon=20,
+                    action_dimension=16,
+                ),
+            )
+
+    def test_training_manifest_32x16_is_adapted_without_rewriting_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_training_checkpoint(root)
+            before = {p: p.read_bytes() for p in root.rglob("*.json")}
+            capability = load_tt_rtc_capability(root)
+            self.assertEqual(capability.source.name, "tt_rtc_training_manifest.json")
+            validate_tt_rtc_model_contract(capability, _loaded_contract(action_horizon=32, action_dimension=16))
+            self.assertEqual(before, {p: p.read_bytes() for p in root.rglob("*.json")})
+            with self.assertRaisesRegex(TTRTCContractError, "manifest rlt"):
+                load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_32x16_eight_step_prefix_respects_declared_training_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for trained_max in (6, 8):
+                payload = _manifest(include_rlt=False)
+                rtc = payload["training_time_rtc"]
+                rtc.update(action_horizon=32, action_dimension=16, max_delay_steps=trained_max)
+                rtc["delay_sampling"]["max_inclusive"] = trained_max
+                (root / "tt_rtc_manifest.json").write_text(json.dumps(payload))
+                capability = load_tt_rtc_capability(root)
+                self.assertEqual(capability.payload["training_time_rtc"]["max_delay_steps"], trained_max)
+                request = SimpleNamespace(action_request_mode="tt_rtc", rtc_delay_steps=8,
+                    rtc_action_dim=16, rtc_prefix_action_list=[0.] * 128)
+                if trained_max == 8:
+                    self.assertEqual(parse_tt_rtc_request(request, action_dim=16, max_delay_steps=trained_max).delay_steps, 8)
+                else:
+                    with self.assertRaises(TTRTCContractError):
+                        parse_tt_rtc_request(request, action_dim=16, max_delay_steps=trained_max)
+
+    def test_32x16_rlt_manifest_requires_matching_reference_horizon(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = _manifest()
+            payload["training_time_rtc"].update(action_horizon=32, action_dimension=16)
+            path = root / "tt_rtc_manifest.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(TTRTCContractError, "rlt.reference_horizon"):
+                load_tt_rtc_capability(root, require_rlt=True)
+            payload["rlt"]["reference_horizon"] = 32
+            path.write_text(json.dumps(payload))
+            load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_disagreeing_training_config_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_training_checkpoint(root)
+            p = root / "config.json"
+            config = json.loads(p.read_text())
+            config["tt_rtc_logical_action_dim"] = 19
+            p.write_text(json.dumps(config))
+            with self.assertRaisesRegex(TTRTCContractError, "training_config"):
+                load_tt_rtc_capability(root)
+
+    def test_16d_request_requires_matching_model_dimension(self):
+        request = SimpleNamespace(action_request_mode="tt_rtc", rtc_delay_steps=6,
+                                  rtc_action_dim=16, rtc_prefix_action_list=[0.] * 96)
+        parsed = parse_tt_rtc_request(request, action_dim=16)
+        self.assertEqual(len(parsed.prefix_actions), 6)
+        with self.assertRaisesRegex(TTRTCContractError, "must be 19"):
+            parse_tt_rtc_request(request)
+
+
+class TTRTCRequestTests(unittest.TestCase):
+    def test_20x16_profile_accepts_bootstrap_and_trained_delay_range_only(self):
+        for delay in (0, 6, 8):
+            with self.subTest(delay=delay):
+                parsed = parse_tt_rtc_request(
+                    SimpleNamespace(
+                        action_request_mode="tt_rtc",
+                        rtc_delay_steps=delay,
+                        rtc_action_dim=16,
+                        rtc_prefix_action_list=[0.0] * (delay * 16),
+                    ),
+                    action_dim=16,
+                    min_delay_steps=6,
+                    max_delay_steps=8,
+                )
+                self.assertEqual(parsed.delay_steps, delay)
+
+        for delay in (1, 5, 9):
+            with self.subTest(delay=delay):
+                with self.assertRaisesRegex(TTRTCContractError, "6..8"):
+                    parse_tt_rtc_request(
+                        SimpleNamespace(
+                            action_request_mode="tt_rtc",
+                            rtc_delay_steps=delay,
+                            rtc_action_dim=16,
+                            rtc_prefix_action_list=[0.0] * (delay * 16),
+                        ),
+                        action_dim=16,
+                        min_delay_steps=6,
+                        max_delay_steps=8,
+                    )
+
+    def test_normal_modes_do_not_create_a_tt_rtc_request(self) -> None:
+        for mode in ("", "sync", "async"):
+            with self.subTest(mode=mode):
+                self.assertIsNone(
+                    parse_tt_rtc_request(SimpleNamespace(action_request_mode=mode))
+                )
+
+    def test_exact_six_by_nineteen_prefix_is_accepted(self) -> None:
+        request = parse_tt_rtc_request(
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=6,
+                rtc_action_dim=19,
+                rtc_prefix_action_list=[0.25] * (6 * 19),
+            )
+        )
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.delay_steps, 6)
+        self.assertEqual(len(request.prefix_actions), 6)
+        self.assertTrue(all(len(row) == 19 for row in request.prefix_actions))
+
+    def test_bootstrap_requires_an_explicit_empty_prefix(self) -> None:
+        request = parse_tt_rtc_request(
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=0,
+                rtc_action_dim=19,
+                rtc_prefix_action_list=[],
+            )
+        )
+
+        self.assertEqual(request.prefix_actions, ())
+
+    def test_bad_delay_dimension_length_and_nonfinite_values_fail_closed(self) -> None:
+        bad_requests = (
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=7,
+                rtc_action_dim=19,
+                rtc_prefix_action_list=[0.0] * (7 * 19),
+            ),
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=6,
+                rtc_action_dim=22,
+                rtc_prefix_action_list=[0.0] * (6 * 22),
+            ),
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=6,
+                rtc_action_dim=19,
+                rtc_prefix_action_list=[0.0] * (6 * 19 - 1),
+            ),
+            SimpleNamespace(
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=1,
+                rtc_action_dim=19,
+                rtc_prefix_action_list=[float("nan")] + [0.0] * 18,
+            ),
+        )
+        for request in bad_requests:
+            with self.subTest(request=request):
+                with self.assertRaises(TTRTCContractError):
+                    parse_tt_rtc_request(request)
+
+
+class TTRTCManifestTests(unittest.TestCase):
+    def test_validated_checkpoint_binds_to_matching_stage2_spec(self) -> None:
+        capability = TTRTCCapability(Path("tt_rtc_manifest.json"), _manifest())
+        spec = SimpleNamespace(
+            reference_horizon=16,
+            action_dim=19,
+            proprio_dim=19,
+            chunk_length=10,
+            reference_offset_steps=6,
+        )
+
+        validate_tt_rtc_rlt_binding(capability, spec)
+
+        for field, value in (
+            ("reference_horizon", 32),
+            ("action_dim", 16),
+            ("proprio_dim", 16),
+            ("chunk_length", 9),
+            ("reference_offset_steps", 5),
+        ):
+            with self.subTest(field=field):
+                incompatible = SimpleNamespace(**vars(spec))
+                setattr(incompatible, field, value)
+                with self.assertRaisesRegex(
+                    TTRTCContractError,
+                    f"rlt_bundle.{field}",
+                ):
+                    validate_tt_rtc_rlt_binding(capability, incompatible)
+
+    def test_schema_v1_stage2_actor_keeps_caller_selected_reference_slice(self) -> None:
+        capability = TTRTCCapability(Path("tt_rtc_manifest.json"), _manifest())
+        legacy_spec = SimpleNamespace(
+            reference_horizon=16,
+            action_dim=19,
+            proprio_dim=19,
+            chunk_length=10,
+            schema_version=1,
+        )
+
+        validate_tt_rtc_rlt_binding(capability, legacy_spec)
+
+    def test_dedicated_manifest_and_rlt_binding_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "tt_rtc_manifest.json"
+            path.write_text(json.dumps(_manifest()), encoding="utf-8")
+
+            capability = load_tt_rtc_capability(root, require_rlt=True)
+
+            self.assertEqual(capability.source, path)
+
+    def test_explicit_config_object_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "config.json"
+            path.write_text(json.dumps(_manifest(include_rlt=False)), encoding="utf-8")
+
+            capability = load_tt_rtc_capability(root)
+
+            self.assertEqual(capability.source, path)
+
+    def test_legacy_rtc_training_prefix_flag_is_not_a_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "config.json").write_text(
+                json.dumps({"rtc_training_prefix_steps": 6}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TTRTCContractError, "capability is missing"):
+                load_tt_rtc_capability(root)
+
+    def test_rlt_mode_requires_the_shifted_reference_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tt_rtc_manifest.json").write_text(
+                json.dumps(_manifest(include_rlt=False)),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TTRTCContractError, "manifest rlt"):
+                load_tt_rtc_capability(root, require_rlt=True)
+
+    def test_qualification_metadata_is_optional_and_not_an_admission_gate(self):
+        for metadata in ({}, {"qualification": None},
+                         {"qualification": {"status": "unqualified"}}):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = {**_manifest(), **metadata}
+                (root / "tt_rtc_manifest.json").write_text(json.dumps(payload))
+                capability = load_tt_rtc_capability(root)
+                validate_tt_rtc_model_contract(capability, _loaded_contract())
+
+    def test_loaded_model_contract_is_cross_checked(self) -> None:
+        payload = _manifest()
+        capability = TTRTCCapability(Path("manifest.json"), payload)
+
+        validate_tt_rtc_model_contract(capability, _loaded_contract())
+        with self.assertRaisesRegex(TTRTCContractError, "loaded_model.action_horizon"):
+            validate_tt_rtc_model_contract(
+                capability,
+                _loaded_contract(action_horizon=40),
+            )
+
+        for field, bad_value in (
+            ("num_timestep_buckets", 999),
+            ("processor_action_horizon", 50),
+            ("processor_action_dimension", 128),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    TTRTCContractError,
+                    f"loaded_model.{field}",
+                ):
+                    validate_tt_rtc_model_contract(
+                        capability,
+                        _loaded_contract(**{field: bad_value}),
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()

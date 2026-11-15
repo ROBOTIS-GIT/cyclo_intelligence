@@ -103,6 +103,9 @@ class TestConversionConfig(unittest.TestCase):
         self.assertEqual(config.chunks_size, 1000)
         self.assertTrue(config.apply_trim)
         self.assertTrue(config.apply_exclude_regions)
+        self.assertFalse(config.trim_stationary_edges)
+        self.assertEqual(config.stationary_action_delta_threshold, 5e-4)
+        self.assertEqual(config.stationary_context_seconds, 0.5)
 
     def test_custom_values(self):
         config = ConversionConfig(
@@ -1439,7 +1442,7 @@ class TestEpisodeExtractCache(unittest.TestCase):
             )
 
             first = converter._episode_extract_cache_path(bag, None, [])
-            mcap.write_bytes(b"two")
+            mcap.write_bytes(b"changed-size")
             second = converter._episode_extract_cache_path(bag, None, [])
 
             self.assertIsNotNone(first)
@@ -2598,8 +2601,8 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
         with patch.object(
             self.converter,
             "_array_cache_signature",
-            side_effect=AssertionError("prepared cache should skip array hashing"),
-        ):
+            wraps=self.converter._array_cache_signature,
+        ) as signature:
             cache_key = self.converter._v21_episode_parquet_cache_key(
                 episode,
                 global_start_index=0,
@@ -2610,6 +2613,7 @@ class TestRosbagToLerobotConverter(unittest.TestCase):
             cache_key["episode"]["prepared_cache"]["path"],
             "/tmp/prepared.pickle",
         )
+        signature.assert_called_once_with(episode.action_sources)
         self.assertNotIn("observation_state", cache_key["episode"])
 
     def test_v21_subtasks_parquet_reuses_source_cache_on_repeat(self):
@@ -3093,6 +3097,9 @@ class TestInfoJsonGeneration(unittest.TestCase):
                 "selected_joint_state_topics",
                 "primitive_instructions",
                 "selected_action_topics",
+                "stationary_edge_trim",
+                "constant_action_values",
+                "constant_action_source",
             ],
         )
         self.assertEqual(
@@ -3110,6 +3117,16 @@ class TestInfoJsonGeneration(unittest.TestCase):
         )
         self.assertEqual(config["selected_end_effector_topics"], [])
         self.assertEqual(config["primitive_instructions"], [])
+        self.assertEqual(
+            config["stationary_edge_trim"],
+            {
+                "enabled": False,
+                "action_delta_threshold": 5e-4,
+                "context_seconds": 0.5,
+                "scope": "leading_and_trailing_edges_only",
+                "source_rosbag_modified": False,
+            },
+        )
         self.assertNotIn("selected_joints", config)
 
 
@@ -3338,17 +3355,20 @@ class TestRosbagToLerobotV30VideoConcat(unittest.TestCase):
         with patch.object(
             self.converter,
             "_array_cache_signature",
-            side_effect=AssertionError("prepared cache should skip array hashing"),
-        ):
+            wraps=self.converter._array_cache_signature,
+        ) as signature:
             cache_key = self.converter._data_aggregate_cache_key(
                 [episode],
                 has_subtask_feature=False,
+                has_episode_success_feature=False,
+                has_action_source_feature=False,
             )
 
         self.assertEqual(
             cache_key["episodes"][0]["prepared_cache"]["path"],
             "/tmp/prepared.pickle",
         )
+        signature.assert_called_once_with(episode.action_sources)
         self.assertNotIn("observation_state", cache_key["episodes"][0])
 
     def test_v30_episodes_parquet_reuses_source_cache_on_repeat(self):

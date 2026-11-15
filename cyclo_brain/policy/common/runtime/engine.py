@@ -73,10 +73,10 @@ class InferenceEngine(ABC):
 
         ``request.task_instruction`` selects the task; model_path / robot_type
         are baked in by ``load_policy``. TT-RTC requests additionally carry
-        ``ttrtc_enabled``, actual ``ttrtc_prefix_steps`` (including zero), and
-        flattened physical ``ttrtc_prefix_actions`` in the loaded action order.
-        The GR00T adapter returns the complete 32-step logical prediction with
-        the committed prefix preserved; Main installs only its 24 new steps.
+        ``action_request_mode="tt_rtc"``, ``rtc_delay_steps`` (including zero),
+        and flattened physical ``rtc_prefix_action_list`` in the loaded order.
+        The GR00T adapter returns the logical prediction and reference actions;
+        Main joins the continuation on the 15 Hz source timeline.
         """
 
     @abstractmethod

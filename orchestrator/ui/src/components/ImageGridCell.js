@@ -40,11 +40,26 @@ const parseAspectRatio = (value) => {
 
 const formatPercent = (value) => `${Number(value.toFixed(4))}%`;
 
-const classCell = (topic) =>
+export const normalizeImageFit = (value) => (
+  value === 'contain' ? 'contain' : 'cover'
+);
+
+export const getQuarterTurnCoverSize = (width, height) => {
+  const normalizedWidth = Number(width);
+  const normalizedHeight = Number(height);
+  if (
+    !Number.isFinite(normalizedWidth) || normalizedWidth <= 0 ||
+    !Number.isFinite(normalizedHeight) || normalizedHeight <= 0
+  ) {
+    return null;
+  }
+  return { width: normalizedHeight, height: normalizedWidth };
+};
+
+const classCell = (topic, edgeToEdge = false, imageFit = 'cover') =>
   clsx(
     'relative',
     'bg-gray-100',
-    'rounded-3xl',
     'overflow-hidden',
     'flex',
     'items-center',
@@ -52,9 +67,11 @@ const classCell = (topic) =>
     'transition-all',
     'duration-300',
     'w-full',
+    edgeToEdge ? 'rounded-none' : 'rounded-3xl',
     {
       'border-2 border-dashed border-gray-300 hover:border-gray-400': !topic,
-      'bg-white': topic,
+      'bg-white': topic && imageFit !== 'contain',
+      'bg-[#1f1e1a]': topic && imageFit === 'contain',
     }
   );
 
@@ -83,12 +100,18 @@ export default function ImageGridCell({
   onClose,
   onPlusClick,
   isActive = true,
+  readOnly = false,
+  edgeToEdge = false,
+  coverCell = false,
+  imageFit = 'cover',
   style = {},
 }) {
   const normalizedRotationDegrees = normalizeRotationDegrees(rotationDegrees);
   const rotate = normalizedRotationDegrees !== 0;
   const swapsDimensions = normalizedRotationDegrees === 90 || normalizedRotationDegrees === 270;
   const aspectRatio = parseAspectRatio(aspect);
+  const normalizedImageFit = normalizeImageFit(imageFit);
+  const containImage = normalizedImageFit === 'contain';
   const rosHost = useSelector((state) => state.ros.rosHost);
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
@@ -97,6 +120,28 @@ export default function ImageGridCell({
   const retryTimerRef = useRef(null);
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 5;
+
+  const sizeRotatedWrapper = useCallback((wrapper) => {
+    if (!wrapper) return;
+
+    if ((coverCell || containImage) && swapsDimensions) {
+      const container = containerRef.current;
+      const coverSize = getQuarterTurnCoverSize(
+        container?.clientWidth,
+        container?.clientHeight
+      );
+      if (coverSize) {
+        // A quarter-turn swaps the rendered dimensions. Size the unrotated
+        // wrapper to H x W so its rotated bounding box exactly covers W x H.
+        wrapper.style.width = `${coverSize.width}px`;
+        wrapper.style.height = `${coverSize.height}px`;
+        return;
+      }
+    }
+
+    wrapper.style.width = swapsDimensions ? formatPercent(100 / aspectRatio) : '100%';
+    wrapper.style.height = swapsDimensions ? formatPercent(100 * aspectRatio) : '100%';
+  }, [aspectRatio, containImage, coverCell, swapsDimensions]);
 
   const destroyImage = useCallback(() => {
     // Signal any in-flight createImage waiting on the staggered delay to bail.
@@ -173,8 +218,8 @@ export default function ImageGridCell({
       if (rotate) {
         const wrapper = document.createElement('div');
         wrapper.style.position = 'absolute';
-        wrapper.style.width = swapsDimensions ? formatPercent(100 / aspectRatio) : '100%';
-        wrapper.style.height = swapsDimensions ? formatPercent(100 * aspectRatio) : '100%';
+        wrapper.dataset.rotatedStreamWrapper = 'true';
+        sizeRotatedWrapper(wrapper);
         wrapper.style.top = '50%';
         wrapper.style.left = '50%';
         wrapper.style.transform = `translate(-50%, -50%) rotate(${normalizedRotationDegrees}deg)`;
@@ -183,7 +228,8 @@ export default function ImageGridCell({
 
         img.style.width = '100%';
         img.style.height = '100%';
-        img.style.objectFit = 'cover';
+        img.style.objectFit = normalizedImageFit;
+        img.style.backgroundColor = containImage ? '#1f1e1a' : '';
         img.style.display = 'block';
 
         wrapper.appendChild(img);
@@ -193,7 +239,9 @@ export default function ImageGridCell({
           currentImgRef.current = wrapper;
         }
       } else {
-        img.className = 'w-full h-full object-cover bg-gray-100';
+        img.className = containImage
+          ? 'w-full h-full object-contain bg-[#1f1e1a]'
+          : 'w-full h-full object-cover bg-gray-100';
 
         if (containerRef.current && !cancelRef.current) {
           containerRef.current.appendChild(img);
@@ -209,11 +257,31 @@ export default function ImageGridCell({
     rosHost,
     idx,
     rotate,
-    swapsDimensions,
-    aspectRatio,
     normalizedRotationDegrees,
+    normalizedImageFit,
+    containImage,
     destroyImage,
+    sizeRotatedWrapper,
   ]);
+
+  useEffect(() => {
+    if (!(coverCell || containImage) || !rotate || typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    const resizeRotatedStream = () => {
+      const wrapper = currentImgRef.current;
+      if (wrapper?.dataset?.rotatedStreamWrapper === 'true') {
+        sizeRotatedWrapper(wrapper);
+      }
+    };
+    const observer = new ResizeObserver(resizeRotatedStream);
+    observer.observe(container);
+    resizeRotatedStream();
+    return () => observer.disconnect();
+  }, [containImage, coverCell, rotate, sizeRotatedWrapper]);
 
   useEffect(() => {
     retryCountRef.current = 0;
@@ -245,9 +313,13 @@ export default function ImageGridCell({
 
   return (
     <div
-      className={classCell(topic)}
-      onClick={!topic ? () => onPlusClick(idx) : undefined}
-      style={{ cursor: !topic ? 'pointer' : 'default', aspectRatio: aspect, ...style }}
+      className={classCell(topic, edgeToEdge, normalizedImageFit)}
+      onClick={!topic && !readOnly ? () => onPlusClick(idx) : undefined}
+      style={{
+        cursor: !topic && !readOnly ? 'pointer' : 'default',
+        aspectRatio: aspect,
+        ...style,
+      }}
     >
       {topic && topic.trim() !== '' && (
         <>
@@ -259,13 +331,23 @@ export default function ImageGridCell({
           >
             <MdScreenRotation size={20} />
           </button>
-          <button type="button" className={classCloseBtn} onClick={handleClose}>
-            <MdClose size={20} />
-          </button>
+          {!readOnly && (
+            <button type="button" className={classCloseBtn} onClick={handleClose}>
+              <MdClose size={20} />
+            </button>
+          )}
         </>
       )}
-      <div ref={containerRef} className="w-full h-full relative overflow-hidden rounded-3xl flex items-center justify-center">
-        {(!topic || !isActive) && <div className="text-6xl text-gray-400 font-light">+</div>}
+      <div
+        ref={containerRef}
+        className={clsx(
+          'w-full h-full relative overflow-hidden flex items-center justify-center',
+          edgeToEdge ? 'rounded-none' : 'rounded-3xl'
+        )}
+      >
+        {(!topic || !isActive) && !readOnly && (
+          <div className="text-6xl text-gray-400 font-light">+</div>
+        )}
       </div>
     </div>
   );

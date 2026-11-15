@@ -128,7 +128,7 @@ _V30_WRITE_SOURCE_REUSE_OUTPUT_CACHE_ENV = (
 _V30_DATA_AGG_CACHE_DISABLE_ENV = "CYCLO_V30_DISABLE_DATA_AGGREGATE_CACHE"
 _V30_PARQUET_COMPRESSION_ENV = "CYCLO_V30_PARQUET_COMPRESSION"
 _V30_PARQUET_USE_DICTIONARY_ENV = "CYCLO_V30_PARQUET_USE_DICTIONARY"
-_V30_DATA_AGGREGATE_CACHE_VERSION = 1
+_V30_DATA_AGGREGATE_CACHE_VERSION = 2
 _V30_EPISODES_PARQUET_CACHE_VERSION = 1
 _V30_TASKS_PARQUET_CACHE_VERSION = 1
 _V30_SUBTASKS_PARQUET_CACHE_VERSION = 1
@@ -712,6 +712,13 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
                     'action_topics': self.config.action_topics,
                     'apply_trim': self.config.apply_trim,
                     'apply_exclude_regions': self.config.apply_exclude_regions,
+                    'trim_stationary_edges': self.config.trim_stationary_edges,
+                    'stationary_action_delta_threshold': (
+                        self.config.stationary_action_delta_threshold
+                    ),
+                    'stationary_context_seconds': (
+                        self.config.stationary_context_seconds
+                    ),
                     'quality_warning_multiplier': self.config.quality_warning_multiplier,
                     'quality_error_multiplier': self.config.quality_error_multiplier,
                     'selected_cameras': list(self.config.selected_cameras),
@@ -835,6 +842,7 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         # Phase 7: Write optional subtask metadata/annotations
         self._write_subtasks_parquet(output_dir, episodes_data)
         self._write_subtask_annotations(output_dir, episodes_data)
+        self._write_rlt_sidecars(output_dir, episodes_data)
 
         # Phase 8: Write global stats
         self._write_global_stats()
@@ -886,6 +894,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
                 "recording_mode": episode.recording_mode,
                 "full_episode_index": episode.full_episode_index,
                 "subtask_instructions": list(episode.subtask_instructions),
+                "episode_success": episode.episode_success,
+                "action_sources": self._array_cache_signature(
+                    episode.action_sources
+                ),
                 "prepared_cache": prepared_cache_signature,
                 "video_files": video_files,
             }
@@ -896,6 +908,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             "recording_mode": episode.recording_mode,
             "full_episode_index": episode.full_episode_index,
             "subtask_instructions": list(episode.subtask_instructions),
+            "episode_success": episode.episode_success,
+            "action_sources": self._array_cache_signature(
+                episode.action_sources
+            ),
             "timestamps": self._array_cache_signature(episode.timestamps),
             "observation_state": self._array_cache_signature(
                 episode.observation_state
@@ -910,6 +926,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         episodes_data: List[EpisodeData],
         *,
         has_subtask_feature: bool,
+        has_episode_success_feature: bool,
+        has_action_source_feature: bool,
     ) -> Dict[str, Any]:
         return {
             "version": _V30_DATA_AGGREGATE_CACHE_VERSION,
@@ -920,6 +938,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             "video_stats_sample_budget": int(self._video_stats_sample_budget()),
             "parquet_write_kwargs": _v30_parquet_write_kwargs(),
             "has_subtask_feature": bool(has_subtask_feature),
+            "has_episode_success_feature": bool(
+                has_episode_success_feature
+            ),
+            "has_action_source_feature": bool(has_action_source_feature),
             "tasks": {
                 str(idx): task for idx, task in sorted(self._tasks.items())
             },
@@ -1336,9 +1358,17 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
 
         output_dir = Path(self.config.output_dir)
         has_subtask_feature = any(ep.subtask_indices for ep in episodes_data)
+        has_episode_success_feature = self._has_episode_success_feature(
+            episodes_data
+        )
+        has_action_source_feature = self._has_action_source_feature(
+            episodes_data
+        )
         cache_key = self._data_aggregate_cache_key(
             episodes_data,
             has_subtask_feature=has_subtask_feature,
+            has_episode_success_feature=has_episode_success_feature,
+            has_action_source_feature=has_action_source_feature,
         )
         self._current_data_aggregate_cache_key = cache_key
         if self._try_reuse_data_aggregate_cache(
@@ -1395,6 +1425,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
                     pending_global_start_index,
                     pending_frame_count,
                     has_subtask_feature,
+                    has_episode_success_feature,
+                    has_action_source_feature,
                 )
                 if data_path is not None:
                     written_data_files.append(data_path)
@@ -1411,6 +1443,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
                 pending_global_start_index,
                 pending_frame_count,
                 has_subtask_feature,
+                has_episode_success_feature,
+                has_action_source_feature,
             )
             if data_path is not None:
                 written_data_files.append(data_path)
@@ -1434,6 +1468,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         global_start_index: int,
         num_frames: int,
         has_subtask_feature: bool,
+        has_episode_success_feature: bool,
+        has_action_source_feature: bool,
     ) -> Optional[Path]:
         """Write an aggregated data Parquet file directly from episode columns."""
         if not episodes or num_frames <= 0:
@@ -1468,6 +1504,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             pa.field("index", pa.int64()),
             pa.field("task_index", pa.int64()),
         ]
+        if has_episode_success_feature:
+            schema_fields.append(pa.field("episode_success", pa.bool_()))
+        if has_action_source_feature:
+            schema_fields.append(pa.field("action_source", pa.string()))
         if has_subtask_feature:
             schema_fields.append(pa.field("subtask_index", pa.int64()))
         if state_dim > 0:
@@ -1481,6 +1521,13 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
         frame_index = np.empty(num_frames, dtype=np.int64)
         episode_index = np.empty(num_frames, dtype=np.int64)
         task_index = np.empty(num_frames, dtype=np.int64)
+        episode_success = (
+            np.empty(num_frames, dtype=np.bool_)
+            if has_episode_success_feature else None
+        )
+        action_source = (
+            [""] * num_frames if has_action_source_feature else None
+        )
         subtask_index = (
             np.empty(num_frames, dtype=np.int64) if has_subtask_feature else None
         )
@@ -1505,6 +1552,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             episode_index[offset:end] = int(episode.episode_index)
             task = episode.tasks[0] if episode.tasks else "default_task"
             task_index[offset:end] = self._task_to_index.get(task, 0)
+            if episode_success is not None:
+                episode_success[offset:end] = bool(episode.episode_success)
+            if action_source is not None:
+                action_source[offset:end] = episode.action_sources[:length]
             if subtask_index is not None:
                 if len(episode.subtask_indices) == length:
                     subtask_index[offset:end] = np.asarray(
@@ -1539,6 +1590,10 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             ),
             pa.array(task_index, type=pa.int64()),
         ]
+        if episode_success is not None:
+            arrays.append(pa.array(episode_success, type=pa.bool_()))
+        if action_source is not None:
+            arrays.append(pa.array(action_source, type=pa.string()))
         if subtask_index is not None:
             arrays.append(pa.array(subtask_index, type=pa.int64()))
         if state_values is not None:
@@ -1550,6 +1605,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
 
         hf_metadata = self._data_file_hf_metadata(
             has_subtask_feature,
+            has_episode_success_feature,
+            has_action_source_feature,
             state_dim,
             action_dim,
         )
@@ -1567,6 +1624,8 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
     @staticmethod
     def _data_file_hf_metadata(
         has_subtask_feature: bool,
+        has_episode_success_feature: bool,
+        has_action_source_feature: bool,
         state_dim: int,
         action_dim: int,
     ) -> str:
@@ -1577,6 +1636,16 @@ class RosbagToLerobotV30Converter(RosbagToLerobotConverterBase):
             "index": {"dtype": "int64", "_type": "Value"},
             "task_index": {"dtype": "int64", "_type": "Value"},
         }
+        if has_episode_success_feature:
+            hf_features["episode_success"] = {
+                "dtype": "bool",
+                "_type": "Value",
+            }
+        if has_action_source_feature:
+            hf_features["action_source"] = {
+                "dtype": "string",
+                "_type": "Value",
+            }
         if has_subtask_feature:
             hf_features["subtask_index"] = {"dtype": "int64", "_type": "Value"}
         if state_dim > 0:

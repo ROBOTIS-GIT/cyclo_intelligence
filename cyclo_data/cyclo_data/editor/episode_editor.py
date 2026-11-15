@@ -74,6 +74,14 @@ class RosbagDeleteResult:
 
 
 @dataclass
+class RosbagRelabelResult:
+    task_dir: Path
+    updated_count: int
+    episode_indices: List[int]
+    episode_success: bool
+
+
+@dataclass
 class RosbagTaskInfo:
     task_dir: Path
     episode_count: int
@@ -81,7 +89,23 @@ class RosbagTaskInfo:
     fps: int = 0
     robot_type: str = ''
     task_instruction: str = ''
+    subtask_instruction: List[str] = field(default_factory=list)
     episode_indices: List[int] = field(default_factory=list)
+    success_episode_indices: List[int] = field(default_factory=list)
+    failure_episode_indices: List[int] = field(default_factory=list)
+    unlabeled_episode_indices: List[int] = field(default_factory=list)
+
+    @property
+    def success_count(self) -> int:
+        return len(self.success_episode_indices)
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failure_episode_indices)
+
+    @property
+    def unlabeled_count(self) -> int:
+        return len(self.unlabeled_episode_indices)
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +507,97 @@ class DataEditor:
             compacted=compact,
         )
 
+    def prune_oldest_rosbag_episodes(
+        self,
+        task_dir: Path,
+        *,
+        success_count: int,
+        failure_count: int,
+    ) -> tuple[RosbagDeleteResult, List[int]]:
+        """Delete the oldest labeled episodes without renumbering survivors.
+
+        The caller must hold the dataset write lock. Keeping gaps avoids a
+        second destructive rename pass and the recorder/converter both accept
+        non-contiguous raw episode directory indices.
+        """
+        for name, value in (
+            ('success_count', success_count),
+            ('failure_count', failure_count),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f'{name} must be a non-negative integer')
+        if success_count == 0 and failure_count == 0:
+            raise ValueError('At least one success or failure episode is required')
+
+        info = self.get_rosbag_task_info(task_dir)
+        if success_count > info.success_count:
+            raise ValueError(
+                f'Requested {success_count} successes but only '
+                f'{info.success_count} are available'
+            )
+        if failure_count > info.failure_count:
+            raise ValueError(
+                f'Requested {failure_count} failures but only '
+                f'{info.failure_count} are available'
+            )
+
+        selected = sorted(
+            info.success_episode_indices[:success_count]
+            + info.failure_episode_indices[:failure_count]
+        )
+        if len(selected) >= info.episode_count:
+            raise ValueError('Oldest pruning must leave at least one episode')
+        result = self.delete_rosbag_episodes(task_dir, selected, compact=False)
+        return result, selected
+
+    def relabel_rosbag_episodes(
+        self,
+        task_dir: Path,
+        indices: List[int],
+        *,
+        episode_success: bool,
+    ) -> RosbagRelabelResult:
+        """Set the recorded outcome for existing episode directories."""
+        if not task_dir.is_dir():
+            raise FileNotFoundError(f'Task folder not found: {task_dir}')
+        if not indices:
+            raise ValueError('No episode indices provided')
+        if not isinstance(episode_success, bool):
+            raise ValueError('episode_success must be a boolean')
+
+        unique_indices = sorted(set(int(index) for index in indices))
+        existing_dirs = {}
+        for episode in _list_episode_dirs(task_dir):
+            try:
+                existing_dirs[int(episode.name)] = episode
+            except ValueError:
+                continue
+
+        missing = [index for index in unique_indices if index not in existing_dirs]
+        if missing:
+            raise FileNotFoundError(
+                f'Episode indices not found in {task_dir}: {missing}'
+            )
+
+        for index in unique_indices:
+            info_path = existing_dirs[index] / 'episode_info.json'
+            info = FileIO.read_json(info_path, default={}) or {}
+            info['episode_index'] = index
+            info['episode_success'] = episode_success
+            if not FileIO.write_json(info_path, info):
+                raise OSError(f'Failed to update episode outcome: {info_path}')
+            self._log(
+                f'Relabeled episode {index} as '
+                f'{"Success" if episode_success else "Fail"}: {info_path}'
+            )
+
+        return RosbagRelabelResult(
+            task_dir=task_dir,
+            updated_count=len(unique_indices),
+            episode_indices=unique_indices,
+            episode_success=episode_success,
+        )
+
     def _compact_episode_indices(self, task_dir: Path) -> None:
         """Renumber surviving episode dirs to 0..M-1.
 
@@ -524,17 +639,32 @@ class DataEditor:
 
         episodes = _list_episode_dirs(task_dir)
         episode_indices: List[int] = []
+        success_episode_indices: List[int] = []
+        failure_episode_indices: List[int] = []
+        unlabeled_episode_indices: List[int] = []
         for episode in episodes:
             try:
-                episode_indices.append(int(episode.name))
+                episode_index = int(episode.name)
             except ValueError:
                 continue
+            episode_indices.append(episode_index)
+            episode_info = FileIO.read_json(
+                episode / 'episode_info.json', default={}
+            ) or {}
+            outcome = episode_info.get('episode_success')
+            if outcome is True:
+                success_episode_indices.append(episode_index)
+            elif outcome is False:
+                failure_episode_indices.append(episode_index)
+            else:
+                unlabeled_episode_indices.append(episode_index)
 
         total_ns = sum(_read_metadata_duration_ns(e) for e in episodes)
 
         fps = 0
         robot_type = ''
         task_instruction = ''
+        subtask_instruction: List[str] = []
         if episodes:
             info = FileIO.read_json(
                 episodes[0] / 'episode_info.json', default={}
@@ -542,6 +672,19 @@ class DataEditor:
             fps = int(info.get('fps', 0) or 0)
             robot_type = str(info.get('robot_type', '') or '')
             task_instruction = str(info.get('task_instruction', '') or '')
+            raw_subtasks = info.get('subtask_instructions', []) or []
+            if isinstance(raw_subtasks, list):
+                subtask_instruction = [
+                    str(item or '') for item in raw_subtasks
+                ]
+            if not subtask_instruction:
+                segments = info.get('segments', []) or []
+                if isinstance(segments, list):
+                    subtask_instruction = [
+                        str(segment.get('sub_task_instruction', '') or '')
+                        for segment in segments
+                        if isinstance(segment, dict)
+                    ]
 
         return RosbagTaskInfo(
             task_dir=task_dir,
@@ -550,5 +693,9 @@ class DataEditor:
             fps=fps,
             robot_type=robot_type,
             task_instruction=task_instruction,
+            subtask_instruction=subtask_instruction,
             episode_indices=episode_indices,
+            success_episode_indices=success_episode_indices,
+            failure_episode_indices=failure_episode_indices,
+            unlabeled_episode_indices=unlabeled_episode_indices,
         )

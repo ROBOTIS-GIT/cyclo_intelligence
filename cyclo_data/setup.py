@@ -24,6 +24,7 @@ packages = [
     f'{package_name}.converter',
     f'{package_name}.converter.scripts',
     f'{package_name}.converter.video_encoder',
+    f'{package_name}.curation',
     f'{package_name}.editor',
     f'{package_name}.hub',
     f'{package_name}.reader',

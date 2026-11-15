@@ -14,6 +14,8 @@
 //
 // Author: Seongwoo Kim
 
+import { normalizeLegacyTtRtcParams } from './ttRtcConfig';
+
 const INDENT = '  ';
 const WRAP_THRESHOLD = 100;
 
@@ -27,8 +29,6 @@ const SEND_COMMAND_INFERENCE_PARAMS_BY_COMMAND = {
     'inference_mode',
     'action_request_mode',
     'vla_rail_enabled',
-    'ttrtc_enabled',
-    'ttrtc_prefix_steps',
     'inference_hz',
     'control_hz',
     'chunk_align_window_s',
@@ -99,6 +99,7 @@ function paramsForXml(tag, params = {}) {
       value != null && String(value).trim() !== ''));
   }
   if (tag !== 'SendCommand') return params;
+  params = normalizeLegacyTtRtcParams(params);
 
   const target = String(params.target || 'INFERENCE').trim().toUpperCase() === 'DOCKER'
     ? 'DOCKER'
@@ -121,10 +122,9 @@ function paramsForXml(tag, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (key === 'target' || key === 'command' || !allowed.has(key)) return;
     if (value === undefined || value === null || value === '') return;
-    if (['vla_rail_enabled', 'ttrtc_enabled', 'ttrtc_prefix_steps'].includes(key)
+    if (['vla_rail_enabled'].includes(key)
       && !String(params.model || '').startsWith('groot')) return;
-    if (['ttrtc_enabled', 'ttrtc_prefix_steps'].includes(key)
-      && String(params.action_request_mode || 'async') !== 'async') return;
+    if (key === 'vla_rail_enabled' && String(params.action_request_mode || 'async') !== 'async') return;
     out[key] = value;
   });
 

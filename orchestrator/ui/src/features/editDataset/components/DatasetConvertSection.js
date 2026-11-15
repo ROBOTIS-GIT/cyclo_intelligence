@@ -40,7 +40,10 @@ const normalizeRosbagTaskPath = (item) => {
   return trimmedPath;
 };
 
-export default function DatasetConvertSection({ isEditable = true }) {
+export default function DatasetConvertSection({
+  isEditable = true,
+  onBusyChange,
+}) {
   const dispatch = useDispatch();
   const { sendRecordCommand } = useRosServiceCaller();
   const info = useSelector(selectRecordTaskInfo, shallowEqual);
@@ -56,7 +59,6 @@ export default function DatasetConvertSection({ isEditable = true }) {
   const [hasSeenConverting, setHasSeenConverting] = useState(false);
   const [convertError, setConvertError] = useState('');
   const [pendingSingleConvert, setPendingSingleConvert] = useState(false);
-
   // Conversion-only knobs. Defaults match cyclo_data's defaults: fps=15
   // (DEFAULT_CONVERSION_FPS in pipeline_worker.py) and both LeRobot
   // formats enabled.
@@ -87,6 +89,10 @@ export default function DatasetConvertSection({ isEditable = true }) {
       }
     }
   }, [conversionStatus.status, conversionStatus.message, isConverting, hasSeenConverting]);
+
+  useEffect(() => {
+    if (onBusyChange) onBusyChange(isConverting);
+  }, [isConverting, onBusyChange]);
 
   // ----- single convert ---------------------------------------------------
   // Two-step: dispatch taskInfo first, then fire sendRecordCommand from a
@@ -125,6 +131,7 @@ export default function DatasetConvertSection({ isEditable = true }) {
     const fire = async () => {
       try {
         const result = await sendRecordCommand('convert_mp4', {
+          taskSource: 'record',
           conversionFps,
           convertV21,
           convertV30,

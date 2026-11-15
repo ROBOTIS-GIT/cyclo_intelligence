@@ -18,10 +18,15 @@ import { useCallback, useRef, useEffect } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import PageType from '../constants/pageType';
-import TaskCommand from '../constants/taskCommand';
+import { normalizeInferenceAcceleration } from '../utils/inferenceAcceleration';
+import TaskCommand, { EpisodeOutcome } from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import {
+  getInferenceRecordingSessionId,
+  getRecordingDatasetFolderInfo,
+} from '../utils/inferenceRecordingFolder';
 import { DEFAULT_PATHS } from '../constants/paths';
 import { readBtNodeCatalog } from '../utils/btCatalogClient';
 import {
@@ -29,6 +34,7 @@ import {
   selectRecordTaskInfo,
 } from '../features/tasks/taskSlice';
 import { CYCLO_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
+import { normalizeActionRequestMode } from '../utils/taskInfoSync';
 
 const DEFAULT_SERVICE_TIMEOUT_MS = 10000;
 const START_INFERENCE_SERVICE_TIMEOUT_MS = 30000;
@@ -61,6 +67,124 @@ export function getRecordCommandServiceTimeoutMs(command, options = {}) {
   return command === 'start_inference'
     ? START_INFERENCE_SERVICE_TIMEOUT_MS
     : DEFAULT_SERVICE_TIMEOUT_MS;
+}
+
+export function normalizeEpisodeOutcome(value) {
+  const outcome = Number(value ?? EpisodeOutcome.UNSPECIFIED);
+  return [EpisodeOutcome.SUCCESS, EpisodeOutcome.FAILURE].includes(outcome)
+    ? outcome
+    : EpisodeOutcome.UNSPECIFIED;
+}
+
+export function getEpisodeOutcomeForCommand(command, value) {
+  return command === 'stop_inference_record'
+    ? normalizeEpisodeOutcome(value)
+    : EpisodeOutcome.UNSPECIFIED;
+}
+
+export function getConversionCommandFields(options = {}) {
+  return {
+    conversion_fps: Number(options.conversionFps || 0),
+    convert_v21: Boolean(options.convertV21),
+    convert_v30: Boolean(options.convertV30),
+    lerobot_output_root: String(options.lerobotOutputRoot || '').trim(),
+    delete_source_after_success: Boolean(options.deleteSourceAfterSuccess),
+  };
+}
+
+export function getActionPolicyCommandFields(
+  taskInfo = {},
+  command = '',
+  options = {}
+) {
+  // A fresh inference session always starts on the base GR00T action
+  // path. SET_ACTION_POLICY is the only command allowed to select the
+  // preloaded RLT actor without unloading the model.
+  const requestedMode = command === 'start_inference'
+    ? 'base'
+    : String(
+      Object.prototype.hasOwnProperty.call(options, 'actionPolicyMode')
+        ? options.actionPolicyMode
+        : taskInfo.actionPolicyMode
+    ).trim().toLowerCase();
+  const rltBundlePath = String(taskInfo.rltBundlePath || '').trim();
+  // RLT is an optional preload. A stale checked state without a selected
+  // bundle must not make an otherwise valid base-policy deploy fail.
+  const rltEnabled = Boolean(taskInfo.rltEnabled && rltBundlePath);
+  return {
+    rlt_enabled: rltEnabled,
+    rlt_bundle_path: rltEnabled ? rltBundlePath : '',
+    rlt_robot_override: Boolean(
+      rltEnabled && (
+        Object.prototype.hasOwnProperty.call(options, 'rltRobotOverride')
+          ? options.rltRobotOverride
+          : taskInfo.rltRobotOverride
+      )
+    ),
+    action_policy_mode: rltEnabled && requestedMode === 'rlt' ? 'rlt' : 'base',
+  };
+}
+
+export function isInferenceCommandRequest(page, taskSource = '') {
+  const requestedTaskSource = String(taskSource || '').trim().toLowerCase();
+  return (
+    requestedTaskSource === 'inference' ||
+    (requestedTaskSource !== 'record' && page === PageType.INFERENCE)
+  );
+}
+
+export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
+  return {
+    initial_pose_sync: Boolean(taskInfo.initialPoseSync),
+    initial_pose_sync_duration_s: Number(
+      taskInfo.initialPoseSyncDurationS ?? 5.0
+    ),
+  };
+}
+
+export function getCommandRecordingFolder(taskInfo = {}, options = {}) {
+  const hasOverride = Object.prototype.hasOwnProperty.call(
+    options,
+    'recordingFolder'
+  );
+  return String(
+    hasOverride ? options.recordingFolder : (taskInfo.recordingFolder || '')
+  ).trim();
+}
+
+export function getRecordInferenceMode(
+  taskInfo = {},
+  inferenceMode = 'simulation',
+  options = {}
+) {
+  return inferenceMode === 'robot' && Boolean(
+    taskInfo.recordInferenceMode || options.forceInferenceRecording
+  );
+}
+
+export function getInferenceTaskTags(
+  taskInfo = {},
+  inferenceMode = 'simulation',
+  recordingSource = ''
+) {
+  const tags = [`inference_mode:${inferenceMode}`];
+  const policyType = String(taskInfo.policyType || '').trim();
+  if (policyType) {
+    tags.push(`policy_type:${policyType}`);
+  }
+  const source = String(recordingSource || '').trim().toLowerCase();
+  if (['inference', 'intervention', 'total'].includes(source)) {
+    tags.push(`recording_source:${source}`);
+  }
+  return tags;
+}
+
+export function getInferenceAccelerationFields(taskInfo = {}) {
+  return normalizeInferenceAcceleration(taskInfo);
+}
+
+export function getInferenceActionRequestMode(taskInfo = {}) {
+  return normalizeActionRequestMode(taskInfo.actionRequestMode);
 }
 
 export function transformReplayDataResult(result = {}, bagPath = '') {
@@ -113,19 +237,11 @@ export function transformReplayDataResult(result = {}, bagPath = '') {
   };
 }
 
-export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
-  return {
-    initial_pose_sync: Boolean(taskInfo.initialPoseSync),
-    initial_pose_sync_duration_s: Number(
-      taskInfo.initialPoseSyncDurationS ?? 5.0
-    ),
-  };
-}
-
 export function buildInferenceChunkTaskInfo(taskInfo = {}) {
   const supportsAcceleration = ['groot', 'lerobot'].includes(taskInfo.serviceType);
   return {
-    action_chunk_size: Number(taskInfo.actionChunkSize || 0),
+    action_chunk_size: normalizeActionRequestMode(taskInfo.actionRequestMode) === 'tt_rtc'
+      ? 0 : Number(taskInfo.actionChunkSize || 0),
     acceleration_mode: supportsAcceleration
       ? String(taskInfo.accelerationMode || 'pytorch').trim() : 'pytorch',
     acceleration_engine_path: supportsAcceleration
@@ -245,7 +361,17 @@ export function useRosServiceCaller() {
       // Read latest values from refs at call time so this callback's
       // identity stays stable across taskInfo / page mutations.
       const page = pageRef.current;
-      const taskInfo = page === PageType.INFERENCE
+      const inferenceRequest = isInferenceCommandRequest(
+        page,
+        options.taskSource
+      );
+      const requestedTaskSource = String(options.taskSource || '')
+        .trim()
+        .toLowerCase();
+      const recordRequest =
+        requestedTaskSource === 'record' ||
+        (requestedTaskSource === '' && page === PageType.RECORD);
+      const taskInfo = inferenceRequest
         ? inferenceTaskInfoRef.current
         : recordTaskInfoRef.current;
       try {
@@ -326,15 +452,18 @@ export function useRosServiceCaller() {
           case 'cancel_segment':
             command_enum = TaskCommand.CANCEL_SEGMENT;
             break;
+          case 'set_action_policy':
+            command_enum = TaskCommand.SET_ACTION_POLICY;
+            break;
           default:
             throw new Error(`Unknown command: ${command}`);
         }
 
         let taskType = '';
 
-        if (page === PageType.RECORD) {
+        if (recordRequest) {
           taskType = 'record';
-        } else if (page === PageType.INFERENCE) {
+        } else if (inferenceRequest) {
           taskType = 'inference';
         }
 
@@ -343,7 +472,17 @@ export function useRosServiceCaller() {
         // empty instead of being replaced by a generated task name.
         const autofillEmptyTaskFields = options.autofillEmptyTaskFields !== false;
         let taskName = taskInfo.taskName || '';
-        let taskInstruction = (options.taskInstruction ?? taskInfo.taskInstruction ?? []).filter(
+        const taskInstructionSource = Object.prototype.hasOwnProperty.call(
+          options,
+          'taskInstruction'
+        )
+          ? options.taskInstruction
+          : taskInfo.taskInstruction;
+        let taskInstruction = (
+          Array.isArray(taskInstructionSource)
+            ? taskInstructionSource
+            : [taskInstructionSource]
+        ).map((instruction) => String(instruction ?? '')).filter(
           (instruction) => instruction.trim() !== ''
         );
         const subtaskInstructionSource =
@@ -381,22 +520,50 @@ export function useRosServiceCaller() {
         );
         const imageResize = options.imageResize || null;
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
-        const policyPath = String(taskInfo.policyPath || '').trim();
-        const actionRequestMode = (
-          String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
-            ? 'sync'
-            : 'async'
+        const recordInferenceMode = getRecordInferenceMode(
+          taskInfo,
+          inferenceMode,
+          options
         );
+        const policyPath = String(taskInfo.policyPath || '').trim();
+        const {
+          accelerationMode,
+          accelerationEnginePath,
+        } = getInferenceAccelerationFields(taskInfo);
+        const actionRequestMode = getInferenceActionRequestMode(taskInfo);
+        const actionPolicyFields = getActionPolicyCommandFields(
+          taskInfo,
+          command,
+          options
+        );
+        const recordingFolder = getCommandRecordingFolder(taskInfo, options);
+        const inferenceRecordingSessionId = recordingFolder
+          ? getInferenceRecordingSessionId(recordingFolder)
+          : '';
+        const recordingDataset = recordingFolder
+          ? getRecordingDatasetFolderInfo(recordingFolder)
+          : null;
+        if (recordingFolder && !recordingDataset) {
+          throw new Error(
+            'Recording folder must be a Task_*_MCAP dataset directly under /workspace/rosbag2'
+          );
+        }
         const request = {
           task_info: {
-            task_num: String(taskInfo.taskNum ?? ''),
+            task_num: inferenceRequest
+              ? (inferenceRecordingSessionId || String(taskInfo.taskNum ?? ''))
+              : String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
             task_type: String(taskType),
             task_instruction: taskInstruction,
             subtask_instruction: subtaskInstruction,
             policy_path: policyPath,
-            record_inference_mode: Boolean(taskInfo.recordInferenceMode),
-            tags: [`inference_mode:${inferenceMode}`],
+            record_inference_mode: recordInferenceMode,
+            tags: getInferenceTaskTags(
+              taskInfo,
+              inferenceMode,
+              options.recordingSource
+            ),
             control_hz: Number(taskInfo.controlHz || 100),
             inference_hz: Number(taskInfo.inferenceHz || 15),
             chunk_align_window_s: Number(
@@ -404,21 +571,31 @@ export function useRosServiceCaller() {
                 ? taskInfo.chunkAlignWindowS
                 : 0.3
             ),
-            include_robotis_license: Boolean(taskInfo.includeRobotisLicense),
+            include_robotis_license: Boolean(
+              Object.prototype.hasOwnProperty.call(options, 'includeRobotisLicense')
+                ? options.includeRobotisLicense
+                : taskInfo.includeRobotisLicense
+            ),
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             action_request_mode: actionRequestMode,
             ...buildInferenceChunkTaskInfo(taskInfo),
+            acceleration_mode: accelerationMode || 'pytorch',
+            acceleration_engine_path: accelerationEnginePath,
+            recording_folder: recordingFolder,
+            ...actionPolicyFields,
             ...buildInitialPoseSyncTaskInfo(taskInfo),
           },
           command: Number(command_enum),
+          episode_outcome: getEpisodeOutcomeForCommand(
+            command,
+            options.episodeOutcome
+          ),
           segment_index: Number(options.segmentIndex || 0),
           // Conversion-only knobs (ignored by the orchestrator unless
           // command == CONVERT_MP4). Default to 0 / false so the wire
           // representation is stable for non-conversion commands.
-          conversion_fps: Number(options.conversionFps || 0),
-          convert_v21: Boolean(options.convertV21),
-          convert_v30: Boolean(options.convertV30),
+          ...getConversionCommandFields(options),
           selected_cameras: [],
           camera_rotation_keys: cameraRotationKeys,
           camera_rotation_values: cameraRotationValues,
@@ -800,8 +977,11 @@ export function useRosServiceCaller() {
   );
 
   const sendEditDatasetCommand = useCallback(
-    async (command) => {
-      const editDatasetInfo = editDatasetInfoRef.current;
+    async (command, overrides = {}) => {
+      const editDatasetInfo = {
+        ...editDatasetInfoRef.current,
+        ...overrides,
+      };
       try {
         console.log('Calling service /data/edit with request:', {
           command: command,
@@ -815,6 +995,12 @@ export function useRosServiceCaller() {
             break;
           case 'delete':
             command_enum = EditDatasetCommand.DELETE;
+            break;
+          case 'prune_oldest':
+            command_enum = EditDatasetCommand.PRUNE_OLDEST;
+            break;
+          case 'relabel':
+            command_enum = EditDatasetCommand.RELABEL;
             break;
           default:
             throw new Error(`Unknown command: ${command}`);
@@ -846,6 +1032,15 @@ export function useRosServiceCaller() {
               editDatasetInfo.deleteCompact === undefined
                 ? true
                 : Boolean(editDatasetInfo.deleteCompact),
+            prune_oldest_success_count: Number(
+              editDatasetInfo.pruneOldestSuccessCount || 0
+            ),
+            prune_oldest_failure_count: Number(
+              editDatasetInfo.pruneOldestFailureCount || 0
+            ),
+            relabel_task_dir: editDatasetInfo.relabelTaskDir || '',
+            relabel_episode_num: editDatasetInfo.relabelEpisodeNums || [],
+            relabel_success: Boolean(editDatasetInfo.relabelSuccess),
           }
         );
 
@@ -871,6 +1066,47 @@ export function useRosServiceCaller() {
         return result;
       } catch (error) {
         console.error('Failed to get dataset info:', error);
+        throw new Error(`${error.message || error}`);
+      }
+    },
+    [callService]
+  );
+
+  const startDatasetCuration = useCallback(
+    async (command, jobId = '', requestPayload = {}) => {
+      const commandMap = { analyze: 0, apply: 1, cancel: 2 };
+      const commandEnum = commandMap[String(command || '').toLowerCase()];
+      if (commandEnum === undefined) {
+        throw new Error(`Unknown curation command: ${command}`);
+      }
+      try {
+        return await callService(
+          '/data/curation/start',
+          'interfaces/srv/StartDatasetCuration',
+          {
+            command: commandEnum,
+            job_id: String(jobId || ''),
+            request_json: JSON.stringify(requestPayload || {}),
+          }
+        );
+      } catch (error) {
+        console.error('Failed to start dataset curation:', error);
+        throw new Error(`${error.message || error}`);
+      }
+    },
+    [callService]
+  );
+
+  const getDatasetCurationStatus = useCallback(
+    async (jobId = '') => {
+      try {
+        return await callService(
+          '/data/curation/status',
+          'interfaces/srv/GetDatasetCurationStatus',
+          { job_id: String(jobId || '') }
+        );
+      } catch (error) {
+        console.error('Failed to get dataset curation status:', error);
         throw new Error(`${error.message || error}`);
       }
     },
@@ -1022,6 +1258,8 @@ export function useRosServiceCaller() {
     browseFile,
     sendEditDatasetCommand,
     getDatasetInfo,
+    startDatasetCuration,
+    getDatasetCurationStatus,
     controlHfServer,
     getTrainingInfo,
     getReplayData,

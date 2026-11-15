@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 import json
+import math
+from engine_process.protocol import POLICY_UPDATE_COMMANDS, CMD_ASYNC_RL_DATASETS, CMD_ASYNC_RL_ON
 import os
 import threading
 import time
@@ -25,6 +27,7 @@ CMD_UPDATE_INSTRUCTION = 6
 # Read-only capability query; request/response wire fields are unchanged.
 CMD_CAPABILITIES = 7
 CMD_FAULT_STOP = 8
+CMD_SET_ACTION_POLICY = 20
 
 
 class ServiceHandler:
@@ -36,6 +39,7 @@ class ServiceHandler:
         self._lifecycle_lock = threading.RLock()
         self._fault_latched = threading.Event()
         self._per_step_actions = False
+        self._playground_session = False
         self._subtask_choices = []
         self._loaded_model_path = ''
         self._instruction_lock = threading.RLock()
@@ -57,11 +61,25 @@ class ServiceHandler:
             if cmd == CMD_CAPABILITIES:
                 return self._make_response(True, HOLD_CAPABILITY)
             if self._fault_latched.is_set() and cmd in (
-                CMD_LOAD, CMD_START, CMD_RESUME, CMD_UPDATE_INSTRUCTION,
+                CMD_LOAD, CMD_START, CMD_RESUME, CMD_UPDATE_INSTRUCTION, CMD_SET_ACTION_POLICY,
+                *POLICY_UPDATE_COMMANDS,
             ):
                 return self._make_response(False, "supervision fault latched; restart policy runtime")
             if cmd == CMD_FAULT_STOP:
                 return self._stop()
+            if cmd in POLICY_UPDATE_COMMANDS:
+                if not self._session.loaded:
+                    return self._make_response(False, "LOAD first")
+                response = self._requester.policy_update(
+                    cmd, str(getattr(request, "rlt_bundle_path", "") or ""),
+                    **({'dataset_paths': list(getattr(request, 'rlt_dataset_paths', []) or [])}
+                       if cmd == CMD_ASYNC_RL_DATASETS else {}),
+                    **({'max_updates': int(getattr(request, 'rlt_max_updates', 0) or 0)}
+                       if cmd == CMD_ASYNC_RL_ON else {}),
+                )
+                return self._make_response(response.success, response.message)
+            if cmd == CMD_SET_ACTION_POLICY:
+                return self._set_action_policy(request)
             if cmd == CMD_LOAD:
                 return self._load(request)
             if cmd == CMD_START:
@@ -88,6 +106,10 @@ class ServiceHandler:
         if not request.robot_type:
             return self._make_response(False, "robot_type is required")
 
+        duration = float(getattr(request, "initial_pose_sync_duration_s", 0.0) or 5.0)
+        if not math.isfinite(duration) or not 1.0 <= duration <= 60.0:
+            raise ValueError("initial_pose_sync_duration_s must be between 1.0 and 60.0")
+
         root = Path(request.model_path)
         if not (root / "config.json").is_file() and (root / "pretrained_model/config.json").is_file():
             root = root / "pretrained_model"
@@ -100,22 +122,19 @@ class ServiceHandler:
         ):
             raise ValueError("Select a trained subtask instruction before LOAD")
         chunk_size = requested_chunk_size(getattr(request, "action_chunk_size", 0))
-        ttrtc_enabled = bool(getattr(request, 'ttrtc_enabled', False))
-        if ttrtc_enabled:
-            if os.environ.get('POLICY_BACKEND', 'groot') != 'groot':
-                raise ValueError('TT-RTC requires the GR00T backend')
-            if getattr(request, 'action_request_mode', 'async') != 'async':
-                raise ValueError('TT-RTC requires asynchronous action requests')
-            if getattr(request, 'vla_rail_enabled', False):
-                raise ValueError('TT-RTC and VLA-RAIL cannot be enabled together')
-            if (float(getattr(request, 'inference_hz', 0)) or 15.) != 15.:
-                raise ValueError('TT-RTC requires the trained 15 Hz action rate')
-            prefix_steps = getattr(request, 'ttrtc_prefix_steps', 7)
-            if (isinstance(prefix_steps, bool) or not isinstance(prefix_steps, int)
-                    or not 0 <= prefix_steps <= 8):
-                raise ValueError('TT-RTC prefix steps must be an integer from 0 to 8')
-            if chunk_size not in (0, 32):
-                raise ValueError('TT-RTC requires the original 32-action model horizon')
+        tt_rtc_enabled = getattr(request, "action_request_mode", "async") == "tt_rtc"
+        rlt_enabled = bool(getattr(request, "rlt_enabled", False))
+        if tt_rtc_enabled or rlt_enabled:
+            if os.environ.get("POLICY_BACKEND", "groot") != "groot":
+                raise ValueError("TT-RTC/RLT requires the GR00T backend")
+            if getattr(request, "vla_rail_enabled", False):
+                raise ValueError("TT-RTC/RLT and VLA-RAIL cannot be enabled together")
+        if tt_rtc_enabled:
+            control_hz = float(getattr(request, "control_hz", 0) or 0)
+            if not math.isfinite(control_hz) or (control_hz != 0 and control_hz < 15):
+                raise ValueError("TT-RTC Control Hz must be at least 15")
+            if chunk_size:
+                raise ValueError("TT-RTC requires the checkpoint's original action horizon")
         per_step_actions = config.get("type") == "act" and act_execution_steps(config, chunk_size) == 1
         if per_step_actions:
             contract_path = root / "inference_contract.json"
@@ -137,18 +156,27 @@ class ServiceHandler:
                 task_instruction=request.task_instruction or "",
                 action_keys=action_keys,
                 publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
-                vla_rail_enabled=bool(getattr(request, "vla_rail_enabled", False)),
-                ttrtc_enabled=ttrtc_enabled,
-                ttrtc_prefix_steps=getattr(request, 'ttrtc_prefix_steps', 7),
                 action_request_mode=getattr(request, "action_request_mode", "async"),
                 control_hz=getattr(request, "control_hz", 0),
-                inference_hz=15. if ttrtc_enabled else getattr(request, "inference_hz", 0),
-                chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
                 initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
                 initial_pose_sync_duration_s=(
                     float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
                 ),
                 **({"per_step_actions": True} if per_step_actions else {}),
+                **({
+                    "vla_rail_enabled": bool(getattr(request, "vla_rail_enabled", False)),
+                    "inference_hz": getattr(request, "inference_hz", 0),
+                    "chunk_align_window_s": getattr(request, "chunk_align_window_s", 0.0),
+                } if not (tt_rtc_enabled or rlt_enabled) else {}),
+                **({
+                    "model_path": request.model_path,
+                    "rlt_enabled": rlt_enabled,
+                    "tt_rtc_horizon": int(getattr(response, "chunk_size", 0) or 16),
+                    "tt_rtc_action_dim": int(getattr(response, "action_dim", 0) or 19),
+                    "tt_rtc_min_delay_steps": int(getattr(response, "rtc_min_delay_steps", 0)) if getattr(response, "rtc_max_delay_steps", 0) else None,
+                    "tt_rtc_max_delay_steps": int(getattr(response, "rtc_max_delay_steps", 0)) if getattr(response, "rtc_max_delay_steps", 0) else None,
+                    "defer_initial_pose_sync_activation": bool(getattr(request, "initial_pose_sync_defer_activation", False)),
+                } if tt_rtc_enabled or rlt_enabled else {}),
             )
         except Exception:
             try:
@@ -160,13 +188,17 @@ class ServiceHandler:
             robot_type=request.robot_type,
             task_instruction=request.task_instruction or "",
             action_keys=action_keys,
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
         )
+        self._playground_session = tt_rtc_enabled or rlt_enabled
         self._per_step_actions = per_step_actions
         self._subtask_choices = subtask_choices
         self._loaded_model_path = request.model_path
         return self._make_response(True, response.message or "loaded", action_keys)
 
     def _start_control_loop(self, request):
+        if self._playground_session:
+            self._require_loaded_publish_mode(request)
         options = {}
         if getattr(request, 'initial_pose_sync', False) or (
                 request.command == CMD_RESUME and hasattr(request, 'initial_pose_sync')):
@@ -179,6 +211,8 @@ class ServiceHandler:
         )
 
     def _start(self, request):
+        if self._playground_session:
+            self._require_loaded_publish_mode(request)
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
         self._reset_policy_if_needed()
@@ -188,7 +222,7 @@ class ServiceHandler:
             self._control_loop.set_task_instruction(instruction)
         syncing = self._start_control_loop(request)
         self._session.mark_running()
-        return self._make_response(True, "syncing" if syncing else "running")
+        return self._make_response(True, "syncing" if syncing else "running", initial_pose_sync_duration_s=float(syncing) if self._playground_session else 0.0)
 
     def _pause(self):
         if not self._session.running:
@@ -200,6 +234,8 @@ class ServiceHandler:
         return self._make_response(True, "paused")
 
     def _resume(self, request):
+        if self._playground_session:
+            self._require_loaded_publish_mode(request)
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
         if not self._session.running:
@@ -211,7 +247,7 @@ class ServiceHandler:
         self._control_loop.set_task_instruction(task_instruction)
         syncing = self._start_control_loop(request)
         self._session.mark_resumed(task_instruction)
-        return self._make_response(True, "syncing" if syncing else "resumed")
+        return self._make_response(True, "syncing" if syncing else "resumed", initial_pose_sync_duration_s=float(syncing) if self._playground_session else 0.0)
 
     def _stop(self):
         hold_ok = self._control_loop.stop()
@@ -230,6 +266,7 @@ class ServiceHandler:
         response = self._requester.unload_policy()
         self._session.mark_unloaded()
         self._per_step_actions = False
+        self._playground_session = False
         self._subtask_choices = []
         self._loaded_model_path = ''
         if not response.success:
@@ -286,14 +323,43 @@ class ServiceHandler:
         self._session.task_instruction = new_instruction
         return self._make_response(True, f'instruction updated: "{new_instruction}"')
 
+    def _set_action_policy(self, request):
+        if not self._session.loaded:
+            return self._make_response(False, "LOAD first")
+        if not self._session.running:
+            return self._make_response(False, "not running - START first")
+        mode = str(getattr(request, "action_policy_mode", "") or "").strip().lower()
+        success, message = self._control_loop.set_action_policy(
+            mode,
+            allow_robot_rlt=bool(
+                getattr(request, "rlt_robot_override", False)
+            ),
+            timeout_s=5.0,
+        )
+        return self._make_response(success, message)
+
+    def _require_loaded_publish_mode(self, request) -> bool:
+        """Prevent START/RESUME from bypassing Engine load-time safety checks."""
+
+        requested = bool(getattr(request, "publish_to_robot", False))
+        loaded = bool(getattr(self._session, "publish_to_robot", False))
+        if requested != loaded:
+            raise RuntimeError(
+                "Deploy Target differs from the loaded policy; STOP, UNLOAD, "
+                "then LOAD again with the requested simulation/robot target"
+            )
+        return loaded
+
     def _make_response(
         self,
         success: bool,
         message: str = "",
         action_keys: Optional[List[str]] = None,
+        initial_pose_sync_duration_s: float = 0.0,
     ):
         return self._response_factory(
             success=bool(success),
             message=str(message),
             action_keys=list(action_keys) if action_keys else [],
+            initial_pose_sync_duration_s=float(initial_pose_sync_duration_s),
         )

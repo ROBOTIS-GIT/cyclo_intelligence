@@ -43,6 +43,14 @@ const TaskCommand = {
   DISCARD_EPISODE: 22,
   SET_TASK_INFO: 23,
   CANCEL_SEGMENT: 24,
+  LOAD_INFERENCE: 25,
+  SET_ACTION_POLICY: 26,
 };
+
+export const EpisodeOutcome = Object.freeze({
+  UNSPECIFIED: 0,
+  SUCCESS: 1,
+  FAILURE: 2,
+});
 
 export default TaskCommand;

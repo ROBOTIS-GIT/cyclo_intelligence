@@ -95,9 +95,8 @@ export default function BtParameterInput({ paramName: key, value, disabled = fal
       return (
         <input
           type="number"
-          step={key === 'ttrtc_prefix_steps' ? '1' : 'any'}
-          min={key === 'ttrtc_prefix_steps' ? '0' : undefined}
-          max={key === 'ttrtc_prefix_steps' ? '8' : undefined}
+          step="any"
+          min={key === 'control_hz' && localParams.action_request_mode === 'tt_rtc' ? '15' : undefined}
           value={value}
           disabled={disabled}
           onChange={(e) => handleChange(key, e.target.value)}

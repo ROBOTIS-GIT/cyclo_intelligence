@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 import sys
 import threading
 
+import pytest
 import yaml
 
 
@@ -102,6 +103,20 @@ def test_inference_save_repo_name_avoids_existing_timestamp(monkeypatch, tmp_pat
     assert task_info.task_name == "inference"
 
 
+def test_inference_save_repo_name_reuses_orchestrator_session_id(tmp_path):
+    task_info = SimpleNamespace(
+        task_num="20260811_120000",
+        task_name="ignored",
+        task_type="inference",
+    )
+
+    first = DataManager._make_save_repo_name(tmp_path, task_info)
+    second = DataManager._make_save_repo_name(tmp_path, task_info)
+
+    assert first == "Task_20260811_120000_inference_MCAP"
+    assert second == first
+
+
 def _write_segment(
     root: Path,
     *,
@@ -110,6 +125,7 @@ def _write_segment(
     subtask_total: int,
     with_video: bool = True,
     subtask_instruction: str | None = None,
+    episode_success: bool | None = None,
 ) -> Path:
     segment = root / str(full_idx) / "segments" / str(subtask_idx)
     segment.mkdir(parents=True, exist_ok=True)
@@ -163,6 +179,8 @@ def _write_segment(
         "episode_index": subtask_idx,
         "subtask_instruction": subtask_instruction or f"subtask {subtask_idx}",
     }
+    if episode_success is not None:
+        info["episode_success"] = episode_success
     if with_video:
         videos = segment / "videos"
         videos.mkdir()
@@ -182,6 +200,9 @@ def test_archive_moves_segmented_files_and_marks_pending(tmp_path):
     manager = _make_manager(root, subtask_total=2)
     first = _write_segment(root, full_idx=0, subtask_idx=0, subtask_total=2)
     second = _write_segment(root, full_idx=0, subtask_idx=1, subtask_total=2)
+    for segment in (first, second):
+        (segment / 'rlt').mkdir()
+        (segment / 'rlt' / 'token.npz').write_bytes(b'preserved-rlt-token')
 
     out = manager._archive_full_episode(0)
 
@@ -191,6 +212,10 @@ def test_archive_moves_segmented_files_and_marks_pending(tmp_path):
     assert not (first / "segment_0.mcap").exists()
     assert not (second / "segment_1.mcap").exists()
     assert not (out / "segments").exists()
+    for index in (0, 1):
+        trace = out / 'rlt' / f'segment_{index:03d}'
+        assert (trace / 'token.npz').read_bytes() == b'preserved-rlt-token'
+        assert (trace / 'source_episode_info.json').is_file()
     assert (out / "videos" / "0_0" / "cam0.mp4").read_bytes() == b"raw-mjpeg"
     assert (out / "videos" / "0_0" / "cam0_timestamps.parquet").read_bytes() == (
         b"timestamps"
@@ -217,6 +242,198 @@ def test_archive_marks_episode_without_videos_not_required(tmp_path):
     assert not (out / "segments").exists()
     info = json.loads((out / "episode_info.json").read_text())
     assert info["transcoding_status"] == "not_required"
+
+
+def test_archive_preserves_episode_success(tmp_path):
+    root = tmp_path / "Task_session_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+
+    out = manager._archive_full_episode(0)
+
+    info = json.loads((out / "episode_info.json").read_text())
+    assert info["episode_success"] is False
+
+
+def test_inference_rollouts_share_session_folder_until_session_id_changes(tmp_path):
+    root = tmp_path / "Task_session_a_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=True,
+    )
+    _write_segment(
+        root,
+        full_idx=1,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+
+    manager._archive_full_episode(0)
+    manager._archive_full_episode(1)
+
+    assert json.loads((root / "0" / "episode_info.json").read_text())[
+        "episode_success"
+    ] is True
+    assert json.loads((root / "1" / "episode_info.json").read_text())[
+        "episode_success"
+    ] is False
+    next_session = SimpleNamespace(
+        task_num="session_b",
+        task_name="inference",
+        task_type="inference",
+    )
+    assert DataManager._make_save_repo_name(tmp_path, next_session) == (
+        "Task_session_b_inference_MCAP"
+    )
+
+
+def test_explicit_recording_folder_reuses_standard_record_dataset(tmp_path):
+    task_info = SimpleNamespace(
+        task_num="",
+        task_name="inference",
+        task_type="inference",
+        recording_folder=str(
+            tmp_path / "Task_700009_OMX_Insert_F2_Intern_MCAP"
+        ),
+    )
+
+    assert DataManager._make_save_repo_name(tmp_path, task_info) == (
+        "Task_700009_OMX_Insert_F2_Intern_MCAP"
+    )
+
+
+def test_selected_recording_folder_uses_raw_root_and_continues_episode(tmp_path):
+    recording_root = tmp_path / "rosbag2"
+    legacy_root = tmp_path / "hf"
+    selected = recording_root / "Task_700009_OMX_Insert_F2_Intern_MCAP"
+    existing = _make_manager(selected, subtask_total=1)
+    for full_idx in (0, 1):
+        _write_segment(
+            selected,
+            full_idx=full_idx,
+            subtask_idx=0,
+            subtask_total=1,
+            with_video=False,
+        )
+        existing._archive_full_episode(full_idx)
+
+    task_info = SimpleNamespace(
+        task_num="",
+        task_name="inference",
+        task_type="inference",
+        recording_folder=str(selected),
+        task_instruction=[],
+        subtask_instruction=[],
+        include_robotis_license=False,
+    )
+    reopened = DataManager(
+        save_root_path=legacy_root,
+        robot_type="f2",
+        task_info=task_info,
+        recording_root_path=recording_root,
+    )
+
+    assert reopened._save_path == legacy_root / selected.name
+    assert Path(reopened._save_rosbag_path) == selected
+    assert reopened._record_episode_count == 2
+    assert reopened._find_next_subtask_position() == (2, 0)
+
+
+def test_explicit_recording_folder_rejects_nested_target(tmp_path):
+    task_info = SimpleNamespace(
+        task_num="",
+        task_name="inference",
+        task_type="inference",
+        recording_folder=str(
+            tmp_path / "nested" / "Task_700009_record_MCAP"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="directly under"):
+        DataManager._make_save_repo_name(tmp_path, task_info)
+
+
+def test_reopened_inference_folder_continues_after_existing_episode_count(tmp_path):
+    root = tmp_path / "Task_existing_inference_MCAP"
+    manager = _make_manager(root, subtask_total=1)
+    _write_segment(
+        root,
+        full_idx=0,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=True,
+    )
+    _write_segment(
+        root,
+        full_idx=1,
+        subtask_idx=0,
+        subtask_total=1,
+        with_video=False,
+        episode_success=False,
+    )
+    manager._archive_full_episode(0)
+    manager._archive_full_episode(1)
+
+    reopened = _make_manager(root, subtask_total=1)
+    reopened._record_episode_count = reopened._find_next_episode_number()
+
+    assert reopened._record_episode_count == 2
+    assert reopened._find_next_subtask_position() == (2, 0)
+
+
+def test_playground_reopens_selected_record_dataset_at_next_episode(tmp_path):
+    root = tmp_path / "Task_700009_OMX_Insert_F2_Intern_MCAP"
+    manager = _make_manager(root, subtask_total=3)
+    for full_idx in (0, 1):
+        for subtask_idx in range(3):
+            _write_segment(
+                root,
+                full_idx=full_idx,
+                subtask_idx=subtask_idx,
+                subtask_total=3,
+                with_video=False,
+            )
+        manager._archive_full_episode(full_idx)
+
+    reopened = _make_manager(root, subtask_total=3)
+    reopened._episode_info_scan_cache = reopened._collect_episode_info_entries()
+    try:
+        reopened._validate_existing_segment_count()
+        assert reopened._find_next_episode_number() == 2
+        assert reopened._find_next_subtask_position() == (2, 0)
+    finally:
+        reopened._episode_info_scan_cache = None
+
+
+def test_raw_metadata_writer_persists_episode_success(tmp_path):
+    manager = _make_manager(tmp_path, subtask_total=1)
+    raw_dir = tmp_path / "0" / "segments" / "0"
+    manager._record_episode_count = 0
+    manager._current_full_episode_index = 0
+    manager._current_subtask_index = 0
+    manager.get_save_rosbag_path = lambda: str(raw_dir)
+    manager._ensure_task_readme = lambda: None
+    manager._write_camera_metadata = lambda *_args, **_kwargs: None
+
+    assert manager.save_robotis_metadata(episode_success=True) is True
+
+    info = json.loads((raw_dir / "episode_info.json").read_text())
+    assert info["episode_success"] is True
 
 
 def test_archive_preserves_pending_raw_spool(tmp_path):

@@ -140,7 +140,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^Real Robot Deploy$/i }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'robot',
       });
     });
@@ -205,7 +205,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
     fireEvent.click(await screen.findByRole('button', { name: /^Real Robot Deploy$/i }));
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'robot',
       });
     });
@@ -221,7 +221,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /resume inference/i }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', { taskSource: 'inference',
         inferenceMode: 'robot',
       });
     });
@@ -241,7 +241,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
     fireEvent.click(await screen.findByRole('button', { name: /^Real Robot Deploy$/i }));
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'robot',
       });
     });
@@ -257,7 +257,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /resume inference/i }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', { taskSource: 'inference',
         inferenceMode: 'robot',
       });
     });
@@ -319,7 +319,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: buttonName }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith(command, {});
+      expect(sendRecordCommand).toHaveBeenCalledWith(command, { taskSource: 'inference' });
       expect(toast.error).toHaveBeenCalledWith(
         'Command failed: current-pose hold failed; retry'
       );
@@ -338,7 +338,7 @@ describe('InferenceControlPanel deploy safety', () => {
 
     await waitFor(() => {
       expect(store.getState().tasks.taskInfo.inferenceMode).toBe('simulation');
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'simulation',
       });
     });
@@ -357,7 +357,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'simulation',
       });
     });
@@ -428,7 +428,7 @@ describe('InferenceControlPanel deploy safety', () => {
     fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
 
     await waitFor(() => {
-      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', {
+      expect(sendRecordCommand).toHaveBeenCalledWith('start_inference', { taskSource: 'inference',
         inferenceMode: 'simulation',
       });
     });

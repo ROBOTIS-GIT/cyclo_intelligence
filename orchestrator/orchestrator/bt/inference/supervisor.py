@@ -82,24 +82,20 @@ class InferenceSupervisor:
                 raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
             if hasattr(request, 'vla_rail_enabled'):
                 request.vla_rail_enabled = rail
-            ttrtc = bool(getattr(owner, 'ttrtc_enabled', False))
-            prefix = getattr(owner, 'ttrtc_prefix_steps', 7)
-            if ttrtc:
-                if (owner.backend != 'groot' or owner.action_request_mode != 'async' or rail
-                        or owner.acceleration_mode not in ('', 'pytorch') or owner.inference_hz not in (0, 15)):
-                    raise ValueError('TT-RTC requires GR00T Async, PyTorch, 15 Hz and VLA-RAIL disabled')
-                if str(prefix) not in {str(i) for i in range(9)}:
-                    raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
-                if not all(hasattr(request, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
+            tt_rtc = owner.action_request_mode == 'tt_rtc'
+            if tt_rtc:
+                if (owner.backend != 'groot' or rail
+                        or owner.acceleration_mode not in ('', 'pytorch', 'tensorrt_dit')):
+                    raise ValueError('TT-RTC requires GR00T without VLA-RAIL')
+                if not hasattr(request, 'action_request_mode'):
                     raise RuntimeError('Rebuild interfaces to enable TT-RTC')
-            if hasattr(request, 'ttrtc_enabled'):
-                request.ttrtc_enabled = ttrtc
-            if hasattr(request, 'ttrtc_prefix_steps'):
-                request.ttrtc_prefix_steps = int(prefix) if ttrtc else 0
+            if hasattr(request, 'action_chunk_size'):
+                # TT-RTC uses its trained checkpoint horizon, never the UI crop.
+                request.action_chunk_size = 0 if tt_rtc else int(getattr(owner, 'action_chunk_size', 0))
             for field in ('action_request_mode', 'acceleration_mode', 'acceleration_engine_path',
                           'control_hz', 'inference_hz', 'chunk_align_window_s'):
                 setattr(request, field, getattr(owner, field))
-            if ttrtc:
+            if tt_rtc:
                 request.inference_hz = 15
         elif command == START and owner is not None:
             request.initial_pose_sync = getattr(owner, 'initial_pose_sync', True)
@@ -137,7 +133,10 @@ class InferenceSupervisor:
             self.publish_to_robot = request.publish_to_robot
             self.instruction = request.task_instruction
         elif command == START:
-            self.sync_until = (time.monotonic() + request.initial_pose_sync_duration_s
+            effective_duration = float(getattr(reply, 'initial_pose_sync_duration_s', 0.0) or 0.0)
+            if effective_duration <= 0:
+                effective_duration = request.initial_pose_sync_duration_s
+            self.sync_until = (time.monotonic() + effective_duration
                                if reply.message == 'syncing' else 0.0)
             self.running = True
             self.motion_uncertain = False

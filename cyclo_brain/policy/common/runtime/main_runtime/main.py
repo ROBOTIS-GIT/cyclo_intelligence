@@ -36,7 +36,7 @@ from robot_client.messages import (  # noqa: E402
     INFERENCE_COMMAND_RESPONSE_DEF,
 )
 
-from .control_loop import ControlLoop  # noqa: E402
+from .control_router import ControlRouter as ControlLoop  # noqa: E402
 from .inference_requester import (  # noqa: E402
     DEFAULT_LOAD_POLICY_TIMEOUT_S,
     InferenceRequester,

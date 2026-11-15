@@ -24,6 +24,7 @@ from rclpy.node import Node
 from interfaces.msg import DataOperationStatus
 
 from cyclo_data.services.conversion_service import ConversionService
+from cyclo_data.services.curation_service import CurationService
 from cyclo_data.services.edit_service import EditService
 from cyclo_data.services.hub_service import HubService
 from cyclo_data.services.recording_service import RecordingService
@@ -51,6 +52,7 @@ class CycloDataNode(Node):
         # Services — each advertises under /data/<name> and logs on startup.
         self._recording = RecordingService(self, self._status_publisher)
         self._conversion = ConversionService(self, self._status_publisher)
+        self._curation = CurationService(self, self._status_publisher)
         self._hub = HubService(self, self._status_publisher)
         self._edit = EditService(self, self._status_publisher)
 
@@ -83,6 +85,7 @@ def main(args=None):
         # them up explicitly before rclpy shutdown.
         node._hub.shutdown()
         node._conversion.shutdown()
+        node._curation.shutdown()
         node._recording.shutdown()
         executor.shutdown()
         node.destroy_node()

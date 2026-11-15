@@ -88,20 +88,18 @@ export default function useBtParameterDraft({ nodes, selectedNodeId, onParamChan
       return;
     }
     if (nodeType === 'SendCommand') {
-      if (paramName === 'ttrtc_prefix_steps' && !/^[0-8]$/.test(value)) return;
       const related = {};
       if ((paramName === 'action_request_mode' && value !== 'async')
           || (paramName === 'model' && !String(value).startsWith('groot'))) {
-        for (const field of ['vla_rail_enabled', 'ttrtc_enabled']) {
+        for (const field of ['vla_rail_enabled']) {
           if (truthy(localParams[field])) related[field] = 'false';
         }
       }
-      if (paramName === 'ttrtc_enabled' && truthy(value)) {
-        Object.assign(related, { vla_rail_enabled: 'false', inference_hz: '15',
-          acceleration_mode: 'pytorch', acceleration_engine_path: '' });
+      if (paramName === 'action_request_mode' && value === 'tt_rtc') {
+        Object.assign(related, { vla_rail_enabled: 'false', inference_hz: '15', acceleration_engine_path: '' });
       }
-      if (paramName === 'vla_rail_enabled' && truthy(value)
-          && truthy(localParams.ttrtc_enabled)) related.ttrtc_enabled = 'false';
+      if (paramName === 'action_request_mode' && localParams.action_request_mode === 'tt_rtc' && value !== 'tt_rtc') related.acceleration_engine_path = '';
+      if (paramName === 'model' && !String(value).startsWith('groot') && localParams.action_request_mode === 'tt_rtc') related.action_request_mode = 'async';
       for (const [field, next] of Object.entries(related)) {
         if (localParams[field] === next) continue;
         setLocalParams((prev) => ({ ...prev, [field]: next }));

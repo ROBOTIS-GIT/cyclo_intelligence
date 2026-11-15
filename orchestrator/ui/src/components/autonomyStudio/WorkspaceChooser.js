@@ -14,7 +14,7 @@
 //
 // Author: Seongwoo Kim
 
-import { MdAccountTree, MdRoute, MdAutoAwesome } from "react-icons/md";
+import { MdAccountTree, MdRoute, MdAutoAwesome, MdModelTraining } from "react-icons/md";
 import { MISSION_BORDER, MISSION_CARD_RADIUS, MISSION_TEXT } from "../../features/mapWorkspace/lib/theme";
 
 export function WorkspaceChoiceCard({
@@ -55,18 +55,18 @@ export function WorkspaceChoiceCard({
 }
 
 // Rendered inside the Autonomy Studio shell, which owns the page root and the
-// app bar; this is only the choice between the three workspaces.
-export default function AutonomyStudioWorkspaceChooser({ onChooseMissionCanvas, onChooseTaskBuilder, onChooseAutonomyCanvas }) {
+// app bar; this is only the choice between the four workspaces.
+export default function AutonomyStudioWorkspaceChooser({ onChooseMissionCanvas, onChooseTaskBuilder, onChooseAutonomyCanvas, onChooseRLCanvas }) {
   return (
     <main className="flex flex-1 items-center justify-center overflow-auto px-8 py-10">
-        <section className="w-full max-w-[1100px]">
+        <section className="w-full max-w-[1380px]">
           <div className="text-[10px] font-mono font-bold tracking-[0.18em]" style={{ color: "var(--mc-accent)" }}>
             AUTONOMY STUDIO
           </div>
           <h2 className="mt-3 text-[28px] font-bold tracking-[-0.025em]" style={{ color: MISSION_TEXT }}>
             Choose a workspace
           </h2>
-          <div className="mt-8 grid grid-cols-1 gap-5 md:grid-cols-3">
+          <div className="mt-8 grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
             <WorkspaceChoiceCard
               ariaLabel="Open Action Canvas"
               title="Action Canvas"
@@ -87,6 +87,13 @@ export default function AutonomyStudioWorkspaceChooser({ onChooseMissionCanvas, 
               examples="RECORD & OPERATE"
               icon={<MdAutoAwesome size={23} aria-hidden="true" />}
               onClick={onChooseAutonomyCanvas}
+            />
+            <WorkspaceChoiceCard
+              ariaLabel="Open RL Canvas"
+              title="RL Canvas"
+              examples="REINFORCEMENT LEARNING"
+              icon={<MdModelTraining size={23} aria-hidden="true" />}
+              onClick={onChooseRLCanvas}
             />
           </div>
         </section>

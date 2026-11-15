@@ -5,6 +5,7 @@ uint8 OP_RECORDING = 0
 uint8 OP_CONVERSION = 1
 uint8 OP_HF = 2
 uint8 OP_EDIT = 3
+uint8 OP_CURATION = 4
 
 ########################################
 # Constants — status

@@ -87,6 +87,9 @@ services:
       # false model-load failure while the container continues downloading.
       - INFERENCE_LOAD_TIMEOUT_SEC=${INFERENCE_LOAD_TIMEOUT_SEC:-7200}
       - PYTHONUNBUFFERED=1
+      - CYCLO_COMMAND_ARBITER_ENABLED=${CYCLO_COMMAND_ARBITER_ENABLED:-0}
+      - AI_WORKER_INTERVENTION_URL=${AI_WORKER_INTERVENTION_URL:-http://127.0.0.1:8779/api/intervention}
+      - INTERVENTION_CONTROL_TOKEN=${INTERVENTION_CONTROL_TOKEN:-}
 
     volumes:
       - /dev:/dev
@@ -191,6 +194,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/cyclo_brain_src
 
     volumes:
       - /dev:/dev
@@ -203,6 +207,11 @@ services:
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
+      - ../cyclo_brain/algorithm:/cyclo_brain_src/cyclo_brain/algorithm:ro
+      - ../cyclo_brain/model:/cyclo_brain_src/cyclo_brain/model:ro
+      - ../cyclo_brain/contracts:/cyclo_brain_src/cyclo_brain/contracts:ro
+      - ../shared/shared:/cyclo_brain_src/shared:ro
+      - ./huggingface/hub:/huggingface_hub:ro
       # Common policy runtime (main-runtime + engine-process + Engine ABC).
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # Live-edit app-level s6 services while keeping s6-overlay's built-in
@@ -295,6 +304,10 @@ services:
       # Main-runtime waits on the local engine process while weights and
       # first-time gated backbones download/load.
       - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
+      # Playground prefix policy is bounded by the checkpoint training range.
+      - CYCLO_TT_RTC_PREFIX_MODE=${CYCLO_TT_RTC_PREFIX_MODE:-fixed_first_6}
+      - CYCLO_TT_RTC_NUM_INFERENCE_TIMESTEPS=${CYCLO_TT_RTC_NUM_INFERENCE_TIMESTEPS:-4}
+      - CYCLO_TT_RTC_TEMPORAL_OVERLAP_STEPS=${CYCLO_TT_RTC_TEMPORAL_OVERLAP_STEPS:-0}
       - INFERENCE_TRACE_PATH=${INFERENCE_TRACE_PATH:-}
       - VLA_RAIL_CAPTURE_ACTIONS=${VLA_RAIL_CAPTURE_ACTIONS:-0}
       - CMD_VEL_LINEAR_DEADBAND=0.02
@@ -302,6 +315,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app:/gr00t:/cyclo_brain_src
 
     volumes:
       - type: bind
@@ -416,6 +430,11 @@ services:
       - ../cyclo_brain/sdk/zenoh_ros2_sdk:/zenoh_sdk:ro
       - ../cyclo_brain/sdk/robot_client:/robot_client_sdk:ro
       - ../cyclo_brain/sdk/action_chunk_processing:/action_chunk_processing_sdk:ro
+      - ../cyclo_brain/algorithm:/cyclo_brain_src/cyclo_brain/algorithm:ro
+      - ../cyclo_brain/model:/cyclo_brain_src/cyclo_brain/model:ro
+      - ../cyclo_brain/contracts:/cyclo_brain_src/cyclo_brain/contracts:ro
+      - ../shared/shared:/cyclo_brain_src/shared:ro
+      - ./huggingface/hub:/huggingface_hub:ro
       # Common policy runtime shared with LeRobot.
       - ../cyclo_brain/policy/common/runtime:/policy_runtime:ro
       # GR00T keeps backend-local app services, while preserving the image's

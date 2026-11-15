@@ -14,6 +14,7 @@
 //
 // Author: Kiwoong Park
 
+import RLInferencePanel from './RLInferencePanel';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
@@ -52,7 +53,7 @@ import {
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { useInferenceSubtaskState } from '../hooks/useInferenceSubtaskState';
 import { requiresInstruction } from '../constants/policyCapabilities';
-import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
+import { getInferenceTaskInfoKey, normalizeActionRequestMode } from '../utils/taskInfoSync';
 import {
   getInferenceTimingWarnings,
   hasIncompleteInferenceTiming,
@@ -60,7 +61,7 @@ import {
 
 const AUTO_SYNC_DELAY_MS = 700;
 
-const InferencePanel = () => {
+const StandardInferencePanel = () => {
   const dispatch = useDispatch();
 
   const info = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -89,10 +90,7 @@ const InferencePanel = () => {
     inferenceStatus.inferencePhase === InferencePhase.INFERENCING;
   const inferenceMode = info.inferenceMode || 'simulation';
   const isRobotMode = inferenceMode === 'robot';
-  const actionRequestMode =
-    String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async';
+  const actionRequestMode = normalizeActionRequestMode(info.actionRequestMode);
   const supportedTrtMode = tensorRtMode(info.serviceType, info.policyType);
   const isTensorRtEnabled = isTensorRtMode(info.accelerationMode);
   const initialPoseSyncEnabled = Boolean(info.initialPoseSync);
@@ -124,11 +122,11 @@ const InferencePanel = () => {
       // the "Update Task Instruction" button below.
       if (field !== 'taskInstruction' && !isEditable) return;
       dispatch(setInferenceTaskInfo({ [field]: value,
-        ...(field === 'policyPath' ? { accelerationEnginePath: '' } : {}),
+        ...((field === 'policyPath' || (field === 'actionRequestMode' && info.actionRequestMode === 'tt_rtc')) ? { accelerationEnginePath: '' } : {}),
       }));
       dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
     },
-    [isEditable, dispatch]
+    [isEditable, dispatch, info.actionRequestMode]
   );
 
   const taskSyncKey = useMemo(
@@ -479,7 +477,7 @@ const InferencePanel = () => {
         Task Information
       </div>
 
-      <InferenceModelSelector readonly={!isEditable} />
+      <InferenceModelSelector official readonly={!isEditable} />
 
       <PolicyBackendControl
         serviceType={info.serviceType}
@@ -643,6 +641,7 @@ const InferencePanel = () => {
           {isTensorRtEnabled && (
             <TrtEngineControl
               serviceType={info.serviceType}
+              actionRequestMode={actionRequestMode}
               modelPath={info.policyPath}
               enginePath={info.accelerationEnginePath}
               robotType={robotType}
@@ -668,7 +667,7 @@ const InferencePanel = () => {
             type="button"
             onClick={() => handleChange('actionRequestMode', 'async')}
             disabled={!isEditable}
-            className={actionModeButtonClass(actionRequestMode !== 'sync')}
+            className={actionModeButtonClass(actionRequestMode === 'async')}
             aria-label="Use async action requests"
             title="Async"
           >
@@ -686,6 +685,17 @@ const InferencePanel = () => {
             <MdHourglassEmpty size={16} className="shrink-0" />
             <span className="truncate">Sync</span>
           </button>
+          {info.serviceType === 'groot' && info.policyType === 'n17' && (
+            <button type="button" disabled={!isEditable}
+              className={actionModeButtonClass(actionRequestMode === 'tt_rtc')}
+              aria-label="Use TT-RTC action requests" title="TT-RTC"
+              onClick={() => {
+                dispatch(setInferenceTaskInfo({ actionRequestMode: 'tt_rtc', inferenceHz: 15, accelerationEnginePath: '' }));
+                dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
+              }}>
+              <span className="truncate">TT-RTC</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -740,7 +750,7 @@ const InferencePanel = () => {
         </div>
       )}
 
-      <InferenceChunkControl info={info} onChange={handleChange} readonly={!isEditable} />
+      {actionRequestMode !== 'tt_rtc' && <InferenceChunkControl info={info} onChange={handleChange} readonly={!isEditable} />}
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
@@ -762,7 +772,7 @@ const InferencePanel = () => {
             const v = e.target.value;
             handleChange('inferenceHz', v === '' ? '' : Number(v));
           }}
-          disabled={!isEditable}
+          disabled={!isEditable || actionRequestMode === 'tt_rtc'}
           aria-label="Dataset FPS"
         />
       </div>
@@ -826,4 +836,8 @@ const InferencePanel = () => {
   );
 };
 
-export default InferencePanel;
+
+
+export default function InferencePanel(props) {
+  return props.variant === 'offlineRL' ? <RLInferencePanel {...props} /> : <StandardInferencePanel {...props} />;
+}

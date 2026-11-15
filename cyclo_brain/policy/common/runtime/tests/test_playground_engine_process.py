@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+
+RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from engine_process.protocol import (  # noqa: E402
+    CMD_GET_ACTION,
+    CMD_LOAD_POLICY,
+    CMD_UNLOAD_POLICY,
+    EngineCommandRequest,
+    request_from_message,
+    request_to_message_kwargs,
+)
+from engine_process.worker import EngineWorker  # noqa: E402
+
+
+class FakeEngine:
+    def __init__(self) -> None:
+        self.loaded_with = None
+        self.action_requested_with = None
+        self.cleaned = False
+
+    @property
+    def is_ready(self) -> bool:
+        return self.loaded_with is not None and not self.cleaned
+
+    def load_policy(self, request) -> dict:
+        self.loaded_with = request
+        self.cleaned = False
+        return {
+            "success": True,
+            "message": f"loaded {request.model_path}",
+            "action_keys": ["arm", "gripper"],
+        }
+
+    def get_action_chunk(self, request) -> dict:
+        self.action_requested_with = request
+        return {
+            "success": True,
+            "message": "ok",
+            "action_chunk": np.arange(6, dtype=np.float64),
+            "chunk_size": 2,
+            "action_dim": 3,
+            "rtc_reference_chunk_size": 2,
+            "rtc_reference_action_chunk": 10.0 + np.arange(6, dtype=np.float64),
+        }
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+class EngineWorkerTests(unittest.TestCase):
+    def test_policy_update_commands_preserve_sequence_and_reject_other_engines(self):
+        engine = FakeEngine()
+        request = EngineCommandRequest(command=24, seq_id=52, rlt_bundle_path='/bundle')
+        worker = EngineWorker(engine)
+        rejected = worker.handle(request)
+        self.assertFalse(rejected.success)
+        self.assertEqual(rejected.seq_id, 52)
+        engine.policy_update_command = lambda req: {
+            'success': req.rlt_bundle_path == '/bundle', 'message': 'queued',
+        }
+        accepted = worker.handle(request)
+        self.assertTrue(accepted.success)
+        self.assertEqual(accepted.message, 'queued')
+        self.assertEqual(accepted.seq_id, 52)
+
+    def test_load_response_carries_model_shape_and_tt_rtc_delay_profile(self):
+        engine = FakeEngine()
+        engine.load_policy = lambda _request: {
+            "success": True,
+            "chunk_size": 20,
+            "action_dim": 16,
+            "rtc_min_delay_steps": 6,
+            "rtc_max_delay_steps": 8,
+        }
+        response = EngineWorker(engine).handle(EngineCommandRequest(command=CMD_LOAD_POLICY))
+        self.assertTrue(response.success)
+        self.assertEqual((response.chunk_size, response.action_dim), (20, 16))
+        self.assertEqual(
+            (response.rtc_min_delay_steps, response.rtc_max_delay_steps),
+            (6, 8),
+        )
+
+    def test_tt_rtc_protocol_round_trip_preserves_prefix(self) -> None:
+        request = EngineCommandRequest(
+            command=CMD_GET_ACTION,
+            seq_id=7,
+            action_request_mode="tt_rtc",
+            rtc_delay_steps=2,
+            rtc_action_dim=3,
+            rtc_prefix_action_list=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+
+        decoded = request_from_message(
+            SimpleNamespace(**request_to_message_kwargs(request))
+        )
+
+        self.assertEqual(decoded.action_request_mode, "tt_rtc")
+        self.assertEqual(decoded.rtc_delay_steps, 2)
+        self.assertEqual(decoded.rtc_action_dim, 3)
+        self.assertEqual(decoded.rtc_prefix_action_list, request.rtc_prefix_action_list)
+
+    def test_load_policy_delegates_to_engine(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(engine)
+
+        response = worker.handle(
+            EngineCommandRequest(
+                command=CMD_LOAD_POLICY,
+                seq_id=11,
+                model_path="/models/policy",
+                robot_type="ffw",
+                publish_to_robot=True,
+                task_instruction="pick",
+                acceleration_mode="tensorrt_dit",
+                acceleration_engine_path="/models/policy/dit_model_bf16.trt",
+            )
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.seq_id, 11)
+        self.assertEqual(response.action_keys, ["arm", "gripper"])
+        self.assertEqual(engine.loaded_with.model_path, "/models/policy")
+        self.assertEqual(engine.loaded_with.robot_type, "ffw")
+        self.assertTrue(engine.loaded_with.publish_to_robot)
+        self.assertEqual(engine.loaded_with.acceleration_mode, "tensorrt_dit")
+        self.assertEqual(
+            engine.loaded_with.acceleration_engine_path,
+            "/models/policy/dit_model_bf16.trt",
+        )
+
+    def test_get_action_returns_flat_action_list(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(engine)
+        worker.handle(
+            EngineCommandRequest(
+                command=CMD_LOAD_POLICY,
+                seq_id=1,
+                model_path="/models/policy",
+                robot_type="ffw",
+            )
+        )
+
+        response = worker.handle(
+            EngineCommandRequest(
+                command=CMD_GET_ACTION,
+                seq_id=12,
+                task_instruction="move",
+                action_policy_mode="rlt",
+                action_request_mode="tt_rtc",
+                rtc_delay_steps=2,
+                rtc_action_dim=3,
+                rtc_prefix_action_list=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            )
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.seq_id, 12)
+        self.assertEqual(response.chunk_size, 2)
+        self.assertEqual(response.action_dim, 3)
+        self.assertEqual(response.action_list, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertEqual(response.rtc_reference_chunk_size, 2)
+        self.assertEqual(
+            response.rtc_reference_action_list,
+            [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+        )
+        self.assertIsInstance(engine.action_requested_with, EngineCommandRequest)
+        self.assertEqual(engine.action_requested_with.task_instruction, "move")
+        self.assertEqual(engine.action_requested_with.action_policy_mode, "rlt")
+        self.assertEqual(engine.action_requested_with.action_request_mode, "tt_rtc")
+        self.assertEqual(engine.action_requested_with.rtc_delay_steps, 2)
+        self.assertEqual(engine.action_requested_with.rtc_action_dim, 3)
+        self.assertEqual(
+            engine.action_requested_with.rtc_prefix_action_list,
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+
+    def test_unload_is_idempotent_cleanup(self) -> None:
+        engine = FakeEngine()
+        worker = EngineWorker(engine)
+
+        response = worker.handle(
+            EngineCommandRequest(command=CMD_UNLOAD_POLICY, seq_id=13)
+        )
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.seq_id, 13)
+        self.assertTrue(engine.cleaned)
+
+
+if __name__ == "__main__":
+    unittest.main()

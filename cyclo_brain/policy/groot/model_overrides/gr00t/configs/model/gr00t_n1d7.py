@@ -116,6 +116,13 @@ class Gr00tN1d7Config(PretrainedConfig):
     noise_s: float = 0.999
     num_timestep_buckets: int = 1000
 
+    # Runtime metadata carried by an externally trained Training-Time
+    # Real-Time Chunking (TT-RTC) checkpoint.  Cyclo consumes this contract for
+    # prefix-conditioned inference; it does not implement TT-RTC fine-tuning.
+    training_time_rtc_enabled: bool = False
+    training_time_rtc_max_delay_steps: int = 0
+    training_time_rtc_action_hz: float = 15.0
+
     # Training parameters
     tune_projector: bool = True
     tune_diffusion_model: bool = True

@@ -48,6 +48,7 @@ import {
   setHFRepoIdDownload,
   setUploadStatus,
   setConversionStatus,
+  setCurationStatus,
 } from '../features/editDataset/editDatasetSlice';
 import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
@@ -77,6 +78,7 @@ export function useRosTopicSubscription() {
   const hfStatusTopicRef = useRef(null);
   const actionEventTopicRef = useRef(null);
   const recordingMonitorTopicRef = useRef(null);
+  const commandSourceStatusTopicRef = useRef(null);
   const joystickModeTopicRef = useRef(null);
   // HOME only seeds task_info once. Record/Inference pages accept later
   // backend echoes so multiple browser tabs stay in sync.
@@ -216,6 +218,8 @@ export function useRosTopicSubscription() {
     unsubscribeFromTopic(hfStatusTopicRef, 'HF status');
     unsubscribeFromTopic(actionEventTopicRef, 'Action event');
     unsubscribeFromTopic(recordingMonitorTopicRef, 'Recording monitor');
+    unsubscribeFromTopic(commandSourceStatusTopicRef, 'Command source status');
+    dispatch(setRecordingMonitor({ arbiter: null }));
     unsubscribeFromTopic(joystickModeTopicRef, 'Joystick mode');
 
     // Reset transition trackers
@@ -309,6 +313,17 @@ export function useRosTopicSubscription() {
           dispatch(
             setRecordStatus({
               taskName: msg.task_info?.task_name || 'idle',
+              taskType: msg.task_info?.task_type || '',
+              recordInferenceMode: Boolean(
+                msg.task_info?.record_inference_mode
+              ),
+              tags: Array.isArray(msg.task_info?.tags)
+                ? msg.task_info.tags.map((tag) => String(tag || ''))
+                : [],
+              taskNum: msg.task_info?.task_num || '',
+              recordingFolder: String(
+                msg.task_info?.recording_folder || ''
+              ).trim(),
               running: isRunning,
               recordPhase: currentPhase || 0,
               progress: Math.round(encodingProgress),
@@ -346,6 +361,7 @@ export function useRosTopicSubscription() {
         const shouldApplyTaskInfo = shouldApplyServerTaskInfoToPage({
           taskInfo: uiTaskInfo,
           currentPage,
+          workspaceKind: store.getState().ui.activeStudioWorkspace,
           inferencePhase: currentInferencePhase,
           initialTaskInfoSynced: initialTaskInfoSyncRef.current,
         });
@@ -379,6 +395,7 @@ export function useRosTopicSubscription() {
       // interfaces/msg/DataOperationStatus.msg.
       const OP_RECORDING = 0;
       const OP_CONVERSION = 1;
+      const OP_CURATION = 4;
       const STATUS_NAMES = {
         0: 'idle',
         1: 'running',
@@ -400,6 +417,19 @@ export function useRosTopicSubscription() {
               recordingOperationStatus: STATUS_NAMES[msg.status] || 'idle',
               recordingOperationStage: msg.stage || '',
               recordingOperationMessage: msg.message || '',
+            })
+          );
+          return;
+        }
+
+        if (msg.operation_type === OP_CURATION) {
+          dispatch(
+            setCurationStatus({
+              status: STATUS_NAMES[msg.status] || 'idle',
+              progress: msg.progress_percentage || 0,
+              stage: msg.stage || '',
+              message: msg.message || '',
+              jobId: msg.job_id || '',
             })
           );
           return;
@@ -720,6 +750,30 @@ export function useRosTopicSubscription() {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
+      if (!commandSourceStatusTopicRef.current) {
+        commandSourceStatusTopicRef.current = new ROSLIB.Topic({
+          ros,
+          name: '/command_source_arbiter/status',
+          messageType: 'std_msgs/msg/String',
+          queue_length: 1,
+          throttle_rate: 1000,
+        });
+        commandSourceStatusTopicRef.current.subscribe((msg) => {
+          try {
+            const status = JSON.parse(msg.data);
+            if (!status || typeof status.mode !== 'string') return;
+            dispatch(setRecordingMonitor({ arbiter: {
+              mode: status.mode,
+              fault: status.fault || '',
+              publisher_conflict: status.publisher_conflict || '',
+              receivedAtMs: Date.now(),
+            } }));
+          } catch (_) {
+            // A malformed status must never turn a missing command into Idle.
+            dispatch(setRecordingMonitor({ arbiter: null }));
+          }
+        });
+      }
       if (recordingMonitorTopicRef.current) return;
 
       recordingMonitorTopicRef.current = new ROSLIB.Topic({

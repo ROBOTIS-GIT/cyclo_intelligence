@@ -81,15 +81,29 @@ class FakeControlLoop:
         return self.hold_pending
 
 
-def make_response(success, message="", action_keys=None):
+def make_response(success, message, action_keys, initial_pose_sync_duration_s):
     return SimpleNamespace(
         success=success,
         message=message,
         action_keys=list(action_keys or []),
+        initial_pose_sync_duration_s=initial_pose_sync_duration_s,
     )
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
+    def test_capabilities_and_error_responses_include_required_wire_duration(self):
+        handler, session, loop = self._handler()
+        capabilities = handler.handle(SimpleNamespace(command=CMD_CAPABILITIES))
+        self.assertTrue(capabilities.success)
+        self.assertEqual(capabilities.initial_pose_sync_duration_s, 0.0)
+        self.assertFalse(session.loaded)
+        self.assertEqual(loop.configures, [])
+        for command in (CMD_START, 255):
+            with self.subTest(command=command):
+                rejected = handler.handle(SimpleNamespace(command=command))
+                self.assertFalse(rejected.success)
+                self.assertEqual(rejected.initial_pose_sync_duration_s, 0.0)
+
     def test_manual_and_detector_updates_share_idempotent_ordered_transition(self):
         handler, session, loop = self._handler()
         session.mark_loaded('ffw', 'phase 1', ['arm'])

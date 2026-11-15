@@ -23,17 +23,20 @@ import {
   MdMerge,
   MdMovie,
   MdPlayCircle,
+  MdOutlineContentCut,
 } from 'react-icons/md';
 import HuggingfaceSection from '../features/editDataset/components/DatasetHuggingfaceSection';
 import MergeSection from '../features/editDataset/components/DatasetMergeSection';
 import DeleteSection from '../features/editDataset/components/DatasetDeleteSection';
 import ConvertSection from '../features/editDataset/components/DatasetConvertSection';
 import ReplayPage from './ReplayPage';
+import CurationSection from '../features/editDataset/components/DatasetCurationSection';
 
 const TOAST_LIMIT = 3;
 
 const SECTION_TYPES = {
   REVIEW: 'review',
+  CURATE: 'curate',
   DELETE: 'delete',
   MERGE: 'merge',
   CONVERT: 'convert',
@@ -44,6 +47,10 @@ const SECTION_CONFIG = {
   [SECTION_TYPES.REVIEW]: {
     label: 'Review Episodes',
     icon: MdPlayCircle,
+  },
+  [SECTION_TYPES.CURATE]: {
+    label: 'Curate & Convert',
+    icon: MdOutlineContentCut,
   },
   [SECTION_TYPES.DELETE]: {
     label: 'Delete Episodes',
@@ -65,6 +72,7 @@ const SECTION_CONFIG = {
 
 const SECTION_ORDER = [
   SECTION_TYPES.REVIEW,
+  SECTION_TYPES.CURATE,
   SECTION_TYPES.DELETE,
   SECTION_TYPES.MERGE,
   SECTION_TYPES.CONVERT,
@@ -90,6 +98,8 @@ export default function EditDatasetPage() {
     switch (activeSection) {
       case SECTION_TYPES.REVIEW:
         return <ReplayPage isActive />;
+      case SECTION_TYPES.CURATE:
+        return <CurationSection isEditable />;
       case SECTION_TYPES.DELETE:
         return <DeleteSection isEditable />;
       case SECTION_TYPES.MERGE:

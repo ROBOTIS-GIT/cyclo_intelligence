@@ -8,17 +8,17 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
+import json
 from typing import Any
-import numpy as np
 
 from engine_process.protocol import (
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
     CMD_RESET_POLICY,
+    POLICY_UPDATE_COMMANDS,
     EngineCommandRequest,
     EngineCommandResponse,
     response_from_message,
@@ -44,6 +44,11 @@ class InferenceRequester:
         self._lock = threading.Lock()
         self._get_action_in_flight = False
 
+    @property
+    def get_action_timeout_s(self) -> float:
+        """Normal inference timeout, also used for TT-RTC requests."""
+        return self._get_action_timeout_s
+
     def has_pending_get_action(self) -> bool:
         with self._lock:
             return self._get_action_in_flight
@@ -56,14 +61,19 @@ class InferenceRequester:
             model_path=str(getattr(request, "model_path", "") or ""),
             embodiment_tag=str(getattr(request, "embodiment_tag", "") or ""),
             robot_type=str(getattr(request, "robot_type", "") or ""),
+            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             task_instruction=str(getattr(request, "task_instruction", "") or ""),
             acceleration_mode=str(getattr(request, "acceleration_mode", "") or ""),
             acceleration_engine_path=str(
                 getattr(request, "acceleration_engine_path", "") or ""
             ),
             action_chunk_size=getattr(request, "action_chunk_size", 0),
-            ttrtc_enabled=bool(getattr(request, "ttrtc_enabled", False)),
-            ttrtc_prefix_steps=getattr(request, "ttrtc_prefix_steps", 7),
+            rlt_enabled=bool(getattr(request, "rlt_enabled", False)),
+            rlt_bundle_path=str(getattr(request, "rlt_bundle_path", "") or ""),
+            action_policy_mode="base",
+            action_request_mode=str(
+                getattr(request, "action_request_mode", "") or "async"
+            ),
         )
         return self._call(
             engine_request,
@@ -71,15 +81,16 @@ class InferenceRequester:
         )
 
     def get_action(
-        self, task_instruction: str, timeout_s: float | None = None, *,
-        ttrtc_prefix_actions=None,
+        self,
+        task_instruction: str,
+        action_policy_mode: str = "base",
+        timeout_s: float | None = None,
+        *,
+        action_request_mode: str = "async",
+        rtc_delay_steps: int = 0,
+        rtc_action_dim: int = 0,
+        rtc_prefix_action_list: list[float] | None = None,
     ) -> EngineCommandResponse:
-        prefix = None
-        if ttrtc_prefix_actions is not None:
-            prefix = np.asarray(ttrtc_prefix_actions, dtype=np.float64)
-            if (prefix.ndim != 2 or prefix.shape[1] != 16 or len(prefix) > 8
-                    or not np.isfinite(prefix).all()):
-                raise ValueError('TT-RTC prefix must be finite [0..8, 16] physical actions')
         with self._lock:
             if self._get_action_in_flight:
                 return EngineCommandResponse(
@@ -93,9 +104,11 @@ class InferenceRequester:
             command=CMD_GET_ACTION,
             seq_id=seq_id,
             task_instruction=task_instruction or "",
-            ttrtc_enabled=prefix is not None,
-            ttrtc_prefix_steps=len(prefix) if prefix is not None else 0,
-            ttrtc_prefix_actions=prefix.ravel().tolist() if prefix is not None else [],
+            action_policy_mode=str(action_policy_mode or "base"),
+            action_request_mode=str(action_request_mode or "async"),
+            rtc_delay_steps=int(rtc_delay_steps),
+            rtc_action_dim=int(rtc_action_dim),
+            rtc_prefix_action_list=list(rtc_prefix_action_list or []),
         )
         try:
             return self._call(
@@ -113,6 +126,15 @@ class InferenceRequester:
             request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
+
+    def policy_update(self, command: int, bundle_path: str, dataset_paths=None, *, max_updates=0) -> EngineCommandResponse:
+        if command not in POLICY_UPDATE_COMMANDS:
+            raise ValueError("Unknown policy update command")
+        return self._call(EngineCommandRequest(
+            command=command, seq_id=self._next_seq_id(), rlt_bundle_path=bundle_path,
+            rlt_dataset_paths=list(dataset_paths or []),
+            rlt_max_updates=max_updates,
+        ), self._get_action_timeout_s)
 
     def reset_policy(self) -> EngineCommandResponse:
         deadline = time.monotonic() + self._get_action_timeout_s

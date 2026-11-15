@@ -39,6 +39,8 @@ export const STAGE_NAVIGATE = "navigate";
 export const WORKSPACE_MISSION = "mission";
 export const WORKSPACE_AUTONOMY = "autonomy";
 
+export const WORKSPACE_RL_CANVAS = "rl_canvas";
+
 export const WORKSPACE_ACTION_CANVAS = "action_canvas";
 
 // Sessions saved while the workspace was still called "standalone BT".

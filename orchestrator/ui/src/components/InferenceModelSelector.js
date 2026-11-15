@@ -16,6 +16,10 @@ import {
   selectInferenceTaskInfo,
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
+import {
+  supportsRltInference,
+  supportsTtRtcInference,
+} from '../constants/policyCapabilities';
 
 // Inference models. Each option pairs a backend (orchestrator routing
 // via TaskInfo.service_type) with a policy class (drives instruction
@@ -29,6 +33,58 @@ import {
 // displayed as disabled options only, so they do not affect runtime routing.
 //
 const MODEL_GROUPS = [
+  {
+    label: 'LeRobot',
+    options: [
+      { value: 'lerobot:act', label: 'ACT', serviceType: 'lerobot', policyType: 'act' },
+      { value: 'lerobot:smolvla', label: 'SmolVLA', serviceType: 'lerobot', policyType: 'smolvla' },
+      { value: 'lerobot:xvla', label: 'XVLA', serviceType: 'lerobot', policyType: 'xvla' },
+      { value: 'lerobot:pi0', label: 'Pi0', serviceType: 'lerobot', policyType: 'pi0' },
+      { value: 'lerobot:pi05', label: 'Pi0.5', serviceType: 'lerobot', policyType: 'pi05' },
+      { value: 'lerobot:diffusion', label: 'Diffusion', serviceType: 'lerobot', policyType: 'diffusion' },
+      {
+        value: 'lerobot:multi_task_dit',
+        label: 'Diffusion Transformer (Flow)',
+        serviceType: 'lerobot',
+        policyType: 'multi_task_dit',
+      },
+    ],
+  },
+  {
+    label: 'GR00T',
+    options: [
+      { value: 'groot:n17', label: 'N1.7', serviceType: 'groot', policyType: 'n17' },
+    ],
+  },
+  {
+    label: 'Coming Soon',
+    options: [
+      {
+        value: 'future:greenvla',
+        label: 'GreenVLA',
+        serviceType: 'future',
+        policyType: 'greenvla',
+        comingSoon: true,
+      },
+      {
+        value: 'future:openpi',
+        label: 'OpenPI',
+        serviceType: 'future',
+        policyType: 'openpi',
+        comingSoon: true,
+      },
+      {
+        value: 'future:rldx1',
+        label: 'RLDX-1',
+        serviceType: 'future',
+        policyType: 'rldx1',
+        comingSoon: true,
+      },
+    ],
+  },
+];
+
+const OFFICIAL_MODEL_GROUPS = [
   {
     label: 'LeRobot',
     options: [
@@ -81,19 +137,29 @@ export const MODEL_OPTIONS = MODEL_GROUPS.flatMap((group) => group.options);
 const AVAILABLE_MODEL_OPTIONS = MODEL_OPTIONS.filter((opt) => !opt.comingSoon);
 const DEFAULT = AVAILABLE_MODEL_OPTIONS[0];
 
-const classLabel = clsx(
-  'text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium'
-);
-
-const InferenceModelSelector = ({ readonly = false }) => {
+const InferenceModelSelector = ({
+  readonly = false,
+  label = 'Model',
+  variant = 'default',
+  official = false,
+}) => {
   const dispatch = useDispatch();
   const info = useSelector(selectInferenceTaskInfo, shallowEqual);
   const serviceType = info.serviceType || DEFAULT.serviceType;
   const policyType = info.policyType || DEFAULT.policyType;
   const value = `${serviceType}:${policyType}`;
+  const modelGroups = official ? OFFICIAL_MODEL_GROUPS : MODEL_GROUPS;
+  const availableOptions = official
+    ? OFFICIAL_MODEL_GROUPS.flatMap((group) => group.options).filter((option) => !option.comingSoon)
+    : AVAILABLE_MODEL_OPTIONS;
+  const isOfflineRL = variant === 'offlineRL';
+  const classLabel = clsx(
+    'w-28 flex-shrink-0 font-medium',
+    isOfflineRL ? 'text-[10px] text-[#6e675c]' : 'text-sm text-gray-600'
+  );
 
   const handleChange = (e) => {
-    const sel = AVAILABLE_MODEL_OPTIONS.find((o) => o.value === e.target.value);
+    const sel = availableOptions.find((o) => o.value === e.target.value);
     if (!sel) return;
     dispatch(
       setInferenceTaskInfo({
@@ -103,6 +169,20 @@ const InferenceModelSelector = ({ readonly = false }) => {
         accelerationMode: isTensorRtMode(info.accelerationMode)
           ? (tensorRtMode(sel.serviceType, sel.policyType) || 'pytorch') : 'pytorch',
         accelerationEnginePath: '',
+        actionRequestMode: supportsTtRtcInference(
+          sel.serviceType,
+          sel.policyType
+        )
+          ? (info.actionRequestMode || 'async')
+          : (info.actionRequestMode === 'tt_rtc' ? 'async' : info.actionRequestMode),
+        // Keep the selected bundle for quick return to N1.7, but never leave
+        // RLT logically enabled on a policy that cannot consume it.
+        rltEnabled: supportsRltInference(sel.serviceType, sel.policyType)
+          ? Boolean(info.rltEnabled)
+          : false,
+        rltRobotOverride: supportsRltInference(sel.serviceType, sel.policyType)
+          ? Boolean(info.rltRobotOverride)
+          : false,
       })
     );
     dispatch(markLocalTaskInfoEdited({ source: 'inference' }));
@@ -110,29 +190,35 @@ const InferenceModelSelector = ({ readonly = false }) => {
 
   return (
     <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-      <span className={classLabel}>Model</span>
+      <span className={classLabel}>{label}</span>
       <select
         className={clsx(
           'flex-1',
           'h-8',
           'px-2',
+          isOfflineRL ? 'text-[11px] text-[#403b34]' : 'text-sm',
           'border',
-          'border-gray-300',
-          'rounded-md',
+          isOfflineRL ? 'border-[#d9d2c5]' : 'border-gray-300',
+          isOfflineRL ? 'rounded-lg' : 'rounded-md',
           'focus:outline-none',
           'focus:ring-2',
-          'focus:ring-blue-500',
+          isOfflineRL ? 'focus:ring-[#c7beb0]' : 'focus:ring-blue-500',
           'focus:border-transparent',
           {
-            'bg-gray-100 cursor-not-allowed text-gray-500': readonly,
-            'bg-white': !readonly,
+            [isOfflineRL
+              ? 'cursor-not-allowed bg-[#ece8df] text-[#8f877b]'
+              : 'bg-gray-100 cursor-not-allowed text-gray-500']: readonly,
+            [isOfflineRL ? 'bg-[#fffefa]' : 'bg-white']: !readonly,
           }
         )}
         value={value}
         onChange={handleChange}
         disabled={readonly}
       >
-        {MODEL_GROUPS.map((group) => (
+        {!modelGroups.some((group) => group.options.some((option) => option.value === value)) && (
+          <option value={value}>{MODEL_OPTIONS.find((option) => option.value === value)?.label || policyType}</option>
+        )}
+        {modelGroups.map((group) => (
           <optgroup key={group.label} label={group.label}>
             {group.options.map((opt) => (
               <option

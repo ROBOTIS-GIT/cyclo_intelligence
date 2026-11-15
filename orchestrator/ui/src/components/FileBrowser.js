@@ -635,6 +635,7 @@ export default function FileBrowser({
   title = 'File Browser',
   targetFileName = null,
   targetFolderName = null,
+  requireTargetForSelection = false,
   onDirectorySelect = null,
   targetFileLabel = null,
   homePath = null,
@@ -767,6 +768,7 @@ export default function FileBrowser({
 
   const handleItemSelect = useCallback(
     (item) => {
+      if (requireTargetForSelection && !item.has_target_file) return;
       if (multiSelect) {
         setSelectedItems((prev) => {
           const next = new Map(prev);
@@ -796,7 +798,7 @@ export default function FileBrowser({
         }
       }
     },
-    [multiSelect, onFileSelect, onDirectorySelect, onSelectionChange]
+    [multiSelect, onFileSelect, onDirectorySelect, onSelectionChange, requireTargetForSelection]
   );
 
   const filteredItems = filterItems(items, targetFileName, fileFilter);
@@ -925,7 +927,7 @@ export default function FileBrowser({
                     targetFileLabel={targetFileLabel}
                     onClick={handleItemClick}
                     onSelect={handleItemSelect}
-                    allowDirectorySelect={allowDirectorySelect}
+                    allowDirectorySelect={allowDirectorySelect && (!requireTargetForSelection || itemHasTarget)}
                     allowFileSelect={allowFileSelect}
                     variant={variant}
                   />

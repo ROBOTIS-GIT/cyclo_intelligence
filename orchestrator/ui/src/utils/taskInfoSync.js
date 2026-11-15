@@ -1,25 +1,12 @@
-// Copyright 2026 ROBOTIS CO., LTD.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// Author: Seongwoo Kim
-
-import PageType from '../constants/pageType';
 import { defaultInferenceChunkSize } from './inferenceChunks';
+import PageType, { isInferenceWorkspacePage } from '../constants/pageType';
+import { normalizeInferenceAcceleration } from './inferenceAcceleration';
 
 const stringArray = (items) => (
   Array.isArray(items) ? items.map((item) => String(item ?? '')) : []
 );
+
+const editableNumberOrDefault = (value, fallback) => value === '' ? '' : numberOrDefault(value, fallback);
 
 const numberOrDefault = (value, fallback) => {
   if (value === '' || value == null) {
@@ -29,12 +16,13 @@ const numberOrDefault = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const editableNumberOrDefault = (value, fallback) => (
-  value === '' ? '' : numberOrDefault(value, fallback)
-);
+export const normalizeActionRequestMode = (value) => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return ['sync', 'tt_rtc'].includes(normalized) ? normalized : 'async';
+};
 
-const actionRequestModeOrDefault = (value) => (
-  String(value ?? '').trim().toLowerCase() === 'sync' ? 'sync' : 'async'
+const actionPolicyModeOrDefault = (value) => (
+  String(value ?? '').trim().toLowerCase() === 'rlt' ? 'rlt' : 'base'
 );
 
 export const normalizeRecordTaskInfo = (taskInfo = {}) => ({
@@ -54,31 +42,35 @@ export const normalizeRecordTaskInfo = (taskInfo = {}) => ({
   recordRosBag2: Boolean(taskInfo.recordRosBag2),
 });
 
-export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
-  taskType: 'inference',
-  taskInstruction: stringArray(taskInfo.taskInstruction),
-  policyPath: String(taskInfo.policyPath ?? '').trim(),
-  recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
-  controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
-  inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
-  actionChunkSize: editableNumberOrDefault(taskInfo.actionChunkSize,
-    defaultInferenceChunkSize(taskInfo.serviceType || 'lerobot', taskInfo.policyType || 'act')),
-  chunkAlignWindowS: editableNumberOrDefault(
-    taskInfo.chunkAlignWindowS ?? 0.3,
-    0.3
-  ),
-  serviceType: String(taskInfo.serviceType ?? '').trim(),
-  policyType: String(taskInfo.policyType ?? '').trim(),
-  inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
-  actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
-  accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
-  accelerationEnginePath: String(taskInfo.accelerationEnginePath ?? '').trim(),
-  initialPoseSync: Boolean(taskInfo.initialPoseSync),
-  initialPoseSyncDurationS: numberOrDefault(
-    taskInfo.initialPoseSyncDurationS ?? 5.0,
-    5.0
-  ),
-});
+export const normalizeInferenceTaskInfo = (taskInfo = {}) => {
+  const serviceType = String(taskInfo.serviceType ?? '').trim();
+  const policyType = String(taskInfo.policyType ?? '').trim();
+  return {
+    taskType: 'inference',
+    taskInstruction: stringArray(taskInfo.taskInstruction),
+    policyPath: String(taskInfo.policyPath ?? '').trim(),
+    recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
+    recordingFolder: String(taskInfo.recordingFolder ?? '').trim(),
+    controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
+    actionChunkSize: editableNumberOrDefault(taskInfo.actionChunkSize, defaultInferenceChunkSize(serviceType || 'lerobot', policyType || 'act')),
+    inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+    chunkAlignWindowS: numberOrDefault(taskInfo.chunkAlignWindowS ?? 0.3, 0.3),
+    serviceType,
+    policyType,
+    inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
+    actionRequestMode: normalizeActionRequestMode(taskInfo.actionRequestMode),
+    ...normalizeInferenceAcceleration(taskInfo),
+    rltEnabled: Boolean(taskInfo.rltEnabled),
+    rltBundlePath: String(taskInfo.rltBundlePath ?? '').trim(),
+    rltRobotOverride: Boolean(taskInfo.rltRobotOverride),
+    actionPolicyMode: actionPolicyModeOrDefault(taskInfo.actionPolicyMode),
+    initialPoseSync: Boolean(taskInfo.initialPoseSync),
+    initialPoseSyncDurationS: numberOrDefault(
+      taskInfo.initialPoseSyncDurationS ?? 5.0,
+      5.0
+    ),
+  };
+};
 
 export const getRecordTaskInfoKey = (taskInfo = {}) =>
   JSON.stringify(normalizeRecordTaskInfo(taskInfo));
@@ -86,39 +78,61 @@ export const getRecordTaskInfoKey = (taskInfo = {}) =>
 export const getInferenceTaskInfoKey = (taskInfo = {}) =>
   JSON.stringify(normalizeInferenceTaskInfo(taskInfo));
 
-export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => ({
-  taskNum: taskInfo.task_num || '',
-  taskName: taskInfo.task_name || '',
-  taskType: taskInfo.task_type || '',
-  taskInstruction: taskInfo.task_instruction || [],
-  subtaskInstruction: taskInfo.subtask_instruction || [],
-  policyPath: taskInfo.policy_path || '',
-  recordInferenceMode: Boolean(taskInfo.record_inference_mode),
-  serviceType: taskInfo.service_type || 'lerobot',
-  inferenceMode: taskInfo.inference_mode || 'simulation',
-  actionRequestMode: actionRequestModeOrDefault(taskInfo.action_request_mode),
-  accelerationMode: taskInfo.acceleration_mode || 'pytorch',
-  accelerationEnginePath: taskInfo.acceleration_engine_path || '',
-  initialPoseSync: Boolean(taskInfo.initial_pose_sync),
-  initialPoseSyncDurationS: numberOrDefault(
-    taskInfo.initial_pose_sync_duration_s,
-    5.0
-  ),
-  userId: taskInfo.user_id || '',
-  controlHz: taskInfo.control_hz || 100,
-  inferenceHz: taskInfo.inference_hz || 15,
-  actionChunkSize: taskInfo.action_chunk_size || defaultInferenceChunkSize(taskInfo.service_type || 'lerobot', 'act'),
-  chunkAlignWindowS: taskInfo.chunk_align_window_s || 0.3,
-  includeRobotisLicense: Boolean(taskInfo.include_robotis_license),
-  warmupTime: taskInfo.warmup_time_s || 0,
-  episodeTime: taskInfo.episode_time_s || 0,
-  resetTime: taskInfo.reset_time_s || 0,
-  numEpisodes: taskInfo.num_episodes || 0,
-  pushToHub: Boolean(taskInfo.push_to_hub),
-  privateMode: Boolean(taskInfo.private_mode),
-  useOptimizedSave: Boolean(taskInfo.use_optimized_save_mode),
-  recordRosBag2: Boolean(taskInfo.record_rosbag2),
-});
+const getTaggedPolicyType = (taskInfo = {}) => {
+  const prefix = 'policy_type:';
+  const tag = (taskInfo.tags || []).find(
+    (item) => String(item || '').trim().startsWith(prefix)
+  );
+  return tag ? String(tag).trim().slice(prefix.length).trim() : '';
+};
+
+export const rosTaskInfoToUiTaskInfo = (taskInfo = {}) => {
+  const serviceType = taskInfo.service_type || 'lerobot';
+  const taggedPolicyType = getTaggedPolicyType(taskInfo);
+  // N1.7 is the only deployed legacy GR00T policy. Old status messages do
+  // not carry policy_type, so infer that one safe pair while leaving an
+  // untagged LeRobot policy untouched in the local UI.
+  const policyType = taggedPolicyType || (serviceType === 'groot' ? 'n17' : '');
+  return {
+    taskNum: taskInfo.task_num || '',
+    taskName: taskInfo.task_name || '',
+    taskType: taskInfo.task_type || '',
+    taskInstruction: taskInfo.task_instruction || [],
+    subtaskInstruction: taskInfo.subtask_instruction || [],
+    policyPath: taskInfo.policy_path || '',
+    recordInferenceMode: Boolean(taskInfo.record_inference_mode),
+    recordingFolder: String(taskInfo.recording_folder || '').trim(),
+    serviceType,
+    ...(policyType ? { policyType } : {}),
+    inferenceMode: taskInfo.inference_mode || 'simulation',
+    actionRequestMode: normalizeActionRequestMode(taskInfo.action_request_mode),
+    accelerationMode: taskInfo.acceleration_mode || 'pytorch',
+    accelerationEnginePath: taskInfo.acceleration_engine_path || '',
+    rltEnabled: Boolean(taskInfo.rlt_enabled),
+    rltBundlePath: taskInfo.rlt_bundle_path || '',
+    rltRobotOverride: Boolean(taskInfo.rlt_robot_override),
+    actionPolicyMode: actionPolicyModeOrDefault(taskInfo.action_policy_mode),
+    initialPoseSync: Boolean(taskInfo.initial_pose_sync),
+    initialPoseSyncDurationS: numberOrDefault(
+      taskInfo.initial_pose_sync_duration_s,
+      5.0
+    ),
+    userId: taskInfo.user_id || '',
+    controlHz: taskInfo.control_hz || 100,
+    actionChunkSize: taskInfo.action_chunk_size || defaultInferenceChunkSize(serviceType, policyType || 'act'),
+    inferenceHz: taskInfo.inference_hz || 15,
+    chunkAlignWindowS: taskInfo.chunk_align_window_s || 0.3,
+    includeRobotisLicense: Boolean(taskInfo.include_robotis_license),
+    warmupTime: taskInfo.warmup_time_s || 0,
+    episodeTime: taskInfo.episode_time_s || 0,
+    resetTime: taskInfo.reset_time_s || 0,
+    numEpisodes: taskInfo.num_episodes || 0,
+    pushToHub: Boolean(taskInfo.push_to_hub),
+    privateMode: Boolean(taskInfo.private_mode),
+    useOptimizedSave: Boolean(taskInfo.use_optimized_save_mode),
+    recordRosBag2: Boolean(taskInfo.record_rosbag2),
+  };
+};
 
 export const hasRosTaskInfoPayload = (taskInfo = {}) => {
   const hasText = (value) => String(value ?? '').trim().length > 0;
@@ -130,6 +144,8 @@ export const hasRosTaskInfoPayload = (taskInfo = {}) => {
     hasText(taskInfo.task_type) ||
     hasText(taskInfo.policy_path) ||
     hasText(taskInfo.service_type) ||
+    hasText(taskInfo.rlt_bundle_path) ||
+    hasText(taskInfo.action_policy_mode) ||
     hasTextArray(taskInfo.task_instruction) ||
     hasTextArray(taskInfo.subtask_instruction)
   );
@@ -138,8 +154,9 @@ export const hasRosTaskInfoPayload = (taskInfo = {}) => {
 export const shouldApplyServerTaskInfoToPage = ({
   currentPage,
   initialTaskInfoSynced = false,
+  workspaceKind = '',
 } = {}) => {
-  if (currentPage === PageType.INFERENCE || currentPage === PageType.RECORD) {
+  if (isInferenceWorkspacePage(currentPage, workspaceKind) || currentPage === PageType.RECORD) {
     return true;
   }
 

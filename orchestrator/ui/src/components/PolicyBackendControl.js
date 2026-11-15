@@ -115,8 +115,13 @@ async function readPullStream(response, onProgress) {
   }
 }
 
-export default function PolicyBackendControl({ serviceType }) {
+export default function PolicyBackendControl({
+  serviceType,
+  variant = 'default',
+  children = null,
+}) {
   const backend = serviceType === 'groot' ? 'groot' : 'lerobot';
+  const isOfflineRL = variant === 'offlineRL';
   const label = useMemo(
     () => getBackendLabel(serviceType),
     [serviceType]
@@ -295,39 +300,54 @@ export default function PolicyBackendControl({ serviceType }) {
   );
 
   const statusClass = clsx(
-    'text-xs',
+    isOfflineRL ? 'text-[9px]' : 'text-xs',
     'font-semibold',
     'px-2',
     'py-0.5',
     'rounded-full',
     {
-      'bg-green-100 text-green-700': isRunning && readiness.ready,
-      'bg-red-100 text-red-700': isStaleContainer,
-      'bg-gray-100 text-gray-600': !isStaleContainer &&
+      [isOfflineRL
+        ? 'bg-[#e5ece5] text-[#607563]'
+        : 'bg-green-100 text-green-700']: isRunning && readiness.ready,
+      [isOfflineRL
+        ? 'bg-[#f4e5e1] text-[#995e54]'
+        : 'bg-red-100 text-red-700']: isStaleContainer,
+      [isOfflineRL
+        ? 'bg-[#ece8df] text-[#756e63]'
+        : 'bg-gray-100 text-gray-600']: !isStaleContainer &&
         (state === 'exited' || state === 'not_created'),
-      'bg-yellow-100 text-yellow-700': !isStaleContainer &&
+      [isOfflineRL
+        ? 'bg-[#f1ead9] text-[#8b724d]'
+        : 'bg-yellow-100 text-yellow-700']: !isStaleContainer &&
         (state === 'unknown' || isWarming),
     }
   );
 
   const serviceStatusClass = (serviceState) => clsx(
-    'text-xs',
+    isOfflineRL ? 'text-[9px]' : 'text-xs',
     'font-semibold',
     'px-2',
     'py-0.5',
     'rounded-full',
     {
-      'bg-green-100 text-green-700': serviceState === 'up',
-      'bg-red-100 text-red-700': serviceState === 'down',
-      'bg-yellow-100 text-yellow-700': serviceState !== 'up' && serviceState !== 'down',
+      [isOfflineRL
+        ? 'bg-[#e5ece5] text-[#607563]'
+        : 'bg-green-100 text-green-700']: serviceState === 'up',
+      [isOfflineRL
+        ? 'bg-[#f4e5e1] text-[#995e54]'
+        : 'bg-red-100 text-red-700']: serviceState === 'down',
+      [isOfflineRL
+        ? 'bg-[#f1ead9] text-[#8b724d]'
+        : 'bg-yellow-100 text-yellow-700']:
+        serviceState !== 'up' && serviceState !== 'down',
     }
   );
 
   const buttonClass = (variant) => clsx(
     'h-8',
     'px-2.5',
-    'rounded-md',
-    'text-sm',
+    isOfflineRL ? 'rounded-lg' : 'rounded-md',
+    isOfflineRL ? 'text-[10px]' : 'text-sm',
     'font-semibold',
     'flex',
     'items-center',
@@ -337,12 +357,24 @@ export default function PolicyBackendControl({ serviceType }) {
     'disabled:opacity-40',
     'disabled:cursor-not-allowed',
     {
-      'bg-blue-500 text-white hover:bg-blue-600': variant === 'on',
-      'bg-gray-500 text-white hover:bg-gray-600': variant === 'restart',
-      'bg-red-500 text-white hover:bg-red-600': variant === 'off',
-      'bg-emerald-500 text-white hover:bg-emerald-600': variant === 'pull',
-      'bg-amber-500 text-white hover:bg-amber-600': variant === 'update',
-      'bg-violet-500 text-white hover:bg-violet-600': variant === 'token',
+      [isOfflineRL
+        ? 'bg-[#69866f] text-white hover:bg-[#5c7663]'
+        : 'bg-blue-500 text-white hover:bg-blue-600']: variant === 'on',
+      [isOfflineRL
+        ? 'bg-[#81796d] text-white hover:bg-[#70695f]'
+        : 'bg-gray-500 text-white hover:bg-gray-600']: variant === 'restart',
+      [isOfflineRL
+        ? 'bg-[#a86b68] text-white hover:bg-[#965d5a]'
+        : 'bg-red-500 text-white hover:bg-red-600']: variant === 'off',
+      [isOfflineRL
+        ? 'bg-[#71806b] text-white hover:bg-[#64725f]'
+        : 'bg-emerald-500 text-white hover:bg-emerald-600']: variant === 'pull',
+      [isOfflineRL
+        ? 'bg-[#a8795b] text-white hover:bg-[#966a4f]'
+        : 'bg-amber-500 text-white hover:bg-amber-600']: variant === 'update',
+      [isOfflineRL
+        ? 'bg-[#7b7180] text-white hover:bg-[#6c6371]'
+        : 'bg-violet-500 text-white hover:bg-violet-600']: variant === 'token',
     }
   );
 
@@ -358,9 +390,23 @@ export default function PolicyBackendControl({ serviceType }) {
   const pullBarWidth = `${pullPercent ?? layerPercent ?? (isPulling ? 8 : 0)}%`;
 
   return (
-    <div className="mb-3 border-t border-b border-gray-200 py-2">
+    <div
+      className={clsx(
+        'mb-3',
+        isOfflineRL
+          ? 'rounded-lg border border-[#ded8cc] bg-[#fbfaf6] px-2.5 py-2.5'
+          : 'border-t border-b border-gray-200 py-2'
+      )}
+      data-appearance={isOfflineRL ? 'offline-rl' : 'default'}
+    >
       <div className="flex items-center justify-between gap-2 mb-2">
-        <div className="text-sm font-semibold text-gray-700">{label}</div>
+        <div className={clsx(
+          'font-semibold',
+          isOfflineRL ? 'text-[10px] text-[#5f584e]' : 'text-sm text-gray-700'
+        )}
+        >
+          {label}
+        </div>
         <div className="flex items-center gap-1.5">
           <span className={statusClass}>
             {statusLabel}
@@ -485,7 +531,7 @@ export default function PolicyBackendControl({ serviceType }) {
             'mt-2',
             'w-full',
             'rounded-md',
-            'bg-gray-50',
+            isOfflineRL ? 'bg-[#f3efe7]' : 'bg-gray-50',
             'px-2',
             'py-2',
             pullProgress.error && 'bg-red-50'
@@ -524,7 +570,11 @@ export default function PolicyBackendControl({ serviceType }) {
                 {pullProgress.detail}
               </div>
             )}
-            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-200">
+            <div className={clsx(
+              'mt-1 h-1.5 overflow-hidden rounded-full',
+              isOfflineRL ? 'bg-[#e2dcd1]' : 'bg-gray-200'
+            )}
+            >
               <div
                 className={clsx(
                   'h-full',
@@ -553,8 +603,16 @@ export default function PolicyBackendControl({ serviceType }) {
                   position="bottom"
                   content={service.raw || displayState}
                 >
-                  <div className="flex items-center justify-between gap-2 rounded-md bg-gray-50 px-2 py-1">
-                    <span className="text-xs font-medium text-gray-600">
+                  <div className={clsx(
+                    'flex items-center justify-between gap-2 rounded-md px-2 py-1',
+                    isOfflineRL ? 'bg-[#f3efe7]' : 'bg-gray-50'
+                  )}
+                  >
+                    <span className={clsx(
+                      'font-medium',
+                      isOfflineRL ? 'text-[9px] text-[#746d62]' : 'text-xs text-gray-600'
+                    )}
+                    >
                       {getPolicyBackendServiceLabel(service.name)}
                     </span>
                     <span className={serviceStatusClass(service.state)}>
@@ -577,6 +635,7 @@ export default function PolicyBackendControl({ serviceType }) {
           Hugging Face token registered for GR00T gated backbone downloads.
         </div>
       )}
+      {children}
       <TokenInputPopup
         isOpen={showTokenPopup}
         onClose={() => setShowTokenPopup(false)}

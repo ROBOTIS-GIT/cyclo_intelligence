@@ -16,6 +16,7 @@
  * Author: Kiwoong Park, Seongwoo Kim
  */
 
+import offlineRLSlice from '../features/offlineRL/offlineRLSlice';
 import { configureStore } from '@reduxjs/toolkit';
 import taskSlice from '../features/tasks/taskSlice';
 import uiSlice from '../features/ui/uiSlice';
@@ -31,6 +32,7 @@ import btSupportSlice from '../features/actionCanvas/btSupportSlice';
 export const store = configureStore({
   reducer: {
     tasks: taskSlice,
+    offlineRL: offlineRLSlice,
     ros: rosSlice,
     ui: uiSlice,
     training: trainingSlice,

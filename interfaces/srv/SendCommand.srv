@@ -41,8 +41,19 @@ uint8 CANCEL_SEGMENT = 24
 # START_INFERENCE, this never starts action generation or robot publication.
 # RESUME_INFERENCE explicitly starts the prepared session.
 uint8 LOAD_INFERENCE = 25
+# Switch the already-loaded inference session between the base VLA action and
+# the preloaded RLT Action MLP. task_info.action_policy_mode carries "base" or
+# "rlt". No checkpoint reload is performed.
+uint8 SET_ACTION_POLICY = 26
+
+# Episode outcome for STOP_INFERENCE_RECORD. General recording commands use
+# UNSPECIFIED so their existing save behavior remains unchanged.
+uint8 UNSPECIFIED = 0
+uint8 SUCCESS = 1
+uint8 FAILURE = 2
 
 uint8 command
+uint8 episode_outcome
 TaskInfo task_info
 # Planned subtask/segment index. For DISCARD_EPISODE only, 0 keeps legacy
 # behavior (delete current cursor) and N > 0 targets full_episode_index N - 1.
@@ -62,6 +73,17 @@ uint16 segment_index
 uint16 conversion_fps
 bool convert_v21
 bool convert_v30
+
+# Parent directory for generated LeRobot datasets. Empty keeps the legacy
+# /workspace/lerobot destination used by Data Tools. Offline RL may select an
+# existing directory under /workspace/lerobot; the converter creates its
+# version-suffixed dataset folders inside it.
+string lerobot_output_root
+
+# Destructive conversion opt-in. The cyclo_data worker removes raw numeric
+# episode directories only after validating all requested LeRobot outputs.
+# False preserves the existing Data Tools behaviour.
+bool delete_source_after_success
 
 # CONVERT_MP4 selection knobs — forwarded to StartConversion.srv when
 # the orchestrator dispatches conversion. All optional; empty / 0 means

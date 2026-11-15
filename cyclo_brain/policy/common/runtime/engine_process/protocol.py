@@ -28,21 +28,38 @@ CMD_LOAD_POLICY = 0
 CMD_GET_ACTION = 1
 CMD_UNLOAD_POLICY = 2
 CMD_RESET_POLICY = 3
+# Shared numeric commands on InferenceCommand and EngineCommand.
+CMD_POLICY_UPDATE_STATUS = 21
+CMD_POLICY_AUTO_APPLY_ON = 22
+CMD_POLICY_AUTO_APPLY_OFF = 23
+CMD_POLICY_APPLY = 24
+CMD_ASYNC_RL_ON = 25
+CMD_ASYNC_RL_OFF = 26
+CMD_ASYNC_RL_DATASETS = 27
+CMD_ASYNC_RL_SAVE = 28
+POLICY_UPDATE_COMMANDS = frozenset(range(21, 29))
 
 
 ENGINE_COMMAND_REQUEST_DEF = """\
 uint8 command
+uint16 action_chunk_size
 uint64 seq_id
 string model_path
 string embodiment_tag
 string robot_type
+bool publish_to_robot
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
-uint16 action_chunk_size
-bool ttrtc_enabled
-uint16 ttrtc_prefix_steps
-float64[] ttrtc_prefix_actions
+bool rlt_enabled
+string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
+string action_policy_mode
+string action_request_mode
+int32 rtc_delay_steps
+int32 rtc_action_dim
+float64[] rtc_prefix_action_list
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -52,7 +69,11 @@ string message
 string[] action_keys
 int32 chunk_size
 int32 action_dim
+int32 rtc_min_delay_steps
+int32 rtc_max_delay_steps
+int32 rtc_reference_chunk_size
 float64[] action_list
+float64[] rtc_reference_action_list
 string timing_json
 """
 
@@ -60,17 +81,24 @@ string timing_json
 @dataclass
 class EngineCommandRequest:
     command: int
+    action_chunk_size: int = 0
     seq_id: int = 0
     model_path: str = ""
     embodiment_tag: str = ""
     robot_type: str = ""
+    publish_to_robot: bool = False
     task_instruction: str = ""
     acceleration_mode: str = ""
     acceleration_engine_path: str = ""
-    action_chunk_size: int = 0
-    ttrtc_enabled: bool = False
-    ttrtc_prefix_steps: int = 7
-    ttrtc_prefix_actions: List[float] = field(default_factory=list)
+    rlt_enabled: bool = False
+    rlt_bundle_path: str = ""
+    rlt_dataset_paths: List[str] = field(default_factory=list)
+    rlt_max_updates: int = 0
+    action_policy_mode: str = "base"
+    action_request_mode: str = "async"
+    rtc_delay_steps: int = 0
+    rtc_action_dim: int = 0
+    rtc_prefix_action_list: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -81,27 +109,46 @@ class EngineCommandResponse:
     action_keys: List[str] = field(default_factory=list)
     chunk_size: int = 0
     action_dim: int = 0
+    rtc_min_delay_steps: int = 0
+    rtc_max_delay_steps: int = 0
+    rtc_reference_chunk_size: int = 0
     action_list: List[float] = field(default_factory=list)
+    rtc_reference_action_list: List[float] = field(default_factory=list)
     timing_json: str = ""
 
 
 def request_from_message(message: Any) -> EngineCommandRequest:
     """Normalize a ROS/Zenoh request object into a dataclass."""
+    rtc_prefix = getattr(message, "rtc_prefix_action_list", None)
     return EngineCommandRequest(
         command=int(getattr(message, "command", 0)),
         seq_id=int(getattr(message, "seq_id", 0)),
         model_path=str(getattr(message, "model_path", "") or ""),
         embodiment_tag=str(getattr(message, "embodiment_tag", "") or ""),
         robot_type=str(getattr(message, "robot_type", "") or ""),
+        publish_to_robot=bool(getattr(message, "publish_to_robot", False)),
         task_instruction=str(getattr(message, "task_instruction", "") or ""),
         acceleration_mode=str(getattr(message, "acceleration_mode", "") or ""),
         acceleration_engine_path=str(
             getattr(message, "acceleration_engine_path", "") or ""
         ),
         action_chunk_size=getattr(message, "action_chunk_size", 0),
-        ttrtc_enabled=bool(getattr(message, "ttrtc_enabled", False)),
-        ttrtc_prefix_steps=int(getattr(message, "ttrtc_prefix_steps", 7)),
-        ttrtc_prefix_actions=list(getattr(message, "ttrtc_prefix_actions", [])),
+        rlt_enabled=bool(getattr(message, "rlt_enabled", False)),
+        rlt_bundle_path=str(getattr(message, "rlt_bundle_path", "") or ""),
+        rlt_dataset_paths=list(getattr(message, "rlt_dataset_paths", []) or []),
+        rlt_max_updates=int(getattr(message, 'rlt_max_updates', 0) or 0),
+        action_policy_mode=str(
+            getattr(message, "action_policy_mode", "") or "base"
+        ),
+        action_request_mode=str(
+            getattr(message, "action_request_mode", "") or "async"
+        ),
+        rtc_delay_steps=int(getattr(message, "rtc_delay_steps", 0)),
+        rtc_action_dim=int(getattr(message, "rtc_action_dim", 0)),
+        rtc_prefix_action_list=[
+            float(value)
+            for value in (list(rtc_prefix) if rtc_prefix is not None else [])
+        ],
     )
 
 
@@ -109,15 +156,26 @@ def response_from_message(message: Any) -> EngineCommandResponse:
     """Normalize a ROS/Zenoh response object into a dataclass."""
     action_keys = getattr(message, "action_keys", None)
     action_list = getattr(message, "action_list", None)
+    reference_action_list = getattr(message, "rtc_reference_action_list", None)
     return EngineCommandResponse(
+        timing_json=str(getattr(message, "timing_json", "") or ""),
         success=bool(getattr(message, "success", False)),
         seq_id=int(getattr(message, "seq_id", 0)),
         message=str(getattr(message, "message", "") or ""),
         action_keys=list(action_keys) if action_keys is not None else [],
         chunk_size=int(getattr(message, "chunk_size", 0)),
         action_dim=int(getattr(message, "action_dim", 0)),
+        rtc_min_delay_steps=int(getattr(message, "rtc_min_delay_steps", 0)),
+        rtc_max_delay_steps=int(getattr(message, "rtc_max_delay_steps", 0)),
+        rtc_reference_chunk_size=int(
+            getattr(message, "rtc_reference_chunk_size", 0)
+        ),
         action_list=[float(v) for v in list(action_list)] if action_list is not None else [],
-        timing_json=str(getattr(message, "timing_json", "") or ""),
+        rtc_reference_action_list=(
+            [float(v) for v in list(reference_action_list)]
+            if reference_action_list is not None
+            else []
+        ),
     )
 
 
@@ -130,7 +188,14 @@ def response_to_message_kwargs(response: EngineCommandResponse) -> dict:
         "action_keys": list(response.action_keys),
         "chunk_size": int(response.chunk_size),
         "action_dim": int(response.action_dim),
+        "rtc_min_delay_steps": int(response.rtc_min_delay_steps),
+        "rtc_max_delay_steps": int(response.rtc_max_delay_steps),
+        "rtc_reference_chunk_size": int(response.rtc_reference_chunk_size),
         "action_list": np.asarray(response.action_list, dtype=np.float64),
+        "rtc_reference_action_list": np.asarray(
+            response.rtc_reference_action_list,
+            dtype=np.float64,
+        ),
         "timing_json": str(response.timing_json),
     }
 
@@ -139,17 +204,27 @@ def request_to_message_kwargs(request: EngineCommandRequest) -> dict:
     """Return kwargs for a generated EngineCommand request class."""
     return {
         "command": int(request.command),
+        "action_chunk_size": int(request.action_chunk_size),
         "seq_id": int(request.seq_id),
         "model_path": str(request.model_path),
         "embodiment_tag": str(request.embodiment_tag),
         "robot_type": str(request.robot_type),
+        "publish_to_robot": bool(request.publish_to_robot),
         "task_instruction": str(request.task_instruction),
         "acceleration_mode": str(request.acceleration_mode),
         "acceleration_engine_path": str(request.acceleration_engine_path),
-        "action_chunk_size": int(request.action_chunk_size),
-        "ttrtc_enabled": bool(request.ttrtc_enabled),
-        "ttrtc_prefix_steps": int(request.ttrtc_prefix_steps),
-        "ttrtc_prefix_actions": np.asarray(request.ttrtc_prefix_actions, dtype=np.float64),
+        "rlt_enabled": bool(request.rlt_enabled),
+        "rlt_bundle_path": str(request.rlt_bundle_path),
+        "rlt_dataset_paths": list(request.rlt_dataset_paths),
+        "rlt_max_updates": int(request.rlt_max_updates),
+        "action_policy_mode": str(request.action_policy_mode),
+        "action_request_mode": str(request.action_request_mode),
+        "rtc_delay_steps": int(request.rtc_delay_steps),
+        "rtc_action_dim": int(request.rtc_action_dim),
+        "rtc_prefix_action_list": np.asarray(
+            request.rtc_prefix_action_list,
+            dtype=np.float64,
+        ),
     }
 
 

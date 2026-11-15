@@ -179,4 +179,43 @@ describe('PolicyBackendControl', () => {
       });
     });
   });
+
+  it('uses the Offline RL active green for the LeRobot ON button', async () => {
+    global.fetch.mockResolvedValueOnce(mockResponse({
+      name: 'lerobot',
+      image: 'robotis/lerobot-zenoh:1.3.2-arm64',
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'exited',
+      services: [],
+    }));
+
+    render(<PolicyBackendControl serviceType="lerobot" variant="offlineRL" />);
+
+    const onButton = await screen.findByRole('button', {
+      name: 'LeRobot Docker on',
+    });
+    expect(onButton).toHaveClass('bg-[#69866f]');
+    expect(onButton).not.toHaveClass('bg-blue-500');
+  });
+
+  it('renders Offline RL backend-specific controls inside the Docker card', async () => {
+    global.fetch.mockResolvedValueOnce(mockResponse({
+      name: 'groot',
+      image: 'robotis/groot-zenoh:1.3.4-arm64',
+      image_pulled: true,
+      image_status: 'current',
+      container_state: 'exited',
+      services: [],
+    }));
+
+    render(
+      <PolicyBackendControl serviceType="groot" variant="offlineRL">
+        <div data-testid="groot-tensorrt-controls">TensorRT controls</div>
+      </PolicyBackendControl>
+    );
+
+    await screen.findByText('GR00T Docker');
+    expect(screen.getByTestId('groot-tensorrt-controls')).toBeInTheDocument();
+  });
 });

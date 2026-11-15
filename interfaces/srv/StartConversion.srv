@@ -42,6 +42,18 @@ uint16 fps
 bool convert_v21
 bool convert_v30
 
+# Parent directory for generated LeRobot datasets. Empty preserves the
+# historical /workspace/lerobot destination. Non-empty paths must be absolute
+# and remain within /workspace/lerobot.
+string lerobot_output_root
+
+# Destructive opt-in used by the Offline RL workflow. When true, raw
+# numeric episode directories are removed only after every requested
+# LeRobot output passes the worker's post-conversion validation. The task
+# root and its metadata files are preserved. Defaults to false for existing
+# Data Tools and other callers.
+bool delete_source_after_success
+
 # ---- Selection knobs (all optional) ----
 # Empty / 0 means "use everything discoverable from robot_config",
 # preserving the legacy behaviour for callers that don't fill these in.

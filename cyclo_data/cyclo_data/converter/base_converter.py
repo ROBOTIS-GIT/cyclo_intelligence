@@ -47,6 +47,11 @@ import pyarrow.parquet as pq  # noqa: F401
 from cyclo_data.reader.bag_reader import BagReader
 from cyclo_data.reader.metadata_manager import MetadataManager
 from cyclo_data.reader.video_metadata_extractor import VideoMetadataExtractor
+from cyclo_data.recorder.rlt_execution_verification import (
+    verify_episode_execution,
+    write_dataset_execution_verification,
+)
+from cyclo_data.recorder.rlt_recorder import copy_rlt_sidecar
 from shared.robot_configs import schema as robot_schema
 
 
@@ -76,10 +81,14 @@ _CONVERSION_WORKER_NICE_ENV = "CYCLO_CONVERSION_WORKER_NICE"
 _DEFAULT_VIDEO_SYNC_TOTAL_WORKERS = 6
 _VIDEO_SYNC_CLEAN_CACHE_ENV = "CYCLO_VIDEO_SYNC_CLEAN_CACHE"
 _EXTRACT_CACHE_DISABLE_ENV = "CYCLO_EXTRACT_CACHE_DISABLE"
-_EXTRACT_CACHE_VERSION = 2
+_EXTRACT_CACHE_VERSION = 3
 _RAW_CDR_EXTRACT_DISABLE_ENV = "CYCLO_EXTRACT_DISABLE_RAW_CDR"
 _PREPARED_EPISODE_CACHE_DISABLE_ENV = "CYCLO_PREPARED_EPISODE_CACHE_DISABLE"
-_PREPARED_EPISODE_CACHE_VERSION = 3
+_PREPARED_EPISODE_CACHE_VERSION = 5
+DEFAULT_STATIONARY_ACTION_DELTA_THRESHOLD = 5e-4
+DEFAULT_STATIONARY_CONTEXT_SECONDS = 0.5
+_INTERVENTION_MODE_TOPIC = "/leader/intervention_mode"
+_ACTION_SOURCE_LEADING_FILL_MAX_SEC = 0.25
 _VIDEO_COPY_MODE_ENV = "CYCLO_VIDEO_COPY_MODE"
 _VIDEO_STATS_SAMPLES_ENV = "CYCLO_VIDEO_STATS_SAMPLES"
 _CONVERTER_INFO_LOGS_ENV = "CYCLO_CONVERTER_INFO_LOGS"
@@ -369,6 +378,20 @@ class ConversionConfig:
     # Trim settings
     apply_trim: bool = True
     apply_exclude_regions: bool = True
+    # Remove only leading/trailing stationary action holds after resampling.
+    # The raw rosbag2 episode is never rewritten; video selection follows the
+    # filtered in-memory grid during LeRobot conversion.
+    trim_stationary_edges: bool = False
+    stationary_action_delta_threshold: float = (
+        DEFAULT_STATIONARY_ACTION_DELTA_THRESHOLD
+    )
+    stationary_context_seconds: float = DEFAULT_STATIONARY_CONTEXT_SECONDS
+    # Optional in-memory action overrides applied after resampling and before
+    # stationary-edge trimming. Source rosbag messages are never rewritten.
+    constant_action_values: Dict[str, float] = field(default_factory=dict)
+    # Optional provenance override for datasets whose recorded intervention
+    # signal does not represent the intended training-data label.
+    constant_action_source: Optional[str] = None
 
     # Staleness thresholds
     quality_warning_multiplier: float = 2.0
@@ -407,6 +430,7 @@ class EpisodeData:
     subtask_segments: List[Dict[str, Any]] = field(default_factory=list)
     subtask_indices: List[int] = field(default_factory=list)
     task_name: str = ""
+    episode_success: Optional[bool] = None
     # Absolute MCAP log_time (seconds since epoch) for each row of
     # ``timestamps``. Populated by ``_resample_to_fps`` so the video
     # sync step can map per-camera MP4 frames onto the same grid.
@@ -414,6 +438,10 @@ class EpisodeData:
     frame_reuse_reports: List[Dict[str, Any]] = field(default_factory=list)
     observation_state_names: List[str] = field(default_factory=list)
     action_names: List[str] = field(default_factory=list)
+    stationary_trim_report: Dict[str, Any] = field(default_factory=dict)
+    # Per-frame provenance of the commanded action. RLT actor validation uses
+    # this to keep human interventions separate from autonomous VLA actions.
+    action_sources: List[str] = field(default_factory=list)
 
 
 class RosbagToLerobotConverterBase:
@@ -864,8 +892,9 @@ class RosbagToLerobotConverterBase:
         action_topics: Dict[str, str] = {}
         for modality, cfg in action_groups.items():
             key = f"leader_{modality}"
-            action_topics[key] = cfg["topic"]
-            self._action_topic_key_map[cfg["topic"]] = key
+            record_topic = cfg.get("record_topic", cfg["topic"])
+            action_topics[key] = record_topic
+            self._action_topic_key_map[record_topic] = key
 
         self.config.state_topics = list(state_topics.values())
         self.config.action_topics = list(action_topics.values())
@@ -1082,15 +1111,36 @@ class RosbagToLerobotConverterBase:
                 bag_path=bag_path,
             )
             if cached_episode is not None:
-                self._log_info(
-                    f"{bag_path.name}: reused prepared episode cache "
-                    f"({cached_episode.length} frames)"
-                )
-                return cached_episode
+                if len(cached_episode.action_sources) != cached_episode.length:
+                    if self._is_archived_segment_episode(bag_path, episode_info):
+                        # Old archived caches have synthetic stitched grid times,
+                        # so provenance must be rebuilt per source MCAP segment.
+                        cached_episode = None
+                    else:
+                        self._populate_action_sources(bag_path, cached_episode)
+                        if len(cached_episode.action_sources) == cached_episode.length:
+                            self._store_prepared_episode_cache(
+                                prepared_cache_path, cached_episode
+                            )
+                if cached_episode is None:
+                    self._log_info(
+                        f"{bag_path.name}: rebuilding prepared episode cache "
+                        "to add action-source provenance"
+                    )
+                else:
+                    self._log_info(
+                        f"{bag_path.name}: reused prepared episode cache "
+                        f"({cached_episode.length} frames)"
+                    )
+                    return cached_episode
 
         if self._is_archived_segment_episode(bag_path, episode_info):
             episode_data = self._convert_archived_segment_episode(
-                bag_path, episode_index, episode_info
+                bag_path,
+                episode_index,
+                episode_info,
+                trim_points=trim_points,
+                exclude_regions=exclude_regions,
             )
         else:
             episode_data = self._extract_joint_data(
@@ -1098,6 +1148,13 @@ class RosbagToLerobotConverterBase:
             )
         if episode_data is None:
             return None
+        if not self._is_archived_segment_episode(bag_path, episode_info):
+            self._apply_constant_action_values(episode_data)
+        if (
+            self.config.trim_stationary_edges
+            and not self._is_archived_segment_episode(bag_path, episode_info)
+        ):
+            self._trim_stationary_episode_edges(episode_data)
         episode_data.source_path = bag_path
 
         self._apply_episode_info(episode_data, episode_info)
@@ -1152,6 +1209,10 @@ class RosbagToLerobotConverterBase:
         elif not self.config.use_videos:
             episode_data.video_files = {}
 
+        if not self._is_archived_segment_episode(bag_path, episode_info):
+            self._populate_action_sources(bag_path, episode_data)
+            self._apply_constant_action_source(episode_data)
+
         self._assign_subtask_indices(episode_data)
 
         task_markers = self._metadata_manager.get_task_markers(bag_path)
@@ -1173,6 +1234,13 @@ class RosbagToLerobotConverterBase:
     def _apply_episode_info(self, episode_data: EpisodeData, info: Dict[str, Any]) -> None:
         if not info:
             return
+        if "episode_success" in info:
+            episode_success = info["episode_success"]
+            if not isinstance(episode_success, bool):
+                raise ValueError(
+                    "episode_info.json field 'episode_success' must be a boolean"
+                )
+            episode_data.episode_success = episode_success
         episode_data.task_name = str(info.get("task_name", "") or "")
         episode_data.recording_mode = str(info.get("recording_mode", "single") or "single")
         try:
@@ -1302,6 +1370,19 @@ class RosbagToLerobotConverterBase:
             "quality_error_multiplier": float(
                 self.config.quality_error_multiplier
             ),
+            "trim_stationary_edges": bool(
+                self.config.trim_stationary_edges
+            ),
+            "stationary_action_delta_threshold": float(
+                self.config.stationary_action_delta_threshold
+            ),
+            "stationary_context_seconds": float(
+                self.config.stationary_context_seconds
+            ),
+            "constant_action_values": dict(
+                self.config.constant_action_values
+            ),
+            "constant_action_source": self.config.constant_action_source,
             "trim_points": trim_points or {},
             "exclude_regions": exclude_regions or [],
         }
@@ -1324,6 +1405,101 @@ class RosbagToLerobotConverterBase:
                 if path.suffix == ".mp4" or path.name.endswith("_timestamps.parquet"):
                     files.append(path)
         return sorted(set(files), key=lambda p: str(p))
+
+    @staticmethod
+    def _action_sources_from_intervention_signal(
+        frame_times: List[float],
+        signal_samples: List[Tuple[float, bool]],
+        *,
+        leading_fill_max_sec: float = _ACTION_SOURCE_LEADING_FILL_MAX_SEC,
+    ) -> List[str]:
+        """Map the recorded intervention mode causally onto dataset frames.
+
+        A true intervention flag means the command came from the human leader;
+        false means it came from the autonomous VLA policy. Recorders may emit
+        their first mode sample a fraction of a period after joint recording
+        starts. Only that bounded leading edge is filled from the first sample;
+        any larger uncovered interval fails closed by returning no labels.
+        """
+        if not frame_times or not signal_samples:
+            return []
+
+        ordered = sorted(
+            (float(timestamp), bool(value))
+            for timestamp, value in signal_samples
+        )
+        signal_times = [sample[0] for sample in ordered]
+        labels: List[str] = []
+        for frame_time_raw in frame_times:
+            frame_time = float(frame_time_raw)
+            sample_index = bisect.bisect_right(signal_times, frame_time) - 1
+            if sample_index < 0:
+                leading_gap = signal_times[0] - frame_time
+                if leading_gap > float(leading_fill_max_sec):
+                    return []
+                sample_index = 0
+            labels.append("human" if ordered[sample_index][1] else "vla")
+        return labels
+
+    def _populate_action_sources(
+        self,
+        bag_path: Path,
+        episode: EpisodeData,
+    ) -> None:
+        """Populate per-frame human/VLA action provenance when recorded."""
+        if episode.length <= 0 or len(episode.grid_log_times_sec) != episode.length:
+            return
+
+        reader = BagReader(Path(bag_path), self.logger)
+        if not reader.open():
+            return
+        try:
+            if _INTERVENTION_MODE_TOPIC not in reader.get_topic_types():
+                return
+            samples: List[Tuple[float, bool]] = []
+            for _, message, timestamp_sec in reader.read_messages(
+                [_INTERVENTION_MODE_TOPIC]
+            ):
+                value = (
+                    message.get("data")
+                    if isinstance(message, dict)
+                    else getattr(message, "data", None)
+                )
+                if isinstance(value, (bool, np.bool_)):
+                    samples.append((float(timestamp_sec), bool(value)))
+                elif isinstance(value, (int, np.integer)) and int(value) in (0, 1):
+                    samples.append((float(timestamp_sec), bool(value)))
+        finally:
+            reader.close()
+
+        labels = self._action_sources_from_intervention_signal(
+            episode.grid_log_times_sec,
+            samples,
+        )
+        if len(labels) != episode.length:
+            self._log_warning(
+                f"{Path(bag_path).name}: {_INTERVENTION_MODE_TOPIC} does not "
+                "cover the complete frame grid; action_source was omitted"
+            )
+            episode.action_sources = []
+            return
+        episode.action_sources = labels
+
+    def _apply_constant_action_source(self, episode: EpisodeData) -> None:
+        """Apply a configured provenance label to every converted frame."""
+        source = self.config.constant_action_source
+        if source is None:
+            return
+        source = str(source).strip().lower()
+        if source not in {"human", "vla", "mlp"}:
+            raise ValueError(
+                "constant_action_source must be one of: human, vla, mlp"
+            )
+        episode.action_sources = [source] * int(episode.length)
+        self._log_info(
+            f"Episode {episode.episode_index}: applied constant "
+            f"action_source={source}"
+        )
 
     @staticmethod
     def _file_signature(path: Path) -> Dict[str, Any]:
@@ -1507,6 +1683,12 @@ class RosbagToLerobotConverterBase:
             bag_path=bag_path,
         )
         if cached_episode is not None:
+            if len(cached_episode.action_sources) != cached_episode.length:
+                if self._is_archived_segment_episode(bag_path, episode_info):
+                    return None
+                self._populate_action_sources(bag_path, cached_episode)
+                if len(cached_episode.action_sources) == cached_episode.length:
+                    self._store_prepared_episode_cache(cache_path, cached_episode)
             self._log_info(
                 f"{bag_path.name}: parent reused prepared episode cache "
                 f"({cached_episode.length} frames)"
@@ -1574,6 +1756,8 @@ class RosbagToLerobotConverterBase:
         bag_path: Path,
         episode_index: int,
         episode_info: Dict[str, Any],
+        trim_points: Optional[Dict] = None,
+        exclude_regions: Optional[List[Dict]] = None,
     ) -> Optional[EpisodeData]:
         """Convert a full episode by resampling each subtask independently.
 
@@ -1591,13 +1775,13 @@ class RosbagToLerobotConverterBase:
         if not mcap_paths:
             return None
 
-        segment_episodes: List[EpisodeData] = []
+        segment_records: List[Tuple[int, Path, EpisodeData]] = []
         for subtask_idx, mcap_path in enumerate(mcap_paths):
             segment_episode = self._extract_joint_data(
                 mcap_path,
                 episode_index,
-                trim_points=None,
-                exclude_regions=[],
+                trim_points=trim_points,
+                exclude_regions=list(exclude_regions or []),
             )
             if segment_episode is None:
                 self._log_warning(
@@ -1610,30 +1794,99 @@ class RosbagToLerobotConverterBase:
                     bag_path,
                     mcap_path.stem,
                 )
-                segment_episode = self._sync_videos_to_grid(
-                    mcap_path, segment_episode
-                )
             else:
                 segment_episode.video_files = {}
+            self._apply_constant_action_values(segment_episode)
+            self._populate_action_sources(mcap_path, segment_episode)
+            self._apply_constant_action_source(segment_episode)
+            segment_episode.subtask_index = subtask_idx
             segment = segments[subtask_idx] if subtask_idx < len(segments) else {}
             if isinstance(segment, dict):
                 segment_episode.subtask_instruction = str(
                     segment.get("sub_task_instruction", "") or ""
                 )
-            segment_episodes.append(segment_episode)
+            segment_records.append((subtask_idx, mcap_path, segment_episode))
 
+        if not segment_records:
+            return None
+
+        trim_report: Dict[str, Any] = {}
+        if self.config.trim_stationary_edges:
+            all_actions = [
+                action
+                for _, _, segment_episode in segment_records
+                for action in segment_episode.action
+            ]
+            original_length = len(all_actions)
+            start, stop = self._stationary_edge_keep_bounds(
+                all_actions,
+                fps=int(self.config.fps),
+                delta_threshold=float(
+                    self.config.stationary_action_delta_threshold
+                ),
+                context_seconds=float(self.config.stationary_context_seconds),
+            )
+            trim_report = {
+                "enabled": True,
+                "original_frames": original_length,
+                "kept_frames": stop - start,
+                "removed_prefix_frames": start,
+                "removed_suffix_frames": original_length - stop,
+                "action_delta_threshold": float(
+                    self.config.stationary_action_delta_threshold
+                ),
+                "context_seconds": float(
+                    self.config.stationary_context_seconds
+                ),
+            }
+            trimmed_records: List[Tuple[int, Path, EpisodeData]] = []
+            frame_cursor = 0
+            for subtask_idx, mcap_path, segment_episode in segment_records:
+                segment_stop = frame_cursor + int(segment_episode.length)
+                local_start = max(start, frame_cursor) - frame_cursor
+                local_stop = min(stop, segment_stop) - frame_cursor
+                if local_stop > local_start:
+                    self._slice_episode_frame_range(
+                        segment_episode,
+                        local_start,
+                        local_stop,
+                    )
+                    trimmed_records.append(
+                        (subtask_idx, mcap_path, segment_episode)
+                    )
+                frame_cursor = segment_stop
+            segment_records = trimmed_records
+            self._log_info(
+                f"Episode {episode_index}: stationary-edge trim "
+                f"{original_length} -> {stop - start} frames "
+                f"across {len(mcap_paths)} archived segment(s) "
+                f"(prefix={start}, suffix={original_length - stop})"
+            )
+
+        if self.config.use_videos:
+            synced_records: List[Tuple[int, Path, EpisodeData]] = []
+            for subtask_idx, mcap_path, segment_episode in segment_records:
+                synced_records.append((
+                    subtask_idx,
+                    mcap_path,
+                    self._sync_videos_to_grid(mcap_path, segment_episode),
+                ))
+            segment_records = synced_records
+
+        segment_episodes = [record[2] for record in segment_records]
         if not segment_episodes:
             return None
 
         if len(segment_episodes) == 1:
             single = segment_episodes[0]
+            original_subtask_index = int(single.subtask_index)
             single.episode_index = episode_index
             single.source_path = bag_path
             single.recording_mode = "single"
             single.full_episode_index = episode_index
             single.task_name = str(episode_info.get("task_name", "") or "")
-            single.subtask_index = 0
-            single.subtask_total = 1
+            single.subtask_index = original_subtask_index
+            single.subtask_total = len(segments)
             single.subtask_instructions = [
                 str(segment.get("sub_task_instruction", "") or "").strip()
                 for segment in segments
@@ -1648,15 +1901,16 @@ class RosbagToLerobotConverterBase:
                 )
             )
             single.subtask_instruction = instruction
-            single.subtask_indices = [0] * int(single.length)
+            single.subtask_indices = [original_subtask_index] * int(single.length)
             single.subtask_segments = [{
-                "subtask_index": 0,
+                "subtask_index": original_subtask_index,
                 "sub_task_instruction": instruction,
                 "frame_duration": [
                     0.0,
                     int(single.length) / float(self.config.fps or DEFAULT_FPS),
                 ],
             }]
+            single.stationary_trim_report = trim_report
             self._log_info(
                 f"{bag_path.name}: converted 1 archived subtask segment "
                 "without row/video stitching"
@@ -1679,7 +1933,8 @@ class RosbagToLerobotConverterBase:
 
         frame_cursor = 0
         frame_reuse_by_camera: Dict[str, List[Dict[str, Any]]] = {}
-        for subtask_idx, segment_episode in enumerate(segment_episodes):
+        for segment_episode in segment_episodes:
+            subtask_idx = int(segment_episode.subtask_index)
             length = int(segment_episode.length)
             if length <= 0:
                 continue
@@ -1692,6 +1947,7 @@ class RosbagToLerobotConverterBase:
                 stitched.action_names = list(segment_episode.action_names or [])
             stitched.observation_state.extend(segment_episode.observation_state)
             stitched.action.extend(segment_episode.action)
+            stitched.action_sources.extend(segment_episode.action_sources)
             stitched.timestamps.extend(
                 [(frame_cursor + offset) / fps for offset in range(length)]
             )
@@ -1729,6 +1985,7 @@ class RosbagToLerobotConverterBase:
             frame_cursor = end_frame
 
         stitched.length = len(stitched.timestamps)
+        stitched.stationary_trim_report = trim_report
         for camera, reports in frame_reuse_by_camera.items():
             merged = self._merge_frame_reuse_reports(
                 reports,
@@ -1902,6 +2159,49 @@ class RosbagToLerobotConverterBase:
         })
         pq.write_table(table, path)
         self._log_info(f"Wrote subtasks metadata: {path}")
+
+    def _write_rlt_sidecars(self, output_dir, episodes_data):
+        """Preserve traces and verify final commands against LeRobot actions."""
+        verification_records = []
+        for episode in episodes_data:
+            if episode.source_path is None:
+                continue
+            source = Path(episode.source_path) / 'rlt'
+            target = Path(output_dir) / 'rlt' / f'episode_{episode.episode_index:06d}'
+            if not copy_rlt_sidecar(source, target):
+                continue
+            info = source.parent / 'episode_info.json'
+            if info.is_file():
+                shutil.copy2(info, target / 'source_episode_info.json')
+            (target / 'source.json').write_text(json.dumps({
+                'source_episode_path': str(episode.source_path),
+                'output_episode_index': episode.episode_index,
+                'timebase': 'original_recording_unmodified',
+                'frame_aligned': False,
+            }), encoding='utf-8')
+            verification = verify_episode_execution(
+                sidecar=target,
+                episode_index=episode.episode_index,
+                grid_log_times_sec=episode.grid_log_times_sec,
+                actions=episode.action,
+                episode_success=episode.episode_success,
+                fps=float(self.config.fps),
+            )
+            (target / 'execution_verification.json').write_text(
+                json.dumps(
+                    verification,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ) + '\n',
+                encoding='utf-8',
+            )
+            verification_records.append(verification)
+        if verification_records:
+            write_dataset_execution_verification(
+                output_dir,
+                verification_records,
+            )
 
     def _write_subtask_annotations(
         self,
@@ -2780,6 +3080,158 @@ class RosbagToLerobotConverterBase:
             return False
         return not self._is_in_exclude_region(timestamp_sec, exclude_regions)
 
+    @staticmethod
+    def _stationary_edge_keep_bounds(
+        actions: List[np.ndarray],
+        *,
+        fps: int,
+        delta_threshold: float,
+        context_seconds: float,
+    ) -> Tuple[int, int]:
+        """Return the half-open frame interval around meaningful action motion.
+
+        Only stationary prefixes and suffixes are removed. Interior pauses stay
+        intact so the converted episode keeps a continuous timeline. Invalid or
+        entirely stationary inputs are left unchanged instead of producing an
+        empty episode.
+        """
+        frame_count = len(actions)
+        if frame_count < 2 or fps <= 0 or delta_threshold < 0:
+            return 0, frame_count
+        try:
+            action_matrix = np.stack(actions).astype(np.float64, copy=False)
+        except (TypeError, ValueError):
+            return 0, frame_count
+        if action_matrix.ndim != 2 or action_matrix.shape[1] == 0:
+            return 0, frame_count
+
+        deltas = np.max(np.abs(np.diff(action_matrix, axis=0)), axis=1)
+        # A non-finite command transition is not safe to classify as idle.
+        moving = np.flatnonzero(
+            (~np.isfinite(deltas)) | (deltas > float(delta_threshold))
+        )
+        if moving.size == 0:
+            return 0, frame_count
+
+        context_frames = max(
+            0,
+            int(np.ceil(max(0.0, float(context_seconds)) * int(fps))),
+        )
+        # diff index i describes the transition from frame i to frame i + 1.
+        first_motion_frame = int(moving[0]) + 1
+        last_motion_frame = int(moving[-1]) + 1
+        start = max(0, first_motion_frame - context_frames)
+        stop = min(frame_count, last_motion_frame + context_frames + 1)
+        if stop <= start:
+            return 0, frame_count
+        return start, stop
+
+    def _apply_constant_action_values(self, episode: EpisodeData) -> None:
+        """Apply configured joint constants without modifying source messages."""
+        overrides = dict(self.config.constant_action_values or {})
+        if not overrides:
+            return
+        names = list(episode.action_names or [])
+        missing = [name for name in overrides if name not in names]
+        if missing:
+            raise ValueError(
+                "constant action joint(s) not found: " + ", ".join(missing)
+            )
+        indices = {
+            names.index(name): float(value)
+            for name, value in overrides.items()
+        }
+        if any(not np.isfinite(value) for value in indices.values()):
+            raise ValueError("constant action values must be finite")
+        for row_index, action in enumerate(episode.action):
+            values = np.asarray(action)
+            if values.ndim != 1 or values.shape[0] != len(names):
+                raise ValueError(
+                    f"invalid action shape at row {row_index}: {values.shape}"
+                )
+            if not values.flags.writeable:
+                values = values.copy()
+                episode.action[row_index] = values
+            for column, value in indices.items():
+                values[column] = value
+        self._log_info(
+            f"Episode {episode.episode_index}: applied constant action values "
+            + ", ".join(
+                f"{name}={float(value):g}"
+                for name, value in overrides.items()
+            )
+        )
+
+    def _trim_stationary_episode_edges(self, episode: EpisodeData) -> None:
+        """Trim idle edges from an in-memory episode without touching rosbag2."""
+        original_length = int(episode.length)
+        if original_length <= 0 or len(episode.action) != original_length:
+            return
+
+        start, stop = self._stationary_edge_keep_bounds(
+            episode.action,
+            fps=int(self.config.fps),
+            delta_threshold=float(
+                self.config.stationary_action_delta_threshold
+            ),
+            context_seconds=float(self.config.stationary_context_seconds),
+        )
+        episode.stationary_trim_report = {
+            "enabled": True,
+            "original_frames": original_length,
+            "kept_frames": stop - start,
+            "removed_prefix_frames": start,
+            "removed_suffix_frames": original_length - stop,
+            "action_delta_threshold": float(
+                self.config.stationary_action_delta_threshold
+            ),
+            "context_seconds": float(
+                self.config.stationary_context_seconds
+            ),
+        }
+        if start == 0 and stop == original_length:
+            self._log_info(
+                f"Episode {episode.episode_index}: stationary-edge trim kept "
+                f"all {original_length} frames"
+            )
+            return
+
+        self._slice_episode_frame_range(episode, start, stop)
+        self._log_info(
+            f"Episode {episode.episode_index}: stationary-edge trim "
+            f"{original_length} -> {episode.length} frames "
+            f"(prefix={start}, suffix={original_length - stop}, "
+            f"threshold={self.config.stationary_action_delta_threshold:g}, "
+            f"context={self.config.stationary_context_seconds:g}s)"
+        )
+
+    @staticmethod
+    def _slice_episode_frame_range(
+        episode: EpisodeData,
+        start: int,
+        stop: int,
+    ) -> None:
+        """Keep one aligned frame range in memory and rebase local time."""
+        original_length = int(episode.length)
+        start = max(0, min(original_length, int(start)))
+        stop = max(start, min(original_length, int(stop)))
+
+        episode.timestamps = episode.timestamps[start:stop]
+        if episode.timestamps:
+            first_timestamp = float(episode.timestamps[0])
+            episode.timestamps = [
+                float(timestamp) - first_timestamp
+                for timestamp in episode.timestamps
+            ]
+        episode.grid_log_times_sec = episode.grid_log_times_sec[start:stop]
+        episode.observation_state = episode.observation_state[start:stop]
+        episode.action = episode.action[start:stop]
+        if len(episode.action_sources) == original_length:
+            episode.action_sources = episode.action_sources[start:stop]
+        if len(episode.subtask_indices) == original_length:
+            episode.subtask_indices = episode.subtask_indices[start:stop]
+        episode.length = stop - start
+
     def _extract_joint_data(
         self,
         bag_path: Path,
@@ -3271,9 +3723,32 @@ class RosbagToLerobotConverterBase:
         action_messages_by_topic: Dict[str, List[Tuple[float, np.ndarray]]],
         action_joint_names_by_topic: Dict[str, List[str]],
     ) -> List[Tuple[float, np.ndarray]]:
-        """Merge action messages from multiple topics into a single action vector."""
+        """Merge sequentially published action topics into atomic vectors.
+
+        RobotClient publishes groups in sorted key order, so the last group is
+        the commit clock for a complete policy action.  On FFW that group is
+        ``leader_mobile``; its standalone idle command is also valid and holds
+        the last arm/head/lift targets while replacing the mobile velocity.
+        """
         if not action_messages_by_topic:
             return []
+        missing_topics = [
+            topic
+            for topic in self.config.action_topics
+            if not action_messages_by_topic.get(topic)
+        ]
+        if missing_topics:
+            # Robot configs describe every actuator supported by the platform,
+            # while a recording may intentionally contain only a subset.  For
+            # example, an F2 arm-only run has zero-message head, lift, and
+            # mobile channels.  Omit only those wholly absent streams and let
+            # the messages that are actually present define the action vector.
+            # If every configured action stream is absent, _resample_to_fps
+            # still rejects the zero-action fallback below.
+            self._log_warning(
+                "Configured action topic(s) had no messages and were omitted: "
+                + ", ".join(sorted(missing_topics))
+            )
 
         # Determine topic ordering using group keys
         topic_to_group: Dict[str, str] = {}
@@ -3316,22 +3791,95 @@ class RosbagToLerobotConverterBase:
                 filter_failed_topics.add(topic)
             filter_indices_by_topic[topic] = indices
 
-        # Use timestamps from the first topic as reference
-        reference_topic = sorted_topics[0]
-        reference_timestamps = [t for t, _ in action_messages_by_topic[reference_topic]]
+        # Paired arm command topics are published by the same control tick,
+        # but their rosbag log timestamps may be observed out of order by a
+        # few milliseconds.  When every selected action stream has the same
+        # cardinality and each ordinal tuple is tightly grouped, ordinal
+        # pairing is the only representation that preserves those atomic
+        # commands.  The timestamp-based commit-clock path below remains the
+        # fallback for mixed-rate topics (notably mobile idle commands).
+        stream_lengths = [len(action_messages_by_topic[topic]) for topic in sorted_topics]
+        paired_sample_count = min(stream_lengths)
+        ordinal_pairing = (
+            len(sorted_topics) > 1
+            and paired_sample_count > 0
+            and not filter_failed_topics
+            and (
+                len(set(stream_lengths)) == 1
+                # Two arm trajectories are emitted as a pair.  A recorder
+                # can stop between those two publishes, leaving one trailing
+                # left/right sample; it cannot form a complete action, so it
+                # is intentionally dropped below.
+                or (
+                    len(sorted_topics) == 2
+                    and max(stream_lengths) - min(stream_lengths) == 1
+                )
+            )
+        )
+        if ordinal_pairing:
+            max_ordinal_skew_sec = 0.050
+            for index in range(paired_sample_count):
+                sample_times = [
+                    action_messages_by_topic[topic][index][0]
+                    for topic in sorted_topics
+                ]
+                if max(sample_times) - min(sample_times) > max_ordinal_skew_sec:
+                    ordinal_pairing = False
+                    break
+
+        if ordinal_pairing:
+            merged_messages: List[Tuple[float, np.ndarray]] = []
+            for index in range(paired_sample_count):
+                combined_parts: List[np.ndarray] = []
+                sample_times: List[float] = []
+                for topic in sorted_topics:
+                    timestamp, value = action_messages_by_topic[topic][index]
+                    indices = filter_indices_by_topic.get(topic)
+                    if indices is not None:
+                        value = value[indices]
+                    combined_parts.append(value)
+                    sample_times.append(timestamp)
+                # Use the last arrival in the paired burst as the action's
+                # commit time, so state samples cannot observe a half-update.
+                merged_messages.append(
+                    (
+                        max(sample_times),
+                        np.concatenate(combined_parts).astype(np.float32, copy=False),
+                    )
+                )
+            self._log_info(
+                f"Merged action from {len(sorted_topics)} ordinally paired topics: "
+                f"{len(merged_messages)} merged samples, {len(combined_names)} dimensions"
+            )
+            if max(stream_lengths) != paired_sample_count:
+                self._log_warning(
+                    "Dropped one trailing unpaired action sample while "
+                    "merging two arm command topics"
+                )
+            return merged_messages
+
         message_times_by_topic = {
             topic: [t for t, _ in action_messages_by_topic[topic]]
             for topic in sorted_topics
         }
         cursor_by_topic = {topic: -1 for topic in sorted_topics}
+        reference_topic = sorted_topics[-1]
+        reference_group = topic_to_group[reference_topic]
+        reference_is_mobile = (
+            reference_group == "leader_mobile"
+            or "cmd_vel" in reference_topic.lower()
+        )
 
-        # For each reference timestamp, concatenate actions from all topics
-        # Only include timestamps where ALL topics have valid previous values
+        # Emit only when the final group in the sequential publish has arrived.
+        # This prevents a state timestamp inside the micro-burst from observing
+        # a mixture of current and previous policy actions.
         merged_messages: List[Tuple[float, np.ndarray]] = []
+        previous_reference_timestamp = float("-inf")
 
-        for timestamp in reference_timestamps:
+        for timestamp, _ in action_messages_by_topic[reference_topic]:
             combined_parts: List[np.ndarray] = []
             all_topics_have_data = True
+            non_reference_updates: List[bool] = []
 
             for topic in sorted_topics:
                 if topic in filter_failed_topics:
@@ -3346,24 +3894,44 @@ class RosbagToLerobotConverterBase:
                 if idx < 0:
                     all_topics_have_data = False
                     break
-                if (timestamp - times[idx]) > 0.05:
-                    all_topics_have_data = False
-                    break
                 prev_value = msgs[idx][1]
                 indices = filter_indices_by_topic.get(topic)
                 if indices is not None:
                     prev_value = prev_value[indices]
                 combined_parts.append(prev_value)
+                if topic != reference_topic:
+                    non_reference_updates.append(
+                        times[idx] > previous_reference_timestamp
+                    )
 
             if all_topics_have_data and combined_parts:
-                merged_messages.append(
-                    (
-                        timestamp,
-                        np.concatenate(combined_parts).astype(
-                            np.float32, copy=False
-                        ),
-                    )
+                complete_publish = all(non_reference_updates)
+                mobile_idle_publish = (
+                    reference_is_mobile
+                    and bool(merged_messages)
+                    and not any(non_reference_updates)
                 )
+                if complete_publish or mobile_idle_publish:
+                    merged_messages.append(
+                        (
+                            timestamp,
+                            np.concatenate(combined_parts).astype(
+                                np.float32, copy=False
+                            ),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        "incomplete action publish would mix action ticks at "
+                        f"timestamp {timestamp:.9f}"
+                    )
+
+            previous_reference_timestamp = timestamp
+
+        self._log_info(
+            f"Merged action from {len(sorted_topics)} topics: "
+            f"{len(merged_messages)} merged samples, {len(combined_names)} dimensions"
+        )
 
         return merged_messages
 
@@ -3573,6 +4141,10 @@ class RosbagToLerobotConverterBase:
 
         if not state_messages:
             return episode, staleness_metrics
+        if self.config.action_topics and not action_messages:
+            raise ValueError(
+                "configured action topics produced no data; refusing zero-action fallback"
+            )
 
         state_times = [t for t, _ in state_messages]
         min_time = min(state_times)
@@ -4994,6 +5566,18 @@ class RosbagToLerobotConverterBase:
             "index": {"dtype": "int64", "shape": (1,), "names": None},
             "task_index": {"dtype": "int64", "shape": (1,), "names": None},
         }
+        if self._has_episode_success_feature(episodes_data):
+            self._features["episode_success"] = {
+                "dtype": "bool",
+                "shape": (1,),
+                "names": None,
+            }
+        if self._has_action_source_feature(episodes_data):
+            self._features["action_source"] = {
+                "dtype": "string",
+                "shape": (1,),
+                "names": None,
+            }
         if any(ep.subtask_indices for ep in episodes_data):
             self._features["subtask_index"] = {
                 "dtype": "int64",
@@ -5173,6 +5757,21 @@ class RosbagToLerobotConverterBase:
                 'selected_joint_state_topics': state_topics,
                 'primitive_instructions': [],
                 'selected_action_topics': action_topics,
+                'stationary_edge_trim': {
+                    'enabled': bool(self.config.trim_stationary_edges),
+                    'action_delta_threshold': float(
+                        self.config.stationary_action_delta_threshold
+                    ),
+                    'context_seconds': float(
+                        self.config.stationary_context_seconds
+                    ),
+                    'scope': 'leading_and_trailing_edges_only',
+                    'source_rosbag_modified': False,
+                },
+                'constant_action_values': dict(
+                    self.config.constant_action_values
+                ),
+                'constant_action_source': self.config.constant_action_source,
             },
         }
         info_path = output_dir / 'info.json'
@@ -5273,7 +5872,75 @@ class RosbagToLerobotConverterBase:
             ti_arr = np.full(num_frames, ti, dtype=np.int64)
             stats["task_index"] = self._scalar_stats(ti_arr, num_frames)
 
+            if episode.episode_success is not None:
+                success = np.full(
+                    num_frames,
+                    episode.episode_success,
+                    dtype=np.bool_,
+                )
+                stats["episode_success"] = self._scalar_stats(
+                    success,
+                    num_frames,
+                )
+
         return stats
+
+    @staticmethod
+    def _has_episode_success_feature(
+        episodes_data: List[EpisodeData],
+    ) -> bool:
+        labeled = [
+            episode.episode_success is not None
+            for episode in episodes_data
+        ]
+        if not any(labeled):
+            return False
+        if not all(labeled):
+            labeled_indices = [
+                episode.episode_index
+                for episode in episodes_data
+                if episode.episode_success is not None
+            ]
+            unlabeled_indices = [
+                episode.episode_index
+                for episode in episodes_data
+                if episode.episode_success is None
+            ]
+            raise ValueError(
+                "Mixed episode_success labels are not supported: "
+                f"labeled={labeled_indices}, unlabeled={unlabeled_indices}"
+            )
+        return True
+
+    @staticmethod
+    def _has_action_source_feature(
+        episodes_data: List[EpisodeData],
+    ) -> bool:
+        labeled = [
+            len(episode.action_sources) == int(episode.length)
+            for episode in episodes_data
+        ]
+        if not any(labeled):
+            return False
+        if not all(labeled):
+            incomplete = [
+                episode.episode_index
+                for episode, complete in zip(episodes_data, labeled)
+                if not complete
+            ]
+            raise ValueError(
+                "Mixed or incomplete action_source labels are not supported: "
+                f"episodes={incomplete}"
+            )
+        invalid = sorted({
+            str(source)
+            for episode in episodes_data
+            for source in episode.action_sources
+            if str(source) not in {"human", "vla", "mlp"}
+        })
+        if invalid:
+            raise ValueError(f"Unsupported action_source labels: {invalid}")
+        return True
 
     @staticmethod
     def _scalar_stats(arr: np.ndarray, num_frames: int) -> Dict[str, Any]:

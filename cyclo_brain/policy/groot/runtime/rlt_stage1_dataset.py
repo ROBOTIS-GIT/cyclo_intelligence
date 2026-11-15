@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+#
+# Copyright 2026 ROBOTIS CO., LTD.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+
+"""Read-only LeRobot v2.1 observations for GR00T RLT Stage 1.
+
+Stage 1 only reconstructs frozen GR00T backbone tokens.  It therefore needs
+the three cameras, robot state and language, but deliberately never reads
+actions, rewards or success labels.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .camera_mapping import resolve_camera_feature_sources
+from .rlt_provenance import RLT_ACTION_GROUP_NAMES, RLT_CAMERA_KEYS, rlt_action_group_names
+from .rlt_lerobot_v30 import (
+    read_dataset_json,
+    read_dataset_jsonl,
+    ParquetRowsReader,
+    ParquetSliceReader,
+    RLTLeRobotV30Layout,
+    VideoSegmentReader,
+    lerobot_codebase_version,
+)
+
+
+LANGUAGE_KEY = "annotation.human.task_description"
+CAMERA_KEYS = RLT_CAMERA_KEYS
+STATE_GROUP_NAMES = RLT_ACTION_GROUP_NAMES
+
+
+class RLTStage1DatasetError(ValueError):
+    """Raised when a dataset cannot satisfy the frozen-GR00T contract."""
+
+
+@dataclass(frozen=True)
+class _Episode:
+    index: int
+    length: int
+    tasks: tuple[str, ...]
+
+
+ParquetReader = Callable[[Path], Mapping[str, Sequence[Any]]]
+VideoReader = Callable[[Path], Iterator[np.ndarray]]
+
+
+def _read_json(path: Path) -> Any:
+    return read_dataset_json(path, RLTStage1DatasetError)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return read_dataset_jsonl(path, RLTStage1DatasetError)
+
+
+def _default_parquet_reader(path: Path) -> Mapping[str, Sequence[Any]]:
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(
+        path,
+        columns=["observation.state", "task_index"],
+    )
+    return {name: table[name].to_pylist() for name in table.column_names}
+
+
+def _default_video_reader(path: Path) -> Iterator[np.ndarray]:
+    import av
+
+    container = av.open(str(path), mode="r")
+    try:
+        streams = tuple(container.streams.video)
+        if len(streams) != 1:
+            raise RLTStage1DatasetError(
+                f"RLT Stage 1 expects one video stream in {path}"
+            )
+        for frame in container.decode(streams[0]):
+            yield frame.to_ndarray(format="rgb24")
+    finally:
+        container.close()
+
+
+class RLTStage1LeRobotV21Source:
+    """Stream deterministic GR00T observations from one LeRobot v2.1 root."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        parquet_reader: ParquetReader | None = None,
+        video_reader: VideoReader | None = None,
+        action_dim: int = 19,
+    ) -> None:
+        self.root = Path(root).expanduser().absolute()
+        if self.root.is_symlink() or not self.root.is_dir():
+            raise RLTStage1DatasetError(
+                f"RLT Stage 1 dataset must be a real directory: {self.root}"
+            )
+        self._parquet_reader = parquet_reader or _default_parquet_reader
+        self._video_reader = video_reader or _default_video_reader
+
+        info = _read_json(self.root / "meta/info.json")
+        if not isinstance(info, dict) or info.get("codebase_version") != "v2.1":
+            raise RLTStage1DatasetError(
+                "GR00T RL Token Training requires a LeRobot v2.1 dataset"
+            )
+        self._data_pattern = str(info.get("data_path", ""))
+        self._video_pattern = str(info.get("video_path", ""))
+        self._chunk_size = int(info.get("chunks_size", 0))
+        if not self._data_pattern or not self._video_pattern or self._chunk_size < 1:
+            raise RLTStage1DatasetError("LeRobot v2.1 path metadata is incomplete")
+
+        features = info.get("features")
+        if not isinstance(features, dict):
+            raise RLTStage1DatasetError("LeRobot v2.1 features metadata is missing")
+        state_feature = features.get("observation.state")
+        state_names = state_feature.get("names") if isinstance(state_feature, dict) else None
+        if not isinstance(state_names, list) or len(set(state_names)) != len(state_names):
+            raise RLTStage1DatasetError("LeRobot observation.state names are invalid")
+        try:
+            self._state_indices = {
+                group: tuple(state_names.index(name) for name in names)
+                for group, names in rlt_action_group_names(action_dim).items()
+            }
+        except ValueError as error:
+            raise RLTStage1DatasetError(
+                "LeRobot state does not contain the SG2 arm/gripper/odometry fields"
+            ) from error
+
+        video_features = [
+            key
+            for key, value in features.items()
+            if isinstance(value, dict) and value.get("dtype") == "video"
+        ]
+        try:
+            self._camera_features = resolve_camera_feature_sources(
+                CAMERA_KEYS,
+                video_features,
+            )
+        except RuntimeError as error:
+            raise RLTStage1DatasetError(
+                f"LeRobot camera features cannot satisfy the GR00T RLT contract: {error}"
+            ) from error
+
+        task_rows = _read_jsonl(self.root / "meta/tasks.jsonl")
+        try:
+            self._tasks = {
+                int(row["task_index"]): str(row["task"]) for row in task_rows
+            }
+        except (KeyError, TypeError, ValueError) as error:
+            raise RLTStage1DatasetError("LeRobot task metadata is invalid") from error
+
+        episode_rows = _read_jsonl(self.root / "meta/episodes.jsonl")
+        try:
+            episodes = tuple(
+                _Episode(
+                    index=int(row["episode_index"]),
+                    length=int(row["length"]),
+                    tasks=tuple(str(value) for value in row.get("tasks", ())),
+                )
+                for row in episode_rows
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RLTStage1DatasetError("LeRobot episode metadata is invalid") from error
+        self._episodes = tuple(sorted(episodes, key=lambda item: item.index))
+        if any(episode.length < 1 for episode in self._episodes):
+            raise RLTStage1DatasetError("LeRobot episodes must contain at least one frame")
+        self.frame_count = sum(episode.length for episode in self._episodes)
+
+    def __len__(self) -> int:
+        return self.frame_count
+
+    def _safe_file(self, relative: str) -> Path:
+        candidate = self.root / relative
+        if candidate.is_symlink():
+            raise RLTStage1DatasetError(f"Dataset file must not be a symlink: {candidate}")
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(self.root.resolve(strict=True))
+        except (OSError, ValueError) as error:
+            raise RLTStage1DatasetError(
+                f"Dataset file is missing or escapes its root: {candidate}"
+            ) from error
+        if not resolved.is_file():
+            raise RLTStage1DatasetError(f"Dataset path is not a file: {resolved}")
+        return resolved
+
+    def _episode_paths(self, episode: _Episode) -> tuple[Path, dict[str, Path]]:
+        chunk = episode.index // self._chunk_size
+        values = {"episode_chunk": chunk, "episode_index": episode.index}
+        try:
+            parquet = self._safe_file(self._data_pattern.format(**values))
+            videos = {
+                output_key: self._safe_file(
+                    self._video_pattern.format(
+                        **values,
+                        video_key=feature_key,
+                    )
+                )
+                for output_key, feature_key in self._camera_features.items()
+            }
+        except (KeyError, ValueError) as error:
+            raise RLTStage1DatasetError("LeRobot path template is invalid") from error
+        return parquet, videos
+
+    def iter_batches(self, batch_size: int) -> Iterator[dict[str, dict[str, Any]]]:
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("RLT Stage 1 batch_size must be positive")
+        pending: list[tuple[dict[str, np.ndarray], dict[str, np.ndarray], str]] = []
+        for episode in self._episodes:
+            parquet_path, video_paths = self._episode_paths(episode)
+            columns = self._parquet_reader(parquet_path)
+            if set(columns) != {"observation.state", "task_index"}:
+                raise RLTStage1DatasetError("LeRobot parquet columns disagree")
+            state = np.asarray(columns["observation.state"], dtype=np.float32)
+            task_indices = tuple(int(value) for value in columns["task_index"])
+            if state.ndim != 2 or state.shape[0] != episode.length:
+                raise RLTStage1DatasetError("LeRobot state row count disagrees with episode")
+            if len(task_indices) != episode.length or not np.isfinite(state).all():
+                raise RLTStage1DatasetError("LeRobot task/state rows are invalid")
+
+            with ExitStack() as stack:
+                video_iters: dict[str, Iterator[np.ndarray]] = {}
+                for key, path in video_paths.items():
+                    iterator = iter(self._video_reader(path))
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        stack.callback(close)
+                    video_iters[key] = iterator
+
+                for frame_index in range(episode.length):
+                    try:
+                        images = {
+                            key: np.asarray(next(iterator), dtype=np.uint8)
+                            for key, iterator in video_iters.items()
+                        }
+                    except StopIteration as error:
+                        raise RLTStage1DatasetError(
+                            "LeRobot video is shorter than its episode"
+                        ) from error
+                    if any(image.ndim != 3 or image.shape[-1] != 3 for image in images.values()):
+                        raise RLTStage1DatasetError("LeRobot videos must contain RGB frames")
+                    try:
+                        language = self._tasks[task_indices[frame_index]]
+                    except KeyError as error:
+                        raise RLTStage1DatasetError("LeRobot task_index is unknown") from error
+                    states = {
+                        group: state[frame_index, list(indices)]
+                        for group, indices in self._state_indices.items()
+                    }
+                    pending.append((images, states, language))
+                    if len(pending) == batch_size:
+                        yield self._collate(pending)
+                        pending = []
+        if pending:
+            yield self._collate(pending)
+
+    @staticmethod
+    def _collate(
+        samples: Sequence[tuple[dict[str, np.ndarray], dict[str, np.ndarray], str]],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            "video": {
+                key: np.stack([sample[0][key] for sample in samples])[:, None, ...]
+                for key in CAMERA_KEYS
+            },
+            "state": {
+                key: np.stack([sample[1][key] for sample in samples])
+                .astype(np.float32, copy=False)[:, None, :]
+                for key in samples[0][1]
+            },
+            "language": {
+                LANGUAGE_KEY: [[sample[2]] for sample in samples],
+            },
+        }
+
+
+class RLTStage1LeRobotV30Source:
+    """Stream deterministic GR00T observations from a LeRobot v3 root."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        parquet_rows_reader: ParquetRowsReader | None = None,
+        parquet_slice_reader: ParquetSliceReader | None = None,
+        video_segment_reader: VideoSegmentReader | None = None,
+        action_dim: int = 19,
+    ) -> None:
+        self.root = Path(root).expanduser().absolute()
+        self._layout = RLTLeRobotV30Layout(
+            self.root,
+            camera_keys=CAMERA_KEYS,
+            parquet_rows_reader=parquet_rows_reader,
+            parquet_slice_reader=parquet_slice_reader,
+            video_segment_reader=video_segment_reader,
+        )
+        features = self._layout.features
+        state_feature = features.get("observation.state")
+        state_names = state_feature.get("names") if isinstance(state_feature, dict) else None
+        if not isinstance(state_names, list) or len(set(state_names)) != len(state_names):
+            raise RLTStage1DatasetError("LeRobot observation.state names are invalid")
+        try:
+            self._state_indices = {
+                group: tuple(state_names.index(name) for name in names)
+                for group, names in rlt_action_group_names(action_dim).items()
+            }
+        except ValueError as error:
+            raise RLTStage1DatasetError(
+                "LeRobot state does not contain the SG2 arm/gripper/odometry fields"
+            ) from error
+        self.frame_count = self._layout.total_frames
+
+    def __len__(self) -> int:
+        return self.frame_count
+
+    def iter_batches(self, batch_size: int) -> Iterator[dict[str, dict[str, Any]]]:
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("RLT Stage 1 batch_size must be positive")
+        pending: list[tuple[dict[str, np.ndarray], dict[str, np.ndarray], str]] = []
+        for episode in self._layout.episodes:
+            columns = self._layout.read_episode_columns(
+                episode,
+                ("observation.state", "task_index"),
+            )
+            state = np.asarray(columns["observation.state"], dtype=np.float32)
+            task_indices = tuple(int(value) for value in columns["task_index"])
+            if state.ndim != 2 or state.shape[0] != episode.length:
+                raise RLTStage1DatasetError("LeRobot state row count disagrees with episode")
+            if len(task_indices) != episode.length or not np.isfinite(state).all():
+                raise RLTStage1DatasetError("LeRobot task/state rows are invalid")
+
+            with ExitStack() as stack:
+                video_iters: dict[str, Iterator[np.ndarray]] = {}
+                for key in CAMERA_KEYS:
+                    iterator = iter(self._layout.iter_video(episode, key))
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        stack.callback(close)
+                    video_iters[key] = iterator
+                for frame_index in range(episode.length):
+                    try:
+                        images = {
+                            key: np.asarray(next(iterator), dtype=np.uint8)
+                            for key, iterator in video_iters.items()
+                        }
+                    except StopIteration as error:
+                        raise RLTStage1DatasetError(
+                            "LeRobot video is shorter than its episode"
+                        ) from error
+                    if any(
+                        image.ndim != 3 or image.shape[-1] != 3
+                        for image in images.values()
+                    ):
+                        raise RLTStage1DatasetError("LeRobot videos must contain RGB frames")
+                    try:
+                        language = self._layout.tasks[task_indices[frame_index]]
+                    except KeyError as error:
+                        raise RLTStage1DatasetError(
+                            "LeRobot task_index is unknown"
+                        ) from error
+                    states = {
+                        group: state[frame_index, list(indices)]
+                        for group, indices in self._state_indices.items()
+                    }
+                    pending.append((images, states, language))
+                    if len(pending) == batch_size:
+                        yield RLTStage1LeRobotV21Source._collate(pending)
+                        pending = []
+                sentinel = object()
+                if any(
+                    next(iterator, sentinel) is not sentinel
+                    for iterator in video_iters.values()
+                ):
+                    raise RLTStage1DatasetError("LeRobot video is longer than its episode")
+        if pending:
+            yield RLTStage1LeRobotV21Source._collate(pending)
+
+
+def open_rlt_stage1_source(
+    root: str | Path,
+    *, action_dim: int = 19,
+) -> RLTStage1LeRobotV21Source | RLTStage1LeRobotV30Source:
+    """Open a supported LeRobot source without rewriting the dataset."""
+
+    version = lerobot_codebase_version(root)
+    if version == "v2.1":
+        return RLTStage1LeRobotV21Source(root, action_dim=action_dim)
+    return RLTStage1LeRobotV30Source(root, action_dim=action_dim)
+
+
+__all__ = [
+    "CAMERA_KEYS",
+    "LANGUAGE_KEY",
+    "RLTStage1DatasetError",
+    "RLTStage1LeRobotV21Source",
+    "RLTStage1LeRobotV30Source",
+    "open_rlt_stage1_source",
+]

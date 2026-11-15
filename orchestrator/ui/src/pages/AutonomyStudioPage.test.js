@@ -20,7 +20,7 @@ jest.mock("../features/missionCanvas/components/mapping/HeadTeleopPanel", () => 
 import { StrictMode } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AutonomyStudioPage from './AutonomyStudioPage';
-jest.mock('react-redux', () => ({ ...jest.requireActual('react-redux'), useSelector: selector => selector({ros:{rosHost:'localhost'}}) }));
+jest.mock('react-redux', () => ({ ...jest.requireActual('react-redux'), useDispatch: () => jest.fn(), useSelector: selector => selector({ros:{rosHost:'localhost'}}) }));
 import {
   cancelNavigateToPoseGoal,
   configureDesignLocalizationAmcl,

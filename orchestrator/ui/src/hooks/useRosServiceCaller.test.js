@@ -1,6 +1,7 @@
 import {
   useRosServiceCaller,
   buildInitialPoseSyncTaskInfo,
+  buildInferenceChunkTaskInfo,
   getRecordCommandServiceTimeoutMs,
   transformReplayDataResult,
 } from './useRosServiceCaller';
@@ -101,4 +102,67 @@ describe('transformReplayDataResult', () => {
     expect(result.end_effector_links).toEqual(['tool0']);
     expect(result.bag_path).toBe('/workspace/rosbag2/sh5/0');
   });
+});
+
+test('TT-RTC leaves the trained action horizon to the runtime', () => {
+  expect(buildInferenceChunkTaskInfo({ serviceType: 'groot', actionRequestMode: 'tt_rtc', actionChunkSize: 24 }).action_chunk_size).toBe(0);
+  expect(buildInferenceChunkTaskInfo({ serviceType: 'groot', actionRequestMode: 'async', actionChunkSize: 24 }).action_chunk_size).toBe(24);
+});
+
+test.each([
+  ['inference', 'tt_rtc', 0],
+  ['autonomy_studio', 'tt_rtc', 0],
+  ['inference', 'async', 24],
+  ['autonomy_studio', 'async', 24],
+])('%s sends %s with the correct action horizon', async (currentPage, actionRequestMode, expectedChunkSize) => {
+  const tasks = taskReducer(undefined, { type: '@@INIT' });
+  const state = {
+    tasks: {
+      ...tasks,
+      inferenceTaskInfo: {
+        ...tasks.inferenceTaskInfo,
+        serviceType: 'groot',
+        policyType: 'n17',
+        policyPath: '/workspace/model/groot/example',
+        actionRequestMode,
+        actionChunkSize: 24,
+        controlHz: 100,
+        inferenceHz: 15,
+      },
+    },
+    training: { trainingInfo: {} }, editDataset: {},
+    ui: { currentPage, activeStudioWorkspace: 'rl_canvas' },
+    ros: { rosbridgeUrl: 'ws://test' },
+  };
+  const store = configureStore({ reducer: (value = state) => value });
+  let callback, sent;
+  rosConnectionManager.getConnection.mockResolvedValue({
+    isConnected: true, idCounter: 0,
+    once: (_id, handler) => { callback = handler; },
+    callOnConnection: (request) => {
+      sent = request;
+      callback({ result: true, values: { success: true } });
+    },
+  });
+  const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    const { result } = renderHook(() => useRosServiceCaller(), {
+      wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+    });
+    await act(async () => result.current.sendRecordCommand('start_inference', {
+      taskSource: 'inference',
+    }));
+    expect(sent.service).toBe('/task/command');
+    expect(sent.type).toBe('interfaces/srv/SendCommand');
+    expect(sent.args.command).toBe(2);
+    expect(sent.args.task_info).toMatchObject({
+      service_type: 'groot',
+      policy_path: '/workspace/model/groot/example',
+      action_request_mode: actionRequestMode,
+      action_chunk_size: expectedChunkSize,
+      control_hz: 100,
+      inference_hz: 15,
+    });
+    expect(store.getState().tasks.inferenceTaskInfo.actionChunkSize).toBe(24);
+  } finally { log.mockRestore(); }
 });

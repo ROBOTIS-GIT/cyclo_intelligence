@@ -28,6 +28,7 @@ import time
 import threading
 import logging
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Union
 
@@ -179,6 +180,8 @@ class RobotClient:
         domain_id: Optional[int] = None,
         enable_command_publishers: bool = False,
         enable_preview_publisher: bool = False,
+        camera_names: Optional[list[str]] = None,
+        defer_image_decoding: bool = False,
     ):
         section = robot_schema.load_robot_section(robot_type)
         self._urdf_path = robot_schema.get_urdf_path(section)
@@ -187,6 +190,11 @@ class RobotClient:
         # the cameras / joint_groups / sensors shape RobotClient and the
         # downstream inference engines have always consumed.
         self._config = _build_runtime_config(section)
+        if camera_names is not None:
+            unknown = set(camera_names) - self._config["cameras"].keys()
+            if unknown:
+                raise ValueError(f"Unknown cameras: {sorted(unknown)}")
+            self._config["cameras"] = {name: self._config["cameras"][name] for name in camera_names}
 
         self._robot_type = robot_type
         self._sync_check = sync_check
@@ -200,6 +208,9 @@ class RobotClient:
 
         # Thread-safe data stores
         self._lock = threading.Lock()
+        self._defer_image_decoding = bool(defer_image_decoding)
+        self._image_decode_lock = threading.Lock()
+        self._compressed_images: dict[str, tuple[bytes, float, float]] = {}
         self._images: dict[str, np.ndarray] = {}
         self._image_timestamps: dict[str, float] = {}
         self._image_received_monotonic: dict[str, float] = {}
@@ -242,6 +253,9 @@ class RobotClient:
                 "using 1.0"
             )
             self._initial_pose_sync_state_max_age_s = 1.0
+        self._initial_pose_sync_max_velocity_rad_s = _float_env("INITIAL_POSE_SYNC_MAX_VELOCITY_RAD_S", 0.25)
+        if not math.isfinite(self._initial_pose_sync_max_velocity_rad_s) or self._initial_pose_sync_max_velocity_rad_s <= 0:
+            self._initial_pose_sync_max_velocity_rad_s = 0.25
         self._closed = False
 
         self._init_subscriptions()
@@ -370,6 +384,11 @@ class RobotClient:
         """CompressedImage -> BGR numpy array."""
         received_monotonic = time.monotonic()
         try:
+            if self._defer_image_decoding:
+                frame = (bytes(msg.data), time.time(), received_monotonic)
+                with self._lock:
+                    self._compressed_images[cam_name] = frame
+                return
             data = msg.data
             if isinstance(data, (list, tuple)):
                 data = bytes(data)
@@ -382,6 +401,37 @@ class RobotClient:
                     self._image_received_monotonic[cam_name] = received_monotonic
         except Exception as e:
             logger.warning(f"Failed to decode image from {cam_name}: {e}")
+
+    def _decode_pending_images(self, camera_names=None):
+        """Decode latest frames on read, retaining their original receipt times.
+
+        Decode work never holds the callback lock. A newer frame received while
+        decoding stays pending for the next read instead of being discarded.
+        """
+        if not getattr(self, "_defer_image_decoding", False):
+            return
+        with self._image_decode_lock:
+            with self._lock:
+                names = list(self._compressed_images) if camera_names is None else camera_names
+                pending = {
+                    name: self._compressed_images.pop(name)
+                    for name in names if name in self._compressed_images
+                }
+            for name, (data, received_at, received_monotonic) in pending.items():
+                try:
+                    image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if image is None:
+                        raise ValueError("invalid compressed image")
+                except Exception as error:
+                    with self._lock:
+                        self._images.pop(name, None)
+                        self._image_timestamps.pop(name, None)
+                        self._image_received_monotonic.pop(name, None)
+                    raise RuntimeError(f"Failed to decode image from {name}: {error}") from error
+                with self._lock:
+                    self._images[name] = image
+                    self._image_timestamps[name] = received_at
+                    self._image_received_monotonic[name] = received_monotonic
 
     def _update_joint(self, group_name: str, msg):
         """JointState -> np.ndarray(float32).
@@ -501,6 +551,7 @@ class RobotClient:
         self,
         resize: Optional[tuple[int, int]] = None,
         format: str = "bgr",
+        camera_names: Optional[list[str]] = None,
     ) -> dict[str, np.ndarray]:
         """Get all camera images.
 
@@ -508,8 +559,9 @@ class RobotClient:
             resize: Optional (width, height) tuple. None = original size.
             format: "bgr" (default) or "rgb".
         """
+        self._decode_pending_images(camera_names)
         with self._lock:
-            result = {k: v.copy() for k, v in self._images.items()}
+            result = {k: v.copy() for k, v in self._images.items() if camera_names is None or k in camera_names}
         if resize:
             result = {k: cv2.resize(v, resize) for k, v in result.items()}
         if format == "rgb":
@@ -523,6 +575,7 @@ class RobotClient:
         format: str = "bgr",
     ) -> Optional[np.ndarray]:
         """Get single camera image."""
+        self._decode_pending_images([camera_name])
         with self._lock:
             img = self._images.get(camera_name)
             if img is None:
@@ -535,10 +588,12 @@ class RobotClient:
         return img
 
     def is_image_ready(self, camera_name: str) -> bool:
+        self._decode_pending_images([camera_name])
         with self._lock:
             return camera_name in self._images
 
     def get_image_timestamp(self, camera_name: str) -> Optional[float]:
+        self._decode_pending_images([camera_name])
         with self._lock:
             return self._image_timestamps.get(camera_name)
 
@@ -752,13 +807,22 @@ class RobotClient:
         action: np.ndarray,
         action_keys: Optional[list[str]] = None,
         duration_s: float = 5.0,
-    ) -> None:
+        *, minimum_duration_s: Optional[float] = None,
+        maximum_duration_s: float = 60.0,
+    ) -> float:
         """Publish one validated action as a slow position-only transition.
 
         Twist modalities are forced to zero. A complete current-position
         snapshot is required before any target is published so an interrupted
         transition can be replaced with a hold trajectory.
         """
+        if minimum_duration_s is not None:
+            minimum_duration_s = float(minimum_duration_s)
+            maximum_duration_s = float(maximum_duration_s)
+            if not math.isfinite(minimum_duration_s) or not math.isfinite(maximum_duration_s) or not 0 < minimum_duration_s <= maximum_duration_s:
+                raise ValueError("Invalid initial pose sync duration range")
+            _ramp, required = self.build_policy_handoff_ramp(action, action_keys, maximum_duration_s=maximum_duration_s)
+            duration_s = max(minimum_duration_s, required)
         duration_s = float(duration_s)
         if not math.isfinite(duration_s) or duration_s <= 0.0:
             raise ValueError("duration_s must be a positive finite value")
@@ -790,6 +854,128 @@ class RobotClient:
                     hold_error,
                 )
             raise
+        return duration_s
+
+    def get_action_joint_limits(self, action_keys: list[str]) -> list[dict]:
+        """Return the selected flat action layout and URDF bounds, without publishing."""
+        joints = {joint.attrib['name']: joint for joint in ET.parse(self._urdf_path).getroot().findall('joint')}
+        result = []
+        for key in action_keys:
+            cfg = self._action_groups[self._resolve_action_key(key)]
+            if cfg['msg_type'] == 'geometry_msgs/msg/Twist':
+                result.extend([{'name': '', 'lower': -math.inf, 'upper': math.inf, 'velocity': math.inf}] * 3)
+                continue
+            for name in cfg['joint_names']:
+                joint = joints.get(name)
+                limit = joint.find('limit') if joint is not None else None
+                if limit is None:
+                    raise ValueError(f'URDF joint limit missing for {name}')
+                result.append({'name': name, 'lower': float(limit.get('lower', '-inf')),
+                               'upper': float(limit.get('upper', 'inf')),
+                               'velocity': float(limit.get('velocity', 'inf'))})
+        return result
+
+    def get_current_action_positions(self, action_keys: list[str]) -> np.ndarray:
+        """Fresh joint feedback in action order; velocity modalities are zeroed."""
+        segments = iter(self._build_current_position_segments(action_keys))
+        values = []
+        for key in action_keys:
+            cfg = self._action_groups[self._resolve_action_key(key)]
+            if cfg['msg_type'] == 'geometry_msgs/msg/Twist':
+                values.extend([0.0] * 3)
+            else:
+                values.extend(next(segments)[2])
+        return np.asarray(values, dtype=np.float64)
+
+    def build_policy_handoff_ramp(
+        self,
+        action: np.ndarray,
+        action_keys: Optional[list[str]] = None,
+        sample_hz: float = 15.0,
+        maximum_duration_s: float = 60.0,
+    ) -> tuple[np.ndarray, float]:
+        """Build a current-feedback-to-policy ramp for a streaming handoff.
+
+        A normal policy command is a zero-duration trajectory.  That is safe
+        only when its first waypoint is already continuous with the robot's
+        held pose.  Lifecycle pause deliberately clears the action processor,
+        so use a fresh joint snapshot as the first sample and insert enough
+        source-rate waypoints to respect the same velocity bound as initial
+        pose synchronization.
+
+        Velocity-like modalities start from zero.  Position modalities start
+        from fresh controller feedback.  The returned ramp includes both the
+        current-state anchor and the requested policy target.
+        """
+        rate_hz = float(sample_hz)
+        maximum_duration = float(maximum_duration_s)
+        if not math.isfinite(rate_hz) or rate_hz <= 0.0:
+            raise ValueError("sample_hz must be positive and finite")
+        if not math.isfinite(maximum_duration) or maximum_duration <= 0.0:
+            raise ValueError("maximum_duration_s must be positive and finite")
+
+        segments = self._build_action_segments(action, action_keys)
+        hold_segments = self._build_current_position_segments(action_keys)
+        current_by_publisher = {
+            id(publisher): values
+            for publisher, _joint_names, values in hold_segments
+        }
+
+        start_parts: list[np.ndarray] = []
+        target_parts: list[np.ndarray] = []
+        max_position_delta = 0.0
+        for publisher, _joint_names, target, msg_type in segments:
+            target_values = np.asarray(target, dtype=np.float64).reshape(-1)
+            if msg_type == "geometry_msgs/msg/Twist":
+                start_values = np.zeros_like(target_values)
+            else:
+                current = current_by_publisher.get(id(publisher))
+                if current is None or current.shape != target_values.shape:
+                    raise RuntimeError(
+                        "current joint state does not match policy handoff target"
+                    )
+                start_values = np.asarray(current, dtype=np.float64).reshape(-1)
+                max_position_delta = max(
+                    max_position_delta,
+                    float(
+                        np.max(
+                            np.abs(target_values - start_values),
+                            initial=0.0,
+                        )
+                    ),
+                )
+            start_parts.append(start_values.copy())
+            target_parts.append(target_values.copy())
+
+        if not start_parts:
+            raise ValueError("policy handoff requires at least one action group")
+        start = np.concatenate(start_parts)
+        target = np.concatenate(target_parts)
+        velocity_limit = self._initial_pose_sync_max_velocity_rad_s
+        required_duration = max_position_delta / velocity_limit
+        if required_duration > maximum_duration:
+            raise RuntimeError(
+                "policy handoff requires "
+                f"{required_duration:.3f}s for max joint delta "
+                f"{max_position_delta:.3f}rad at {velocity_limit:.3f}rad/s, "
+                f"exceeding the {maximum_duration:.3f}s safety limit"
+            )
+
+        interval_count = max(1, int(math.ceil(required_duration * rate_hz)))
+        effective_duration = interval_count / rate_hz
+        if effective_duration > maximum_duration + 1e-9:
+            raise RuntimeError(
+                "policy handoff sampling would exceed the configured "
+                f"{maximum_duration:.3f}s safety limit"
+            )
+        ramp = np.linspace(
+            start,
+            target,
+            num=interval_count + 1,
+            axis=0,
+            dtype=np.float64,
+        )
+        return ramp, effective_duration
 
     def publish_current_pose_hold(
         self,
@@ -1083,6 +1269,22 @@ class RobotClient:
     # Observation
     # ------------------------------------------------------------------ #
 
+    def get_fresh_observation(self, max_age_s, camera_names=None, format="rgb"):
+        max_age_s = float(max_age_s)
+        if not math.isfinite(max_age_s) or max_age_s <= 0:
+            raise ValueError("max_age_s must be positive and finite")
+        cameras = list(self._config.get("cameras", {})) if camera_names is None else camera_names
+        groups = list(self._config.get("joint_groups", {}))
+        snapshot = self.get_observation_snapshot(format=format, camera_names=cameras, joint_groups=groups)
+        if any(age > max_age_s for age in snapshot["timing"]["sensor_age_s"].values()):
+            raise RuntimeError("Observation is stale")
+        if "odom" in self._config.get("sensors", {}):
+            with self._lock:
+                stamp = self._sensor_received_monotonic.get("odom", 0)
+            if not stamp or time.monotonic() - stamp > max_age_s:
+                raise RuntimeError("Odometry is stale")
+        return {"images": snapshot["images"], "joint_positions": snapshot["joints"], "timing": snapshot["timing"]}
+
     def get_observation_snapshot(
         self,
         format: str = 'rgb',
@@ -1099,6 +1301,7 @@ class RobotClient:
         """
         if format not in ('rgb', 'bgr'):
             raise ValueError('Observation image format must be rgb or bgr')
+        self._decode_pending_images(camera_names)
         with self._lock:
             cameras = list(self._images) if camera_names is None else list(camera_names)
             groups = list(self._joint_positions) if joint_groups is None else list(joint_groups)
@@ -1205,6 +1408,7 @@ class RobotClient:
         return False
 
     def _all_ready(self) -> bool:
+        self._decode_pending_images()
         with self._lock:
             for cam in self._config.get("cameras", {}):
                 if cam not in self._images:
@@ -1215,6 +1419,7 @@ class RobotClient:
             return True
 
     def _get_missing(self) -> list[str]:
+        self._decode_pending_images()
         missing = []
         with self._lock:
             for cam in self._config.get("cameras", {}):
@@ -1231,6 +1436,7 @@ class RobotClient:
 
     def get_status(self) -> dict:
         """Get current status of all subscriptions."""
+        self._decode_pending_images()
         with self._lock:
             return {
                 "robot_type": self._robot_type,
@@ -1268,19 +1474,21 @@ class RobotClient:
         if hasattr(self, '_closed') and self._closed:
             return
         self._closed = True
-        for sub in self._subscribers:
+        subscribers = getattr(self, '_subscribers', [])
+        for sub in subscribers:
             try:
                 sub.close()
             except Exception as e:
                 logger.debug(f"Error closing subscriber: {e}")
-        self._subscribers.clear()
-        for pub in self._command_publishers.values():
+        subscribers.clear()
+        publishers = getattr(self, '_command_publishers', {})
+        for pub in publishers.values():
             try:
                 pub.close()
             except Exception as e:
                 logger.debug(f"Error closing command publisher: {e}")
-        self._command_publishers.clear()
-        if self._preview_publisher is not None:
+        publishers.clear()
+        if getattr(self, '_preview_publisher', None) is not None:
             try:
                 self._preview_publisher.close()
             except Exception as e:

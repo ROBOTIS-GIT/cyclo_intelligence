@@ -73,6 +73,14 @@ const initialState = {
     message: '',
     jobId: '',
   },
+  // --- Intervention/stationary-frame curation progress -------------------
+  curationStatus: {
+    status: 'idle',
+    progress: 0,
+    stage: '',
+    message: '',
+    jobId: '',
+  },
 };
 
 const editDatasetSlice = createSlice({
@@ -137,6 +145,9 @@ const editDatasetSlice = createSlice({
     setConversionStatus: (state, action) => {
       state.conversionStatus = { ...state.conversionStatus, ...action.payload };
     },
+    setCurationStatus: (state, action) => {
+      state.curationStatus = { ...state.curationStatus, ...action.payload };
+    },
   },
 });
 
@@ -159,6 +170,7 @@ export const {
   setUploadStatus,
   setDownloadStatus,
   setConversionStatus,
+  setCurationStatus,
 } = editDatasetSlice.actions;
 
 export default editDatasetSlice.reducer;

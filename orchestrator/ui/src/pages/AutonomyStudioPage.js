@@ -17,13 +17,16 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useDispatch } from "react-redux";
+import { setActiveStudioWorkspace } from "../features/ui/uiSlice";
+import RLWorkflowLayout from "../features/offlineRL/components/RLWorkflowLayout";
 import ActionCanvasWorkspace from "../components/navigation/ActionCanvasWorkspace";
 import AutonomyStudioAppBar from "../components/autonomyStudio/AutonomyStudioAppBar";
 import AutonomyStudioWorkspaceChooser from "../components/autonomyStudio/WorkspaceChooser";
 import AutonomyCanvasWorkspace from "../features/autonomyCanvas/AutonomyCanvasWorkspace";
 import MissionCanvasWorkspace from "../features/missionCanvas/MissionCanvasWorkspace";
 import useStaleRunShutdownRecovery from "../features/mapWorkspace/hooks/useStaleRunShutdownRecovery";
-import { WORKSPACE_ACTION_CANVAS, WORKSPACE_MISSION, WORKSPACE_AUTONOMY } from "../features/mapWorkspace/lib/stages";
+import { WORKSPACE_ACTION_CANVAS, WORKSPACE_MISSION, WORKSPACE_AUTONOMY, WORKSPACE_RL_CANVAS } from "../features/mapWorkspace/lib/stages";
 import {
   initialWorkspaceKind,
   readMissionSession,
@@ -76,13 +79,16 @@ function AutonomyStudioWorkspace({
   // The kind is fixed for the lifetime of a mount; the shell remounts (keyed)
   // when a different workspace is chosen.
   const [workspaceKind] = useState(() => (
-    workspaceKindOverride === WORKSPACE_MISSION
+    workspaceKindOverride === WORKSPACE_RL_CANVAS
+      || workspaceKindOverride === WORKSPACE_MISSION
       || workspaceKindOverride === WORKSPACE_AUTONOMY
       || workspaceKindOverride === WORKSPACE_ACTION_CANVAS
       ? workspaceKindOverride
       : initialWorkspaceKind(readMissionSession())
   ));
   const MapWorkspace = workspaceKind === WORKSPACE_AUTONOMY ? AutonomyCanvasWorkspace : MissionCanvasWorkspace;
+  const dispatch = useDispatch();
+  const rlCanvas = workspaceKind === WORKSPACE_RL_CANVAS;
   const actionCanvas = workspaceKind === WORKSPACE_ACTION_CANVAS;
   const [actionCanvasExitState, setActionCanvasExitState] = useState(IDLE_EXIT_STATE);
   const [missionExitBlockReason, setMissionExitBlockReason] = useState("");
@@ -90,8 +96,10 @@ function AutonomyStudioWorkspace({
 
   useEffect(() => {
     saveMissionSession({ workspaceKind });
-  }, [workspaceKind]);
-  useStaleRunShutdownRecovery(actionCanvas);
+    dispatch(setActiveStudioWorkspace(workspaceKind));
+    return () => { dispatch(setActiveStudioWorkspace("")); };
+  }, [dispatch, workspaceKind]);
+  useStaleRunShutdownRecovery(actionCanvas || rlCanvas);
 
   const handleActionCanvasExitStateChange = useCallback((nextState) => {
     const normalized = {
@@ -110,14 +118,14 @@ function AutonomyStudioWorkspace({
     );
   }, []);
 
-  const blockReason = actionCanvas
+  const blockReason = actionCanvas || rlCanvas
     ? actionCanvasExitBlockReason(actionCanvasExitState)
     : missionExitBlockReason;
 
   const handleBack = () => {
     // The app bar already shows the reason; the click is simply not honored.
     if (blockReason) return;
-    if (actionCanvas) {
+    if (actionCanvas || rlCanvas) {
       onBackToWorkspaceChooser();
       return;
     }
@@ -137,7 +145,11 @@ function AutonomyStudioWorkspace({
         backTitle="Back to workspace selection"
         blockReason={blockReason}
       />
-      {actionCanvas ? (
+      {rlCanvas ? (
+        <main className="rl-canvas-workspace flex-1 min-w-0 min-h-0" aria-label="RL Canvas workspace">
+          <RLWorkflowLayout isActive embedded onExitStateChange={handleActionCanvasExitStateChange} />
+        </main>
+      ) : actionCanvas ? (
         <main className="flex-1 min-w-0 min-h-0" aria-label="Action Canvas workspace">
           <ActionCanvasWorkspace
             isActive
@@ -188,6 +200,7 @@ export default function AutonomyStudioPage({
         <>
           <AutonomyStudioAppBar onBack={onBackHome} />
           <AutonomyStudioWorkspaceChooser
+            onChooseRLCanvas={() => chooseWorkspace(WORKSPACE_RL_CANVAS)}
             onChooseTaskBuilder={() => chooseWorkspace(WORKSPACE_ACTION_CANVAS)}
             onChooseMissionCanvas={() => chooseWorkspace(WORKSPACE_MISSION)}
             onChooseAutonomyCanvas={() => chooseWorkspace(WORKSPACE_AUTONOMY)}

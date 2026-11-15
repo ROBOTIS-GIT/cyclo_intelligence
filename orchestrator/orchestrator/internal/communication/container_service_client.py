@@ -115,6 +115,7 @@ class ServiceResponse:
         for attr in [
             'job_id', 'state', 'step', 'total_steps', 'loss',
             'learning_rate', 'chunk_size', 'action_dim',
+            'initial_pose_sync_duration_s',
         ]:
             if hasattr(response, attr):
                 data[attr] = getattr(response, attr)
@@ -145,6 +146,7 @@ class ContainerServiceClient:
     CMD_STOP = 4
     CMD_UNLOAD = 5
     CMD_UPDATE_INSTRUCTION = 6
+    CMD_SET_ACTION_POLICY = 20
 
     def __init__(
         self,
@@ -384,8 +386,11 @@ class ContainerServiceClient:
         initial_pose_sync_duration_s: float = 5.0,
         timeout_sec: Optional[float] = None,
         action_chunk_size: int = 0,
-        ttrtc_enabled: bool = False,
-        ttrtc_prefix_steps: int = 7,
+        rlt_enabled: bool = False,
+        rlt_bundle_path: str = "",
+        action_policy_mode: str = "base",
+        rlt_robot_override: bool = False,
+        initial_pose_sync_defer_activation: bool = False,
     ) -> ServiceResponse:
         """Call /{prefix}/inference_command (InferenceCommand.srv).
 
@@ -394,9 +399,9 @@ class ContainerServiceClient:
         other commands. ``task_instruction`` is used by LOAD (training-time
         conditioning) and RESUME (online re-conditioning). ``publish_to_robot``
         gates the policy container's robot command publishers; false is
-        simulation / 3D preview only. ``action_request_mode`` controls whether
-        the policy Main runtime prefetches chunks ("async") or waits for the
-        current buffer to drain ("sync"). ``acceleration_mode`` and
+        simulation / 3D preview only. ``action_request_mode`` selects async
+        prefetch, drained-buffer sync, or GR00T-only ``tt_rtc`` clean-prefix
+        continuation. ``acceleration_mode`` and
         ``acceleration_engine_path`` are LOAD-time runtime optimization knobs.
         ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` configure
         the Main runtime's action processing at LOAD time. Zero values keep
@@ -409,20 +414,12 @@ class ContainerServiceClient:
         if vla_rail_enabled and (int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
                                  or action_request_mode != 'async'):
             raise ValueError('VLA-RAIL requires ordinary GR00T Async LOAD')
-        if ttrtc_enabled:
-            if (int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
-                    or action_request_mode != 'async' or vla_rail_enabled
-                    or acceleration_mode not in ('', 'pytorch') or inference_hz not in (0, 15)):
-                raise ValueError('TT-RTC requires GR00T Async LOAD, PyTorch, 15 Hz and VLA-RAIL disabled')
-            if str(ttrtc_prefix_steps) not in {str(i) for i in range(9)}:
-                raise ValueError('ttrtc_prefix_steps must be an integer from 0 to 8')
+        if action_request_mode == 'tt_rtc' and (
+            int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
+            or vla_rail_enabled or acceleration_mode not in ('', 'pytorch', 'tensorrt_dit')
+        ):
+            raise ValueError('TT-RTC requires GR00T LOAD without VLA-RAIL')
         request = InferenceCommand.Request()
-        if ttrtc_enabled and not all(hasattr(request, field) for field in ('ttrtc_enabled', 'ttrtc_prefix_steps')):
-            raise RuntimeError('Rebuild interfaces to enable TT-RTC')
-        if hasattr(request, 'ttrtc_enabled'):
-            request.ttrtc_enabled = bool(ttrtc_enabled)
-        if hasattr(request, 'ttrtc_prefix_steps'):
-            request.ttrtc_prefix_steps = int(ttrtc_prefix_steps) if ttrtc_enabled else 0
         if vla_rail_enabled and not hasattr(request, 'vla_rail_enabled'):
             raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
         if hasattr(request, 'vla_rail_enabled'):
@@ -446,18 +443,30 @@ class ContainerServiceClient:
         if hasattr(request, "acceleration_engine_path"):
             request.acceleration_engine_path = str(acceleration_engine_path or "")
         if hasattr(request, "control_hz"):
-            request.control_hz = _uint16_or_zero(control_hz)
+            request.control_hz = float(_positive_float_or_zero(control_hz))
         if hasattr(request, "inference_hz"):
-            request.inference_hz = 15 if ttrtc_enabled else _uint16_or_zero(inference_hz)
+            request.inference_hz = _uint16_or_zero(inference_hz)
         if hasattr(request, "chunk_align_window_s"):
             request.chunk_align_window_s = _positive_float_or_zero(
                 chunk_align_window_s
             )
+        if hasattr(request, "rlt_enabled"):
+            request.rlt_enabled = bool(rlt_enabled)
+        if hasattr(request, "rlt_bundle_path"):
+            request.rlt_bundle_path = str(rlt_bundle_path or "")
+        if hasattr(request, "action_policy_mode"):
+            request.action_policy_mode = str(action_policy_mode or "base")
+        if hasattr(request, "rlt_robot_override"):
+            request.rlt_robot_override = bool(rlt_robot_override)
         if hasattr(request, "initial_pose_sync"):
             request.initial_pose_sync = bool(initial_pose_sync)
         if hasattr(request, "initial_pose_sync_duration_s"):
             request.initial_pose_sync_duration_s = float(
                 initial_pose_sync_duration_s
+            )
+        if hasattr(request, "initial_pose_sync_defer_activation"):
+            request.initial_pose_sync_defer_activation = bool(
+                initial_pose_sync_defer_activation
             )
 
         if timeout_sec is None:

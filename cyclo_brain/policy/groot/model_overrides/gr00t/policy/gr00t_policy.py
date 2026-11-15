@@ -391,8 +391,7 @@ class Gr00tPolicy(BasePolicy):
 
         Args:
             observation: Batched observation dictionary
-            options: TT-RTC requests provide ttrtc_enabled and a physical action
-                prefix dict with arrays [B,d,D_key], including empty d=0 arrays.
+            options: Optional standard inference parameters.
 
         Returns:
             Tuple of (actions_dict, info_dict)
@@ -414,17 +413,8 @@ class Gr00tPolicy(BasePolicy):
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
 
         # Step 4: Run model inference to predict actions
-        model_options = None
-        rtc_enabled = bool(getattr(self.model.config, "training_time_rtc", False))
-        if rtc_enabled:
-            model_options = self._ttrtc_model_options(options, states)
-        elif options and (options.get("ttrtc_enabled") or "ttrtc_prefix_actions" in options):
-            raise ValueError("TT-RTC inference requires a training_time_rtc checkpoint")
         with torch.inference_mode():
-            if rtc_enabled:
-                model_pred = self.model.get_action(**collated_inputs, options=model_options)
-            else:
-                model_pred = self.model.get_action(**collated_inputs)
+            model_pred = self.model.get_action(**collated_inputs)
         normalized_action = model_pred["action_pred"].float()
 
         # Step 5: Decode actions from normalized space back to physical units
@@ -439,45 +429,8 @@ class Gr00tPolicy(BasePolicy):
         casted_action = {
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
-        if rtc_enabled:
-            # Preserve commands already committed by the execution queue despite
-            # normalization clipping and BF16 rounding inside the network.
-            for key, prefix in options["ttrtc_prefix_actions"].items():
-                casted_action[key][:, :prefix.shape[1]] = prefix
         return casted_action, {}
 
-    def _ttrtc_model_options(self, options, states):
-        if not options or options.get("ttrtc_enabled") is not True:
-            raise ValueError("TT-RTC checkpoint requires the explicit TT-RTC execution mode")
-        prefix = options.get("ttrtc_prefix_actions")
-        keys = self.modality_configs["action"].modality_keys
-        if not isinstance(prefix, dict) or set(prefix) != set(keys):
-            raise ValueError("TT-RTC prefix must contain every trained action key")
-        processor = self.processor.state_action_processor
-        tag = self.embodiment_tag.value
-        delay = None
-        for key in keys:
-            values = prefix[key]
-            dim = int(processor.norm_params[tag]["action"][key]["dim"])
-            if (not isinstance(values, np.ndarray) or values.ndim != 3
-                    or values.shape[0] != len(states) or values.shape[2] != dim
-                    or not 0 <= values.shape[1] <= 8 or not np.isfinite(values).all()):
-                raise ValueError("TT-RTC physical prefix must be finite [B,d,D_key], d=0..8")
-            if delay is None:
-                delay = values.shape[1]
-            elif delay != values.shape[1]:
-                raise ValueError("TT-RTC action keys must have the same prefix length")
-        normalized = []
-        for index, state in enumerate(states):
-            sample = {key: prefix[key][index] for key in keys}
-            # Use checkpoint statistics and its exact min/max clipping transform,
-            # in the processor's trained key order, without re-estimating stats.
-            sample = processor.apply_action(sample, tag, state=state)
-            normalized.append(np.concatenate([sample[key] for key in keys], axis=-1))
-        result = np.stack(normalized).astype(np.float32)
-        if result.shape[-1] != 16:
-            raise ValueError("TT-RTC requires the trained 16-dimensional action space")
-        return {"ttrtc_prefix": result}
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.
@@ -537,6 +490,315 @@ class Gr00tPolicy(BasePolicy):
             Dictionary containing the info after resetting the policy
         """
         return {}
+
+    @property
+    def training_time_rtc_enabled(self) -> bool:
+        """Whether the loaded model config declares TT-RTC training support."""
+
+        return bool(getattr(self.model.config, "training_time_rtc_enabled", False))
+
+    @property
+    def training_time_rtc_max_delay_steps(self) -> int:
+        """Maximum trained clean-prefix length declared by the model config."""
+
+        value = getattr(self.model.config, "training_time_rtc_max_delay_steps", 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(
+                "Invalid model.config.training_time_rtc_max_delay_steps: "
+                f"{value!r}"
+            )
+        return value
+
+    def get_tt_rtc_model_contract(self) -> dict[str, int | float | bool]:
+        """Expose loaded config/dimensions for manifest cross-validation."""
+
+        action_hz = getattr(self.model.config, "training_time_rtc_action_hz", 15.0)
+        if isinstance(action_hz, bool) or not isinstance(action_hz, (int, float)):
+            raise RuntimeError(
+                f"Invalid model.config.training_time_rtc_action_hz: {action_hz!r}"
+            )
+        return {
+            "enabled": self.training_time_rtc_enabled,
+            "max_delay_steps": self.training_time_rtc_max_delay_steps,
+            "action_hz": float(action_hz),
+            "action_horizon": len(self.modality_configs["action"].delta_indices),
+            "action_dimension": sum(
+                dimension for _key, dimension in self._action_group_dimensions()
+            ),
+            "model_action_horizon": int(self.model.config.action_horizon),
+            "model_action_dimension": int(self.model.config.max_action_dim),
+            "processor_action_horizon": int(self.processor.max_action_horizon),
+            "processor_action_dimension": int(self.processor.max_action_dim),
+            "num_inference_timesteps": int(self.model.config.num_inference_timesteps),
+            "num_timestep_buckets": int(self.model.config.num_timestep_buckets),
+        }
+
+    def _action_group_dimensions(self) -> list[tuple[str, int]]:
+        """Return physical action groups in checkpoint serialization order."""
+
+        processor = self.processor.state_action_processor
+        tag = self.embodiment_tag.value
+        groups = []
+        for key in self.modality_configs["action"].modality_keys:
+            params = processor.norm_params[tag]["action"][key]
+            dim = params.get("dim")
+            if dim is None:
+                for statistic_name in ("mean", "min", "max"):
+                    statistic = params.get(statistic_name)
+                    if statistic is not None:
+                        dim = np.asarray(statistic).size
+                        break
+            try:
+                value = int(np.asarray(dim).item())
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"Cannot determine action dimension for modality {key!r}"
+                ) from error
+            if value <= 0:
+                raise RuntimeError(f"Invalid action dimension for modality {key!r}: {value}")
+            groups.append((key, value))
+        return groups
+
+    def _normalize_tt_rtc_prefix(
+        self,
+        committed_action_prefix: np.ndarray,
+        raw_states: list[dict[str, np.ndarray]],
+    ) -> torch.Tensor:
+        """Normalize a physical prefix and pad it to GR00T's model action width."""
+
+        prefix = np.asarray(committed_action_prefix, dtype=np.float32)
+        if prefix.ndim != 3:
+            raise ValueError(
+                "TT-RTC committed_action_prefix must have shape (B, d, A), got "
+                f"{prefix.shape}"
+            )
+        if prefix.shape[0] != len(raw_states):
+            raise ValueError("TT-RTC prefix batch size does not match observation batch size")
+        if not np.isfinite(prefix).all():
+            raise ValueError("TT-RTC committed_action_prefix must be finite")
+
+        groups = self._action_group_dimensions()
+        logical_action_dim = sum(dim for _key, dim in groups)
+        if prefix.shape[2] != logical_action_dim:
+            raise ValueError(
+                "TT-RTC physical action dimension mismatch: expected "
+                f"{logical_action_dim}, got {prefix.shape[2]}"
+            )
+        model_action_dim = int(self.model.config.max_action_dim)
+        if logical_action_dim > model_action_dim:
+            raise RuntimeError("TT-RTC logical action exceeds GR00T model action width")
+
+        normalized_batches = []
+        for batch_index, state in enumerate(raw_states):
+            offset = 0
+            physical_groups = {}
+            for key, dim in groups:
+                physical_groups[key] = prefix[
+                    batch_index,
+                    :,
+                    offset : offset + dim,
+                ]
+                offset += dim
+            if prefix.shape[1] == 0:
+                normalized = np.zeros((0, logical_action_dim), dtype=np.float32)
+            else:
+                normalized_groups = self.processor.state_action_processor.apply_action(
+                    physical_groups,
+                    self.embodiment_tag.value,
+                    state=state,
+                    clip_outliers=False,
+                )
+                normalized = np.concatenate(
+                    [normalized_groups[key] for key, _dim in groups],
+                    axis=-1,
+                ).astype(np.float32, copy=False)
+            padded = np.zeros((prefix.shape[1], model_action_dim), dtype=np.float32)
+            padded[:, :logical_action_dim] = normalized
+            normalized_batches.append(padded)
+        return torch.from_numpy(np.stack(normalized_batches, axis=0))
+
+    @torch.inference_mode()
+    def get_action_tt_rtc(
+        self,
+        observation: dict[str, Any],
+        *,
+        committed_action_prefix: np.ndarray,
+        delay_steps: int,
+        action_horizon: int,
+        temporal_overlap_steps: int = 0,
+        return_rlt_context: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Generate a TT-RTC chunk from a physical committed action prefix.
+
+        This entry point deliberately bypasses the legacy inference-time RTC
+        ``options`` contract.  It normalizes the physical prefix with the same
+        checkpoint processor used for training and exposes an optional RLT
+        context from this exact backbone/action-head forward.
+        """
+
+        if self.strict:
+            self.check_observation(observation)
+        if isinstance(delay_steps, bool) or not isinstance(delay_steps, int):
+            raise ValueError("TT-RTC delay_steps must be an integer")
+        logical_horizon = len(self.modality_configs["action"].delta_indices)
+        if action_horizon != logical_horizon:
+            raise ValueError(
+                f"TT-RTC action_horizon must be {logical_horizon}, got {action_horizon}"
+            )
+        if not self.training_time_rtc_enabled:
+            raise RuntimeError("GR00T checkpoint is not configured for Training-Time RTC")
+        max_delay = self.training_time_rtc_max_delay_steps
+        if (
+            isinstance(max_delay, bool)
+            or not isinstance(max_delay, int)
+            or not 0 <= delay_steps <= max_delay
+        ):
+            raise ValueError(
+                f"TT-RTC delay_steps must be in [0, {max_delay}], got {delay_steps}"
+            )
+        if delay_steps >= logical_horizon:
+            raise ValueError("TT-RTC delay must leave a non-empty logical postfix")
+        if (
+            isinstance(temporal_overlap_steps, bool)
+            or not isinstance(temporal_overlap_steps, int)
+            or not 0 <= temporal_overlap_steps
+            <= logical_horizon - delay_steps
+        ):
+            raise ValueError(
+                "TT-RTC temporal_overlap_steps must fit in the logical postfix"
+            )
+
+        unbatched_observations = self._unbatch_observation(observation)
+        processed_inputs = []
+        raw_states = []
+        for obs in unbatched_observations:
+            vla_step_data = self._to_vla_step_data(obs)
+            raw_states.append(vla_step_data.states)
+            processed_inputs.append(
+                self.processor(
+                    [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
+                )
+            )
+        collated_inputs = self.collate_fn(processed_inputs)
+        collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
+        if "inputs" not in collated_inputs:
+            raise RuntimeError("TT-RTC expected collator output containing 'inputs'")
+
+        prefix = np.asarray(committed_action_prefix, dtype=np.float32)
+        expected_prefix_shape = (
+            len(unbatched_observations),
+            delay_steps,
+            sum(dim for _key, dim in self._action_group_dimensions()),
+        )
+        if prefix.shape != expected_prefix_shape:
+            raise ValueError(
+                "TT-RTC committed_action_prefix must have shape "
+                f"{expected_prefix_shape}, got {prefix.shape}"
+            )
+        normalized_prefix = self._normalize_tt_rtc_prefix(prefix, raw_states)
+
+        backbone_inputs, action_inputs = self.model.prepare_input(collated_inputs["inputs"])
+        backbone_output = self.model.backbone(backbone_inputs)
+        # RLT Stage 1 consumes the unprojected backbone representation.  Clone
+        # it before action_head.process_backbone_output mutates the container.
+        raw_tokens = backbone_output["backbone_features"].detach().clone()
+        raw_token_valid = backbone_output["backbone_attention_mask"].to(
+            dtype=torch.bool
+        ).detach().clone()
+        raw_image_token = backbone_output["image_mask"].to(
+            dtype=torch.bool
+        ).detach().clone()
+        normalized_state = action_inputs["state"].detach().clone()
+
+        model_pred = self.model.action_head.get_action_tt_rtc(
+            backbone_output,
+            action_inputs,
+            normalized_action_prefix=normalized_prefix,
+            delay_steps=delay_steps,
+            logical_action_horizon=logical_horizon,
+            temporal_overlap_steps=temporal_overlap_steps,
+        )
+        normalized_action = model_pred["action_pred"].float()
+
+        batched_states = {
+            key: np.stack([state[key] for state in raw_states], axis=0)
+            for key in self.modality_configs["state"].modality_keys
+        }
+        unnormalized_action = self.processor.decode_action(
+            normalized_action.cpu().numpy(),
+            self.embodiment_tag,
+            batched_states,
+        )
+        casted_action = {
+            key: value.astype(np.float32) for key, value in unnormalized_action.items()
+        }
+        # The sampler conditions in the model's compute dtype (normally
+        # BF16), while the control queue owns float32 physical commands.  A
+        # decode round-trip can therefore move a committed prefix by a few
+        # ULPs.  Return the queue-owned physical prefix verbatim: those rows
+        # have already executed or are irrevocably committed, and the common
+        # runtime requires an exact handoff before accepting the postfix.
+        offset = 0
+        for key, dimension in self._action_group_dimensions():
+            group_action = casted_action.get(key)
+            expected_group_shape = (
+                prefix.shape[0],
+                logical_horizon,
+                dimension,
+            )
+            if group_action is None or tuple(group_action.shape) != expected_group_shape:
+                raise RuntimeError(
+                    f"TT-RTC decoded action group {key!r} must have shape "
+                    f"{expected_group_shape}, got "
+                    f"{None if group_action is None else tuple(group_action.shape)}"
+                )
+            group_action[:, :delay_steps, :] = prefix[
+                :, :delay_steps, offset : offset + dimension
+            ]
+            offset += dimension
+        if offset != expected_prefix_shape[2]:
+            raise RuntimeError("TT-RTC decoded action groups did not consume the full prefix")
+        if self.strict:
+            self.check_action(casted_action)
+
+        info: dict[str, Any] = {}
+        if return_rlt_context:
+            logical_action_dim = expected_prefix_shape[2]
+            reference = normalized_action[
+                :, :logical_horizon, :logical_action_dim
+            ].detach().clone()
+            normalized_committed_prefix = model_pred["normalized_action_prefix"][
+                :, :, :logical_action_dim
+            ].float().detach().clone()
+            if not torch.equal(
+                reference[:, :delay_steps],
+                normalized_committed_prefix.to(
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+            ):
+                raise RuntimeError("TT-RTC sampler did not preserve the exact clean prefix")
+            info["tt_rtc_rlt_context"] = {
+                "schema": "cyclo.groot.tt-rtc-rlt-context/v1",
+                "delay_steps": delay_steps,
+                "tokens": raw_tokens,
+                "token_valid": raw_token_valid,
+                "image_token": raw_image_token,
+                "proprio": normalized_state[
+                    :, -1, :logical_action_dim
+                ].float().detach().clone(),
+                "reference_actions": reference,
+                "normalized_committed_prefix": normalized_committed_prefix,
+                "batched_states": batched_states,
+            }
+        return casted_action, info
+
+    def reset_tt_rtc_noise_cache(self) -> None:
+        """Reset cached initial noise when trajectory continuity is broken."""
+
+        reset = getattr(self.model.action_head, "reset_tt_rtc_noise_cache", None)
+        if callable(reset):
+            reset()
 
 
 class Gr00tSimPolicyWrapper(PolicyWrapper):

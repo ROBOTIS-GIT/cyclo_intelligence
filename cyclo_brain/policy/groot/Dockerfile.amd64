@@ -187,7 +187,7 @@ RUN if [ "$GPU_ARCH" = "blackwell" ]; then \
 # action_chunk_processing are mounted as volumes (see docker-compose.yml).
 # IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled zenoh-c version (1.6.x)
 # Mismatched versions (e.g., 1.7.x vs 1.6.x) cause service call failures despite discovery working
-RUN pip install "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
+RUN pip install "ruckig==0.12.2" "eclipse-zenoh>=1.6.0,<1.7.0" rosbags>=0.11.0 GitPython>=3.1.18 json5>=0.9.14 pyyaml \
     && mkdir -p /zenoh_sdk /robot_client_sdk /action_chunk_processing_sdk /orchestrator_config \
                 /policy_runtime
 

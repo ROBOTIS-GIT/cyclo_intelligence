@@ -48,14 +48,11 @@ def test_dynamic_inference_command_definition_matches_ros_service() -> None:
     dynamic_fields = _field_lines(_load_request_definition())
 
     assert dynamic_fields == service_fields
-    assert dynamic_fields[-6:] == [
-        "uint16 control_hz",
-        "uint16 inference_hz",
-        "float64 chunk_align_window_s",
-        "bool initial_pose_sync",
-        "float64 initial_pose_sync_duration_s",
-        "uint16 action_chunk_size",
-    ]
+    assert "uint16 action_chunk_size" in dynamic_fields
+    assert "string action_request_mode" in dynamic_fields
+    assert "bool rlt_enabled" in dynamic_fields
+    assert not any("ttrtc_" in field for field in dynamic_fields)
+
 
 
 def test_dynamic_engine_command_definitions_match_service_and_runtime():
@@ -71,4 +68,14 @@ def test_dynamic_engine_command_definitions_match_service_and_runtime():
     fields = _field_lines(service, stop_at_separator=True)
     assert _field_lines(module.ENGINE_COMMAND_REQUEST_DEF) == fields
     assert _field_lines(runtime_definition) == fields
-    assert fields[-1] == 'uint16 action_chunk_size'
+    assert fields[:2] == ["uint8 command", "uint16 action_chunk_size"]
+    assert fields[-1] == "float64[] rtc_prefix_action_list"
+
+    response = _field_lines(service.split("---", 1)[1])
+    assert _field_lines(module.ENGINE_COMMAND_RESPONSE_DEF) == response
+    runtime_response = next(ast.literal_eval(node.value) for node in source.body
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+        and target.id == "ENGINE_COMMAND_RESPONSE_DEF" for target in node.targets))
+    assert _field_lines(runtime_response) == response
+    inference_response = _field_lines(SERVICE_PATH.read_text().split("---", 1)[1])
+    assert _field_lines(module.INFERENCE_COMMAND_RESPONSE_DEF) == inference_response

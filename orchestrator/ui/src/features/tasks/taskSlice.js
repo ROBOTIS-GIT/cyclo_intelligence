@@ -17,18 +17,31 @@
  */
 
 import { createSelector, createSlice } from '@reduxjs/toolkit';
+import { normalizeInferenceAcceleration } from '../../utils/inferenceAcceleration';
 import { defaultInferenceChunkSize } from '../../utils/inferenceChunks';
 import { RecordPhase, InferencePhase } from '../../constants/taskPhases';
 import {
   getInferenceTaskInfoKey,
   getRecordTaskInfoKey,
+  normalizeActionRequestMode,
 } from '../../utils/taskInfoSync';
+import {
+  supportsTtRtcInference,
+} from '../../constants/policyCapabilities';
 
 const SYNCED_MESSAGE = 'Session task info synced.';
 const CONFLICT_MESSAGE = 'Server task info changed while editing; local draft not synced.';
 const FAILED_MESSAGE = 'Task info not synced; robot button may use old task.';
 export const ROBOT_TYPE_STORAGE_KEY = 'cyclo_intelligence.robot_type';
 export const ROBOT_TYPE_STATUS_GUARD_MS = 30000;
+
+export const InferenceRecordingUiPhase = Object.freeze({
+  IDLE: 'idle',
+  STARTING: 'starting',
+  RECORDING: 'recording',
+  SAVING: 'saving',
+  CANCELLING: 'cancelling',
+});
 
 const getSessionStorage = () => {
   if (typeof window === 'undefined') {
@@ -114,6 +127,7 @@ const inferenceTaskInfoInitialState = {
   checkpointInstructionKey: '',
   policyPath: '',
   recordInferenceMode: false,
+  recordingFolder: '',
   controlHz: 100,
   inferenceHz: 15,
   actionChunkSize: 100,
@@ -124,6 +138,14 @@ const inferenceTaskInfoInitialState = {
   actionRequestMode: 'async',
   accelerationMode: 'pytorch',
   accelerationEnginePath: '',
+  // RLT is preloaded with the base policy. actionPolicyMode is runtime
+  // routing state and always resets to the base GR00T path on a fresh start.
+  rltEnabled: false,
+  rltBundlePath: '',
+  // Explicit safety opt-in required before an RLT action can be routed to a
+  // physical robot. Simulation remains available without this override.
+  rltRobotOverride: false,
+  actionPolicyMode: 'base',
   initialPoseSync: false,
   initialPoseSyncDurationS: 5.0,
 };
@@ -144,17 +166,34 @@ const copyRecordTaskInfo = (recordTaskInfo = recordTaskInfoInitialState) => ({
 
 const copyInferenceTaskInfo = (
   inferenceTaskInfo = inferenceTaskInfoInitialState
-) => ({
-  ...inferenceTaskInfoInitialState,
-  ...inferenceTaskInfo,
-  actionChunkSize: inferenceTaskInfo.actionChunkSize ?? defaultInferenceChunkSize(
-    inferenceTaskInfo.serviceType || 'lerobot', inferenceTaskInfo.policyType || 'act'
-  ),
-  actionRequestMode:
-    String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async',
-});
+) => {
+  const serviceType = String(
+    inferenceTaskInfo.serviceType ?? inferenceTaskInfoInitialState.serviceType
+  );
+  const policyType = String(
+    inferenceTaskInfo.policyType ?? inferenceTaskInfoInitialState.policyType
+  );
+  const requestedActionMode = normalizeActionRequestMode(
+    inferenceTaskInfo.actionRequestMode
+  );
+  return {
+    ...inferenceTaskInfoInitialState,
+    ...inferenceTaskInfo,
+    actionChunkSize: inferenceTaskInfo.actionChunkSize ?? defaultInferenceChunkSize(serviceType, policyType),
+    rltEnabled: Boolean(inferenceTaskInfo.rltEnabled),
+    rltBundlePath: String(inferenceTaskInfo.rltBundlePath ?? ''),
+    rltRobotOverride: Boolean(inferenceTaskInfo.rltRobotOverride),
+    actionPolicyMode:
+      String(inferenceTaskInfo.actionPolicyMode || '').trim().toLowerCase() === 'rlt'
+        ? 'rlt'
+        : 'base',
+    actionRequestMode:
+      requestedActionMode === 'tt_rtc' &&
+      !supportsTtRtcInference(serviceType, policyType)
+        ? 'async'
+        : requestedActionMode,
+  };
+};
 
 const selectTasksState = (state) => state.tasks || state;
 
@@ -303,6 +342,16 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
   } else {
     applySharedTaskInfo(state, taskInfo);
   }
+  const serviceType = String(
+    taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''
+  );
+  const policyType = String(
+    taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'
+  );
+  const supportsTtRtc = supportsTtRtcInference(serviceType, policyType);
+  const requestedActionMode = normalizeActionRequestMode(
+    taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode
+  );
   state.inferenceTaskInfo = {
     ...state.inferenceTaskInfo,
     taskType: 'inference',
@@ -310,6 +359,9 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     recordInferenceMode: Object.prototype.hasOwnProperty.call(taskInfo, 'recordInferenceMode')
       ? Boolean(taskInfo.recordInferenceMode)
       : Boolean(state.inferenceTaskInfo.recordInferenceMode),
+    recordingFolder: String(
+      taskInfo.recordingFolder ?? state.inferenceTaskInfo.recordingFolder ?? ''
+    ),
     controlHz: taskInfo.controlHz ?? state.inferenceTaskInfo.controlHz ?? 100,
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
     actionChunkSize: taskInfo.actionChunkSize ?? (
@@ -321,24 +373,38 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     ),
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
-    serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
-    policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
+    serviceType,
+    policyType,
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
     actionRequestMode:
+      requestedActionMode === 'tt_rtc' && !supportsTtRtc
+        ? 'async'
+        : requestedActionMode,
+    ...normalizeInferenceAcceleration({ ...state.inferenceTaskInfo, ...taskInfo, serviceType, policyType }),
+    rltEnabled: Object.prototype.hasOwnProperty.call(taskInfo, 'rltEnabled')
+      ? Boolean(taskInfo.rltEnabled)
+      : Boolean(state.inferenceTaskInfo.rltEnabled),
+    rltBundlePath: String(
+      taskInfo.rltBundlePath ?? state.inferenceTaskInfo.rltBundlePath ?? ''
+    ),
+    rltRobotOverride: Object.prototype.hasOwnProperty.call(
+      taskInfo,
+      'rltRobotOverride'
+    )
+      ? Boolean(taskInfo.rltRobotOverride)
+      : Boolean(state.inferenceTaskInfo.rltRobotOverride),
+    actionPolicyMode:
       String(
-        taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode ?? ''
-      ).trim().toLowerCase() === 'sync'
-        ? 'sync'
-        : 'async',
-    accelerationMode: String(
-      taskInfo.accelerationMode ?? state.inferenceTaskInfo.accelerationMode ?? 'pytorch'
-    ),
-    accelerationEnginePath: String(
-      taskInfo.accelerationEnginePath ?? state.inferenceTaskInfo.accelerationEnginePath ?? ''
-    ),
-    initialPoseSync: Object.prototype.hasOwnProperty.call(taskInfo, 'initialPoseSync')
+        taskInfo.actionPolicyMode ?? state.inferenceTaskInfo.actionPolicyMode ?? ''
+      ).trim().toLowerCase() === 'rlt'
+        ? 'rlt'
+        : 'base',
+    initialPoseSync: Object.prototype.hasOwnProperty.call(
+      taskInfo,
+      'initialPoseSync'
+    )
       ? Boolean(taskInfo.initialPoseSync)
       : Boolean(state.inferenceTaskInfo.initialPoseSync),
     initialPoseSyncDurationS:
@@ -367,6 +433,11 @@ const initialState = {
   // record-session state.
   recordStatus: {
     taskName: 'idle',
+    taskType: '',
+    recordInferenceMode: false,
+    tags: [],
+    taskNum: '',
+    recordingFolder: '',
     running: false,
     recordPhase: RecordPhase.READY,
     progress: 0,
@@ -393,6 +464,10 @@ const initialState = {
     topicReceived: false,
   },
 
+  inferenceRecordingUi: {
+    phase: InferenceRecordingUiPhase.IDLE,
+  },
+
   // Inference-side snapshot from /task/inference_status (orchestrator
   // direct, one-shot per phase transition).
   inferenceStatus: {
@@ -410,6 +485,7 @@ const initialState = {
   joystickMode: '',
   // Per-topic live monitor snapshot from rosbag_recorder (1 Hz while recording).
   recordingMonitor: {
+    arbiter: null,      // Fresh command-source state, used to distinguish idle commands.
     topics: [],         // [{name, rateHz, baselineHz, secondsSinceLast, status}]
     cameraTopics: [],   // [{name, cameraName, rateHz, baselineHz, secondsSinceLast, status}]
     totalReceived: 0,
@@ -464,10 +540,61 @@ const taskSlice = createSlice({
       syncLegacyTaskInfo(state);
     },
     setRecordStatus: (state, action) => {
-      state.recordStatus = { ...state.recordStatus, ...action.payload };
+      const previousStatus = state.recordStatus;
+      const nextStatus = { ...previousStatus, ...action.payload };
+      state.recordStatus = nextStatus;
+
+      const previousOwned =
+        previousStatus.taskType === 'inference' ||
+        Boolean(previousStatus.recordInferenceMode);
+      const nextOwned =
+        nextStatus.taskType === 'inference' ||
+        Boolean(nextStatus.recordInferenceMode);
+      const previousBusy =
+        previousOwned && previousStatus.recordPhase !== RecordPhase.READY;
+      const uiPhase = state.inferenceRecordingUi.phase;
+
+      if (
+        nextOwned &&
+        nextStatus.recordPhase === RecordPhase.RECORDING
+      ) {
+        if (![
+          InferenceRecordingUiPhase.SAVING,
+          InferenceRecordingUiPhase.CANCELLING,
+        ].includes(uiPhase)) {
+          state.inferenceRecordingUi.phase =
+            InferenceRecordingUiPhase.RECORDING;
+        }
+      } else if (
+        nextOwned &&
+        nextStatus.recordPhase === RecordPhase.SAVING
+      ) {
+        state.inferenceRecordingUi.phase =
+          InferenceRecordingUiPhase.SAVING;
+      } else if (
+        nextStatus.recordPhase === RecordPhase.READY &&
+        (
+          uiPhase === InferenceRecordingUiPhase.SAVING ||
+          uiPhase === InferenceRecordingUiPhase.CANCELLING ||
+          previousBusy ||
+          (previousOwned && uiPhase === InferenceRecordingUiPhase.RECORDING)
+        )
+      ) {
+        state.inferenceRecordingUi.phase = InferenceRecordingUiPhase.IDLE;
+      }
     },
     resetRecordStatus: (state) => {
       state.recordStatus = initialState.recordStatus;
+      state.inferenceRecordingUi = { ...initialState.inferenceRecordingUi };
+    },
+    setInferenceRecordingUiPhase: (state, action) => {
+      const phase = String(action.payload || '');
+      if (Object.values(InferenceRecordingUiPhase).includes(phase)) {
+        state.inferenceRecordingUi.phase = phase;
+      }
+    },
+    resetInferenceRecordingUi: (state) => {
+      state.inferenceRecordingUi = { ...initialState.inferenceRecordingUi };
     },
     setInferenceStatus: (state, action) => {
       state.inferenceStatus = { ...state.inferenceStatus, ...action.payload };
@@ -593,7 +720,9 @@ const taskSlice = createSlice({
           state.inferenceTaskInfoSync.editBaseServerTaskKey =
             state.inferenceTaskInfoSync.serverTaskKey;
         }
-        state.inferenceTaskInfoSync.staleEchoTaskKey = '';
+        // A second edit can begin after the service accepted the first one
+        // but before recording_status echoed it. Keep the original stale
+        // snapshot armed until the current task key is observed on status.
         state.inferenceTaskInfoSync.dirty = true;
         state.inferenceTaskInfoSync.syncStatus = 'pending';
         state.inferenceTaskInfoSync.syncMessage = 'Task info changed; syncing soon...';
@@ -653,12 +782,16 @@ const taskSlice = createSlice({
       const editBaseServerTaskKey =
         state.inferenceTaskInfoSync.editBaseServerTaskKey ||
         state.inferenceTaskInfoSync.serverTaskKey;
+      const originalStaleEchoTaskKey =
+        state.inferenceTaskInfoSync.staleEchoTaskKey;
       state.inferenceTaskInfoSync.serverTaskKey = taskKey;
       state.inferenceTaskInfoSync.editBaseServerTaskKey = taskKey;
       state.inferenceTaskInfoSync.staleEchoTaskKey =
-        editBaseServerTaskKey && editBaseServerTaskKey !== taskKey
-          ? editBaseServerTaskKey
-          : '';
+        originalStaleEchoTaskKey || (
+          editBaseServerTaskKey && editBaseServerTaskKey !== taskKey
+            ? editBaseServerTaskKey
+            : ''
+        );
       state.inferenceTaskInfoSync.dirty = false;
       state.inferenceTaskInfoSync.syncStatus = 'synced';
       state.inferenceTaskInfoSync.syncMessage = SYNCED_MESSAGE;
@@ -686,10 +819,23 @@ const taskSlice = createSlice({
         const inferenceServerTaskInfo = protectRecordSharedInstruction
           ? omitTaskInstruction(serverTaskInfo)
           : serverTaskInfo;
+        const preserveRuntimeRouting =
+          state.inferenceStatus.inferencePhase !== InferencePhase.READY;
         const nextInferenceTaskInfo = {
           ...currentInferenceTaskInfo,
           ...inferenceServerTaskInfo,
           taskType: 'inference',
+          // Recording status republishes the TaskInfo snapshot captured when
+          // inference started; it is not authoritative for hot-switched
+          // runtime routing. While inference is active, keep the locally
+          // acknowledged route and approval instead of letting that stale
+          // snapshot flip the UI back. READY still accepts server hydration.
+          ...(preserveRuntimeRouting
+            ? {
+                actionPolicyMode: currentInferenceTaskInfo.actionPolicyMode,
+                rltRobotOverride: currentInferenceTaskInfo.rltRobotOverride,
+              }
+            : {}),
         };
         const currentInferenceTaskKey = getInferenceTaskInfoKey(currentInferenceTaskInfo);
         const nextInferenceTaskKey = getInferenceTaskInfoKey(nextInferenceTaskInfo);
@@ -818,6 +964,42 @@ export const selectInferenceTaskInfo = createSelector(
   (tasks) => buildInferenceTaskInfo(tasks)
 );
 
+export const selectInferenceRecordingControl = createSelector(
+  [selectTasksState],
+  (tasks) => {
+    const recordStatus = tasks.recordStatus || {};
+    const uiPhase = tasks.inferenceRecordingUi?.phase ||
+      InferenceRecordingUiPhase.IDLE;
+    const serverOwned =
+      recordStatus.taskType === 'inference' ||
+      Boolean(recordStatus.recordInferenceMode);
+    const serverRecording =
+      serverOwned && recordStatus.recordPhase === RecordPhase.RECORDING;
+    const serverSaving =
+      serverOwned && recordStatus.recordPhase === RecordPhase.SAVING;
+    const serverBusy =
+      serverOwned && recordStatus.recordPhase !== RecordPhase.READY;
+
+    return {
+      uiPhase,
+      active:
+        uiPhase === InferenceRecordingUiPhase.RECORDING || serverRecording,
+      pending: [
+        InferenceRecordingUiPhase.STARTING,
+        InferenceRecordingUiPhase.SAVING,
+        InferenceRecordingUiPhase.CANCELLING,
+      ].includes(uiPhase),
+      episodeCount: serverOwned
+        ? Number(recordStatus.currentEpisodeNumber || 0)
+        : 0,
+      serverRecording,
+      serverSaving,
+      lifecycleLocked:
+        uiPhase !== InferenceRecordingUiPhase.IDLE || serverBusy,
+    };
+  }
+);
+
 export const {
   setTaskInfo,
   setRecordTaskInfo,
@@ -827,6 +1009,8 @@ export const {
   resetTaskInfo,
   setRecordStatus,
   resetRecordStatus,
+  setInferenceRecordingUiPhase,
+  resetInferenceRecordingUi,
   setInferenceStatus,
   resetInferenceStatus,
   selectRobotType,

@@ -20,8 +20,8 @@ def method(relative, class_name, method_name, namespace):
 
 class CurrentRequest:
     vla_rail_enabled = False
-    ttrtc_enabled = False
-    ttrtc_prefix_steps = 0
+    action_request_mode = "async"
+    action_chunk_size = 0
     inference_hz = 0
 
 
@@ -122,49 +122,43 @@ class RailLoadPlumbingTests(unittest.TestCase):
                                if line.split('#', 1)[0].strip() and '=' not in line]
         self.assertEqual(fields(sdk_definition), fields(service))
 
-    def test_ttrtc_service_forwards_prefix_and_rejects_incompatible_modes(self):
+    def test_tt_rtc_service_uses_canonical_mode_and_model_horizon(self):
         client, call, calls = self.client_call()
-        request = call(client, 0, ttrtc_enabled=True, ttrtc_prefix_steps=7, inference_hz=15)
-        self.assertTrue(request.ttrtc_enabled)
-        self.assertEqual(request.ttrtc_prefix_steps, 7)
-        self.assertEqual(call(client, 0, ttrtc_enabled=True).inference_hz, 15)
-        self.assertEqual(call(client, 0, ttrtc_enabled=True, ttrtc_prefix_steps=0).ttrtc_prefix_steps, 0)
-        for extra in ({'vla_rail_enabled': True}, {'action_request_mode': 'sync'},
-                      {'inference_hz': 30}, {'acceleration_mode': 'tensorrt_dit'},
-                      {'ttrtc_prefix_steps': 9}, {'ttrtc_prefix_steps': -1},
-                      {'ttrtc_prefix_steps': 1.5}):
+        request = call(client, 0, action_request_mode='tt_rtc', inference_hz=15)
+        self.assertEqual(request.action_request_mode, 'tt_rtc')
+        self.assertEqual(request.action_chunk_size, 0)
+        self.assertFalse(hasattr(request, 'ttrtc_prefix_steps'))
+        for extra in ({'vla_rail_enabled': True}, {'acceleration_mode': 'other'}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
-                call(client, 0, ttrtc_enabled=True, **extra)
+                call(client, 0, action_request_mode='tt_rtc', **extra)
         with self.assertRaises(ValueError):
-            call(client, 1, ttrtc_enabled=True)
-        client, call, _ = self.client_call(OldRequest)
-        with self.assertRaisesRegex(RuntimeError, 'Rebuild interfaces'):
-            call(client, 0, ttrtc_enabled=True)
-        self.assertIsNotNone(call(client, 0))
+            call(client, 1, action_request_mode='tt_rtc')
 
-    def test_ttrtc_supervisor_forwards_and_rejects_old_schema(self):
+    def test_tt_rtc_supervisor_forwards_mode_without_legacy_fields(self):
         supervisor, owner, submit, requests = self.supervisor_call()
         owner.vla_rail_enabled = False
-        owner.ttrtc_enabled, owner.ttrtc_prefix_steps = True, 8
+        owner.action_request_mode = 'tt_rtc'
+        owner.action_chunk_size = 24  # Ordinary UI preference must not truncate TT-RTC.
         submit(supervisor, 0, owner)
-        self.assertTrue(requests[-1].ttrtc_enabled)
-        self.assertEqual(requests[-1].ttrtc_prefix_steps, 8)
+        self.assertEqual(requests[-1].action_request_mode, 'tt_rtc')
+        self.assertEqual(requests[-1].action_chunk_size, 0)
+        self.assertFalse(hasattr(requests[-1], 'ttrtc_prefix_steps'))
         supervisor, owner, submit, requests = self.supervisor_call(OldRequest)
-        owner.vla_rail_enabled, owner.ttrtc_enabled = False, True
+        owner.vla_rail_enabled = False
+        owner.action_request_mode = 'tt_rtc'
         with self.assertRaisesRegex(RuntimeError, 'Rebuild interfaces'):
             submit(supervisor, 0, owner)
         self.assertEqual(requests, [])
 
-    def test_signature_includes_ttrtc_mode_and_active_prefix(self):
+    def test_signature_includes_tt_rtc_mode_and_rlt_bundle(self):
         path = ROOT / 'orchestrator/internal/communication/inference_mode.py'
         namespace = {}
         exec(compile(path.read_text(), str(path), 'exec'), namespace)
         signature = namespace['inference_runtime_signature']
         args = ('/model', 'pytorch', '', 'async', 100, 15, .3)
-        self.assertNotEqual(signature(*args), signature(*args, ttrtc_enabled=True))
-        self.assertNotEqual(signature(*args, ttrtc_enabled=True, ttrtc_prefix_steps=7),
-                            signature(*args, ttrtc_enabled=True, ttrtc_prefix_steps=8))
-        self.assertEqual(signature(*args), signature(*args, ttrtc_prefix_steps=8))
+        self.assertNotEqual(signature(*args), signature(*args[:3], 'tt_rtc', *args[4:]))
+        self.assertNotEqual(signature(*args), signature(*args, rlt_enabled=True, rlt_bundle_path='/bundle'))
+        self.assertEqual(signature(*args), signature(*args, rlt_bundle_path='/unused'))
 
     def test_engine_sdk_service_schema_matches_rosidl(self):
         source = ROOT.parent / 'cyclo_brain/sdk/robot_client/robot_client/messages/__init__.py'

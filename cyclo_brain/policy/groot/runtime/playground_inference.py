@@ -1,0 +1,1534 @@
+#!/usr/bin/env python3
+#
+# Copyright 2025 ROBOTIS CO., LTD.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Author: Dongyun Kim
+
+"""GR00T N1.6 inference engine.
+
+Encapsulates Gr00tPolicy loading, RobotClient setup, observation
+preprocessing, and action chunk postprocessing. Imported by
+runtime/inference_server.py (Process A) which slots it into the
+cyclo_intelligence two-process pattern (LOAD srv → configure broadcast
+→ Zenoh trigger/chunk).
+
+Original Step 1 location: cyclo_brain/policy/groot/inference.py.
+Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
+"""
+import logging
+import json
+import gc
+import os
+import sys
+import tempfile
+import time
+import ast
+from dataclasses import asdict
+from typing import Mapping, Optional
+
+import cv2
+import numpy as np
+import torch
+
+try:
+    from runtime.tt_rtc import (
+        TT_RTC_ACTION_DIM,
+        TT_RTC_ACTION_HORIZON,
+        TT_RTC_MAX_DELAY_STEPS,
+        TT_RTC_NUM_INFERENCE_TIMESTEPS,
+        TT_RTC_REQUEST_MODE,
+        TT_RTC_RLT_CHUNK_LENGTH,
+        load_tt_rtc_capability,
+        parse_tt_rtc_request,
+        validate_tt_rtc_model_contract,
+    )
+except ModuleNotFoundError:  # pragma: no cover - repository-local import path.
+    from cyclo_brain.policy.groot.runtime.tt_rtc import (
+        TT_RTC_ACTION_DIM,
+        TT_RTC_ACTION_HORIZON,
+        TT_RTC_MAX_DELAY_STEPS,
+        TT_RTC_NUM_INFERENCE_TIMESTEPS,
+        TT_RTC_REQUEST_MODE,
+        TT_RTC_RLT_CHUNK_LENGTH,
+        load_tt_rtc_capability,
+        parse_tt_rtc_request,
+        validate_tt_rtc_model_contract,
+    )
+
+
+# -- robot_client import shim --------------------------------------------------
+# /robot_client_sdk/ is the bind-mount root; the package itself sits at
+# /robot_client_sdk/robot_client/ so the parent dir goes onto sys.path.
+_ROBOT_CLIENT_PATH = os.environ.get("ROBOT_CLIENT_SDK_PATH", "/robot_client_sdk")
+if os.path.exists(_ROBOT_CLIENT_PATH) and _ROBOT_CLIENT_PATH not in sys.path:
+    sys.path.insert(0, _ROBOT_CLIENT_PATH)
+
+import gr00t.model  # noqa: F401 - register custom models
+from gr00t.data.embodiment_tags import EmbodimentTag  # noqa: E402
+from gr00t.policy.gr00t_policy import Gr00tPolicy  # noqa: E402
+from robot_client import RobotClient  # noqa: E402
+from robot_client.camera_mapping import resolve_camera_feature_sources  # noqa: E402
+
+try:
+    from hf_token_sync import sync_token_file  # noqa: E402
+except Exception:  # pragma: no cover - helper is mounted in policy containers.
+    sync_token_file = None
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logging.getLogger("groot_inference").warning(
+            "Ignoring invalid %s=%r; using %s",
+            name,
+            value,
+            default,
+        )
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_nonnegative_int(name: str, default: int = 0) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logging.getLogger("groot_inference").warning(
+            "Ignoring invalid %s=%r; using %s",
+            name,
+            value,
+            default,
+        )
+        return default
+    if parsed < 0:
+        logging.getLogger("groot_inference").warning(
+            "Ignoring negative %s=%r; using %s",
+            name,
+            value,
+            default,
+        )
+        return default
+    return parsed
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logging.getLogger("groot_inference").warning(
+            "Ignoring invalid %s=%r; using %s",
+            name,
+            value,
+            default,
+        )
+        return default
+    return parsed if np.isfinite(parsed) and parsed > 0.0 else default
+
+
+ACCELERATION_PYTORCH = "pytorch"
+ACCELERATION_TENSORRT_DIT = "tensorrt_dit"
+ACCELERATION_TENSORRT_FULL_PIPELINE = "tensorrt_full_pipeline"
+TT_RTC_TRT_ENGINE_NAME = "dit_model_bf16_ttrtc.trt"
+LEGACY_TT_RTC_TRT_ENGINE_NAME = "dit_model_tt_rtc_bf16.trt"
+SUPPORTED_ACCELERATION_MODES = {
+    ACCELERATION_PYTORCH,
+    ACCELERATION_TENSORRT_DIT,
+    ACCELERATION_TENSORRT_FULL_PIPELINE,
+}
+
+# Add GR00T root to sys.path for deployment script imports.
+# After the move into runtime/, parents[0]=runtime, parents[1]=groot,
+# so the legacy in-tree fallback is a layer deeper than before — but
+# the /gr00t fallback (where the submodule lives in the container)
+# still wins, which is what we want at runtime.
+_GROOT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if os.path.isdir(os.path.join(_GROOT_ROOT, "scripts", "deployment")):
+    _groot_path = _GROOT_ROOT
+elif os.path.isdir("/gr00t/scripts/deployment"):
+    _groot_path = "/gr00t"
+else:
+    _groot_path = None
+
+if _groot_path and _groot_path not in sys.path:
+    sys.path.insert(0, _groot_path)
+
+# TensorRT DiT acceleration - reuse existing GR00T deployment code
+from scripts.deployment.standalone_inference_script import (  # noqa: E402
+    replace_dit_with_tensorrt,
+)
+try:  # GR00T N1.7
+    from scripts.deployment.export_onnx_n1d7 import (  # noqa: E402
+        DiTInputCapture,
+        export_dit_to_onnx,
+    )
+except ImportError:  # GR00T N1.6 / N1.6.1
+    from scripts.deployment.export_onnx_n1d6 import (  # noqa: E402
+        DiTInputCapture,
+        export_dit_to_onnx,
+    )
+
+
+def build_trt_engine(
+    policy: Gr00tPolicy,
+    observation: dict,
+    engine_path: str,
+    workspace_mb: Optional[int] = None,
+    tt_rtc_capability=None,
+    release_model_after_export: bool = False,
+):
+    """Export DiT to ONNX and build TensorRT engine automatically.
+
+    Uses DiTInputCapture and export_dit_to_onnx from GR00T deployment scripts,
+    then builds the TRT engine via build_tensorrt_engine.build_engine().
+    Takes ~3-5 min on Orin.
+
+    The standalone converter may release its disposable policy after export.
+    This option clears policy.model; callers retaining the policy must leave it off.
+    """
+    from scripts.deployment.build_tensorrt_engine import (
+        build_engine,
+        derive_shapes_with_hint,
+    )
+
+    logger = logging.getLogger("groot_inference")
+    engine_dir = os.path.dirname(engine_path)
+    if workspace_mb is None:
+        workspace_mb = _env_int("GROOT_TRT_WORKSPACE_MB", 4096)
+
+    # Step 1: Capture DiT input shapes via hook
+    logger.info("Capturing DiT input shapes...")
+    capture = DiTInputCapture()
+    hook = policy.model.action_head.model.register_forward_pre_hook(
+        capture.hook_fn, with_kwargs=True
+    )
+    try:
+        with torch.inference_mode():
+            if tt_rtc_capability is None:
+                policy.get_action(observation)
+            else:
+                rtc = tt_rtc_capability.payload["training_time_rtc"]
+                policy.get_action_tt_rtc(
+                    observation, delay_steps=6, action_horizon=rtc["action_horizon"],
+                    committed_action_prefix=np.zeros((1, 6, rtc["action_dimension"]), dtype=np.float32),
+                )
+    finally:
+        hook.remove()
+
+    if not capture.captured:
+        raise RuntimeError("Failed to capture DiT inputs")
+
+    # Step 2/3: Export DiT to ONNX in an isolated temporary directory, then
+    # build the TensorRT engine into the checkpoint directory. GR00T's ONNX
+    # exporter consolidates external-data files by deleting every non
+    # .onnx/.json/.data file next to the ONNX path. Keeping ONNX artifacts out
+    # of the checkpoint directory prevents model-*.safetensors from being
+    # mistaken for temporary external data.
+    with tempfile.TemporaryDirectory(prefix=".trt_export_", dir=engine_dir) as export_dir:
+        onnx_path = os.path.join(export_dir, "dit_model_bf16.onnx")
+
+        # Patch torch.onnx.export to force dynamo=False (avoids torch.export
+        # failures with DiT's dynamic shapes, without modifying upstream GR00T).
+        _orig_export = torch.onnx.export
+        def _patched_export(*args, **kwargs):
+            kwargs.setdefault("dynamo", False)
+            return _orig_export(*args, **kwargs)
+        torch.onnx.export = _patched_export
+        try:
+            exporter = export_dit_to_onnx
+            if tt_rtc_capability is not None:
+                from runtime.tt_rtc_trt import export_tt_rtc_dit
+                exporter = export_tt_rtc_dit
+            exporter(
+                policy=policy,
+                captured_inputs=capture,
+                output_path=onnx_path,
+                use_bf16=True,
+            )
+        finally:
+            torch.onnx.export = _orig_export
+
+        logger.info("ONNX exported: %s", onnx_path)
+
+        # N1.7 exports only the visual-language sequence axis as dynamic. The
+        # state/action sequence (sa_embs) is static for a given policy/action
+        # horizon. Derive profiles from ONNX so fixed dims stay fixed and only
+        # named dynamic dims get ranges.
+        vl_seq_len = int(capture.vl_embs.shape[1])
+        min_shapes, opt_shapes, max_shapes = derive_shapes_with_hint(
+            onnx_path,
+            opt_seq_lens={"vl_seq_len": vl_seq_len},
+            max_batch=1,
+        )
+
+        # Keep the previous generous upper bound for language-conditioned
+        # inputs. derive_shapes_with_hint uses ~2x opt by default, which can be
+        # too tight if the BT sends a longer instruction than export captured.
+        for name in ("vl_embs", "image_mask", "backbone_attention_mask"):
+            shape = max_shapes.get(name)
+            if shape and len(shape) > 1 and shape[1] != opt_shapes[name][1]:
+                widened = list(shape)
+                widened[1] = max(widened[1], 512)
+                max_shapes[name] = tuple(widened)
+
+        if release_model_after_export:
+            # Only the standalone conversion process opts in. ONNX and shape
+            # profiles are now sufficient; do not keep GR00T alongside the builder.
+            torch.cuda.synchronize()
+            policy.model = None
+            del capture
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info("Released conversion-only GR00T model before TensorRT build")
+
+        build_engine(
+            onnx_path=onnx_path,
+            engine_path=engine_path,
+            precision="bf16",
+            workspace_mb=workspace_mb,
+            min_shapes=min_shapes,
+            opt_shapes=opt_shapes,
+            max_shapes=max_shapes,
+        )
+
+    logger.info("Cleaned up temporary ONNX export directory")
+
+
+class GR00TInference:
+    """Encapsulates GR00T policy loading, observation building, and inference."""
+
+    logger = logging.getLogger("groot_inference")
+    DEFAULT_EMBODIMENT_TAG = "new_embodiment"
+    ROTATE_MAP = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }
+
+    def __init__(self):
+        self.policy: Optional[Gr00tPolicy] = None
+        self.robot: Optional[RobotClient] = None
+        self._rlt_adapter = None
+        self._rlt_trace = None
+        self._rlt_trace_initialized = False
+        self._loaded_model_path: Optional[str] = None  # track cached policy path
+        self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
+        self._loaded_acceleration_engine_path: str = ""
+        self._loaded_rlt_enabled: bool = False
+        self._loaded_rlt_bundle_path: str = ""
+        self._loaded_publish_to_robot: bool = False
+        self._tt_rtc_trt_ready = False
+        self._cuda_execution = None
+        self._real_robot_sensor_max_age_s = _env_float(
+            "GROOT_REAL_ROBOT_SENSOR_MAX_AGE_S",
+            0.5,
+        )
+        self._tt_rtc_capability = None
+        self._tt_rtc_num_inference_timesteps = _env_int(
+            "CYCLO_TT_RTC_NUM_INFERENCE_TIMESTEPS",
+            TT_RTC_NUM_INFERENCE_TIMESTEPS,
+        )
+        if self._tt_rtc_num_inference_timesteps > 64:
+            self.logger.warning(
+                "Ignoring CYCLO_TT_RTC_NUM_INFERENCE_TIMESTEPS=%s; maximum is 64",
+                self._tt_rtc_num_inference_timesteps,
+            )
+            self._tt_rtc_num_inference_timesteps = TT_RTC_NUM_INFERENCE_TIMESTEPS
+        self._tt_rtc_temporal_overlap_steps = _env_nonnegative_int(
+            "CYCLO_TT_RTC_TEMPORAL_OVERLAP_STEPS",
+            0,
+        )
+        self.policy_info: dict = {
+            "video": [],       # e.g. ["cam_left_head", "cam_left_wrist", ...]
+            "state": [],       # e.g. ["arm_left", "arm_right"]
+            "action": [],      # e.g. ["arm_left", "arm_right"]
+            "language": [],    # e.g. ["annotation.human.task_description"]
+        }
+        self.robot_info: dict = {
+            # Policy camera keys to emit in the GR00T observation.
+            "cameras": [],
+            # policy_camera_key -> RobotClient camera key. This lets a model
+            # trained with cam_left_head consume a robot stream named
+            # cam_head_left without changing the checkpoint metadata.
+            "camera_sources": {},
+            "joints": {},          # modality_key -> yaml_group mapping
+            "camera_rotations": {},  # camera_name -> rotation_deg
+        }
+
+    @property
+    def is_ready(self) -> bool:
+        return self.policy is not None and self.robot is not None
+
+    def load_policy(self, request) -> dict:
+        """Load GR00T policy and create RobotClient for sensor data."""
+        model_path = request.model_path
+        robot_type = request.robot_type
+
+        try:
+            rlt_enabled = bool(getattr(request, "rlt_enabled", False))
+            rlt_bundle_path = str(
+                getattr(request, "rlt_bundle_path", "") or ""
+            ).strip()
+            if rlt_enabled and not rlt_bundle_path:
+                raise RuntimeError("RLT preload requires rlt_bundle_path")
+            if not rlt_enabled:
+                rlt_bundle_path = ""
+            acceleration_mode, acceleration_engine_path, strict_acceleration = (
+                self._resolve_acceleration_request(request, model_path)
+            )
+            action_request_mode = str(
+                getattr(request, "action_request_mode", "async") or "async"
+            ).strip().lower()
+            publish_to_robot = bool(getattr(request, "publish_to_robot", False))
+            if action_request_mode not in {"sync", "async", TT_RTC_REQUEST_MODE}:
+                raise RuntimeError(
+                    "Unsupported action_request_mode; expected 'sync', 'async', "
+                    "or 'tt_rtc'"
+                )
+            tt_rtc_capability = None
+            if action_request_mode == TT_RTC_REQUEST_MODE:
+                if acceleration_mode not in {ACCELERATION_PYTORCH, ACCELERATION_TENSORRT_DIT}:
+                    raise RuntimeError(
+                        "TT-RTC supports PyTorch or DiT TensorRT only"
+                    )
+                tt_rtc_capability = load_tt_rtc_capability(
+                    model_path,
+                    require_rlt=False,
+                )
+                if not callable(getattr(Gr00tPolicy, "get_action_tt_rtc", None)):
+                    raise RuntimeError(
+                        self._missing_tt_rtc_runtime_message("base")
+                    )
+                if rlt_enabled:
+                    from runtime.rlt_adapter import GR00TRLTInferenceAdapter
+
+                    if not callable(
+                        getattr(GR00TRLTInferenceAdapter, "get_action_tt_rtc", None)
+                    ):
+                        raise RuntimeError(
+                            self._missing_tt_rtc_runtime_message("rlt")
+                        )
+            if acceleration_mode == ACCELERATION_TENSORRT_FULL_PIPELINE:
+                raise RuntimeError(
+                    "acceleration_mode=tensorrt_full_pipeline is not wired into "
+                    "Cyclo GR00T runtime yet; use tensorrt_dit or pytorch"
+                )
+
+            # Reuse cached policy if the same model is already loaded.
+            # Only reload robot client (subscribers) on restart.
+            if (
+                self.policy is not None
+                and self._loaded_model_path == model_path
+                and self._loaded_acceleration_mode == acceleration_mode
+                and self._loaded_acceleration_engine_path == acceleration_engine_path
+                and self._loaded_rlt_enabled == rlt_enabled
+                and self._loaded_rlt_bundle_path == rlt_bundle_path
+                and (self._tt_rtc_capability is not None) == (tt_rtc_capability is not None)
+            ):
+                if tt_rtc_capability is not None:
+                    self._validate_loaded_tt_rtc_policy(tt_rtc_capability)
+                self.logger.info(
+                    "Reusing cached policy: %s (acceleration=%s)",
+                    model_path,
+                    acceleration_mode,
+                )
+                if self.robot is not None:
+                    self.robot.close()
+                    self.robot = None
+                self.init_policy_info()
+                self.init_robot_info(robot_type)
+                self._tt_rtc_capability = tt_rtc_capability
+                self._loaded_publish_to_robot = publish_to_robot
+                if rlt_enabled:
+                    self._ensure_rlt_recording()
+                return {
+                    "success": True,
+                    "message": self._load_success_message(cached=True),
+                    "action_keys": list(self.policy_info["action"]),
+                    **self._tt_rtc_load_shape(),
+                }
+
+            if self.policy is not None:
+                if self._rlt_adapter is not None:
+                    self._rlt_adapter.close_async_training(dispose=True)
+                self.logger.info(
+                    "Reloading GR00T policy due to model/runtime change "
+                    "(model=%s, acceleration=%s)",
+                    model_path,
+                    acceleration_mode,
+                )
+                if self.robot is not None:
+                    self.robot.close()
+                    self.robot = None
+                self.policy = None
+                self._cuda_execution = None
+                self._rlt_adapter = None
+                self._loaded_model_path = None
+                self._loaded_acceleration_mode = ACCELERATION_PYTORCH
+                self._loaded_acceleration_engine_path = ""
+                self._loaded_rlt_enabled = False
+                self._loaded_rlt_bundle_path = ""
+                self._loaded_publish_to_robot = False
+                self._tt_rtc_capability = None
+
+            self.logger.info(
+                "Loading GR00T policy from: %s (acceleration=%s)",
+                model_path,
+                acceleration_mode,
+            )
+            self._sync_hf_token_for_gated_backbones()
+
+            self._tt_rtc_trt_ready = False
+            self.policy = Gr00tPolicy(
+                embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+                model_path=model_path,
+                device="cuda",
+            )
+            if tt_rtc_capability is not None:
+                self._validate_loaded_tt_rtc_policy(tt_rtc_capability)
+
+            if _env_flag("CYCLO_GROOT_BACKBONE_OPTIMIZATIONS", True):
+                try:
+                    from runtime.qwen3_inference import optimize_qwen3_backbone
+                except ModuleNotFoundError:  # Repository-local test imports.
+                    from cyclo_brain.policy.groot.runtime.qwen3_inference import optimize_qwen3_backbone
+                if optimize_qwen3_backbone(self.policy):
+                    self.logger.info(
+                        "Qwen3 inference optimization enabled: no unused language logits; "
+                        "cached structural positions and vision attention lengths"
+                    )
+
+            self.init_policy_info()
+            self.init_robot_info(robot_type)
+            # Loading a policy does not require live sensors. Real-robot action
+            # requests validate their observations immediately before inference.
+
+            if acceleration_mode == ACCELERATION_TENSORRT_DIT:
+                trt_applied = self._enable_dit_tensorrt(
+                    request=request,
+                    engine_path=acceleration_engine_path,
+                    strict=strict_acceleration,
+                )
+                if not trt_applied:
+                    acceleration_mode = ACCELERATION_PYTORCH
+                    acceleration_engine_path = ""
+            else:
+                self.logger.info(
+                    "TensorRT acceleration disabled by request; using PyTorch Eager"
+                )
+
+            if rlt_enabled:
+                # Imported lazily so the normal GR00T-only image contract remains
+                # unchanged when RLT is not requested.
+                from runtime.rlt_adapter import GR00TRLTInferenceAdapter
+
+                self.logger.info("Preloading RLT bundle: %s", rlt_bundle_path)
+                self._rlt_adapter = GR00TRLTInferenceAdapter.load(
+                    self.policy,
+                    rlt_bundle_path,
+                    model_path,
+                )
+                if tt_rtc_capability is not None:
+                    self._rlt_adapter.bind_tt_rtc_capability(
+                        tt_rtc_capability
+                    )
+                self._ensure_rlt_recording()
+                qualification = self._rlt_adapter.qualification
+                if self._rlt_adapter.deployment_qualified:
+                    self.logger.info(
+                        "RLT bundle loaded with qualification=%s; deployment "
+                        "qualification is present",
+                        qualification,
+                    )
+                else:
+                    self.logger.warning(
+                        "RLT bundle loaded with qualification=%s; real-robot "
+                        "routing requires explicit operator override",
+                        qualification,
+                    )
+            else:
+                self._rlt_adapter = None
+
+            self._loaded_model_path = model_path
+            self._loaded_acceleration_mode = acceleration_mode
+            self._loaded_acceleration_engine_path = acceleration_engine_path
+            self._loaded_rlt_enabled = rlt_enabled
+            self._loaded_rlt_bundle_path = rlt_bundle_path
+            self._loaded_publish_to_robot = publish_to_robot
+            self._tt_rtc_capability = tt_rtc_capability
+
+            return {
+                "success": True,
+                "message": self._load_success_message(cached=False),
+                "action_keys": list(self.policy_info["action"]),
+                **self._tt_rtc_load_shape(),
+            }
+        except Exception as e:
+            self._loaded_model_path = None
+            self._loaded_acceleration_mode = ACCELERATION_PYTORCH
+            self._loaded_acceleration_engine_path = ""
+            self._loaded_rlt_enabled = False
+            self._loaded_rlt_bundle_path = ""
+            self._loaded_publish_to_robot = False
+            self._tt_rtc_capability = None
+            self._rlt_adapter = None
+            message = self._format_load_error(e)
+            self.logger.error("Failed to start inference: %s", message, exc_info=True)
+            return self.fail(message)
+
+    def _load_success_message(self, *, cached: bool) -> str:
+        state = "restarted (policy cached)" if cached else "started"
+        if self._loaded_rlt_enabled or self._rlt_adapter is not None:
+            return f"GR00T inference {state}; RLT bundle preloaded, base action active"
+        return f"GR00T inference {state}"
+
+    @staticmethod
+    def _normalize_acceleration_mode(value: str) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"", "none", "off", "false", "pytorch", "eager"}:
+            return ACCELERATION_PYTORCH
+        if mode in {"trt", "tensorrt", "tensorrt_dit", "dit", "dit_only"}:
+            return ACCELERATION_TENSORRT_DIT
+        if mode in {
+            "trt_full_pipeline",
+            "tensorrt_full_pipeline",
+            "full_pipeline",
+        }:
+            return ACCELERATION_TENSORRT_FULL_PIPELINE
+        return mode
+
+    def _resolve_acceleration_request(
+        self,
+        request,
+        model_path: str,
+    ) -> tuple[str, str, bool]:
+        raw_mode = str(getattr(request, "acceleration_mode", "") or "").strip()
+        strict = bool(raw_mode)
+        if raw_mode:
+            mode = self._normalize_acceleration_mode(raw_mode)
+        elif _env_flag("GROOT_TRT_ENABLED", default=False):
+            mode = ACCELERATION_TENSORRT_DIT
+        else:
+            mode = ACCELERATION_PYTORCH
+
+        if mode not in SUPPORTED_ACCELERATION_MODES:
+            raise RuntimeError(
+                f"Unsupported acceleration_mode={raw_mode!r}; expected one of "
+                f"{sorted(SUPPORTED_ACCELERATION_MODES)}"
+            )
+
+        if mode == ACCELERATION_PYTORCH:
+            return mode, "", strict
+
+        engine_path = str(
+            getattr(request, "acceleration_engine_path", "") or ""
+        ).strip()
+        if engine_path:
+            if not os.path.isabs(engine_path):
+                engine_path = os.path.join(model_path, engine_path)
+        else:
+            engine_name = "dit_model_bf16.trt"
+            if getattr(request, "action_request_mode", "") == TT_RTC_REQUEST_MODE:
+                engine_name = TT_RTC_TRT_ENGINE_NAME
+                canonical_engine = os.path.join(model_path, engine_name)
+                legacy_engine = os.path.join(
+                    model_path,
+                    LEGACY_TT_RTC_TRT_ENGINE_NAME,
+                )
+                if not os.path.exists(canonical_engine) and os.path.exists(legacy_engine):
+                    engine_name = LEGACY_TT_RTC_TRT_ENGINE_NAME
+            engine_path = os.path.join(model_path, engine_name)
+        return mode, os.path.normpath(engine_path), strict
+
+    def _enable_dit_tensorrt(
+        self,
+        request,
+        engine_path: str,
+        strict: bool,
+    ) -> bool:
+        try:
+            engine_dir = os.path.dirname(os.path.abspath(engine_path))
+            os.makedirs(engine_dir, exist_ok=True)
+            if not os.path.exists(engine_path):
+                raise FileNotFoundError(
+                    f"TRT engine not found: {engine_path}. "
+                    "Build the TensorRT engine before starting inference."
+                )
+            if os.path.getsize(engine_path) <= 0:
+                raise RuntimeError(f"TRT engine is empty: {engine_path}")
+
+            self._tt_rtc_trt_ready = False
+            self._cuda_execution = None
+            if getattr(request, "action_request_mode", "") == TT_RTC_REQUEST_MODE:
+                from runtime.tt_rtc_trt import install_tt_rtc_dit
+                install_tt_rtc_dit(self.policy, engine_path)
+                self._tt_rtc_trt_ready = True
+                if _env_flag("CYCLO_GROOT_DEDICATED_CUDA_STREAM", True):
+                    from runtime.cuda_execution import InferenceStream
+                    self._cuda_execution = InferenceStream()
+                    self.logger.info("TT-RTC inference uses a dedicated CUDA stream")
+            else:
+                replace_dit_with_tensorrt(self.policy, engine_path)
+            self.logger.info("DiT accelerated with TensorRT: %s", engine_path)
+            return True
+        except Exception as e:
+            if strict:
+                raise RuntimeError(
+                    f"TensorRT acceleration requested but unavailable: {e}"
+                ) from e
+            self.logger.warning(
+                "TensorRT acceleration unavailable, using PyTorch Eager: %s", e
+            )
+            return False
+
+    def _sync_hf_token_for_gated_backbones(self) -> None:
+        if sync_token_file is None:
+            self.logger.warning("HF token sync helper unavailable")
+            return
+        if not sync_token_file():
+            self.logger.warning(
+                "No Hugging Face token found. GR00T N1.7 may need a token "
+                "to download the gated Cosmos-Reason2-2B backbone unless it "
+                "is already cached."
+            )
+
+    def _format_load_error(self, error: Exception) -> str:
+        message = str(error)
+        marker_text = message.lower()
+        gated_markers = (
+            "cannot access gated repo",
+            "access to model nvidia/cosmos-reason2-2b is restricted",
+            "401 client error",
+        )
+        if "cosmos-reason2-2b" in marker_text and any(
+            marker in marker_text for marker in gated_markers
+        ):
+            return (
+                "GR00T N1.7 needs access to the gated Hugging Face repo "
+                "nvidia/Cosmos-Reason2-2B. Register a Hugging Face token for "
+                "an approved account before loading the model, or pre-cache "
+                "the Cosmos backbone in the shared Hugging Face cache."
+            )
+        return message
+
+    def _build_dummy_observation(self, task_instruction: str = "") -> dict:
+        """Build a real observation from robot sensors for TRT engine building."""
+        images = self.robot.get_images(format="rgb")
+        joints = self.robot.get_joint_positions()
+        return self.preprocess(images, joints, task_instruction)
+
+    def build_synthetic_observation(self, task_instruction: str = "") -> dict:
+        """Build a model-schema observation without live robot sensors."""
+        if self.policy is None:
+            return self.fail("Policy is not loaded")
+
+        image_h, image_w = self._model_image_hw()
+        image_c = self._model_image_channels()
+        video_t = self._modality_horizon("video")
+        state_t = self._modality_horizon("state")
+        language_t = self._modality_horizon("language")
+
+        video_obs = {
+            key: np.zeros(
+                (1, video_t, image_h, image_w, image_c),
+                dtype=np.uint8,
+            )
+            for key in self.policy_info["video"]
+        }
+        state_obs = {}
+        for key in self.policy_info["state"]:
+            dim = self._model_state_dim(key)
+            vector = self._model_state_vector(key)
+            state_obs[key] = (
+                np.broadcast_to(vector, (1, state_t, dim))
+                .astype(np.float32)
+                .copy()
+            )
+
+        language_obs = {
+            key: [[str(task_instruction)] * language_t]
+            for key in self.policy_info["language"]
+        }
+
+        return {
+            "video": video_obs,
+            "state": state_obs,
+            "language": language_obs,
+        }
+
+    def _embodiment_tag_value(self) -> str:
+        tag = getattr(self.policy, "embodiment_tag", None)
+        if hasattr(tag, "value"):
+            return str(tag.value)
+        if tag:
+            return str(tag)
+        return self.DEFAULT_EMBODIMENT_TAG
+
+    @staticmethod
+    def _entry_value(entry, name: str, default=None):
+        if isinstance(entry, dict):
+            return entry.get(name, default)
+        return getattr(entry, name, default)
+
+    def _policy_modality_entry(self, modality: str):
+        configs = getattr(self.policy, "modality_configs", None)
+        if configs is None:
+            all_configs = self.policy.processor.get_modality_configs()
+            configs = all_configs.get(self._embodiment_tag_value(), {})
+        entry = configs.get(modality) if isinstance(configs, dict) else None
+        if entry is None:
+            raise RuntimeError(f"Model is missing modality config: {modality}")
+        return entry
+
+    def _modality_horizon(self, modality: str) -> int:
+        entry = self._policy_modality_entry(modality)
+        delta_indices = self._entry_value(entry, "delta_indices")
+        if not delta_indices:
+            raise RuntimeError(
+                f"Model modality '{modality}' has no delta_indices"
+            )
+        return len(delta_indices)
+
+    @staticmethod
+    def _coerce_int_pair(value, label: str) -> tuple[int, int]:
+        if isinstance(value, str):
+            try:
+                value = ast.literal_eval(value)
+            except (SyntaxError, ValueError) as e:
+                raise RuntimeError(f"Invalid {label}: {value!r}") from e
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise RuntimeError(f"Invalid {label}: {value!r}")
+        first, second = int(value[0]), int(value[1])
+        if first <= 0 or second <= 0:
+            raise RuntimeError(f"Invalid {label}: {value!r}")
+        return first, second
+
+    def _model_image_hw(self) -> tuple[int, int]:
+        candidates = [
+            getattr(getattr(self.policy, "processor", None), "image_target_size", None),
+            getattr(
+                getattr(getattr(self.policy, "processor", None), "config", None),
+                "image_target_size",
+                None,
+            ),
+            getattr(
+                getattr(getattr(self.policy, "model", None), "config", None),
+                "image_target_size",
+                None,
+            ),
+        ]
+        for candidate in candidates:
+            if candidate:
+                return self._coerce_int_pair(candidate, "image_target_size")
+        raise RuntimeError(
+            "Model image_target_size is unavailable; cannot build synthetic "
+            "TRT observation without hardcoded image dimensions"
+        )
+
+    def _model_image_channels(self) -> int:
+        processor = getattr(self.policy, "processor", None)
+        qwen_processor = getattr(processor, "processor", None)
+        candidates = [
+            getattr(getattr(qwen_processor, "image_processor", None), "image_mean", None),
+            getattr(getattr(qwen_processor, "image_processor", None), "image_std", None),
+            getattr(getattr(qwen_processor, "video_processor", None), "image_mean", None),
+            getattr(getattr(qwen_processor, "video_processor", None), "image_std", None),
+            getattr(processor, "image_mean", None),
+            getattr(processor, "image_std", None),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, (list, tuple)) and candidate:
+                return len(candidate)
+
+        num_channels = getattr(
+            getattr(getattr(self.policy, "model", None), "config", None),
+            "num_channels",
+            None,
+        )
+        if num_channels:
+            channels = int(num_channels)
+            if channels > 0:
+                return channels
+
+        raise RuntimeError(
+            "Model image channel count is unavailable; cannot build synthetic "
+            "TRT observation without hardcoded image channels"
+        )
+
+    def _state_norm_params(self, key: str) -> dict:
+        processor = getattr(self.policy, "processor", None)
+        state_action_processor = getattr(processor, "state_action_processor", None)
+        norm_params = getattr(state_action_processor, "norm_params", None)
+        tag = self._embodiment_tag_value()
+        try:
+            return norm_params[tag]["state"][key]
+        except (TypeError, KeyError) as e:
+            raise RuntimeError(
+                f"Model statistics are missing state dimension for '{key}' "
+                f"under embodiment '{tag}'"
+            ) from e
+
+    def _model_state_dim(self, key: str) -> int:
+        params = self._state_norm_params(key)
+        dim = params.get("dim")
+        try:
+            result = int(np.asarray(dim).item())
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(f"Invalid state dimension for '{key}': {dim!r}") from e
+        if result <= 0:
+            raise RuntimeError(f"Invalid state dimension for '{key}': {result}")
+        return result
+
+    def _model_state_vector(self, key: str) -> np.ndarray:
+        params = self._state_norm_params(key)
+        dim = self._model_state_dim(key)
+        mean = params.get("mean")
+        if mean is None:
+            return np.zeros((dim,), dtype=np.float32)
+
+        vector = np.asarray(mean, dtype=np.float32)
+        if vector.size != dim:
+            raise RuntimeError(
+                f"Model state mean for '{key}' has {vector.size} values, "
+                f"expected {dim}"
+            )
+        return vector.reshape(dim)
+
+    def init_policy_info(self) -> None:
+        """Read video/state/action/language keys from the loaded policy."""
+        mc = getattr(self.policy, "modality_configs", None)
+        if mc is None:
+            mc = self.policy.processor.get_modality_configs().get(
+                self.DEFAULT_EMBODIMENT_TAG, {}
+            )
+
+        for modality in ("video", "state", "action", "language"):
+            if modality not in mc:
+                self.policy_info[modality] = []
+                continue
+            entry = mc[modality]
+            self.policy_info[modality] = self._entry_value(
+                entry,
+                "modality_keys",
+                [],
+            )
+
+        self.logger.info("Policy info: %s", self.policy_info)
+
+    def init_robot_info(self, robot_type: str) -> None:
+        """Create RobotClient and resolve active cameras/joints from YAML."""
+        from schema import get_image_topics, load_robot_section
+        available_cameras = get_image_topics(load_robot_section(robot_type))
+        camera_sources = resolve_camera_feature_sources(
+            self.policy_info["video"],
+            available_cameras,
+        )
+        # Avoid transport/deserialization work for cameras absent from this
+        # checkpoint, as well as avoiding their JPEG decode work.
+        self.robot = RobotClient(
+            robot_type, defer_image_decoding=True,
+            camera_names=list(camera_sources.values()) or None,
+        )
+        cam_config = self.robot._config.get("cameras", {})
+
+        self.robot_info["cameras"] = list(camera_sources.keys())
+        self.robot_info["camera_sources"] = camera_sources
+        self.robot_info["camera_rotations"] = {
+            name: cfg.get("rotation_deg", 0)
+            for name, cfg in cam_config.items()
+            if cfg.get("rotation_deg", 0) != 0
+        }
+
+        joints = {}
+        for group in self.robot.joint_group_names:
+            if "follower" not in group:
+                continue
+            modality_key = group.removeprefix("follower_")
+            if modality_key in self.policy_info["state"]:
+                joints[modality_key] = group
+        self.robot_info["joints"] = joints
+
+        # Sensor-backed state modalities. Training runs have used both
+        # ``mobile`` and ``odometry`` for the same 3-dim base velocity slice,
+        # while robot_client keeps /odom as a sensor instead of a joint group.
+        # Bridge either policy key to the odom sensor here.
+        sensor_states = {}
+        sensors_cfg = self.robot._config.get("sensors", {})
+        if "odom" in sensors_cfg:
+            for modality_key in ("mobile", "odometry"):
+                if modality_key in self.policy_info["state"]:
+                    sensor_states[modality_key] = "odom"
+        self.robot_info["sensor_states"] = sensor_states
+
+        self.logger.info("Robot info: %s", self.robot_info)
+
+    def _tt_rtc_load_shape(self) -> dict:
+        if self._tt_rtc_capability is None:
+            return {}
+        rtc = self._tt_rtc_capability.payload["training_time_rtc"]
+        return {
+            "chunk_size": rtc["action_horizon"],
+            "action_dim": rtc["action_dimension"],
+            "rtc_min_delay_steps": rtc["min_delay_steps"],
+            "rtc_max_delay_steps": rtc["max_delay_steps"],
+        }
+
+    def _require_tt_rtc_capability(self, action_policy_mode: str) -> None:
+        if self._loaded_acceleration_mode != ACCELERATION_PYTORCH and not (
+            self._loaded_acceleration_mode == ACCELERATION_TENSORRT_DIT
+            and self._tt_rtc_trt_ready
+        ):
+            raise RuntimeError(
+                "TT-RTC requires its per-token TensorRT engine or PyTorch; reload the policy"
+            )
+        if not self._loaded_model_path:
+            raise RuntimeError("TT-RTC cannot validate an unknown GR00T checkpoint")
+        if self._tt_rtc_capability is None:
+            self._tt_rtc_capability = load_tt_rtc_capability(
+                self._loaded_model_path
+            )
+
+        if action_policy_mode == "rlt":
+            if self._rlt_adapter is None:
+                raise RuntimeError(
+                    "TT-RTC MLP action requested without a preloaded RLT bundle"
+                )
+            validator = getattr(
+                self._rlt_adapter,
+                "require_tt_rtc_capability",
+                None,
+            )
+            if not callable(validator):
+                raise RuntimeError(
+                    "The loaded RLT adapter cannot validate delayed-reference "
+                    "TT-RTC capability"
+                )
+            validator()
+
+    def _validate_loaded_tt_rtc_policy(self, capability) -> None:
+        """Bind a manifest to the model/processor configuration in GPU memory."""
+
+        # Checkpoint configs produced by the training workflow use the
+        # ``training_time_rtc`` field, whereas the upstream GR00T runtime
+        # exposes its contract through ``training_time_rtc_enabled``.  The
+        # dedicated receiver manifest takes precedence over the training
+        # manifest, so the old source-name guard skipped this normalization for
+        # otherwise valid checkpoints.  Normalize only after the loaded config
+        # itself has positively declared TT-RTC and agrees with the validated
+        # manifest; this must not make a legacy checkpoint appear capable.
+        config = self.policy.model.config
+        if getattr(config, "training_time_rtc", None) is True:
+            rtc = capability.payload["training_time_rtc"]
+            if getattr(config, "tt_rtc_max_delay_steps", None) != rtc["max_delay_steps"]:
+                raise RuntimeError("Loaded model TT-RTC delay differs from training metadata")
+            config.training_time_rtc_enabled = True
+            config.training_time_rtc_max_delay_steps = rtc["max_delay_steps"]
+            config.training_time_rtc_action_hz = rtc["action_hz"]
+        elif getattr(config, "training_time_rtc_enabled", None) is not True:
+            raise RuntimeError("Loaded model disagrees with TT-RTC training metadata")
+        getter = getattr(self.policy, "get_tt_rtc_model_contract", None)
+        if not callable(getter):
+            raise RuntimeError(
+                "The installed GR00T policy cannot expose its TT-RTC model "
+                "contract; rebuild the GR00T image from the TT-RTC source"
+            )
+        validate_tt_rtc_model_contract(capability, getter())
+        action_head = getattr(self.policy.model, "action_head", None)
+        loaded_steps = getattr(action_head, "num_inference_timesteps", None)
+        if isinstance(loaded_steps, bool) or not isinstance(loaded_steps, int):
+            raise RuntimeError(
+                "Loaded GR00T action head does not expose integer denoising steps"
+            )
+        action_head.num_inference_timesteps = self._tt_rtc_num_inference_timesteps
+        self.logger.info(
+            "TT-RTC denoising steps: checkpoint=%s runtime=%s",
+            loaded_steps,
+            self._tt_rtc_num_inference_timesteps,
+        )
+
+    @staticmethod
+    def _missing_tt_rtc_runtime_message(action_policy_mode: str) -> str:
+        output_name = "RLT Action MLP" if action_policy_mode == "rlt" else "GR00T VLA"
+        return (
+            f"TT-RTC {output_name} inference is not available in the installed "
+            "Isaac-GR00T runtime. A paper-faithful implementation must expose "
+            "get_action_tt_rtc(), use a per-action-token flow timestep, and clamp "
+            "the exact clean committed prefix at every denoising step. The legacy "
+            "inference-only RTC option is intentionally not used."
+        )
+
+    def _ensure_rlt_recording(self):
+        if not self._rlt_trace_initialized:
+            try:
+                from rlt_recording import create_rlt_trace_publisher
+            except ModuleNotFoundError:
+                from cyclo_brain.policy.common.runtime.rlt_recording import create_rlt_trace_publisher
+            self._rlt_trace = create_rlt_trace_publisher()
+            self._rlt_trace_initialized = True
+
+    def _run_tt_rtc_action(
+        self,
+        observation: dict,
+        tt_request,
+        action_policy_mode: str,
+        capture_rlt_context: bool = False,
+    ) -> tuple[dict, Mapping]:
+        """Invoke only an explicitly TT-RTC-aware policy/adapter entry point."""
+
+        target = self._rlt_adapter if action_policy_mode == "rlt" else self.policy
+        runner = getattr(target, "get_action_tt_rtc", None)
+        if not callable(runner):
+            raise RuntimeError(
+                self._missing_tt_rtc_runtime_message(action_policy_mode)
+            )
+
+        committed_prefix = np.asarray(
+            tt_request.prefix_actions,
+            dtype=np.float32,
+        ).reshape(1, tt_request.delay_steps, tt_request.action_dim)
+        runner_kwargs = {
+            'committed_action_prefix': committed_prefix,
+            'delay_steps': tt_request.delay_steps,
+            'action_horizon': self._tt_rtc_capability.payload[
+                "training_time_rtc"
+            ]["action_horizon"],
+        }
+        reset_noise_cache = getattr(
+            self.policy,
+            "reset_tt_rtc_noise_cache",
+            None,
+        )
+        if action_policy_mode == "base" and self._tt_rtc_temporal_overlap_steps:
+            overlap_steps = (
+                0
+                if tt_request.delay_steps == 0
+                else self._tt_rtc_temporal_overlap_steps
+            )
+            action_horizon = int(runner_kwargs['action_horizon'])
+            if overlap_steps > action_horizon - tt_request.delay_steps:
+                raise RuntimeError(
+                    "TT-RTC temporal overlap exceeds the generated postfix"
+            )
+            runner_kwargs['temporal_overlap_steps'] = overlap_steps
+            if tt_request.delay_steps == 0 and callable(reset_noise_cache):
+                reset_noise_cache()
+        elif action_policy_mode == "rlt" and callable(reset_noise_cache):
+            reset_noise_cache()
+
+        result = runner(
+            observation,
+            **runner_kwargs,
+            **({'capture_context': True} if capture_rlt_context else {}),
+        )
+        # Match Gr00tPolicy.get_action's public convention while preserving
+        # RLT's raw VLA reference as metadata for the next TT-RTC prefix.
+        if isinstance(result, tuple) and len(result) == 2:
+            action, info = result
+        else:
+            action, info = result, {}
+        if not isinstance(action, dict):
+            raise RuntimeError("TT-RTC policy returned an invalid action mapping")
+        if not isinstance(info, Mapping):
+            raise RuntimeError("TT-RTC policy returned invalid action metadata")
+        return action, info
+
+    def _validate_tt_rtc_output(self, result: dict, action_policy_mode: str) -> dict:
+        if not result.get("success"):
+            return result
+        expected_horizon = (
+            TT_RTC_RLT_CHUNK_LENGTH
+            if action_policy_mode == "rlt"
+            else self._tt_rtc_capability.payload["training_time_rtc"]["action_horizon"]
+        )
+        if int(result.get("chunk_size", -1)) != expected_horizon:
+            return GR00TInference.fail(
+                "TT-RTC output horizon mismatch: expected "
+                f"{expected_horizon}, got {result.get('chunk_size')}"
+            )
+        expected_dim = self._tt_rtc_capability.payload["training_time_rtc"]["action_dimension"]
+        if int(result.get("action_dim", -1)) != expected_dim:
+            return GR00TInference.fail(
+                "TT-RTC output action dimension mismatch: expected "
+                f"{expected_dim}, got "
+                f"{result.get('action_dim')}"
+            )
+        if action_policy_mode == "rlt":
+            if int(result.get("rtc_reference_chunk_size", -1)) != TT_RTC_RLT_CHUNK_LENGTH:
+                return GR00TInference.fail(
+                    "TT-RTC RLT VLA reference horizon mismatch: expected "
+                    f"{TT_RTC_RLT_CHUNK_LENGTH}, got "
+                    f"{result.get('rtc_reference_chunk_size')}"
+                )
+            reference = np.asarray(
+                result.get("rtc_reference_action_chunk", []),
+                dtype=np.float64,
+            )
+            if reference.size != TT_RTC_RLT_CHUNK_LENGTH * expected_dim:
+                return GR00TInference.fail(
+                    "TT-RTC RLT VLA reference size mismatch"
+                )
+            if not bool(np.isfinite(reference).all()):
+                return GR00TInference.fail(
+                    "TT-RTC RLT VLA reference contains NaN or Inf"
+                )
+        return result
+
+    def policy_update_command(self, request) -> dict:
+        """Control staged MLP application; never switch the VLA/RLT action route."""
+        try:
+            from engine_process import protocol as commands
+        except ModuleNotFoundError:
+            from cyclo_brain.policy.common.runtime.engine_process import protocol as commands
+        try:
+            adapter = self._rlt_adapter
+            if not self.is_ready or adapter is None:
+                raise RuntimeError("Load GR00T with an RLT bundle first")
+            expected = str(getattr(request, "rlt_bundle_path", "") or "").strip()
+            if not expected or os.path.abspath(expected) != str(adapter.bundle.root):
+                raise RuntimeError("Selected RLT bundle differs from the loaded bundle")
+            updates = adapter.policy_updates
+            if request.command == commands.CMD_POLICY_AUTO_APPLY_ON:
+                updates.set_auto_apply(True)
+            elif request.command == commands.CMD_POLICY_AUTO_APPLY_OFF:
+                updates.set_auto_apply(False)
+            elif request.command == commands.CMD_POLICY_APPLY:
+                updates.request_apply()
+            elif request.command in (commands.CMD_ASYNC_RL_ON, commands.CMD_ASYNC_RL_OFF):
+                adapter.set_async_training(request.command == commands.CMD_ASYNC_RL_ON,
+                    max_updates=getattr(request, 'rlt_max_updates', 0) or None)
+            elif request.command == commands.CMD_ASYNC_RL_DATASETS:
+                adapter.select_async_datasets(list(getattr(request, 'rlt_dataset_paths', []) or []))
+            elif request.command == commands.CMD_ASYNC_RL_SAVE:
+                adapter._async_checkpoint.start()
+            elif request.command != commands.CMD_POLICY_UPDATE_STATUS:
+                raise ValueError("Unknown RLT policy update command")
+            return {"success": True, "message": json.dumps({
+                **updates.status(), **adapter.async_training_status(),
+            })}
+        except Exception as error:
+            return self.fail(str(error))
+
+    def get_action_chunk(self, request) -> dict:
+        adapter = self._rlt_adapter
+        if adapter is not None and hasattr(adapter, 'inference_slot'):
+            with adapter.inference_slot():
+                return self._get_action_chunk(request)
+        # RLT owns its training/inference synchronization separately. Keep
+        # the complete base request on one stream, including tensor creation
+        # and CPU action decoding, so TRT never enqueues on the default stream.
+        if adapter is None and self._cuda_execution is not None:
+            with self._cuda_execution.activate():
+                return self._get_action_chunk(request)
+        return self._get_action_chunk(request)
+
+    def _get_action_chunk(self, request) -> dict:
+        """Build observation from RobotClient, run inference, return action chunk."""
+        if not self.is_ready:
+            return self.fail("Not in inference mode")
+
+        try:
+            request_started = time.monotonic()
+            sensor_snapshot = None
+            if self._loaded_publish_to_robot:
+                snapshot_reader = getattr(self.robot, "get_fresh_observation", None)
+                freshness_validator = getattr(
+                    self.robot,
+                    "validate_observation_freshness",
+                    None,
+                )
+                if not callable(snapshot_reader) and not callable(freshness_validator):
+                    return self.fail(
+                        "Real-robot inference refused: RobotClient does not "
+                        "provide an observation freshness watchdog"
+                    )
+                camera_names = list(self.robot_info.get("camera_sources", {}).values()) or None
+                if callable(snapshot_reader):
+                    sensor_snapshot = snapshot_reader(
+                        self._real_robot_sensor_max_age_s,
+                        camera_names=camera_names, format="rgb",
+                    )
+                else:
+                    freshness_validator(
+                        self._real_robot_sensor_max_age_s, camera_names=camera_names,
+                    )
+
+            action_policy_mode = str(
+                getattr(request, "action_policy_mode", "base") or "base"
+            ).strip().lower()
+            if action_policy_mode not in {"base", "rlt"}:
+                return self.fail(
+                    "Unsupported action_policy_mode; expected 'base' or 'rlt'"
+                )
+            if action_policy_mode == "rlt" and self._rlt_adapter is None:
+                return self.fail(
+                    "RLT action requested without a preloaded RLT bundle"
+                )
+
+            if str(getattr(request, "action_request_mode", "") or "").strip().lower() == TT_RTC_REQUEST_MODE:
+                self._require_tt_rtc_capability(action_policy_mode)
+            rtc_contract = (
+                self._tt_rtc_capability.payload["training_time_rtc"]
+                if self._tt_rtc_capability
+                else None
+            )
+            expected_dim = (
+                rtc_contract["action_dimension"]
+                if rtc_contract
+                else TT_RTC_ACTION_DIM
+            )
+            tt_request = parse_tt_rtc_request(
+                request,
+                action_dim=expected_dim,
+                min_delay_steps=(rtc_contract["min_delay_steps"] if rtc_contract else 0),
+                max_delay_steps=(
+                    rtc_contract["max_delay_steps"]
+                    if rtc_contract
+                    else TT_RTC_MAX_DELAY_STEPS
+                ),
+            )
+
+            if action_policy_mode == 'rlt':
+                self._ensure_rlt_recording()
+            recording_id = self._rlt_trace.recording_id if self._rlt_trace else ''
+            capture_context = bool(recording_id and action_policy_mode == 'rlt')
+            observed_at_ns = time.time_ns()
+            if sensor_snapshot is not None:
+                images = sensor_snapshot["images"]
+                joints = sensor_snapshot["joint_positions"]
+            else:
+                images = self.robot.get_images(
+                    format="rgb",
+                    camera_names=list(self.robot_info.get("camera_sources", {}).values()) or None,
+                )
+                joints = self.robot.get_joint_positions()
+            observation_read_completed_ns = time.time_ns()
+            task = request.task_instruction
+
+            observation = self.preprocess(images, joints, task)
+            if "success" in observation:
+                return observation
+
+            t0 = time.monotonic()
+            observation_latency = t0 - request_started
+            request_mode = "tt_rtc" if tt_request is not None else "standard"
+            self.logger.info(
+                "Running GR00T inference (request=%s, action=%s)...",
+                request_mode,
+                action_policy_mode,
+            )
+            tt_rtc_info: Mapping = {}
+            if tt_request is not None:
+                action, tt_rtc_info = self._run_tt_rtc_action(
+                    observation,
+                    tt_request,
+                    action_policy_mode,
+                    capture_rlt_context=capture_context,
+                )
+            elif action_policy_mode == "rlt":
+                action = self._rlt_adapter.get_action(
+                    observation, **({'capture_context': True} if capture_context else {}),
+                )
+            else:
+                action, _info = self.policy.get_action(observation)
+            self.logger.info(
+                "GR00T inference completed in %.3fs (request=%s, action=%s)",
+                time.monotonic() - t0,
+                request_mode,
+                action_policy_mode,
+            )
+            result = self.postprocess_action(action)
+            if (
+                tt_request is not None
+                and action_policy_mode == "rlt"
+                and result.get("success")
+            ):
+                reference_action = tt_rtc_info.get(
+                    "tt_rtc_vla_reference_action"
+                )
+                if not isinstance(reference_action, dict):
+                    return self.fail(
+                        "TT-RTC RLT did not return its VLA reference action"
+                    )
+                reference_result = self.postprocess_action(reference_action)
+                if not reference_result.get("success"):
+                    return self.fail(
+                        "TT-RTC RLT VLA reference could not be decoded: "
+                        f"{reference_result.get('message', 'unknown error')}"
+                    )
+                result["rtc_reference_action_chunk"] = reference_result[
+                    "action_chunk"
+                ]
+                result["rtc_reference_chunk_size"] = reference_result[
+                    "chunk_size"
+                ]
+            if tt_request is not None:
+                result = self._validate_tt_rtc_output(result, action_policy_mode)
+            if capture_context and result.get('success'):
+                arrays = self._rlt_adapter.recording_context
+                self._rlt_adapter.recording_context = None
+                arrays['physical_action_chunk'] = np.asarray(result['action_chunk']).reshape(
+                    result['chunk_size'], result['action_dim'],
+                ).copy()
+                if tt_request is not None and action_policy_mode == 'rlt':
+                    arrays['physical_vla_reference_chunk'] = np.asarray(
+                        result['rtc_reference_action_chunk']
+                    ).reshape(
+                        result['rtc_reference_chunk_size'],
+                        result['action_dim'],
+                    ).copy()
+                arrays['physical_prefix'] = np.asarray(
+                    tt_request.prefix_actions if tt_request else [], dtype=np.float32,
+                ).reshape(-1, result['action_dim'])
+                self._rlt_trace.submit({
+                    'event': 'inference', 'request_seq': getattr(request, 'seq_id', 0),
+                    'timebase': 'unix_wall_clock_ns',
+                    'observation_read_started_ns': observed_at_ns,
+                    'observation_read_completed_ns': observation_read_completed_ns,
+                    'inference_completed_ns': time.time_ns(),
+                    'action_policy_mode': action_policy_mode,
+                    'action_request_mode': getattr(request, 'action_request_mode', 'sync'),
+                    'delay_steps': tt_request.delay_steps if tt_request else 0,
+                    'model_path': self._loaded_model_path,
+                    'bundle_path': str(self._rlt_adapter.bundle.root),
+                    'contract': asdict(self._rlt_adapter.spec),
+                    'policy_identity': self._rlt_adapter.recording_identity,
+                    'task_instruction': task,
+                    'action_domain': ('mlp_joint_normalized_except_physical_arrays' if getattr(self._rlt_adapter.shadow_policy.actor, 'mlp_normalization', None) else 'normalized_except_physical_arrays'),
+                    'mlp_normalization': getattr(self._rlt_adapter.shadow_policy.actor, 'mlp_normalization', None),
+                    'action_keys': list(self.policy_info['action']),
+                    'execution_verified': False,
+                }, arrays, recording_id=recording_id)
+            self.logger.info(
+                "GR00T request timing: observation=%.3fs model_and_output=%.3fs total=%.3fs",
+                observation_latency, time.monotonic() - t0,
+                time.monotonic() - request_started,
+            )
+            return result
+
+        except Exception as e:
+            self.logger.error("Inference failed: %s", e, exc_info=True)
+            return self.fail(str(e))
+
+    def preprocess(self, images: dict, joints: dict, task: str) -> dict:
+        """Build observation dict from raw sensor data. Returns fail dict on error."""
+        if not images or not joints:
+            return self.fail("No recent observations from sensors")
+
+        video_obs = {}
+        for cam_key in self.robot_info["cameras"]:
+            source_key = self.robot_info.get("camera_sources", {}).get(cam_key, cam_key)
+            img = images.get(source_key)
+            if img is None:
+                return self.fail(f"Missing camera: {source_key} for {cam_key}")
+            rotation = self.robot_info["camera_rotations"].get(source_key)
+            if rotation and rotation in self.ROTATE_MAP:
+                img = cv2.rotate(img, self.ROTATE_MAP[rotation])
+            video_obs[cam_key] = img[np.newaxis, np.newaxis, ...]  # (1,1,H,W,C)
+
+        state_obs = {}
+        for modality_key, yaml_group in self.robot_info["joints"].items():
+            positions = joints.get(yaml_group)
+            if positions is None or len(positions) == 0:
+                return self.fail(f"Missing joint group: {modality_key}")
+            state_obs[modality_key] = positions[np.newaxis, np.newaxis, :]  # (1,1,D)
+
+        # Sensor-backed state modalities (e.g. mobile ← odom).
+        for modality_key, sensor_name in self.robot_info.get("sensor_states", {}).items():
+            if sensor_name == "odom":
+                odom = self.robot.get_odom()
+                if odom is None:
+                    return self.fail(f"Missing sensor: {sensor_name}")
+                vec = np.array([
+                    float(odom["linear_velocity"][0]),
+                    float(odom["linear_velocity"][1]),
+                    float(odom["angular_velocity"][2]),
+                ], dtype=np.float32)
+                state_obs[modality_key] = vec[np.newaxis, np.newaxis, :]  # (1,1,3)
+            else:
+                return self.fail(f"Unsupported sensor modality: {sensor_name}")
+
+        language_obs = {key: [[task]] for key in self.policy_info["language"]}
+
+        return {
+            "video": video_obs,
+            "state": state_obs,
+            "language": language_obs,
+        }
+
+    def postprocess_action(self, action: dict) -> dict:
+        chunks = [
+            action[key][0]  # remove batch dim
+            for key in self.policy_info["action"]
+            if key in action and isinstance(action[key], np.ndarray)
+        ]
+        if not chunks:
+            return self.fail("No action output from policy")
+
+        chunk = np.concatenate(chunks, axis=1)  # (T, D_total)
+        T, D = chunk.shape
+        self.logger.info("Action chunk: T=%d, D=%d", T, D)
+        return {
+            "success": True,
+            # Keep as numpy — zenoh_ros2_sdk's publisher uses .view() for fast
+            # CDR encoding and crashes on plain lists ('list' object has no
+            # attribute 'view'). inference_server._publish_chunk passes this
+            # straight through.
+            "action_chunk": np.asarray(chunk.flatten(), dtype=np.float64),
+            "chunk_size": T,
+            "action_dim": D,
+        }
+
+    def cleanup(self) -> None:
+        """Release robot resources. Policy is kept cached for fast restart."""
+        if self._rlt_adapter is not None and hasattr(self._rlt_adapter, 'close_async_training'):
+            self._rlt_adapter.close_async_training()
+        if self._rlt_trace is not None:
+            self._rlt_trace.close()
+        self._rlt_trace = None
+        self._rlt_trace_initialized = False
+        if self.robot is not None:
+            self.robot.close()
+            self.robot = None
+
+        self.policy_info = {k: [] for k in self.policy_info}
+        self.robot_info = {
+            "cameras": [],
+            "joints": {},
+            "camera_rotations": {},
+        }
+
+    @staticmethod
+    def fail(message: str) -> dict:
+        return {"success": False, "message": message}
+
+
+def create_engine() -> GR00TInference:
+    """Factory used by the shared Engine process."""
+    return GR00TInference()

@@ -73,7 +73,7 @@ export const resolveInitialPageState = (storage = getSessionStorage()) => {
     };
   }
 
-  if (storedPage === LEGACY_BT_MANAGER_PAGE) {
+  if (storedPage === LEGACY_BT_MANAGER_PAGE || storedPage === 'offline_rl') {
     // One-time migration for tabs saved before BT Manager became the Action
     // Canvas. Preserve the rest of the Mission Canvas session and only select
     // Canvas workspace inside Autonomy Studio; select that mapless workspace.
@@ -91,7 +91,7 @@ export const resolveInitialPageState = (storage = getSessionStorage()) => {
     try {
       storage.setItem(AUTONOMY_STUDIO_SESSION_STORAGE_KEY, JSON.stringify({
         ...missionSession,
-        workspaceKind: 'action_canvas',
+        workspaceKind: storedPage === 'offline_rl' ? 'rl_canvas' : 'action_canvas',
       }));
       storage.setItem(CURRENT_PAGE_STORAGE_KEY, PageType.AUTONOMY_STUDIO);
     } catch (_error) {
@@ -163,6 +163,7 @@ const initialState = {
   error: null,
   currentPage: initialPageState.currentPage,
   restoredPageFromSession: initialPageState.restoredPageFromSession,
+  activeStudioWorkspace: '',
   sidebarOpen: false,
   modalOpen: false,
   notifications: [],
@@ -178,6 +179,7 @@ const uiSlice = createSlice({
   name: 'ui',
   initialState,
   reducers: {
+    setActiveStudioWorkspace: (state, action) => { state.activeStudioWorkspace = action.payload; },
     setLoading: (state, action) => {
       state.isLoading = action.payload;
     },
@@ -226,6 +228,7 @@ const uiSlice = createSlice({
 });
 
 export const {
+  setActiveStudioWorkspace,
   setLoading,
   setError,
   clearError,

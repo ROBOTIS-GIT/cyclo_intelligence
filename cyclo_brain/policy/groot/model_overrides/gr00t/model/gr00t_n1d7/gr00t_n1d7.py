@@ -225,6 +225,9 @@ class Gr00tN1d7ActionHead(nn.Module):
             do_dropout = do_dropout[:, None, None].to(dtype=state_features.dtype)
             state_features = state_features * (1 - do_dropout)
 
+        if bool(getattr(self.config, "training_time_rtc_enabled", False)):
+            raise RuntimeError("TT-RTC fine-tuning is external; this runtime provides inference only")
+
         # Embed noised action trajectory.
         actions = action_input.action
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
@@ -341,12 +344,6 @@ class Gr00tN1d7ActionHead(nn.Module):
             embodiment_id: [B] (embodiment IDs)
             backbone_output: Output from the backbone model
         """
-        if getattr(self.config, "training_time_rtc", False):
-            return self._get_ttrtc_action_with_features(
-                backbone_features, state_features, embodiment_id, backbone_output, options
-            )
-        if options and "ttrtc_prefix" in options:
-            raise ValueError("TT-RTC prefix requires a training_time_rtc checkpoint")
         vl_embeds = backbone_features
 
         # Set initial actions as the sampled noise.
@@ -448,57 +445,6 @@ class Gr00tN1d7ActionHead(nn.Module):
             }
         )
 
-    def _get_ttrtc_action_with_features(
-        self, vl_embeds, state_features, embodiment_id, backbone_output, options
-    ) -> BatchFeature:
-        """Integrate the training-time RTC flow with a clean, immutable prefix.
-
-        Tokens stay at the checkpoint's padded H40/D132 shape. Only the logical
-        H32/D16 rectangle is decoded; padded coordinates of clean prefix tokens
-        are zero exactly as in training. State and suffix use tau, prefix uses 1.
-        """
-        if options is None or "ttrtc_prefix" not in options:
-            raise ValueError("TT-RTC inference requires an explicit normalized ttrtc_prefix")
-        if (getattr(self.config, "logical_action_horizon", None) != 32
-                or getattr(self.config, "logical_action_dim", None) != 16
-                or getattr(self.config, "tt_rtc_max_delay_steps", None) != 8
-                or self.action_horizon != 40 or self.action_dim != 132
-                or self.num_inference_timesteps != 4 or self.num_timestep_buckets != 1000):
-            raise ValueError("Unsupported TT-RTC checkpoint action/time contract")
-        batch, device = vl_embeds.shape[0], vl_embeds.device
-        prefix = torch.as_tensor(options["ttrtc_prefix"], device=device, dtype=vl_embeds.dtype)
-        if (prefix.ndim != 3 or prefix.shape[0] != batch or prefix.shape[2] != 16
-                or not 0 <= prefix.shape[1] <= 8 or not torch.isfinite(prefix).all()):
-            raise ValueError("ttrtc_prefix must be finite normalized [B,d,16], 0 <= d <= 8")
-        delay = prefix.shape[1]
-        clean_prefix = torch.zeros((batch, delay, self.action_dim), dtype=vl_embeds.dtype, device=device)
-        clean_prefix[:, :, :16] = prefix
-        actions = torch.randn((batch, self.action_horizon, self.action_dim),
-                              dtype=vl_embeds.dtype, device=device)
-        dt = 1.0 / self.num_inference_timesteps
-        for step in range(self.num_inference_timesteps):
-            actions[:, :delay] = clean_prefix
-            code = int(step * self.num_timestep_buckets / self.num_inference_timesteps)
-            action_codes = torch.full((batch, self.action_horizon), code,
-                                      device=device, dtype=torch.long)
-            action_codes[:, :delay] = self.num_timestep_buckets
-            state_codes = torch.full(state_features.shape[:2], code, device=device, dtype=torch.long)
-            dit_codes = torch.cat((state_codes, action_codes), dim=1)
-            action_features = self.action_encoder(actions, action_codes, embodiment_id)
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(self.action_horizon, device=device)
-                action_features = action_features + self.position_embedding(pos_ids).unsqueeze(0)
-            kwargs = dict(hidden_states=torch.cat((state_features, action_features), dim=1),
-                          encoder_hidden_states=vl_embeds, timestep=dit_codes)
-            if self.config.use_alternate_vl_dit:
-                kwargs.update(image_mask=backbone_output.image_mask,
-                              backbone_attention_mask=backbone_output.backbone_attention_mask)
-            velocity = self.action_decoder(self.model(**kwargs), embodiment_id)[:, -self.action_horizon:]
-            actions = actions + dt * velocity
-            actions[:, :delay] = clean_prefix
-        return BatchFeature(data={"action_pred": actions,
-                                  "backbone_features": vl_embeds,
-                                  "state_features": state_features})
 
     @torch.no_grad()
     def get_action(
@@ -543,6 +489,223 @@ class Gr00tN1d7ActionHead(nn.Module):
     def prepare_input(self, batch: dict) -> BatchFeature:
         """Prepare input batch for the action head."""
         return BatchFeature(data=batch)
+
+    def _predict_tt_rtc_velocity(
+        self,
+        *,
+        vl_embeds: torch.Tensor,
+        state_features: torch.Tensor,
+        actions: torch.Tensor,
+        embodiment_id: torch.Tensor,
+        backbone_output: BatchFeature,
+        action_time_codes: torch.Tensor,
+        dit_time_codes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict velocity with one flow-time code per state/action token."""
+
+        batch_size, action_horizon, _ = actions.shape
+        if tuple(action_time_codes.shape) != (batch_size, action_horizon):
+            raise ValueError(
+                "TT-RTC action_time_codes must have shape "
+                f"{(batch_size, action_horizon)}, got {tuple(action_time_codes.shape)}"
+            )
+        expected_dit_shape = (batch_size, state_features.shape[1] + action_horizon)
+        if tuple(dit_time_codes.shape) != expected_dit_shape:
+            raise ValueError(
+                "TT-RTC dit_time_codes must have shape "
+                f"{expected_dit_shape}, got {tuple(dit_time_codes.shape)}"
+            )
+
+        action_features = self.action_encoder(
+            actions,
+            action_time_codes,
+            embodiment_id,
+        )
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(
+                action_features.shape[1],
+                dtype=torch.long,
+                device=actions.device,
+            )
+            action_features = action_features + self.position_embedding(pos_ids).unsqueeze(0)
+
+        sa_embs = torch.cat((state_features, action_features), dim=1)
+        if self.config.use_alternate_vl_dit:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embeds,
+                encoder_attention_mask=backbone_output.backbone_attention_mask,
+                timestep=dit_time_codes,
+                return_all_hidden_states=False,
+                image_mask=backbone_output.image_mask,
+                backbone_attention_mask=backbone_output.backbone_attention_mask,
+            )
+        else:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embeds,
+                encoder_attention_mask=backbone_output.backbone_attention_mask,
+                timestep=dit_time_codes,
+                return_all_hidden_states=False,
+            )
+        pred = self.action_decoder(model_output, embodiment_id)
+        return pred[:, -action_horizon:]
+
+    @torch.no_grad()
+    def get_action_tt_rtc_with_features(
+        self,
+        *,
+        backbone_features: torch.Tensor,
+        state_features: torch.Tensor,
+        embodiment_id: torch.Tensor,
+        backbone_output: BatchFeature,
+        normalized_action_prefix: torch.Tensor,
+        delay_steps: int,
+        logical_action_horizon: int,
+        temporal_overlap_steps: int = 0,
+    ) -> BatchFeature:
+        """Sample a chunk conditioned on an exact normalized clean prefix."""
+
+        vl_embeds = backbone_features
+        batch_size = vl_embeds.shape[0]
+        if isinstance(delay_steps, bool) or not isinstance(delay_steps, int):
+            raise ValueError("TT-RTC delay_steps must be an integer")
+        if not 0 <= delay_steps < self.action_horizon:
+            raise ValueError(
+                f"TT-RTC delay_steps must be in [0, {self.action_horizon - 1}]"
+            )
+        expected_prefix_shape = (batch_size, delay_steps, self.action_dim)
+        if tuple(normalized_action_prefix.shape) != expected_prefix_shape:
+            raise ValueError(
+                "TT-RTC normalized_action_prefix must have shape "
+                f"{expected_prefix_shape}, got {tuple(normalized_action_prefix.shape)}"
+            )
+        if not bool(torch.isfinite(normalized_action_prefix).all()):
+            raise ValueError("TT-RTC normalized_action_prefix must be finite")
+        if (
+            isinstance(logical_action_horizon, bool)
+            or not isinstance(logical_action_horizon, int)
+            or not 0 < logical_action_horizon <= self.action_horizon
+        ):
+            raise ValueError(
+                "TT-RTC logical_action_horizon must be in "
+                f"[1, {self.action_horizon}]"
+            )
+        if (
+            isinstance(temporal_overlap_steps, bool)
+            or not isinstance(temporal_overlap_steps, int)
+            or not 0 <= temporal_overlap_steps
+            <= logical_action_horizon - delay_steps
+        ):
+            raise ValueError(
+                "TT-RTC temporal_overlap_steps must fit in the logical postfix"
+            )
+
+        actions = torch.randn(
+            size=(batch_size, self.action_horizon, self.action_dim),
+            dtype=vl_embeds.dtype,
+            device=vl_embeds.device,
+        )
+        previous_noise = getattr(self, "_tt_rtc_previous_initial_noise", None)
+        if temporal_overlap_steps and previous_noise is not None:
+            if tuple(previous_noise.shape) == tuple(actions.shape):
+                previous_start = logical_action_horizon - temporal_overlap_steps
+                current_start = delay_steps
+                actions[:, current_start : current_start + temporal_overlap_steps] = (
+                    previous_noise[
+                        :, previous_start:logical_action_horizon
+                    ].to(device=actions.device, dtype=actions.dtype)
+                )
+        initial_noise = actions.detach().clone()
+        normalized_action_prefix = normalized_action_prefix.to(
+            device=actions.device,
+            dtype=actions.dtype,
+        )
+        prefix_values = torch.zeros_like(actions)
+        prefix_values[:, :delay_steps] = normalized_action_prefix
+        prefix_mask = (
+            torch.arange(self.action_horizon, device=actions.device)[None, :]
+            < delay_steps
+        ).expand(batch_size, -1)
+
+        dt = 1.0 / self.num_inference_timesteps
+        for step in range(self.num_inference_timesteps):
+            # A committed prefix is a clean condition, not part of the random
+            # trajectory.  Clamp it before every network call.
+            actions = torch.where(prefix_mask[..., None], prefix_values, actions)
+            flow_time = step / float(self.num_inference_timesteps)
+            base_time_code = int(flow_time * self.num_timestep_buckets)
+            action_time_codes = torch.full(
+                (batch_size, self.action_horizon),
+                base_time_code,
+                dtype=torch.long,
+                device=actions.device,
+            )
+            action_time_codes = torch.where(
+                prefix_mask,
+                torch.full_like(action_time_codes, self.num_timestep_buckets),
+                action_time_codes,
+            )
+            state_time_codes = torch.full(
+                (batch_size, state_features.shape[1]),
+                base_time_code,
+                dtype=torch.long,
+                device=actions.device,
+            )
+            dit_time_codes = torch.cat((state_time_codes, action_time_codes), dim=1)
+            pred_velocity = self._predict_tt_rtc_velocity(
+                vl_embeds=vl_embeds,
+                state_features=state_features,
+                actions=actions,
+                embodiment_id=embodiment_id,
+                backbone_output=backbone_output,
+                action_time_codes=action_time_codes,
+                dit_time_codes=dit_time_codes,
+            )
+            updated = actions + dt * pred_velocity
+            # Prefix tokens are conditioning only; never integrate them.  The
+            # final clamp also guarantees the returned reference is exact.
+            actions = torch.where(prefix_mask[..., None], prefix_values, updated)
+
+        self._tt_rtc_previous_initial_noise = initial_noise
+        return BatchFeature(
+            data={
+                "action_pred": actions,
+                "backbone_features": vl_embeds,
+                "state_features": state_features,
+                "normalized_action_prefix": normalized_action_prefix,
+            }
+        )
+
+    @torch.no_grad()
+    def get_action_tt_rtc(
+        self,
+        backbone_output: BatchFeature,
+        action_input: BatchFeature,
+        *,
+        normalized_action_prefix: torch.Tensor,
+        delay_steps: int,
+        logical_action_horizon: int,
+        temporal_overlap_steps: int = 0,
+    ) -> BatchFeature:
+        """Encode observation features once and run the TT-RTC sampler."""
+
+        features = self._encode_features(backbone_output, action_input)
+        return self.get_action_tt_rtc_with_features(
+            backbone_features=features.backbone_features,
+            state_features=features.state_features,
+            embodiment_id=action_input.embodiment_id,
+            backbone_output=backbone_output,
+            normalized_action_prefix=normalized_action_prefix,
+            delay_steps=delay_steps,
+            logical_action_horizon=logical_action_horizon,
+            temporal_overlap_steps=temporal_overlap_steps,
+        )
+
+    def reset_tt_rtc_noise_cache(self) -> None:
+        """Drop temporal diffusion state at a trajectory boundary."""
+
+        self._tt_rtc_previous_initial_noise = None
 
 
 def get_backbone_cls(config: Gr00tN1d7Config):

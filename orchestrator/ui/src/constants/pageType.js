@@ -26,4 +26,9 @@ const PageType = {
   AUTONOMY_STUDIO: 'autonomy_studio',
 };
 
+export const isInferenceWorkspacePage = (page, workspaceKind = '') => (
+  page === PageType.INFERENCE || page === 'offline_rl' ||
+  (page === PageType.AUTONOMY_STUDIO && workspaceKind === 'rl_canvas')
+);
+
 export default PageType;

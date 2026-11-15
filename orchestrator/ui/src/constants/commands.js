@@ -20,6 +20,8 @@
 const EditDatasetCommand = {
   MERGE: 0,
   DELETE: 1,
+  PRUNE_OLDEST: 2,
+  RELABEL: 3,
 };
 
 export default EditDatasetCommand;

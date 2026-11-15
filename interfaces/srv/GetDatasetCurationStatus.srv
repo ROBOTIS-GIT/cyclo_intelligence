@@ -1,0 +1,9 @@
+string job_id
+---
+bool success
+uint8 status
+float32 progress_percentage
+string stage
+string message
+# Versioned JSON analysis/final report. Empty while no report is available.
+string result_json

@@ -335,6 +335,8 @@ class StateActionProcessor:
         action: dict[str, np.ndarray],
         embodiment_tag: str,
         state: dict[str, np.ndarray] | None = None,
+        *,
+        clip_outliers: bool | None = None,
     ) -> dict[str, np.ndarray]:
         """
         Apply action processing (absolute->relative conversion, normalization).
@@ -350,6 +352,9 @@ class StateActionProcessor:
             state: Optional dict mapping joint_group -> raw state values
                 Required if any action group uses ActionRepresentation.RELATIVE
                 Shape per group: (T_state, D) where last timestep is used as reference
+            clip_outliers: Per-call clipping override. ``None`` preserves the
+                processor setting. TT-RTC committed prefixes use ``False`` so
+                decode -> physical execution -> re-normalize is invertible.
 
         Returns:
             Dict mapping joint_group -> processed action values
@@ -411,7 +416,8 @@ class StateActionProcessor:
             else:
                 normalized = normalize_values_minmax(action[joint_group], params)
 
-            if self.clip_outliers:
+            should_clip = self.clip_outliers if clip_outliers is None else bool(clip_outliers)
+            if should_clip:
                 normalized = np.clip(normalized, -1.0, 1.0)
 
             normalized_values[joint_group] = normalized

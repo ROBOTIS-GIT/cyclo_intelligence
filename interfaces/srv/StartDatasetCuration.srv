@@ -1,0 +1,16 @@
+########################################
+# Commands
+########################################
+uint8 ANALYZE = 0
+uint8 APPLY = 1
+uint8 CANCEL = 2
+
+uint8 command
+# Empty for ANALYZE. Required for APPLY and CANCEL.
+string job_id
+# Versioned JSON request. See cyclo_data.curation.engine for schema v1.
+string request_json
+---
+bool success
+string job_id
+string message

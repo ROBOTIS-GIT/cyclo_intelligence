@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from engine_process.protocol import EngineCommandResponse  # noqa: E402
+from main_runtime.inference_requester import InferenceRequester  # noqa: E402
+
+
+class FakeEngineClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def call(self, request, timeout_s: float):
+        self.calls.append((request, timeout_s))
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class InferenceRequesterTests(unittest.TestCase):
+    def test_async_budget_survives_wire_round_trip(self):
+        from engine_process.protocol import request_from_message, request_to_message_kwargs
+        from types import SimpleNamespace
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=1)])
+        requester = InferenceRequester(client)
+        self.assertTrue(requester.policy_update(25, '/bundle', max_updates=750).success)
+        decoded = request_from_message(SimpleNamespace(**request_to_message_kwargs(client.calls[0][0])))
+        self.assertEqual(decoded.rlt_max_updates, 750)
+        self.assertEqual(decoded.command, 25)
+
+    def test_replay_selection_command_forwards_multiple_and_empty_paths(self):
+        from engine_process.protocol import request_from_message, request_to_message_kwargs
+        from types import SimpleNamespace
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=n) for n in (1, 2)])
+        requester = InferenceRequester(client)
+        for paths in (['/data/a', '/data/b'], []):
+            self.assertTrue(requester.policy_update(27, '/bundle', paths).success)
+            request = client.calls[-1][0]
+            decoded = request_from_message(SimpleNamespace(**request_to_message_kwargs(request)))
+            self.assertEqual(decoded.rlt_dataset_paths, paths)
+            self.assertEqual(decoded.command, 27)
+
+    def test_policy_update_uses_existing_bundle_field_and_does_not_start_actions(self):
+        client = FakeEngineClient([EngineCommandResponse(success=True, seq_id=1)])
+        requester = InferenceRequester(client)
+        self.assertTrue(requester.policy_update(24, '/bundle').success)
+        request, _ = client.calls[0]
+        self.assertEqual(request.command, 24)
+        self.assertEqual(request.rlt_bundle_path, '/bundle')
+        self.assertFalse(requester.has_pending_get_action())
+        with self.assertRaisesRegex(ValueError, 'Unknown'):
+            requester.policy_update(1, '/bundle')
+
+    def test_load_policy_default_timeout_is_long_enough_for_model_load(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client)
+
+        requester.load_policy(type("Req", (), {
+            "model_path": "/models/policy",
+            "acceleration_mode": "tensorrt_dit",
+            "acceleration_engine_path": "/models/policy/dit_model_bf16.trt",
+            "rlt_enabled": True,
+            "rlt_bundle_path": "/models/rlt",
+            "action_request_mode": "tt_rtc",
+            "publish_to_robot": True,
+        })())
+
+        self.assertEqual(client.calls[0][1], 7200.0)
+        self.assertEqual(client.calls[0][0].acceleration_mode, "tensorrt_dit")
+        self.assertEqual(
+            client.calls[0][0].acceleration_engine_path,
+            "/models/policy/dit_model_bf16.trt",
+        )
+        self.assertTrue(client.calls[0][0].rlt_enabled)
+        self.assertEqual(client.calls[0][0].rlt_bundle_path, "/models/rlt")
+        self.assertEqual(client.calls[0][0].action_request_mode, "tt_rtc")
+        self.assertTrue(client.calls[0][0].publish_to_robot)
+
+    def test_get_action_uses_monotonic_seq_id(self) -> None:
+        client = FakeEngineClient(
+            [
+                EngineCommandResponse(
+                    success=True,
+                    seq_id=1,
+                    action_list=[1.0, 2.0, 3.0, 4.0],
+                    chunk_size=2,
+                    action_dim=2,
+                )
+            ]
+        )
+        requester = InferenceRequester(client, get_action_timeout_s=2.5)
+        self.assertEqual(requester.get_action_timeout_s, 2.5)
+
+        response = requester.get_action("open drawer", action_policy_mode="rlt")
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.seq_id, 1)
+        request, timeout_s = client.calls[0]
+        self.assertEqual(request.seq_id, 1)
+        self.assertEqual(request.task_instruction, "open drawer")
+        self.assertEqual(request.action_policy_mode, "rlt")
+        self.assertEqual(timeout_s, 2.5)
+        self.assertFalse(requester.has_pending_get_action())
+
+    def test_tt_rtc_get_action_carries_prefix_contract(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client)
+        prefix = [float(value) for value in range(6 * 19)]
+
+        requester.get_action(
+            "pick",
+            action_policy_mode="base",
+            action_request_mode="tt_rtc",
+            rtc_delay_steps=6,
+            rtc_action_dim=19,
+            rtc_prefix_action_list=prefix,
+        )
+
+        request, _timeout_s = client.calls[0]
+        self.assertEqual(request.action_request_mode, "tt_rtc")
+        self.assertEqual(request.rtc_delay_steps, 6)
+        self.assertEqual(request.rtc_action_dim, 19)
+        self.assertEqual(request.rtc_prefix_action_list, prefix)
+
+    def test_get_action_explicit_timeout_overrides_default(self) -> None:
+        client = FakeEngineClient(
+            [EngineCommandResponse(success=True, seq_id=1)]
+        )
+        requester = InferenceRequester(client, get_action_timeout_s=5.0)
+
+        requester.get_action(
+            "pick",
+            action_request_mode="tt_rtc",
+            timeout_s=0.275,
+        )
+
+        self.assertEqual(client.calls[0][1], 0.275)
+
+    def test_timeout_clears_in_flight_and_next_request_advances_seq(self) -> None:
+        client = FakeEngineClient(
+            [
+                TimeoutError("slow model"),
+                EngineCommandResponse(success=True, seq_id=2),
+            ]
+        )
+        requester = InferenceRequester(client, get_action_timeout_s=1.0)
+
+        first = requester.get_action("pick")
+        second = requester.get_action("place")
+
+        self.assertFalse(first.success)
+        self.assertIn("timed out", first.message)
+        self.assertTrue(second.success)
+        self.assertEqual([call[0].seq_id for call in client.calls], [1, 2])
+        self.assertFalse(requester.has_pending_get_action())
+
+    def test_stale_response_is_discarded_by_seq_id(self) -> None:
+        client = FakeEngineClient(
+            [
+                EngineCommandResponse(
+                    success=True,
+                    seq_id=7,
+                    action_list=[1.0],
+                    chunk_size=1,
+                    action_dim=1,
+                )
+            ]
+        )
+        requester = InferenceRequester(client, get_action_timeout_s=5.0)
+
+        response = requester.get_action("current request")
+
+        self.assertFalse(response.success)
+        self.assertIn("stale", response.message)
+        self.assertEqual(response.action_list, [])
+        self.assertFalse(requester.has_pending_get_action())
+
+
+if __name__ == "__main__":
+    unittest.main()

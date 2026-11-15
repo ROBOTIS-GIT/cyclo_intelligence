@@ -73,23 +73,60 @@ class ActionChunkProcessor:
     def output_hz(self) -> float:
         return self._control_hz if self._postprocess else self._inference_hz
 
+    def peek_actions(self, count: Optional[int] = None) -> np.ndarray:
+        """Return a copy of queued actions without consuming them.
+
+        TT-RTC uses this snapshot as the clean action prefix supplied to the
+        next inference request.  Returning a copy prevents inference code from
+        mutating actions that are already committed for robot execution.
+        """
+        with self._lock:
+            if count is not None and count < 0:
+                raise ValueError("count must be non-negative")
+            actions = list(self._buffer)
+            if count is not None:
+                actions = actions[:count]
+            if not actions:
+                return np.empty((0, 0), dtype=np.float64)
+            return np.stack(
+                [np.asarray(action, dtype=np.float64).copy() for action in actions],
+                axis=0,
+            )
+
     def push_chunk(
         self,
         chunk: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        boundary_blend_source_steps: Optional[int] = None,
     ) -> int:
         if chunk.ndim != 2:
             raise ValueError(f"chunk must be 2D (T, D); got shape {chunk.shape}")
+        if (
+            boundary_blend_source_steps is not None
+            and (
+                isinstance(boundary_blend_source_steps, bool)
+                or not isinstance(boundary_blend_source_steps, int)
+                or boundary_blend_source_steps <= 0
+            )
+        ):
+            raise ValueError("boundary_blend_source_steps must be a positive integer")
 
         with self._lock:
             anchor = self._alignment_anchor()
             if not self._postprocess:
-                for action in chunk:
+                buffered = chunk
+                if boundary_blend_source_steps is not None:
+                    buffered = self._blend(
+                        chunk,
+                        anchor,
+                        smooth_blend_steps=boundary_blend_source_steps,
+                    )
+                for action in buffered:
                     self._buffer.append(np.asarray(action).copy())
-                if len(chunk) > 0:
-                    self._last_action = np.asarray(chunk[-1]).copy()
-                return len(chunk)
+                if len(buffered) > 0:
+                    self._last_action = np.asarray(buffered[-1]).copy()
+                return len(buffered)
 
             aligned = (
                 self._align(chunk, anchor, scheduled_start_delay_s)
@@ -100,7 +137,23 @@ class ActionChunkProcessor:
                 return 0
 
             interpolated = self._interpolate(aligned)
-            blended = self._blend(interpolated, anchor)
+            smooth_blend_steps = None
+            if boundary_blend_source_steps is not None:
+                smooth_blend_steps = max(
+                    1,
+                    int(
+                        round(
+                            boundary_blend_source_steps
+                            * self._control_hz
+                            / self._inference_hz
+                        )
+                    ),
+                )
+            blended = self._blend(
+                interpolated,
+                anchor,
+                smooth_blend_steps=smooth_blend_steps,
+            )
 
             for action in blended:
                 self._buffer.append(action)
@@ -114,8 +167,14 @@ class ActionChunkProcessor:
         actions: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        boundary_blend_source_steps: Optional[int] = None,
     ) -> int:
-        return self.push_chunk(actions, scheduled_start_delay_s, align=align)
+        return self.push_chunk(
+            actions,
+            scheduled_start_delay_s,
+            align=align,
+            boundary_blend_source_steps=boundary_blend_source_steps,
+        )
 
     def pop_action(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -220,14 +279,29 @@ class ActionChunkProcessor:
             out[:, d] = np.interp(t_interp, t_original, chunk[:, d])
         return out
 
-    def _blend(self, chunk: np.ndarray, anchor: Optional[np.ndarray]) -> np.ndarray:
+    def _blend(
+        self,
+        chunk: np.ndarray,
+        anchor: Optional[np.ndarray],
+        smooth_blend_steps: Optional[int] = None,
+    ) -> np.ndarray:
         if anchor is None or len(chunk) == 0:
             return chunk
         chunk = chunk.copy()
-        n_blend = min(self._blend_steps, len(chunk))
+        n_blend = min(
+            self._blend_steps if smooth_blend_steps is None else smooth_blend_steps,
+            len(chunk),
+        )
+        blend_target = chunk[n_blend - 1].copy()
         for i in range(n_blend):
-            alpha = (i + 1) / (n_blend + 1)
-            chunk[i] = (1 - alpha) * anchor + alpha * chunk[i]
+            if smooth_blend_steps is None:
+                alpha = (i + 1) / (n_blend + 1)
+                target = chunk[i]
+            else:
+                progress = (i + 1) / n_blend
+                alpha = progress * progress * (3.0 - 2.0 * progress)
+                target = blend_target
+            chunk[i] = (1 - alpha) * anchor + alpha * target
         return chunk
 
 

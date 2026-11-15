@@ -31,12 +31,14 @@ export default function FileBrowserModal({
   allowFileSelect = true,
   targetFileName = null,
   targetFolderName = null,
+  requireTargetForSelection = false,
   targetFileLabel = null,
   homePath = null,
   defaultPath = null,
   multiSelect = false,
   variant = 'legacy',
   shortcuts = [],
+  overlayZClass = 'z-50',
 }) {
   const [selectedItem, setSelectedItem] = useState(null);
   const [multiSelectedItems, setMultiSelectedItems] = useState([]);
@@ -106,7 +108,7 @@ export default function FileBrowserModal({
 
   if (!isOpen) return null;
 
-  const classOverlay = clsx('fixed', 'inset-0', 'z-50', 'overflow-y-auto');
+  const classOverlay = clsx('fixed', 'inset-0', overlayZClass, 'overflow-y-auto');
 
   const classBackdrop = clsx('fixed', 'inset-0', 'bg-black', 'bg-opacity-50', 'transition-opacity');
 
@@ -235,6 +237,7 @@ export default function FileBrowserModal({
               title=""
               targetFileName={targetFileName}
               targetFolderName={targetFolderName}
+              requireTargetForSelection={requireTargetForSelection}
               onDirectorySelect={handleFileSelect}
               targetFileLabel={targetFileLabel}
               homePath={homePath}

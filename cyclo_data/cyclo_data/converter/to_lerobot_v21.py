@@ -116,7 +116,7 @@ _V21_DIRECT_VIDEO_CACHE_DISABLE_ENV = "CYCLO_V21_DIRECT_VIDEO_CACHE_DISABLE"
 _V21_DIRECT_VIDEO_VALIDATE_ENV = "CYCLO_V21_VALIDATE_DIRECT_VIDEO"
 _V21_CONCAT_DECODER_DISABLE_ENV = "CYCLO_V21_CONCAT_DECODER_DISABLE"
 _V21_EPISODE_PARQUET_CACHE_DISABLE_ENV = "CYCLO_V21_EPISODE_PARQUET_CACHE_DISABLE"
-_V21_EPISODE_PARQUET_CACHE_VERSION = 1
+_V21_EPISODE_PARQUET_CACHE_VERSION = 2
 _V21_SUBTASKS_PARQUET_CACHE_DISABLE_ENV = "CYCLO_V21_SUBTASKS_PARQUET_CACHE_DISABLE"
 _V21_SUBTASKS_PARQUET_CACHE_VERSION = 1
 # Keep v2.1 segment batches large enough to amortize ffmpeg startup while
@@ -1495,6 +1495,17 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
                 'action_topics': self.config.action_topics,
                 'apply_trim': self.config.apply_trim,
                 'apply_exclude_regions': self.config.apply_exclude_regions,
+                'trim_stationary_edges': self.config.trim_stationary_edges,
+                'stationary_action_delta_threshold': (
+                    self.config.stationary_action_delta_threshold
+                ),
+                'stationary_context_seconds': (
+                    self.config.stationary_context_seconds
+                ),
+                'constant_action_values': dict(
+                    self.config.constant_action_values
+                ),
+                'constant_action_source': self.config.constant_action_source,
                 'quality_warning_multiplier': self.config.quality_warning_multiplier,
                 'quality_error_multiplier': self.config.quality_error_multiplier,
                 # Selection knobs (camera/topic/joint filters + per-knob
@@ -1653,6 +1664,10 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
             "recording_mode": episode.recording_mode,
             "full_episode_index": episode.full_episode_index,
             "subtask_instructions": list(episode.subtask_instructions),
+            "episode_success": episode.episode_success,
+            "action_sources": self._array_cache_signature(
+                episode.action_sources
+            ),
         }
         if isinstance(prepared_cache_signature, dict):
             common["prepared_cache"] = prepared_cache_signature
@@ -1980,6 +1995,7 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         # Optional subtask metadata mirrors the per-frame subtask_index.
         self._write_subtasks_parquet(output_dir, episodes_data)
         self._write_subtask_annotations(output_dir, episodes_data)
+        self._write_rlt_sidecars(output_dir, episodes_data)
 
         # Write metadata files
         self._write_info_json()
@@ -2092,6 +2108,12 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
             pa.field("task_index", pa.int64()),
             pa.field("timestamp", pa.float64()),
         ]
+        has_episode_success_feature = "episode_success" in self._features
+        if has_episode_success_feature:
+            schema_fields.append(pa.field("episode_success", pa.bool_()))
+        has_action_source_feature = "action_source" in self._features
+        if has_action_source_feature:
+            schema_fields.append(pa.field("action_source", pa.string()))
         if action_dim > 0:
             schema_fields.append(pa.field("action", pa.list_(pa.float32(), action_dim)))
         if state_dim > 0:
@@ -2124,6 +2146,17 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
                 type=pa.float64(),
             )
         )
+        if has_episode_success_feature:
+            arrays.append(
+                pa.array(
+                    [bool(episode.episode_success)] * num_frames,
+                    type=pa.bool_(),
+                )
+            )
+        if has_action_source_feature:
+            arrays.append(
+                pa.array(episode.action_sources[:num_frames], type=pa.string())
+            )
 
         # Add action as fixed_size_list
         if episode.action:
@@ -2155,6 +2188,16 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
             "task_index": {"dtype": "int64", "_type": "Value"},
             "timestamp": {"dtype": "float64", "_type": "Value"},
         }
+        if has_episode_success_feature:
+            hf_features["episode_success"] = {
+                "dtype": "bool",
+                "_type": "Value",
+            }
+        if has_action_source_feature:
+            hf_features["action_source"] = {
+                "dtype": "string",
+                "_type": "Value",
+            }
 
         if action_dim > 0:
             hf_features["action"] = {
@@ -2192,7 +2235,15 @@ class RosbagToLerobotConverter(RosbagToLerobotConverterBase):
         for key in self._features:
             if key.startswith("observation.images."):
                 ordered[key] = self._features[key]
-        for key in ("timestamp", "episode_index", "index", "task_index", "subtask_index"):
+        for key in (
+            "timestamp",
+            "episode_index",
+            "index",
+            "task_index",
+            "episode_success",
+            "action_source",
+            "subtask_index",
+        ):
             if key in self._features:
                 value = dict(self._features[key])
                 if key == "timestamp":

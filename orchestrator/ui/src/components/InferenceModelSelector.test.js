@@ -1,0 +1,66 @@
+import { configureStore } from '@reduxjs/toolkit';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { Provider } from 'react-redux';
+import InferenceModelSelector from './InferenceModelSelector';
+import taskReducer from '../features/tasks/taskSlice';
+
+describe('InferenceModelSelector RLT compatibility', () => {
+  test('disables RLT when leaving N1.7 while retaining the selected bundle', () => {
+    const initialTasks = taskReducer(undefined, { type: '@@INIT' });
+    const store = configureStore({
+      reducer: { tasks: taskReducer },
+      preloadedState: {
+        tasks: {
+          ...initialTasks,
+          inferenceTaskInfo: {
+            ...initialTasks.inferenceTaskInfo,
+            serviceType: 'groot',
+            policyType: 'n17',
+            accelerationMode: 'tensorrt_dit',
+            accelerationEnginePath: '/workspace/model/groot/showroom_groot/dit.trt',
+            rltEnabled: true,
+            rltBundlePath: '/workspace/checkpoint/rlt/showroom_groot_bundle',
+            rltRobotOverride: true,
+            actionRequestMode: 'tt_rtc',
+          },
+        },
+      },
+    });
+
+    render(
+      <Provider store={store}>
+        <InferenceModelSelector />
+      </Provider>
+    );
+
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'lerobot:act' },
+    });
+
+    const info = store.getState().tasks.inferenceTaskInfo;
+    expect(info.serviceType).toBe('lerobot');
+    expect(info.policyType).toBe('act');
+    expect(info.accelerationMode).toBe('tensorrt_act');
+    expect(info.accelerationEnginePath).toBe('');
+    expect(info.rltEnabled).toBe(false);
+    expect(info.rltRobotOverride).toBe(false);
+    expect(info.actionRequestMode).toBe('async');
+    expect(info.rltBundlePath).toBe(
+      '/workspace/checkpoint/rlt/showroom_groot_bundle'
+    );
+  });
+});
+
+
+test('official catalog matches upstream model choices without changing the selection on mount', () => {
+  const initialTasks = taskReducer(undefined, { type: '@@INIT' });
+  const info = { ...initialTasks.inferenceTaskInfo, serviceType: 'groot', policyType: 'n17', actionRequestMode: 'tt_rtc' };
+  const store = configureStore({ reducer: { tasks: taskReducer }, preloadedState: { tasks: { ...initialTasks, inferenceTaskInfo: info } } });
+  render(<Provider store={store}><InferenceModelSelector official /></Provider>);
+  expect(screen.getByRole('combobox')).toHaveValue('groot:n17');
+  for (const name of ['ACT', 'Diffusion', 'MolmoAct2', 'VLA-JEPA', 'FastWAM', 'N1.7']) expect(screen.getByRole('option', { name })).toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: 'Diffusion Transformer (Flow)' })).not.toBeInTheDocument();
+  expect(store.getState().tasks.inferenceTaskInfo.actionRequestMode).toBe('tt_rtc');
+  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'lerobot:molmoact2' } });
+  expect(store.getState().tasks.inferenceTaskInfo.policyType).toBe('molmoact2');
+});

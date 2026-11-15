@@ -65,7 +65,8 @@ def _write_manifest(engine_path: str, payload: dict) -> None:
 def _base_manifest(args, engine_path: str, status: str, started_at: float) -> dict:
     now = time.time()
     return {
-        "adapter": "groot_dit",
+        "adapter": "groot_dit_ttrtc" if args.action_request_mode == "tt_rtc" else "groot_dit",
+        "action_request_mode": args.action_request_mode,
         "status": status,
         "model_path": args.model_path,
         "engine_path": engine_path,
@@ -85,6 +86,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--task-instruction", default="")
     parser.add_argument("--workspace-mb", type=int, default=_default_workspace_mb())
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--action-request-mode", choices=("sync", "async", "tt_rtc"), default="async")
     return parser.parse_args()
 
 
@@ -95,7 +97,12 @@ def main() -> int:
     )
     args = _parse_args()
     args.model_path = os.path.normpath(args.model_path)
-    engine_path = os.path.normpath(args.engine_path or _default_engine_path(args.model_path))
+    tt_rtc = args.action_request_mode == "tt_rtc"
+    default_engine = os.path.join(args.model_path, "dit_model_bf16_ttrtc.trt") if tt_rtc else _default_engine_path(args.model_path)
+    engine_path = os.path.normpath(args.engine_path or default_engine)
+    if tt_rtc and engine_path == _default_engine_path(args.model_path):
+        raise ValueError("TT-RTC must use a separate TensorRT engine path")
+    adapter = "groot_dit_ttrtc" if tt_rtc else "groot_dit"
     started_at = time.time()
     if args.workspace_mb <= 0:
         raise ValueError("workspace_mb must be positive")
@@ -104,15 +111,20 @@ def main() -> int:
     if reuse_existing and os.path.isfile(_manifest_path(engine_path)):
         with open(_manifest_path(engine_path)) as stream:
             previous = json.load(stream)
-        if previous.get("adapter") == "groot_dit" and previous.get("status") == "ready":
-            manifest = validate_manifest(args.model_path, engine_path, "groot_dit")
+        if previous.get("adapter") == adapter and previous.get("status") == "ready":
+            manifest = validate_manifest(args.model_path, engine_path, adapter)
             print(json.dumps(manifest, sort_keys=True))
             return 0
     manifest = _base_manifest(args, engine_path, "building", started_at)
     manifest["message"] = "Building TensorRT engine"
     _write_manifest(engine_path, manifest)
 
-    inference = GR00TInference()
+    inference_type = GR00TInference
+    builder = build_trt_engine
+    if tt_rtc:
+        from runtime.playground_inference import GR00TInference as PlaygroundInference, build_trt_engine as playground_builder
+        inference_type, builder = PlaygroundInference, playground_builder
+    inference = inference_type()
     try:
         LOGGER.info("Loading GR00T policy from: %s", args.model_path)
         inference._sync_hf_token_for_gated_backbones()
@@ -124,6 +136,11 @@ def main() -> int:
                 model_path=args.model_path,
                 device="cuda",
             )
+        capability = None
+        if tt_rtc:
+            from runtime.tt_rtc import load_tt_rtc_capability
+            capability = load_tt_rtc_capability(args.model_path)
+            inference._validate_loaded_tt_rtc_policy(capability)
         inference.init_policy_info()
 
         LOGGER.info("Building model-schema synthetic observation")
@@ -133,11 +150,14 @@ def main() -> int:
 
         # Unbound legacy plans are rebuilt from the selected weights. A similar
         # DiT forward pass alone cannot establish checkpoint provenance.
-        verification = build_trt_engine(
+        build_options = {"workspace_mb": args.workspace_mb}
+        if tt_rtc:
+            build_options["tt_rtc_capability"] = capability
+        verification = builder(
             inference.policy,
             observation,
             engine_path,
-            workspace_mb=args.workspace_mb,
+            **build_options,
         )
         if not os.path.exists(engine_path) or os.path.getsize(engine_path) <= 0:
             raise RuntimeError(

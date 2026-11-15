@@ -1,5 +1,6 @@
 """Run the real orchestrator callback with fake services, without ROS or hardware."""
 import ast
+import math
 from pathlib import Path
 import re
 import threading
@@ -14,7 +15,7 @@ SOURCE = ROOT / 'orchestrator/orchestrator_node.py'
 SERVICE = ROOT.parent / 'interfaces/srv/SendCommand.srv'
 CONSTANTS = {name: int(value) for name, value in re.findall(r'^uint8 (\w+) = (\d+)', SERVICE.read_text(), re.M)}
 Request = type('Request', (), CONSTANTS)
-PHASE = SimpleNamespace(READY=0, LOADING=1, INFERENCING=2, PAUSED=3)
+PHASE = SimpleNamespace(READY=0, LOADING=1, INFERENCING=2, PAUSED=3, SYNCING=4)
 
 
 class DeferredThread:
@@ -44,6 +45,8 @@ class Backend:
         self.commands = []
         self.requests = []
         self.stop_ok = True
+        self.syncing = False
+        self.sync_duration_s = 0.0
 
 
 class Client:
@@ -79,18 +82,23 @@ class Client:
             backend.running = False
         elif command == self.CMD_UNLOAD:
             backend.loaded = False
-        return SimpleNamespace(success=True, message='ok', data={'action_keys': ['arm_left', 'arm_right']})
+        data = {'action_keys': ['arm_left', 'arm_right']}
+        message = 'ok'
+        if command in (self.CMD_START, self.CMD_RESUME) and backend.syncing:
+            data['initial_pose_sync_duration_s'] = backend.sync_duration_s
+            message = 'syncing'
+        return SimpleNamespace(success=True, message=message, data=data)
 
 
 def real_methods():
     """Compile production methods unchanged; omit imports that initialize ROS."""
     tree = ast.parse(SOURCE.read_text())
     klass = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'OrchestratorNode')
-    names = {'user_interaction_callback', '_set_session_active', '_snapshot_session_state', '_teardown_inference_client', '_pause_inference_client'}
+    names = {'user_interaction_callback', '_set_session_active', '_snapshot_session_state', '_teardown_inference_client', '_pause_inference_client', '_inference_clear_error', '_effective_initial_pose_sync_duration', '_initial_pose_sync_from_task_info', '_mark_initial_pose_sync_started', '_select_policy_or_pause', '_activate_deferred_initial_pose_sync'}
     methods = [node for node in klass.body if isinstance(node, ast.FunctionDef) and node.name in names]
     environment = {
         'SendCommand': SimpleNamespace(Request=Request), 'InferenceStatus': PHASE,
-        'ContainerServiceClient': Client, 'Optional': Optional, 'time': time,
+        'ContainerServiceClient': Client, 'Optional': Optional, 'time': time, 'math': math,
         'threading': SimpleNamespace(Thread=DeferredThread),
         'publish_to_robot_from_task_info': lambda task: task.inference_mode == 'robot',
         'inference_timing_from_task_info': lambda task: (100, 15, .3),
@@ -116,8 +124,9 @@ class Node:
         self._loaded_inference_action_request_mode = 'async'
         self._loaded_inference_vla_rail_enabled = False
         self._loaded_inference_action_chunk_size = 0
-        self._loaded_inference_ttrtc_enabled = False
-        self._loaded_inference_ttrtc_prefix_steps = 7
+        self._loaded_inference_rlt_enabled = False
+        self._loaded_inference_rlt_bundle_path = ''
+        self._inference_record_session_id = None
         self._loaded_inference_control_hz, self._loaded_inference_inference_hz = 100, 15
         self._loaded_inference_chunk_align_window_s = .3
         self._loaded_inference_initial_pose_sync = False
@@ -128,20 +137,41 @@ class Node:
         self.robot_type = 'ffw_sg2_rev1'
         self.timer_manager = None
         self.phases = []
+        self.sync_durations = []
+        self.arbiter_enabled = False
+        self.arbiter_calls = []
+        def arbiter_call(command):
+            self.arbiter_calls.append(command)
+            return SimpleNamespace(success=True, message='ok')
+        self._command_arbiter = SimpleNamespace(
+            call=arbiter_call,
+            wait_select_policy=lambda **kwargs: arbiter_call('select_policy'),
+        )
         self.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
 
+    def _requires_command_arbiter(self, task=None): return self.arbiter_enabled
+    def _action_request_mode_error(self, *args): return ''
+    def _acceleration_for_service(self, *args): return 'pytorch', ''
+    def _begin_inference_record_session(self, task): self._inference_record_session_id = 'test'
+    def _get_inference_record_task_info(self): return None
     def get_logger(self): return self.logger
     def _cache_ui_task_info(self, *args): pass
     def init_robot_control_parameters_from_user_task(self, *args): pass
     def _determine_service_prefix(self, task): return '/groot'
     def _acceleration_from_task_info(self, task): return 'pytorch', ''
-    def _action_request_mode_from_task_info(self, task): return 'async'
-    def _initial_pose_sync_from_task_info(self, task): return False, 5.
+    def _action_request_mode_from_task_info(self, task): return getattr(task, 'action_request_mode', 'async')
     def _normalize_policy_path(self, path): return path
-    def _initial_pose_sync_is_active(self, client): return False
-    def _clear_initial_pose_sync_hold_pending(self, client): pass
+    def _initial_pose_sync_is_active(self, client): return self._initial_pose_sync_hold_pending
+    def _clear_initial_pose_sync_hold_pending(self, client): self._initial_pose_sync_hold_pending = False
+    def _cancel_initial_pose_sync_status(self, expected_client=None): return False
     def _prepare_active_initial_pose_sync_teardown(self): return None
     def _publish_inference_phase(self, phase, **kwargs): self.phases.append((phase, kwargs))
+    def _begin_initial_pose_sync_status(self, client, duration_s):
+        self.sync_durations.append(duration_s)
+        self._publish_inference_phase(PHASE.SYNCING)
+    def _apply_cyclo_data_response(self, result, response):
+        response.success = result.success and (result.response is None or result.response.success)
+        response.message = result.response.message if result.response else result.message
     def _forward_recording(self, *args, **kwargs): return SimpleNamespace(success=True, message='ok', response=None)
     def _is_policy_already_loaded_message(self, message): return 'already loaded' in message
 
@@ -157,7 +187,7 @@ class LoadOnlyLifecycleTests(unittest.TestCase):
 
     def command(self, command, drain=True, reverse=False, **task_fields):
         task = SimpleNamespace(task_instruction=['pick coffee'], policy_path='/model',
-                               inference_mode='robot', task_type='inference', vla_rail_enabled=True)
+                               inference_mode='robot', task_type='inference', vla_rail_enabled=False, record_inference_mode=False)
         task.__dict__.update(task_fields)
         result = self.node.user_interaction_callback(SimpleNamespace(command=command, task_info=task), SimpleNamespace(success=False, message=''))
         self.assertTrue(result.success, result.message)
@@ -231,24 +261,98 @@ class LoadOnlyLifecycleTests(unittest.TestCase):
         self.command(Request.FINISH)
         self.assertFalse(self.node._loaded_inference_vla_rail_enabled)
 
-    def test_ttrtc_mode_and_prefix_changes_reload_and_finish_resets(self):
-        self.command(Request.START_INFERENCE, vla_rail_enabled=False,
-                     ttrtc_enabled=True, ttrtc_prefix_steps=7)
+    def test_playground_deploy_target_change_reloads(self):
+        self.command(Request.START_INFERENCE, action_request_mode='tt_rtc', inference_mode='simulation')
+        self.command(Request.START_INFERENCE, action_request_mode='tt_rtc', inference_mode='robot', reverse=True)
+        loads = [parameters for command, parameters in self.node.backend.requests if command == Client.CMD_LOAD]
+        self.assertEqual(len(loads), 2)
+        self.assertFalse(loads[0]['publish_to_robot'])
+        self.assertTrue(loads[1]['publish_to_robot'])
+        self.assertTrue(self.node.backend.running)
+
+    def test_runtime_change_drains_cleanup_even_when_new_load_runs_first(self):
+        self.command(Request.START_INFERENCE, action_request_mode='async')
+        self.command(Request.START_INFERENCE, action_request_mode='tt_rtc', reverse=True)
+        self.assertTrue(self.node.backend.loaded)
+        self.assertTrue(self.node.backend.running)
+        self.assertEqual(self.node.backend.commands[-2:], [Client.CMD_LOAD, Client.CMD_START])
+
+    def test_ttrtc_mode_changes_reload_and_finish_resets(self):
+        self.command(Request.START_INFERENCE, action_request_mode='tt_rtc')
         loads = [params for command, params in self.node.backend.requests if command == Client.CMD_LOAD]
-        self.assertTrue(loads[-1]['ttrtc_enabled'])
-        self.assertEqual(loads[-1]['ttrtc_prefix_steps'], 7)
-        self.command(Request.START_INFERENCE, vla_rail_enabled=False,
-                     ttrtc_enabled=True, ttrtc_prefix_steps=8)
+        self.assertEqual(loads[-1]['action_request_mode'], 'tt_rtc')
+        self.assertNotIn('ttrtc_enabled', loads[-1])
+        self.command(Request.START_INFERENCE, action_request_mode='async')
         loads = [params for command, params in self.node.backend.requests if command == Client.CMD_LOAD]
         self.assertEqual(len(loads), 2)
-        self.assertEqual(loads[-1]['ttrtc_prefix_steps'], 8)
-        self.assertTrue(self.node._loaded_inference_ttrtc_enabled)
+        self.assertEqual(loads[-1]['action_request_mode'], 'async')
         self.command(Request.FINISH)
-        self.assertFalse(self.node._loaded_inference_ttrtc_enabled)
+        self.assertEqual(self.node._loaded_inference_action_request_mode, 'async')
+
+    def test_fresh_start_arms_one_timer_for_runtime_extended_sync(self):
+        self.node.backend.syncing = True
+        self.node.backend.sync_duration_s = 47.5
+        self.command(Request.START_INFERENCE, initial_pose_sync=True, initial_pose_sync_duration_s=5.)
+        self.assertEqual(self.node.sync_durations, [47.5])
+        self.assertEqual(self.node.phases[-1][0], PHASE.SYNCING)
+
+    def test_resume_uses_runtime_extended_duration(self):
+        self.command(Request.LOAD_INFERENCE)
+        self.node.backend.syncing = True
+        self.node.backend.sync_duration_s = 47.5
+        self.command(Request.RESUME_INFERENCE, initial_pose_sync=True, initial_pose_sync_duration_s=5.)
+        self.assertEqual(self.node.sync_durations, [47.5])
+        self.assertEqual(self.node.phases[-1][0], PHASE.SYNCING)
+
+    def test_reused_start_arms_only_one_timer_and_preserves_sync_request(self):
+        self.node.backend.syncing = True
+        self.node.backend.sync_duration_s = 47.5
+        options = dict(initial_pose_sync=True, initial_pose_sync_duration_s=5.)
+        self.command(Request.START_INFERENCE, **options)
+        self.command(Request.START_INFERENCE, **options)
+        self.assertEqual(self.node.sync_durations, [47.5, 47.5])
+        command, parameters = self.node.backend.requests[-1]
+        self.assertEqual(command, Client.CMD_RESUME)
+        self.assertTrue(parameters['initial_pose_sync'])
+
+    def test_ordinary_sync_uses_legacy_duration_without_double_start(self):
+        self.node.arbiter_enabled = True
+        self.node.backend.syncing = True
+        self.command(Request.START_INFERENCE, initial_pose_sync=True, initial_pose_sync_duration_s=5.)
+        self.assertEqual(self.node.sync_durations, [5.])
+        self.assertEqual(self.node.backend.commands, [Client.CMD_LOAD, Client.CMD_START])
+
+    def test_load_then_resume_selects_arbiter_and_activates_deferred_sync(self):
+        self.node.arbiter_enabled = True
+        self.command(Request.LOAD_INFERENCE, action_request_mode='tt_rtc', initial_pose_sync=True)
+        self.node.backend.syncing = True
+        self.node.backend.sync_duration_s = 47.5
+        self.command(Request.RESUME_INFERENCE, initial_pose_sync=True, initial_pose_sync_duration_s=5.)
+        self.assertEqual(self.node.arbiter_calls, ['select_none', 'select_policy'])
+        self.assertEqual(self.node.backend.commands[-2:], [Client.CMD_RESUME, Client.CMD_START])
+        self.assertEqual(self.node.sync_durations, [47.5])
+
+    def test_clear_passes_cached_recording_identity_and_keeps_rejected_session(self):
+        self.command(Request.LOAD_INFERENCE)
+        cached_task = SimpleNamespace(task_num='record-session')
+        self.node._get_inference_record_task_info = lambda: cached_task
+        forwarded = []
+        def reject_clear(*args, **kwargs):
+            forwarded.append(kwargs['task_info'])
+            return SimpleNamespace(success=True, response=SimpleNamespace(success=False, message='Archive still running'))
+        self.node._forward_recording = reject_clear
+        result = self.node.user_interaction_callback(
+            SimpleNamespace(command=Request.FINISH, task_info=SimpleNamespace(task_type='inference')),
+            SimpleNamespace(success=False, message=''),
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(forwarded, [cached_task])
+        self.assertTrue(self.node.backend.loaded)
+        self.assertIsNotNone(self.node.container_service_client)
 
     def test_bt_load_is_single_idle_stage(self):
         tree = ast.parse((ROOT / 'orchestrator/bt/actions/send_command.py').read_text())
-        assignments = [node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in ('LOAD_INFERENCE_COMMAND', 'COMMAND_STAGES') for target in node.targets)]
+        assignments = [node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in ('LOAD_INFERENCE_COMMAND', 'INITIAL_POSE_SYNC_MAX_DURATION_SEC', 'PHASE_COMPLETION_GRACE_SEC', 'RESUME_PHASE_TIMEOUT_SEC', 'COMMAND_STAGES') for target in node.targets)]
         env = {'SendCommandSrv': SimpleNamespace(Request=Request), 'InferenceStatus': PHASE}
         exec(compile(ast.Module(body=assignments, type_ignores=[]), '<bt stages>', 'exec'), env)
         stages = env['COMMAND_STAGES']['LOAD']

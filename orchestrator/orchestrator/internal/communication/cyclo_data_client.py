@@ -111,6 +111,7 @@ class CycloDataClient:
         urdf_path: str = '',
         segment_index: int = 0,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        episode_outcome: int = 0,
     ) -> CallResult:
         # START now includes a bounded live preflight plus recorder setup.
         # Do not let the forwarder time out while a valid start is still pending.
@@ -124,6 +125,7 @@ class CycloDataClient:
         req.topics = list(topics or [])
         req.urdf_path = urdf_path
         req.segment_index = int(segment_index)
+        req.episode_outcome = int(episode_outcome)
         return self._call(self._recording, req, timeout_sec, 'recording')
 
     def start_conversion(
@@ -135,6 +137,8 @@ class CycloDataClient:
         fps: int = 0,
         convert_v21: bool = True,
         convert_v30: bool = True,
+        lerobot_output_root: str = '',
+        delete_source_after_success: bool = False,
         selected_cameras=None,
         camera_rotations=None,
         image_resize=None,
@@ -157,6 +161,8 @@ class CycloDataClient:
         # side also interprets it as 'run both' (legacy UI safety).
         req.convert_v21 = bool(convert_v21)
         req.convert_v30 = bool(convert_v30)
+        req.lerobot_output_root = str(lerobot_output_root or '').strip()
+        req.delete_source_after_success = bool(delete_source_after_success)
 
         # Selection knobs — flatten dicts into the parallel-array shape
         # ROS2 srv requires.

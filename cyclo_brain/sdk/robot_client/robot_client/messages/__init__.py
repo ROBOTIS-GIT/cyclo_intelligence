@@ -63,24 +63,29 @@ string robot_type
 string task_instruction
 bool publish_to_robot
 string action_request_mode
+float64 control_hz
 bool vla_rail_enabled
-# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
-bool ttrtc_enabled
-uint16 ttrtc_prefix_steps
-string acceleration_mode
-string acceleration_engine_path
-uint16 control_hz
 uint16 inference_hz
 float64 chunk_align_window_s
+uint16 action_chunk_size
+string acceleration_mode
+string acceleration_engine_path
+bool rlt_enabled
+string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
+string action_policy_mode
+bool rlt_robot_override
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
-uint16 action_chunk_size
+bool initial_pose_sync_defer_activation
 """
 
 INFERENCE_COMMAND_RESPONSE_DEF = """\
 bool success
 string message
 string[] action_keys
+float64 initial_pose_sync_duration_s
 """
 
 # --- EngineCommand (interfaces/srv/EngineCommand.srv) ---
@@ -88,17 +93,24 @@ string[] action_keys
 # process can discard late/stale responses after a timeout.
 ENGINE_COMMAND_REQUEST_DEF = """\
 uint8 command
+uint16 action_chunk_size
 uint64 seq_id
 string model_path
 string embodiment_tag
 string robot_type
+bool publish_to_robot
 string task_instruction
 string acceleration_mode
 string acceleration_engine_path
-uint16 action_chunk_size
-bool ttrtc_enabled
-uint16 ttrtc_prefix_steps
-float64[] ttrtc_prefix_actions
+bool rlt_enabled
+string rlt_bundle_path
+string[] rlt_dataset_paths
+uint32 rlt_max_updates
+string action_policy_mode
+string action_request_mode
+int32 rtc_delay_steps
+int32 rtc_action_dim
+float64[] rtc_prefix_action_list
 """
 
 ENGINE_COMMAND_RESPONSE_DEF = """\
@@ -108,7 +120,11 @@ string message
 string[] action_keys
 int32 chunk_size
 int32 action_dim
+int32 rtc_min_delay_steps
+int32 rtc_max_delay_steps
+int32 rtc_reference_chunk_size
 float64[] action_list
+float64[] rtc_reference_action_list
 string timing_json
 """
 

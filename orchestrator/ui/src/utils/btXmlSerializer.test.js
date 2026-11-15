@@ -55,10 +55,8 @@ describe('btXmlSerializer', () => {
   it.each([
     ['vla_rail_enabled', 'true'],
     ['vla_rail_enabled', 'false'],
-    ['ttrtc_enabled', 'true'],
-    ['ttrtc_enabled', 'false'],
-    ['ttrtc_prefix_steps', '0'],
-    ['ttrtc_prefix_steps', '8'],
+    ['action_request_mode', 'tt_rtc'],
+    ['control_hz', '100'],
   ])('preserves %s=%s on GR00T LOAD through XML round trip', (param, value) => {
     const node = { id: 'load', type: 'btAction', position: { x: 0, y: 0 }, data: {
       nodeType: 'SendCommand', label: 'Load', params: {
@@ -316,3 +314,14 @@ describe('btXmlSerializer', () => {
     });
   });
 });
+
+ test('migrates legacy TT-RTC while saving Canvas XML', () => {
+  const params = { command: 'LOAD', model: 'groot:n17', action_request_mode: 'async', ttrtc_enabled: 'true', ttrtc_prefix_steps: '7', control_hz: '100' };
+  const xml = serializeFromGraph([{ id: 'rtc', position: { x: 0, y: 0 } }], [], new Map([
+    ['rtc', { tag: 'SendCommand', name: 'RTC', params }],
+  ]));
+  expect(xml).toContain('action_request_mode="tt_rtc"');
+  expect(xml).toContain('control_hz="100"');
+  expect(xml).not.toContain('ttrtc_enabled');
+  expect(xml).not.toContain('ttrtc_prefix_steps');
+ });

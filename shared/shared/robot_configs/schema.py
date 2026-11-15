@@ -396,10 +396,12 @@ def get_visualization_end_effector_links(section: Dict[str, Any]) -> List[str]:
     return [str(link) for link in links if link]
 
 
-def get_joystick_topics(section: Dict[str, Any]) -> Dict[str, str]:
+def get_joystick_topics(section: Dict[str, Any]) -> Dict[str, Any]:
     """Optional joystick integration topics for record triggers and UI mode."""
     joystick = section.get("joystick") or {}
     return {
         "trigger_topic": str(joystick.get("trigger_topic") or ""),
         "mode_topic": str(joystick.get("mode_topic") or ""),
+        "middle_pedal_topic": str(joystick.get("middle_pedal_topic") or ""),
+        "require_middle_pedal": bool(joystick.get("require_middle_pedal", False)),
     }

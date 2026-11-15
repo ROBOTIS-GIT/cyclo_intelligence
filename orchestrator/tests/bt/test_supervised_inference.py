@@ -246,3 +246,16 @@ def test_repeated_load_resume_stop_loop_never_starts_during_load():
     assert run(SupervisedCommand(Owner('CLEAR'), supervisor)) == NodeStatus.SUCCESS
     assert [r.command for r in node.client.requests][-2:] == [4, 5]
     assert not supervisor.loaded
+
+
+def test_supervised_sync_waits_for_runtime_effective_duration(monkeypatch):
+    node, supervisor = loaded()
+    owner = Owner('RESUME')
+    owner.initial_pose_sync = True
+    owner.initial_pose_sync_duration_s = 5.0
+    node.client.pending[1] = done(SimpleNamespace(
+        success=True, message='syncing', action_keys=[], initial_pose_sync_duration_s=12.0))
+    monkeypatch.setattr('orchestrator.bt.inference.supervisor.time.monotonic', lambda: 100.0)
+    future = supervisor.submit(1, owner)
+    assert supervisor.poll(future)
+    assert supervisor.sync_until == 112.0

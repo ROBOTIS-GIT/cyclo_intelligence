@@ -807,9 +807,16 @@ class Gr00tN1d7Processor(BaseProcessor):
             assert v.dtype == torch.uint8, f"{v} is not a uint8 tensor"
             assert v.shape[1] == 3, f"{v} is not a 3 channel tensor"
 
-        stacked_images = torch.stack(
-            [temporal_stacked_images[view] for view in image_keys], dim=1
-        ).flatten(0, 1)  # (T*V, C, H, W)
+        # Preserve per-camera geometry (e.g. landscape head and portrait
+        # wrists). Qwen accepts a list of CHW tensors with different H/W.
+        # Flatten in the original time-major, then view-major order.
+        n_t = len(next(iter(temporal_stacked_images.values())))
+        if any(len(images) != n_t for images in temporal_stacked_images.values()):
+            raise ValueError("Camera views must have the same number of frames")
+        frames = [temporal_stacked_images[view][t]
+                  for t in range(n_t) for view in image_keys]
+        stacked_images = (torch.stack(frames) if len({tuple(frame.shape) for frame in frames}) == 1
+                          else frames)
 
         vlm_inputs = self._apply_vlm_processing(stacked_images, language)
 

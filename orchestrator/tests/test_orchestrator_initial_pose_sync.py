@@ -34,6 +34,7 @@ _install_module_stub(
 )
 
 from interfaces.msg import InferenceStatus, TaskInfo  # noqa: E402
+from interfaces.srv import SendCommand  # noqa: E402
 from orchestrator.orchestrator_node import OrchestratorNode  # noqa: E402
 
 for _module_name, _previous_module in _MODULE_BACKUPS.items():
@@ -97,6 +98,11 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._initial_pose_sync_status_generation = 0
         self.node._initial_pose_sync_hold_pending = False
         self.node.communicator = FakeCommunicator()
+        self.node._inference_status_lock = threading.Lock()
+        self.node._inference_status_publisher = SimpleNamespace(publish=lambda msg:
+            self.node.communicator.publish_inference_status(
+                phase=msg.inference_phase, robot_type=msg.robot_type, error=msg.error,
+            ))
         self.node.robot_type = "ffw_sg2_rev1"
         self.node.get_logger = lambda: FakeLogger()
         self.node._loaded_inference_policy_path = "/models/policy"
@@ -112,6 +118,34 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.node._cancel_initial_pose_sync_status()
+
+    def test_real_resume_callback_uses_runtime_extended_timer(self) -> None:
+        self.node.on_inference, self.node.on_recording = True, False
+        self.node._loaded_inference_rlt_enabled = False
+        self.node._requires_command_arbiter = lambda *args: False
+        self.client.inference_command = lambda *args, **kwargs: SimpleNamespace(
+            success=True, message='syncing', data={'initial_pose_sync_duration_s': 47.5},
+        )
+        task_info = TaskInfo()
+        task_info.initial_pose_sync = True
+        task_info.initial_pose_sync_duration_s = 5.0
+        result = self.node.user_interaction_callback(
+            SimpleNamespace(command=SendCommand.Request.RESUME_INFERENCE, task_info=task_info),
+            SimpleNamespace(success=False, message=''),
+        )
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(self.node._initial_pose_sync_status_timer.interval, 47.5)
+        self.assertEqual(self.node._initial_pose_sync_status_generation, 1)
+        self.assertEqual(self.node.communicator.phases[-1][0], InferenceStatus.SYNCING)
+
+    def test_bt_resume_timeout_allows_velocity_limited_sync(self) -> None:
+        from orchestrator.bt.actions.send_command import SendCommand as BTCommand
+        node = SimpleNamespace(
+            create_client=lambda *args, **kwargs: object(),
+            create_subscription=lambda *args, **kwargs: object(),
+        )
+        action = BTCommand(node, command='RESUME', initial_pose_sync_duration_s=5.)
+        self.assertEqual(action._stage['timeout'], 70.)
 
     def test_task_info_settings_default_validate_and_copy(self) -> None:
         self.assertEqual(

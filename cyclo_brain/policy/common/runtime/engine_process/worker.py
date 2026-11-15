@@ -32,6 +32,7 @@ from .protocol import (
     CMD_LOAD_POLICY,
     CMD_UNLOAD_POLICY,
     CMD_RESET_POLICY,
+    POLICY_UPDATE_COMMANDS,
     ENGINE_COMMAND_REQUEST_DEF,
     ENGINE_COMMAND_RESPONSE_DEF,
     EngineCommandRequest,
@@ -83,6 +84,15 @@ class EngineWorker:
             else request_from_message(request)
         )
         try:
+            if req.command in POLICY_UPDATE_COMMANDS:
+                handler = getattr(self._engine, "policy_update_command", None)
+                result = handler(req) if callable(handler) else {
+                    "success": False, "message": "RLT policy updates require GR00T",
+                }
+                return EngineCommandResponse(
+                    success=bool(result.get("success", False)),
+                    seq_id=req.seq_id, message=str(result.get("message", "")),
+                )
             if req.command == CMD_RESET_POLICY:
                 reset = getattr(self._engine, "reset_policy", None)
                 if reset is None:
@@ -116,6 +126,10 @@ class EngineWorker:
             seq_id=request.seq_id,
             message=str(result.get("message", "")),
             action_keys=list(result.get("action_keys", []) or []),
+            chunk_size=int(result.get("chunk_size", 0)),
+            action_dim=int(result.get("action_dim", 0)),
+            rtc_min_delay_steps=int(result.get("rtc_min_delay_steps", 0)),
+            rtc_max_delay_steps=int(result.get("rtc_max_delay_steps", 0)),
         )
 
     def _get_action(self, request: EngineCommandRequest) -> EngineCommandResponse:
@@ -147,6 +161,8 @@ class EngineWorker:
             chunk_size=int(result.get("chunk_size", 0)),
             action_dim=int(result.get("action_dim", 0)),
             action_list=flatten_action_list(result.get("action_chunk", [])),
+            rtc_reference_chunk_size=int(result.get("rtc_reference_chunk_size", 0)),
+            rtc_reference_action_list=flatten_action_list(result.get("rtc_reference_action_chunk", [])),
             timing_json=timing_json,
         )
 

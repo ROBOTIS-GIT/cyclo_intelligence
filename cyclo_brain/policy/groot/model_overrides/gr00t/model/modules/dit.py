@@ -67,10 +67,19 @@ class TimestepEncoder(nn.Module):
     def forward(self, timesteps):
         dtype = next(self.parameters()).dtype
         if timesteps.ndim not in (1, 2):
-            raise ValueError("timesteps must have shape [B] or [B,T]")
+            raise ValueError(
+                "DiT timesteps must have shape (B,) or (B, T), got "
+                f"{tuple(timesteps.shape)}"
+            )
+        timestep_shape = tuple(timesteps.shape)
+        # diffusers' Timesteps primitive accepts a flat vector.  Flatten the
+        # TT-RTC token grid and restore it after the shared, parameter-identical
+        # projection stack.
         timesteps_proj = self.time_proj(timesteps.reshape(-1)).to(dtype)
         timesteps_emb = self.timestep_embedder(timesteps_proj)
-        return timesteps_emb.reshape(*timesteps.shape, -1)
+        if len(timestep_shape) == 2:
+            timesteps_emb = timesteps_emb.reshape(*timestep_shape, -1)
+        return timesteps_emb
 
 
 class AdaLayerNorm(nn.Module):
@@ -96,9 +105,49 @@ class AdaLayerNorm(nn.Module):
         temb = self.linear(self.silu(temb))
         scale, shift = temb.chunk(2, dim=-1)
         if temb.ndim == 2:
-            scale, shift = scale[:, None], shift[:, None]
+            # Original scalar-time path: one modulation per batch item.
+            scale = scale[:, None, :]
+            shift = shift[:, None, :]
+        elif temb.ndim == 3:
+            # TT-RTC path: one modulation per state/action token.
+            if tuple(temb.shape[:2]) != tuple(x.shape[:2]):
+                raise ValueError(
+                    "Per-token timestep embedding must match hidden-state tokens: "
+                    f"{tuple(temb.shape[:2])} != {tuple(x.shape[:2])}"
+                )
+        else:
+            raise ValueError(
+                "Timestep embedding must have shape (B, D) or (B, T, D), "
+                f"got {tuple(temb.shape)}"
+            )
         x = self.norm(x) * (1 + scale) + shift
         return x
+
+
+def _apply_output_conditioning(
+    hidden_states: torch.Tensor,
+    temb: torch.Tensor,
+    norm_out: nn.Module,
+    proj_out: nn.Module,
+) -> torch.Tensor:
+    """Apply scalar or token-wise DiT output conditioning."""
+
+    shift, scale = proj_out(F.silu(temb)).chunk(2, dim=-1)
+    if temb.ndim == 2:
+        shift = shift[:, None, :]
+        scale = scale[:, None, :]
+    elif temb.ndim == 3:
+        if tuple(temb.shape[:2]) != tuple(hidden_states.shape[:2]):
+            raise ValueError(
+                "Per-token output conditioning must match hidden-state tokens: "
+                f"{tuple(temb.shape[:2])} != {tuple(hidden_states.shape[:2])}"
+            )
+    else:
+        raise ValueError(
+            "Timestep embedding must have shape (B, D) or (B, T, D), "
+            f"got {tuple(temb.shape)}"
+        )
+    return norm_out(hidden_states) * (1 + scale) + shift
 
 
 class BasicTransformerBlock(nn.Module):
@@ -333,11 +382,12 @@ class DiT(ModelMixin, ConfigMixin):
             all_hidden_states.append(hidden_states)
 
         # Output processing
-        conditioning = temb
-        shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=-1)
-        if conditioning.ndim == 2:
-            shift, scale = shift[:, None], scale[:, None]
-        hidden_states = self.norm_out(hidden_states) * (1 + scale) + shift
+        hidden_states = _apply_output_conditioning(
+            hidden_states,
+            temb,
+            self.norm_out,
+            self.proj_out_1,
+        )
         if return_all_hidden_states:
             return self.proj_out_2(hidden_states), all_hidden_states
         else:
@@ -415,11 +465,12 @@ class AlternateVLDiT(DiT):
             all_hidden_states.append(hidden_states)
 
         # Output processing
-        conditioning = temb
-        shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=-1)
-        if conditioning.ndim == 2:
-            shift, scale = shift[:, None], scale[:, None]
-        hidden_states = self.norm_out(hidden_states) * (1 + scale) + shift
+        hidden_states = _apply_output_conditioning(
+            hidden_states,
+            temb,
+            self.norm_out,
+            self.proj_out_1,
+        )
         if return_all_hidden_states:
             return self.proj_out_2(hidden_states), all_hidden_states
         else:

@@ -30,12 +30,10 @@ string inference_mode
 
 # Action chunk request scheduling. "async" requests the next chunk while the
 # current buffer is still executing. "sync" waits until the buffer is empty.
+# "tt_rtc" is available only for a qualified GR00T N1.7 checkpoint.
 string action_request_mode
-# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
 bool vla_rail_enabled
-# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
-bool ttrtc_enabled
-uint16 ttrtc_prefix_steps
+uint16 action_chunk_size
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
 # "tensorrt_dit" enables GR00T DiT-only TensorRT acceleration when supported.
@@ -45,11 +43,28 @@ string acceleration_mode
 # model-local default, e.g. <model_path>/dit_model_bf16.trt for GR00T DiT-only.
 string acceleration_engine_path
 
-# Real-robot startup safety option. When enabled, inference uses the first
-# action of the first chunk as a slow initial pose target before normal control.
+# Optional PI RLT side policy. Enabling this only preloads the bundle during
+# inference LOAD; action_policy_mode decides which candidate is executed.
+bool rlt_enabled
+string rlt_bundle_path
+
+# Runtime action router selection. "base" executes the frozen VLA reference
+# policy and "rlt" executes the RLT Action MLP. Sync/async switch at a drained
+# chunk boundary; TT-RTC preserves the committed prefix and hands off when the
+# selected route's continuation has been validated and enqueued.
+string action_policy_mode
+
+# Explicit operator acknowledgement for routing an unqualified RLT action to a
+# physical robot. This is consumed only by SET_ACTION_POLICY; simulation and
+# the base action path do not require the override.
+bool rlt_robot_override
+
+# Real-robot startup safety. Duration is the minimum transition time; the
+# runtime may extend it based on joint displacement and its velocity limit.
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
 
-# Runtime action horizon limit. 0 keeps the checkpoint's inference settings.
-# Positive values are capped at the trained horizon; no model shape changes.
-uint16 action_chunk_size
+# Explicit raw MCAP task folder. Empty keeps the legacy task_num/task_name
+# naming rules. When set, it must be a Task_*_MCAP directory directly under
+# /workspace/rosbag2.
+string recording_folder

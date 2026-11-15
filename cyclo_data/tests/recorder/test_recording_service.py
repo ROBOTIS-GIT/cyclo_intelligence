@@ -65,6 +65,9 @@ class _RecordingCommand:
         DISCARD_EPISODE = 14
         SET_TASK_INFO = 15
         CANCEL_SEGMENT = 16
+        UNSPECIFIED = 0
+        SUCCESS = 1
+        FAILURE = 2
 
 
 class _Dummy:
@@ -108,9 +111,11 @@ for _module_name in (
 
 
 def _request(segment_index=0, tags=None, **attrs):
+    episode_outcome = attrs.pop("episode_outcome", 0)
     return SimpleNamespace(
         segment_index=segment_index,
-        task_info=SimpleNamespace(tags=tags or []),
+        episode_outcome=episode_outcome,
+        task_info=SimpleNamespace(tags=tags or [], task_type=""),
         **attrs,
     )
 
@@ -159,13 +164,23 @@ def _service_with_logger():
     return service, logger
 
 
+def test_rlt_sidecar_flushes_with_existing_episode_writers():
+    service, _ = _service_with_logger()
+    calls = []
+    service._rlt_recorder = SimpleNamespace(stop_episode=lambda: calls.append('rlt'))
+    service._video_recorder = SimpleNamespace(stop_episode=lambda: calls.append('video'))
+    service._camera_info = None
+    service._stop_episode_writers()
+    assert calls == ['rlt', 'video']
+
+
 def test_ensure_data_manager_reuses_same_task_without_candidate_scan(
     monkeypatch,
     tmp_path,
 ):
     service, _ = _service_with_logger()
     service._session_lock = RLock()
-    service.DEFAULT_SAVE_ROOT_PATH = tmp_path
+    service.RECORDING_ROOT_PATH = tmp_path
     updates = []
     existing = SimpleNamespace(
         _save_repo_name="Task_42_pick_MCAP",
@@ -194,6 +209,51 @@ def test_ensure_data_manager_reuses_same_task_without_candidate_scan(
 
     assert service._ensure_data_manager(task_info, "ffw_sg2_rev1") is existing
     assert updates == [task_info]
+
+
+def test_ensure_data_manager_separates_recording_and_legacy_roots(
+    monkeypatch,
+    tmp_path,
+):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = None
+    service.DEFAULT_SAVE_ROOT_PATH = tmp_path / "hf"
+    service.RECORDING_ROOT_PATH = tmp_path / "rosbag2"
+    selected = service.RECORDING_ROOT_PATH / "Task_42_pick_MCAP"
+    task_info = SimpleNamespace(
+        task_num="42",
+        task_name="pick",
+        recording_folder=str(selected),
+    )
+    constructor_args = {}
+
+    class CapturingDataManager:
+        @classmethod
+        def _make_save_repo_name(cls, recording_root_path, received_task_info):
+            assert recording_root_path == service.RECORDING_ROOT_PATH
+            assert received_task_info is task_info
+            return selected.name
+
+        def __init__(self, **kwargs):
+            constructor_args.update(kwargs)
+            self._save_repo_name = selected.name
+
+    monkeypatch.setattr(
+        recording_service_module,
+        "DataManager",
+        CapturingDataManager,
+    )
+
+    manager = service._ensure_data_manager(task_info, "ffw_sg2_rev1")
+
+    assert manager._save_repo_name == selected.name
+    assert constructor_args == {
+        "save_root_path": service.DEFAULT_SAVE_ROOT_PATH,
+        "robot_type": "ffw_sg2_rev1",
+        "task_info": task_info,
+        "recording_root_path": service.RECORDING_ROOT_PATH,
+    }
 
 
 def test_validate_active_segment_rejects_stale_segment_request():
@@ -544,3 +604,218 @@ def test_cancel_segment_rejects_when_no_active_recording():
     assert result is response
     assert response.success is False
     assert response.message == "CANCEL_SEGMENT: no active recording"
+
+
+def test_cancel_active_inference_rollout_deletes_files_without_incrementing_count(
+    tmp_path,
+):
+    service, _ = _service_with_logger()
+    episode_dir = tmp_path / "5" / "segments" / "0"
+    (episode_dir / "videos").mkdir(parents=True)
+    (episode_dir / "episode.mcap").write_bytes(b"active")
+    (episode_dir / "videos" / "cam.mjpeg.tmp").write_bytes(b"active")
+    manager = SimpleNamespace(
+        _record_episode_count=5,
+        is_recording=lambda: True,
+        get_save_rosbag_path=lambda: str(episode_dir),
+        discard_recording=lambda **_kwargs: None,
+    )
+    events = []
+    service._data_manager = manager
+    service._stop_episode_writers = lambda: None
+    service._rosbag = SimpleNamespace(
+        stop_and_delete_rosbag=lambda: None,
+        publish_action_event=lambda event: events.append(event),
+    )
+    service._publish_umbrella_status = lambda *_args, **_kwargs: None
+    response = SimpleNamespace(success=False, message="")
+    request = _request(command=_RecordingCommand.Request.CANCEL)
+    request.task_info.task_type = "inference"
+
+    result = service._do_cancel(request, response)
+
+    assert result.success is True
+    assert not episode_dir.exists()
+    assert manager._record_episode_count == 5
+    assert events == ["cancel"]
+
+
+def _inference_stop_fixture(tmp_path):
+    service, _ = _service_with_logger()
+    metadata_calls = []
+    rosbag_stops = []
+    manager = SimpleNamespace(
+        _task_info=SimpleNamespace(task_type="inference"),
+        _record_episode_count=0,
+        _segmented_storage_mode=True,
+        is_recording=lambda: True,
+        get_status=lambda: "recording",
+        get_current_subtask_index=lambda: 0,
+        get_save_rosbag_path=lambda: str(tmp_path / "0" / "segments" / "0"),
+        save_robotis_metadata=lambda **kwargs: metadata_calls.append(kwargs),
+        stop_recording=lambda **_kwargs: None,
+    )
+    service._data_manager = manager
+    service._rosbag = SimpleNamespace(
+        stop_rosbag=lambda: rosbag_stops.append(True),
+        publish_action_event=lambda _event: None,
+    )
+    service._video_recorder = None
+    service._camera_info = None
+    service._last_camera_rotations = {}
+    service._last_image_topics = {}
+    service._last_camera_info_topics = {}
+    service._publish_umbrella_status = lambda *_args, **_kwargs: None
+    service._start_finish_episode_thread = lambda _manager: True
+    return service, metadata_calls, rosbag_stops
+
+
+def test_inference_stop_segment_allows_unspecified_outcome(tmp_path):
+    service, metadata_calls, rosbag_stops = _inference_stop_fixture(tmp_path)
+    request = _request(
+        command=_RecordingCommand.Request.STOP_SEGMENT,
+        episode_outcome=_RecordingCommand.Request.UNSPECIFIED,
+        segment_index=0,
+        urdf_path="",
+    )
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_stop_and_save(
+        request,
+        response,
+        "STOP_SEGMENT",
+        "finish",
+    )
+
+    assert result.success is True
+    assert result.message == "Subtask saved"
+    assert rosbag_stops == [True]
+    assert metadata_calls[0]["episode_success"] is None
+
+
+def test_inference_stop_requires_outcome_before_rosbag_stop(tmp_path):
+    service, metadata_calls, rosbag_stops = _inference_stop_fixture(tmp_path)
+    request = _request(
+        command=_RecordingCommand.Request.STOP,
+        episode_outcome=_RecordingCommand.Request.UNSPECIFIED,
+        urdf_path="",
+    )
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=True, message="")
+
+    result = service._do_stop_and_save(request, response, "STOP", "finish")
+
+    assert result.success is False
+    assert "SUCCESS or FAILURE" in result.message
+    assert rosbag_stops == []
+    assert metadata_calls == []
+
+
+def test_inference_stop_writes_episode_success_metadata(tmp_path):
+    service, metadata_calls, rosbag_stops = _inference_stop_fixture(tmp_path)
+    request = _request(
+        command=_RecordingCommand.Request.STOP,
+        episode_outcome=_RecordingCommand.Request.SUCCESS,
+        urdf_path="",
+    )
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_stop_and_save(request, response, "STOP", "finish")
+
+    assert result.success is True
+    assert rosbag_stops == [True]
+    assert metadata_calls[0]["episode_success"] is True
+
+
+def test_inference_stop_reports_metadata_write_failure(tmp_path):
+    service, _, rosbag_stops = _inference_stop_fixture(tmp_path)
+    service._data_manager.save_robotis_metadata = lambda **_kwargs: False
+    service._start_finish_episode_thread = lambda _manager: pytest.fail(
+        "metadata-less episode must not be archived"
+    )
+    published = []
+    service._publish_umbrella_status = lambda *args: published.append(args)
+    request = _request(
+        command=_RecordingCommand.Request.STOP,
+        episode_outcome=_RecordingCommand.Request.FAILURE,
+        urdf_path="",
+    )
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=True, message="")
+
+    result = service._do_stop_and_save(request, response, "STOP", "finish")
+
+    assert result.success is False
+    assert "metadata could not be saved" in result.message
+    assert rosbag_stops == [True]
+    assert published[-1][0] == _DataOperationStatus.FAILED
+
+
+def test_inference_set_task_info_does_not_create_data_manager():
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = None
+    service._ensure_data_manager = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("DataManager must be lazy for inference")
+    )
+    service._publish_recording_status = lambda: pytest.fail(
+        "status must remain lazy until an inference DataManager exists"
+    )
+    request = _request(robot_type="ffw_sg2_rev1")
+    request.task_info.task_type = "inference"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_set_task_info(request, response)
+
+    assert result.success is True
+    assert result.message == (
+        "inference task_info acknowledged; DataManager starts on Record"
+    )
+
+
+def test_inference_set_task_info_refreshes_existing_manager_and_status():
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    updates = []
+    published = []
+    service._data_manager = SimpleNamespace(
+        update_task_info=lambda task_info: updates.append(task_info)
+    )
+    service._publish_recording_status = lambda: published.append(True)
+    request = _request(robot_type="ffw_sg2_rev1")
+    request.task_info.task_type = "inference"
+    request.task_info.policy_path = "/workspace/model/lerobot/act"
+    response = SimpleNamespace(success=False, message="")
+
+    result = service._do_set_task_info(request, response)
+
+    assert result.success is True
+    assert result.message == "inference task_info updated"
+    assert updates == [request.task_info]
+    assert published == [True]
+
+
+def test_rejected_start_preserves_other_recorders_files_and_writers(tmp_path):
+    service, _ = _service_with_logger()
+    episode_dir = tmp_path / 'active_episode'
+    episode_dir.mkdir()
+    bag = episode_dir / '0_0.mcap'
+    bag.write_bytes(b'existing recording')
+    service._stop_episode_writers = lambda: (_ for _ in ()).throw(AssertionError('not owned'))
+    service._rosbag = SimpleNamespace(stop_and_delete_rosbag=lambda: (_ for _ in ()).throw(AssertionError('not owned')))
+    service._cleanup_failed_start(episode_dir=episode_dir, data_manager=None, rosbag_started=False)
+    assert bag.read_bytes() == b'existing recording'
+
+
+def test_failed_stop_preserves_episode_files(tmp_path):
+    service, _ = _service_with_logger()
+    episode_dir = tmp_path / 'active_episode'
+    episode_dir.mkdir()
+    bag = episode_dir / '0_0.mcap'
+    bag.write_bytes(b'writer still open')
+    service._stop_episode_writers = lambda: None
+    service._rosbag = SimpleNamespace(stop_and_delete_rosbag=lambda: (_ for _ in ()).throw(RuntimeError('stop timeout')))
+    service._cleanup_failed_start(episode_dir=episode_dir, data_manager=None, rosbag_started=True)
+    assert bag.read_bytes() == b'writer still open'

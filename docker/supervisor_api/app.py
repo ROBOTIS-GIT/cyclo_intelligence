@@ -275,6 +275,7 @@ class BackendStatus(BaseModel):
 
 
 class TrtBuildRequest(BaseModel):
+    action_request_mode: Literal["sync", "async", "tt_rtc"] = "async"
     model_path: str
     engine_path: str = ""
     robot_type: str
@@ -694,8 +695,15 @@ def _resolve_trt_paths(
     return model, engine
 
 
-def _resolve_groot_trt_paths(model_path: str, engine_path: str = ""):
-    return _resolve_trt_paths(model_path, engine_path, "groot")
+def _resolve_groot_trt_paths(model_path: str, engine_path: str = "", action_request_mode: str = "async"):
+    if action_request_mode == "tt_rtc" and not (engine_path or "").strip():
+        canonical = "dit_model_bf16_ttrtc.trt"
+        legacy = "dit_model_tt_rtc_bf16.trt"
+        engine_path = legacy if not os.path.exists(os.path.join(model_path, canonical)) and os.path.exists(os.path.join(model_path, legacy)) else canonical
+    model, engine = _resolve_trt_paths(model_path, engine_path, "groot")
+    if action_request_mode == "tt_rtc" and engine == os.path.join(model, "dit_model_bf16.trt"):
+        raise HTTPException(400, "TT-RTC must use a separate TensorRT engine path")
+    return model, engine
 
 
 def _trt_manifest_path(engine_path: str) -> str:
@@ -942,6 +950,7 @@ def _start_trt_build_job(
     workspace_mb: Optional[int],
     force: bool,
     backend: str = "groot",
+    action_request_mode: str = "async",
 ) -> _TrtBuildJob:
     log_path = _trt_log_path(engine_path)
     cmd = [
@@ -960,6 +969,8 @@ def _start_trt_build_job(
         "--task-instruction",
         task_instruction,
     ]
+    if backend == "groot":
+        cmd.extend(["--action-request-mode", action_request_mode])
     if workspace_mb:
         cmd.extend(["--workspace-mb", str(workspace_mb)])
     if force:
@@ -1197,6 +1208,12 @@ app = FastAPI(
     version="1.4.0",
     lifespan=_app_lifespan,
 )
+
+_rl_playground_module = _load_sibling_module("rl_playground", "rl_playground.py")
+_rl_playground_module.configure_control_plane(sys.modules[__name__])
+_include_router_with_eager_routes(app, _rl_playground_module.router)
+_intervention_module = _load_sibling_module("intervention", "intervention.py")
+_include_router_with_eager_routes(app, _intervention_module.router)
 
 _include_router_with_eager_routes(app, navigation_router)
 _include_router_with_eager_routes(app, navigation_spots_router)
@@ -1536,8 +1553,9 @@ async def inference_options(name: str, model_path: str):
 async def groot_trt_status(
     model_path: str,
     engine_path: str = "",
+    action_request_mode: Literal["sync", "async", "tt_rtc"] = "async",
 ) -> TrtEngineStatus:
-    model, engine = _resolve_groot_trt_paths(model_path, engine_path)
+    model, engine = _resolve_groot_trt_paths(model_path, engine_path, action_request_mode)
     return _trt_status(model, engine)
 
 
@@ -1572,6 +1590,7 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
     model, engine = _resolve_groot_trt_paths(
         request.model_path,
         request.engine_path,
+        request.action_request_mode,
     )
     robot_type = request.robot_type.strip()
     if not robot_type:
@@ -1596,6 +1615,7 @@ async def groot_trt_build(request: TrtBuildRequest) -> TrtEngineStatus:
         request.task_instruction,
         request.workspace_mb,
         request.force,
+        action_request_mode=request.action_request_mode,
     )
     return _trt_status(model, engine)
 

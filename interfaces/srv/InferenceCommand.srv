@@ -18,15 +18,19 @@ uint8 STOP               = 4   # Stop loop; keep model in GPU memory.
 uint8 UNLOAD             = 5   # Free GPU memory.
 uint8 UPDATE_INSTRUCTION = 6   # Re-condition language instruction mid-run.
                                # Requires LOAD + START already issued. Touches
-                               # No lifecycle change. Known multi-subtask GR00T
-                               # models also discard prior-stage actions and
-                               # late responses before reconditioning.
+                               # task_instruction only — no lifecycle change.
+uint8 SET_ACTION_POLICY   = 20   # Queue base/RLT output switch at next buffer
+                               # boundary. Requires LOAD + START.
 
-# Runtime extensions, sent as numeric command values without changing ROSIDL:
-# 7: CAPABILITIES, read-only; confirmed_pose_hold_v2 advertises confirmed STOP
-#    and fault latch support.
-# 8: FAULT_STOP, confirmed hold + permanent START/LOAD lockout until Main restart.
+uint8 CAPABILITIES = 7
+uint8 FAULT_STOP = 8
+
 uint8 command
+# Additional GR00T MLP update commands (same wire fields):
+# 21=status, 22=auto apply on, 23=auto apply off, 24=queue manual apply,
+# 25=async RL on, 26=async RL off, 27=select Async RL datasets, 28=save bundle.
+# rlt_bundle_path identifies the already-loaded bundle. Replies contain JSON
+# status in message. Only 25 starts learning; none changes the action mode.
 
 # LOAD fields — required when command = LOAD, "" otherwise.
 string model_path
@@ -41,12 +45,17 @@ string task_instruction
 bool publish_to_robot
 # Action chunk request scheduling at LOAD time. Empty / "async" preserves the
 # current prefetch behavior. "sync" requests only after the active buffer drains.
+# "tt_rtc" is the GR00T-only clean-prefix continuation contract; the backend
+# rejects checkpoints that do not declare and implement Training-Time RTC.
 string action_request_mode
-# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
+# TT-RTC LOAD: interpolated command rate; 0 uses the runtime default.
+# Model source actions remain at 15 Hz.
+float64 control_hz
+# Ordinary async and sync settings (RAIL only for ordinary GR00T async).
 bool vla_rail_enabled
-# Trained TT-RTC mode (GR00T Async only); prefix length 0..8.
-bool ttrtc_enabled
-uint16 ttrtc_prefix_steps
+uint16 inference_hz
+float64 chunk_align_window_s
+uint16 action_chunk_size
 # Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
 # PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
 # supported by the backend.
@@ -54,17 +63,27 @@ string acceleration_mode
 # Optional engine file/directory. Empty lets the backend use its model-local
 # default path.
 string acceleration_engine_path
-# Main-runtime timing configured at LOAD time. Zero values preserve the
-# policy container's environment/default settings.
-uint16 control_hz
-uint16 inference_hz
-float64 chunk_align_window_s
-# LOAD-time initial-pose synchronization settings. Ignored unless
-# publish_to_robot is true.
+# LOAD-only RLT preload contract. rlt_bundle_path is a bundle directory; the
+# backend resolves and validates its frozen RL-token encoder + Action MLP.
+bool rlt_enabled
+string rlt_bundle_path
+# Command 27: absolute LeRobot roots, empty means wait for data (not OFF).
+string[] rlt_dataset_paths
+# Command 25: critic updates per ON run; 0 preserves the server limit (default 1000).
+uint32 rlt_max_updates
+# SET_ACTION_POLICY target. "base" or "rlt"; ignored by other commands.
+string action_policy_mode
+# SET_ACTION_POLICY-only operator acknowledgement for an unqualified RLT
+# bundle on a physical robot. It is never inferred from publish_to_robot.
+bool rlt_robot_override
+# Real-robot START only. The duration is a minimum; runtime extends it when
+# needed to respect INITIAL_POSE_SYNC_MAX_VELOCITY_RAD_S (default 0.25 rad/s).
 bool initial_pose_sync
 float64 initial_pose_sync_duration_s
-# LOAD-time action horizon limit. 0 preserves checkpoint behavior.
-uint16 action_chunk_size
+# Internal routing handshake. When true, the first START only publishes the
+# target; a second START begins the sync clock after an external arbiter has
+# forwarded that target. Normal/direct clients leave this false.
+bool initial_pose_sync_defer_activation
 ---
 bool success
 string message
@@ -72,3 +91,5 @@ string message
 # modality_config (e.g. ["arm_left", "arm_right", "gripper"]). Main uses this
 # order when publishing a flat action vector through RobotClient.
 string[] action_keys
+# Effective duration returned by START/RESUME when initial pose sync starts.
+float64 initial_pose_sync_duration_s

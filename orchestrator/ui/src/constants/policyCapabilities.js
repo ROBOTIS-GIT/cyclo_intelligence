@@ -25,9 +25,23 @@ export const POLICY_REQUIRES_INSTRUCTION = {
   'lerobot:molmoact2': true,
   'lerobot:vla_jepa': true,
   'lerobot:fastwam': true,
+  'lerobot:multi_task_dit': true,
 };
 
 export const DEFAULT_REQUIRES_INSTRUCTION = false;
+
+const RLT_INFERENCE_POLICIES = new Set([
+  'groot:n17',
+]);
+
+const TENSORRT_INFERENCE_POLICIES = new Set([
+  'lerobot:act',
+  'groot:n17',
+]);
+
+const TT_RTC_INFERENCE_POLICIES = new Set([
+  'groot:n17',
+]);
 
 export function requiresInstruction(serviceType, policyType) {
   const exact = `${serviceType}:${policyType}`;
@@ -39,4 +53,31 @@ export function requiresInstruction(serviceType, policyType) {
     return POLICY_REQUIRES_INSTRUCTION[wild];
   }
   return DEFAULT_REQUIRES_INSTRUCTION;
+}
+
+/**
+ * Policies whose frozen feature boundary is compatible with the staged RLT
+ * bundle contract. Runtime routing is connected independently from this UI
+ * capability so unsupported policies never expose a misleading RLT control.
+ */
+export function supportsRltInference(serviceType, policyType) {
+  return RLT_INFERENCE_POLICIES.has(`${serviceType}:${policyType}`);
+}
+
+/**
+ * Policies whose runtime implements its architecture-specific TensorRT contract.
+ * Keep this pair-based rather than backend-wide so a future GR00T policy
+ * cannot accidentally inherit an engine built for N1.7.
+ */
+export function supportsTensorRtInference(serviceType, policyType) {
+  return TENSORRT_INFERENCE_POLICIES.has(`${serviceType}:${policyType}`);
+}
+
+/**
+ * Policies trained with the prefix-conditioned Training-Time RTC contract.
+ * Keep this explicit so an ordinary async policy cannot expose TT-RTC by
+ * inheriting a backend-wide capability.
+ */
+export function supportsTtRtcInference(serviceType, policyType) {
+  return TT_RTC_INFERENCE_POLICIES.has(`${serviceType}:${policyType}`);
 }

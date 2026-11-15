@@ -36,7 +36,9 @@ export const DEFAULT_PATHS = {
   POLICY_MODEL_PATH: `${LEROBOT_OUTPUTS_PATH}/train/`,
   POLICY_CHECKPOINTS_PATH: '/workspace/model',
   LEROBOT_CHECKPOINTS_PATH: '/workspace/model/lerobot',
+  LEROBOT_DATASETS_PATH: '/workspace/lerobot',
   GROOT_CHECKPOINTS_PATH: '/workspace/model/groot',
+  RLT_CHECKPOINTS_PATH: '/workspace/checkpoint/rlt',
   DATASET_PATH: `${DOT_CACHE_PATH}/huggingface/lerobot/`,
   ROSBAG2_PATH: '/workspace/rosbag2/',
   // Default destinations for HuggingFace downloads on the robot. The

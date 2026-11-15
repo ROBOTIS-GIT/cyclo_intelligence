@@ -22,15 +22,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
     BrowserItem,
-    DatasetInfo,
-    InferenceStatus
 )
 from interfaces.srv import (
     BrowseFile,
-    GetDatasetInfo,
     GetImageTopicList,
 )
-from cyclo_data.editor.episode_editor import DataEditor
 from orchestrator.internal.file_browser.file_browse_utils import FileBrowseUtils
 from shared.robot_configs import schema as robot_schema
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -41,7 +37,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy
 )
-from std_msgs.msg import Empty, String
+from std_msgs.msg import Bool, Empty, String
 
 
 class Communicator:
@@ -97,9 +93,6 @@ class Communicator:
         )
         self._mcap_topics = robot_schema.get_mcap_record_topics(robot_section)
 
-        # Initialize DataEditor for dataset editing
-        self.data_editor = DataEditor()
-
         # Log topic information
         node.get_logger().info(f'Camera topics: {self.camera_topics}')
         node.get_logger().info(f'State topics: {self.state_topics}')
@@ -119,6 +112,11 @@ class Communicator:
             'updated': False,
             'mode': None
         }
+        joystick_topics = robot_schema.get_joystick_topics(robot_section)
+        self._require_middle_pedal = bool(
+            joystick_topics.get('require_middle_pedal', False)
+        )
+        self._middle_pedal_held = False
 
         # Protects joystick_state — orchestrator_node's timer callback
         # and joystick_trigger_callback both run under
@@ -146,40 +144,48 @@ class Communicator:
         return dict(self.camera_info_topics)
 
     def init_subscribers(self):
-        """Initialize only joystick trigger subscriber."""
+        """Initialize configured leader trigger and middle-pedal inputs."""
         joystick_topics = robot_schema.get_joystick_topics(self.robot_section)
         trigger_topic = joystick_topics.get('trigger_topic', '')
+        middle_pedal_topic = joystick_topics.get('middle_pedal_topic', '')
         self.joystick_trigger_subscriber = None
+        self.middle_pedal_subscriber = None
         if not trigger_topic:
             self.node.get_logger().info(
                 'Joystick trigger subscriber skipped: no trigger topic '
                 'configured for this robot'
             )
-            return
+        else:
+            self.joystick_trigger_subscriber = self.node.create_subscription(
+                String,
+                trigger_topic,
+                self.joystick_trigger_callback,
+                10
+            )
+            self.node.get_logger().info(
+                f'Joystick trigger subscriber initialized: {trigger_topic}'
+            )
 
-        self.joystick_trigger_subscriber = self.node.create_subscription(
-            String,
-            trigger_topic,
-            self.joystick_trigger_callback,
-            10
-        )
-        self.node.get_logger().info(
-            f'Joystick trigger subscriber initialized: {trigger_topic}'
-        )
+        if middle_pedal_topic:
+            self.middle_pedal_subscriber = self.node.create_subscription(
+                Bool,
+                middle_pedal_topic,
+                self.middle_pedal_callback,
+                10
+            )
+            self.node.get_logger().info(
+                'Middle-pedal subscriber initialized: '
+                f'{middle_pedal_topic}'
+            )
+        elif self._require_middle_pedal:
+            self.node.get_logger().warning(
+                'Middle pedal is required but no middle_pedal_topic is '
+                'configured; leader recording triggers will stay disabled'
+            )
 
     def init_publishers(self):
         """Initialize publishers."""
         self.node.get_logger().info('Initializing publishers...')
-
-        # Inference status publisher — orchestrator owns the inference phase
-        # half of the split (record half lives on /data/recording/status,
-        # published by cyclo_data). See ~/.claude/plans/record-zippy-sunrise.md
-        # and PLAN §10.3 D18.
-        self.inference_status_publisher = self.node.create_publisher(
-            InferenceStatus,
-            '/task/inference_status',
-            self.PUB_QOS_SIZE
-        )
 
         # /task/action_event publisher moved to cyclo_data.recorder.rosbag_control
         # in Step 3 Part C2d-1/-5. cyclo_data owns the recording lifecycle.
@@ -210,12 +216,6 @@ class Communicator:
             self.browse_file_callback
         )
 
-        self.get_dataset_info_service = self.node.create_service(
-            GetDatasetInfo,
-            '/dataset/get_info',
-            self.get_dataset_info_callback
-        )
-
 
     # Rosbag command client + prepare/start/stop/finish/stop_and_delete_rosbag
     # and _send_rosbag_command moved to cyclo_data.recorder.rosbag_control in
@@ -223,19 +223,6 @@ class Communicator:
     # rosbag service topic is now only contacted by the cyclo_data node.
 
     # ========== Publishers ==========
-
-    def publish_inference_status(
-        self,
-        phase: int,
-        robot_type: str = '',
-        error: str = '',
-    ) -> None:
-        """Publish an InferenceStatus snapshot on /task/inference_status."""
-        msg = InferenceStatus()
-        msg.inference_phase = phase
-        msg.robot_type = robot_type
-        msg.error = error
-        self.inference_status_publisher.publish(msg)
 
     # publish_action_event moved to cyclo_data.recorder.rosbag_control.RosbagControl
     # (Step 3 Part C2d-1/-5). Orchestrator no longer owns /task/action_event.
@@ -276,6 +263,19 @@ class Communicator:
         with self._joystick_lock:
             self.joystick_state['updated'] = True
             self.joystick_state['mode'] = msg.data
+
+    def middle_pedal_callback(self, msg: Bool):
+        """Track whether the configured middle foot pedal is held."""
+        with self._joystick_lock:
+            self._middle_pedal_held = bool(msg.data)
+
+    def recording_trigger_enabled(self) -> bool:
+        """Return whether the optional middle-pedal interlock is satisfied."""
+        with self._joystick_lock:
+            return (
+                not self._require_middle_pedal
+                or self._middle_pedal_held
+            )
 
     def consume_joystick_update(self):
         """Atomically read-and-clear ``joystick_state``.
@@ -421,31 +421,6 @@ class Communicator:
 
         return response
 
-    def get_dataset_info_callback(self, request, response):
-        from pathlib import Path
-        try:
-            task_dir = Path(request.dataset_path)
-            task_info = self.data_editor.get_rosbag_task_info(task_dir)
-
-            info = DatasetInfo()
-            info.robot_type = task_info.robot_type
-            info.task_instruction = task_info.task_instruction
-            info.episode_count = int(task_info.episode_count)
-            info.total_duration_s = float(task_info.total_duration_s)
-            info.fps = int(task_info.fps)
-
-            response.dataset_info = info
-            response.success = True
-            response.message = 'Task info retrieved successfully'
-            return response
-
-        except Exception as e:
-            self.node.get_logger().error(f'Error in get_dataset_info_callback: {str(e)}')
-            response.success = False
-            response.message = f'Error: {str(e)}'
-            response.dataset_info = DatasetInfo()
-            return response
-
     # ========== Cleanup ==========
 
     def _destroy_service_if_exists(self, service_attr_name: str):
@@ -481,7 +456,6 @@ class Communicator:
 
     def _cleanup_publishers(self):
         publisher_names = [
-            'inference_status_publisher',
             'heartbeat_publisher',
         ]
         for publisher_name in publisher_names:
@@ -492,12 +466,15 @@ class Communicator:
            self.joystick_trigger_subscriber is not None:
             self.node.destroy_subscription(self.joystick_trigger_subscriber)
             self.joystick_trigger_subscriber = None
+        if hasattr(self, 'middle_pedal_subscriber') and \
+           self.middle_pedal_subscriber is not None:
+            self.node.destroy_subscription(self.middle_pedal_subscriber)
+            self.middle_pedal_subscriber = None
 
     def _cleanup_services(self):
         service_names = [
             'image_topic_list_service',
             'file_browser_service',
-            'get_dataset_info_service',
         ]
         for service_name in service_names:
             self._destroy_service_if_exists(service_name)

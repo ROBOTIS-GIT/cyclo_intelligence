@@ -23,6 +23,7 @@ import {
   normalizeWorkspaceStage,
   STAGE_RUN,
   WORKSPACE_ACTION_CANVAS,
+  WORKSPACE_RL_CANVAS,
   WORKSPACE_MISSION,
   WORKSPACE_AUTONOMY,
   STAGE_OPERATE,
@@ -78,6 +79,7 @@ export function initialWorkspaceStage(session, workspaceKind = null) {
 
 export function initialWorkspaceKind(session) {
   const kind = session?.workspaceKind;
+  if (kind === WORKSPACE_RL_CANVAS) return WORKSPACE_RL_CANVAS;
   if (kind === WORKSPACE_ACTION_CANVAS || kind === LEGACY_WORKSPACE_STANDALONE_BT) return WORKSPACE_ACTION_CANVAS;
   if (kind === WORKSPACE_AUTONOMY || [STAGE_COLLECT, STAGE_OPERATE, STAGE_LEARN].includes(normalizeWorkspaceStage(session?.workspaceStage))) return WORKSPACE_AUTONOMY;
   return WORKSPACE_MISSION;
