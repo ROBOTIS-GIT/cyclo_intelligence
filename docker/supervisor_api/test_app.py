@@ -400,7 +400,7 @@ def test_trial_json_rejects_a_different_robot_without_changing_history(trial_cli
     }).json()
     original = Path(first["file"]).read_text()
     second = trial_client.post("/try-results", json={
-        "model": model, "robot_type": "f2", "result": "fail",
+        "model": model, "robot_type": "w2", "result": "fail",
     })
     assert second.status_code == 409
     assert Path(first["file"]).read_text() == original
@@ -408,22 +408,22 @@ def test_trial_json_rejects_a_different_robot_without_changing_history(trial_cli
         "model": model, "robot_type": "ffw_sg2_rev1",
     }).json()["rows"] == first["rows"]
     assert trial_client.get("/try-results", params={
-        "model": model, "robot_type": "f2",
+        "model": model, "robot_type": "w2",
     }).status_code == 409
 
 
 def test_old_external_json_is_imported_without_losing_trials(trial_client):
     model = trial_model("lerobot/act")
     app._TRIAL_RESULTS_DIR.mkdir()
-    old_path = app._old_evaluation_file(model, "f2")
-    old = app._new_evaluation(model, "f2")
+    old_path = app._old_evaluation_file(model, "w2")
+    old = app._new_evaluation(model, "w2")
     old["trials"].append({
         "trial_id": "original-trial", "result": "success", "recorded_at": "2026-10-02T05:00:00Z",
     })
     app._write_evaluation(old_path, old)
-    imported = trial_client.get("/try-results", params={"model": model, "robot_type": "f2"}).json()
+    imported = trial_client.get("/try-results", params={"model": model, "robot_type": "w2"}).json()
     assert imported["rows"][0]["result"] == "success"
-    trial_client.post("/try-results", json={"model": model, "robot_type": "f2", "result": "fail"})
+    trial_client.post("/try-results", json={"model": model, "robot_type": "w2", "result": "fail"})
     saved = json.loads((Path(model) / "evaluation_manifest.json").read_text())
     assert "evaluation_id" not in saved
     assert [trial["trial_id"] for trial in saved["trials"]] == [1, 2]
@@ -450,7 +450,7 @@ def test_multiple_evaluation_wrapper_requires_manual_separation(trial_client):
     model = trial_model("lerobot/act")
     path = Path(model) / "evaluation_manifest.json"
     path.write_text(json.dumps({"schema_version": 1, "evaluations": [
-        app._new_evaluation(model, "ffw_sg2_rev1"), app._new_evaluation(model, "f2"),
+        app._new_evaluation(model, "ffw_sg2_rev1"), app._new_evaluation(model, "w2"),
     ]}))
     before = path.read_text()
     assert trial_client.post("/try-results", json={

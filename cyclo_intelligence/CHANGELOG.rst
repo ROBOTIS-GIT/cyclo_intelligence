@@ -2,6 +2,14 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* Renamed F1 and F2 to W1 and W2 in robot configuration keys, filenames, display names, and bundled URDF identifiers.
+* Robot selection now discovers ``w1`` and ``w2``. Legacy ``f1`` and ``f2`` aliases are not provided; existing launch arguments and external configuration paths must use the new names.
+* Preserved camera and command topics, joint ordering, robot geometry, and dataset format versions. Existing user datasets and model artifacts are not rewritten.
+* Updated Cyclo package versions, UI, and the default core image reference to 1.5.1; model Worker image versions are unchanged.
+* Contributors: Taehyeong Kim
+
 1.5.0 (2026-11-16)
 ------------------
 * Added a central Policy Runtime with manifest-discovered Workers and ABot-M0, LingBot-VLA, and RLDX integrations.

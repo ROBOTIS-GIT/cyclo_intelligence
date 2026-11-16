@@ -2,6 +2,10 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* None
+
 1.5.0 (2026-11-16)
 ------------------
 * Reused explicitly selected inference recording folders across episodes and preserved model metadata captured at recording start.

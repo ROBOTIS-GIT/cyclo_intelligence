@@ -2,6 +2,10 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* None
+
 1.5.0 (2026-11-16)
 ------------------
 * Added Worker Engine description, status, execution-context, and context-update fields for the central Runtime protocol.
