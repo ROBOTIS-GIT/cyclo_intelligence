@@ -45,7 +45,18 @@ def _assert_urdf_path_and_mesh_assets_resolve(robot_type, expected_urdf_name):
 
     tree = ET.parse(urdf_path)
     if robot_type in ("w1", "w2"):
-        assert tree.getroot().attrib["name"] == f"ffw_{robot_type}_follower"
+        assert tree.getroot().attrib["name"] == f"{robot_type}_follower"
+        expected_controls = {f"{robot_type}_follower"}
+        if robot_type == "w2":
+            expected_controls.update({"w2_base", "w2_sensor"})
+        assert {
+            control.attrib["name"] for control in tree.findall("ros2_control")
+        } == expected_controls
+        assert [node.text for node in tree.findall(".//plugin/parameters")] == [
+            "/root/ros2_ws/install/ffw_bringup/share/ffw_bringup/config/"
+            f"{robot_type}_follower/{robot_type}_follower_ai_hardware_controller.yaml"
+        ]
+        assert not (urdf_path.parent / f"ffw_{robot_type}_follower.urdf").exists()
     mesh_filenames = {
         mesh.attrib["filename"]
         for mesh in tree.findall(".//mesh")
@@ -164,7 +175,7 @@ def test_w2_state_and_action_dimensions_match_layout():
 def test_w2_urdf_path_and_mesh_assets_resolve():
     _assert_urdf_path_and_mesh_assets_resolve(
         "w2",
-        "ffw_w2_follower.urdf",
+        "w2_follower.urdf",
     )
 
 
@@ -189,7 +200,7 @@ def test_w1_state_and_action_dimensions_match_layout():
 def test_w1_urdf_path_and_mesh_assets_resolve():
     _assert_urdf_path_and_mesh_assets_resolve(
         "w1",
-        "ffw_w1_follower.urdf",
+        "w1_follower.urdf",
     )
 
 

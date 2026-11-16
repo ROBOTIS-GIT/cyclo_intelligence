@@ -5,7 +5,7 @@ Changelog for package shared
 1.5.1 (2026-11-16)
 ------------------
 * Renamed F1/F2 robot configuration files and keys to ``w1_config.yaml``/``w2_config.yaml`` and ``w1``/``w2``, with W1/W2 display names.
-* Renamed bundled follower URDF files and robot/control identifiers to W1/W2 while preserving geometry, mesh paths, joint ordering, and ROS topics.
+* Aligned bundled ``w1_follower.urdf``/``w2_follower.urdf``, robot/control identifiers, and controller configuration references with AI Worker while preserving geometry, mesh paths, joint ordering, and ROS topics.
 * Added coverage for W1/W2 configuration discovery, URDF assets, and removal of legacy aliases.
 * Contributors: Taehyeong Kim
 
