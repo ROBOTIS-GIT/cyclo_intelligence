@@ -13,7 +13,6 @@ SDK locally.
 
 from __future__ import annotations
 
-import itertools
 from typing import Any
 
 from engine_process.protocol import (
@@ -21,13 +20,10 @@ from engine_process.protocol import (
     ENGINE_COMMAND_RESPONSE_DEF,
     EngineCommandRequest,
     request_to_message_kwargs,
-    response_from_message,
 )
 
 
 class ZenohEngineCommandClient:
-    _ping_seq = itertools.count(1_000_000)
-
     def __init__(
         self,
         service_name: str,
@@ -76,15 +72,6 @@ class ZenohEngineCommandClient:
         finally:
             if previous_timeout is not None:
                 self._client.timeout = previous_timeout
-
-    def ping(self, timeout_s: float = 1.0) -> bool:
-        seq_id = next(self._ping_seq)
-        response = self.call(
-            EngineCommandRequest(command=255, seq_id=seq_id),
-            timeout_s=timeout_s,
-        )
-        parsed = response_from_message(response)
-        return parsed.seq_id == seq_id
 
     def close(self) -> None:
         if self._client is None:

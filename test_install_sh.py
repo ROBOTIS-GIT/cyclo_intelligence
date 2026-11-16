@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 INSTALLER = REPO_ROOT / "install.sh"
@@ -15,6 +17,7 @@ def _write_stub_commands(tmp_path, hostname_value="dev-pc", ssd_mounted=True):
     git_stub.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$INSTALL_TEST_LOG\"\n"
+        "if [ \"$1\" = -C ]; then exit \"${INSTALL_TEST_SDK_EXIT:-0}\"; fi\n"
         "for dest do :; done\n"
         "mkdir -p \"$dest/docker\"\n"
         "cat > \"$dest/docker/container.sh\" <<'EOS'\n"
@@ -69,7 +72,7 @@ def _write_stub_commands(tmp_path, hostname_value="dev-pc", ssd_mounted=True):
     return bin_dir
 
 
-def _run_install(tmp_path, args=None, hostname_value="dev-pc", ssd_mounted=True):
+def _run_install(tmp_path, args=None, hostname_value="dev-pc", ssd_mounted=True, extra_env=None):
     args = args or []
     home = tmp_path / "home"
     home.mkdir()
@@ -90,6 +93,7 @@ def _run_install(tmp_path, args=None, hostname_value="dev-pc", ssd_mounted=True)
         "CYCLO_INSTALL_REPO_URL": "https://example.invalid/cyclo.git",
         "CYCLO_INSTALL_SSD_ROOT": str(ssd),
         "CYCLO_INSTALL_FSTAB": str(fstab),
+        **(extra_env or {}),
     }
 
     result = subprocess.run(
@@ -107,7 +111,11 @@ def test_local_mode_installs_under_home_and_prints_start_command(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert (home / "cyclo_intelligence").is_dir()
-    assert "clone --recurse-submodules --branch main" in log_path.read_text()
+    log = log_path.read_text()
+    assert "clone --no-recurse-submodules --branch main" in log
+    assert f"-C {home / 'cyclo_intelligence'} submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" in log
+    assert "cyclo_brain/policy/" not in log
+    assert "docker/README.md" in result.stdout
     assert "mountpoint " not in log_path.read_text()
     assert "container.sh start" not in log_path.read_text()
     assert "./docker/container.sh start" in result.stdout
@@ -220,7 +228,8 @@ def test_robot_mode_uses_sudo_when_ssd_parent_is_not_writable(tmp_path):
     assert "sudo mkdir -p" in log
     assert "sudo chown" in log
     assert "sudo mount " in log
-    assert "clone --recurse-submodules --branch main" in log
+    assert "clone --no-recurse-submodules --branch main" in log
+    assert f"-C {install_dir} submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" in log
 
 
 def test_robot_mode_does_not_duplicate_existing_fstab_bind_mount(tmp_path):
@@ -457,6 +466,8 @@ def test_existing_home_path_safely_stops(tmp_path):
 
     assert result.returncode != 0
     assert "already exists" in result.stderr
+    assert "--recursive" not in result.stderr
+    assert "docker/README.md" in result.stderr
     assert not log_path.exists()
 
 
@@ -467,4 +478,64 @@ def test_ref_option_is_passed_to_git_clone(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert "clone --recurse-submodules --branch v9.9.9" in log_path.read_text()
+    assert "clone --no-recurse-submodules --branch v9.9.9" in log_path.read_text()
+
+
+@pytest.mark.parametrize("mode", ["--local", "--robot"])
+def test_sdk_failure_removes_incomplete_install_without_mounting_or_starting(tmp_path, mode):
+    result, home, ssd, log_path = _run_install(
+        tmp_path, [mode], extra_env={"INSTALL_TEST_SDK_EXIT": "1"},
+    )
+    assert result.returncode != 0
+    assert "Source setup failed" in result.stderr
+    assert not (home / "cyclo_intelligence").exists()
+    assert not (ssd / "cyclo_intelligence").exists()
+    assert (tmp_path / "fstab").read_text() == "# test fstab\n"
+    assert "container.sh start" not in log_path.read_text()
+    assert not any(line.startswith(("mount ", "sudo mount ")) for line in log_path.read_text().splitlines())
+
+
+def test_real_git_install_initializes_only_pinned_sdk(tmp_path):
+    def git(root, *args):
+        return subprocess.run(
+            ["git", "-C", str(root), "-c", "user.name=Test", "-c",
+             "user.email=test@example.invalid", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    sdk = tmp_path / "sdk-origin"
+    sdk.mkdir()
+    git(sdk, "init", "-q")
+    (sdk / "README.md").write_text("SDK fixture\n")
+    git(sdk, "add", ".")
+    git(sdk, "commit", "-qm", "Pinned SDK")
+    pinned = git(sdk, "rev-parse", "HEAD")
+    git(sdk, "commit", "--allow-empty", "-qm", "Newer SDK must not be selected")
+
+    repo = tmp_path / "origin"
+    repo.mkdir()
+    git(repo, "init", "-q", "--initial-branch=main")
+    sdk_path = "cyclo_brain/sdk/zenoh_ros2_sdk"
+    model_path = "cyclo_brain/policy/unused/upstream"
+    (repo / ".gitmodules").write_text(
+        f'[submodule "sdk"]\n\tpath = {sdk_path}\n\turl = {sdk}\n'
+        f'[submodule "model"]\n\tpath = {model_path}\n\turl = {tmp_path / "unavailable-model"}\n'
+    )
+    git(repo, "add", ".gitmodules")
+    for path in (sdk_path, model_path):
+        git(repo, "update-index", "--add", "--cacheinfo", "160000", pinned, path)
+    git(repo, "commit", "-qm", "Selective installation fixture")
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        ["bash", str(INSTALLER), "--local"], capture_output=True, text=True, timeout=30,
+        env={**os.environ, "HOME": str(home), "CYCLO_INSTALL_REPO_URL": str(repo),
+             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow",
+             "GIT_CONFIG_VALUE_0": "always"},
+    )
+    assert result.returncode == 0, result.stderr
+    installed = home / "cyclo_intelligence"
+    assert git(installed / sdk_path, "rev-parse", "HEAD") == pinned
+    assert not (installed / model_path / ".git").exists()
+    assert any(line.startswith("-") and model_path in line
+               for line in git(installed, "submodule", "status").splitlines())

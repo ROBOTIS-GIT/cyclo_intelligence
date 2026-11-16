@@ -1,0 +1,7 @@
+# Standard LeRobot training has no external area resize; keep native images
+# for the saved processor and model. Model resize_images_to remains active
+# if explicitly set in the checkpoint (its upstream default is None).
+# For checkpoints trained with an EXTRA Torch area resize to 224x224,
+# declare an explicit Torch area resize in preprocessing.images.
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

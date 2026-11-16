@@ -4,6 +4,7 @@ import json
 import sys
 import threading
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,6 +62,7 @@ _mount_source_for_destination = app._mount_source_for_destination
 _backend_container_image_mismatch = app._backend_container_image_mismatch
 _backend_container_stale_reason = app._backend_container_stale_reason
 _compose_env = app._compose_env
+_load_compose_configuration = app._load_compose_configuration
 _host_workspace_dir = app._host_workspace_dir
 _require_known_service = app._require_known_service
 _validate_bt_robot_type = app._validate_bt_robot_type
@@ -80,6 +82,474 @@ _GROOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["groot"]
 _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
 
 
+@pytest.fixture(autouse=True)
+def isolate_navigation_ros(monkeypatch):
+    # API unit tests must not start a native ROS executor in the pytest process.
+    monkeypatch.setattr(app._navigation_module, "ensure_ros_grid_subscriber_started", lambda: None)
+
+
+@pytest.fixture
+def trial_client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(app, "_TRIAL_RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr(app, "_TRIAL_MODEL_ROOT", tmp_path / "model")
+    with TestClient(app.app) as client:
+        yield client
+
+
+def trial_model(relative):
+    path = app._TRIAL_MODEL_ROOT / relative
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def test_worker_build_uses_mounted_source_not_host_runtime_project(tmp_path, monkeypatch):
+    source = tmp_path / "mounted-source"
+    (source / "docker").mkdir(parents=True)
+    (source / "docker/container.sh").write_text("#!/bin/bash\n")
+    (source / ".git").mkdir()
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(source))
+    monkeypatch.setattr(app, "_host_project_dir", lambda: "/host/only/cyclo/docker")
+    assert app._worker_build_command("lerobot") == [
+        "bash", str(source / "docker/container.sh"), "build-policy", "lerobot",
+    ]
+    with pytest.raises(app.HTTPException) as exc:
+        app._worker_build_command("cyclo_intelligence")
+    assert exc.value.status_code == 404
+
+
+def test_worker_build_requires_source_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path))
+    with pytest.raises(app.HTTPException) as exc:
+        app._worker_build_command("lerobot")
+    assert exc.value.status_code == 409
+
+
+def test_worker_build_endpoint_holds_lease_until_completion(monkeypatch):
+    from supervisor_api.worker_build import WorkerBuilds
+    import time
+    builds = WorkerBuilds()
+    events = []
+    monkeypatch.setattr(app, "_WORKER_BUILDS", builds)
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: [sys.executable, "-c", "print('built')"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", lambda name: events.append("begin") or "token")
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: events.append((name, token)))
+    monkeypatch.setattr(app, "_docker_client", lambda: SimpleNamespace(images=SimpleNamespace(get=lambda tag: events.append(tag))))
+    try:
+        result = asyncio.run(app.backend_build("lerobot"))
+        assert result["state"] == "building"
+        deadline = time.monotonic() + 5
+        while builds.status("lerobot")["state"] == "building" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert builds.status("lerobot")["state"] == "succeeded"
+        assert events == ["begin", app._BACKENDS["lerobot"]["image"], ("lerobot", "token")]
+    finally:
+        builds.close()
+
+
+def test_worker_build_launch_rejection_releases_lease(monkeypatch):
+    events = []
+    def busy(*args):
+        raise RuntimeError("already building")
+    monkeypatch.setattr(app, "_WORKER_BUILDS", SimpleNamespace(start=busy))
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: ["bash", "builder"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", lambda name: "token")
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: events.append((name, token)))
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_build("groot"))
+    assert exc.value.status_code == 409
+    assert events == [("groot", "token")]
+
+
+def test_worker_build_rejected_by_runtime_never_starts(monkeypatch):
+    def denied(name):
+        raise app.HTTPException(409, "Clear the loaded model first")
+    def unexpected(*args):
+        pytest.fail("a build must not start without the maintenance reservation")
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: ["bash", "builder"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", denied)
+    monkeypatch.setattr(app, "_WORKER_BUILDS", SimpleNamespace(start=unexpected))
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_build("lerobot"))
+    assert exc.value.status_code == 409
+
+
+def test_worker_pull_is_retired_without_contacting_docker(monkeypatch):
+    def unexpected():
+        pytest.fail("Worker pull must not contact Docker")
+    monkeypatch.setattr(app, "_docker_client", unexpected)
+    with pytest.raises(app.HTTPException) as exc:
+        asyncio.run(app.backend_pull("lerobot"))
+    assert exc.value.status_code == 410
+
+
+def test_cancelled_build_request_transfers_acquired_lease(monkeypatch):
+    import threading
+    entered, proceed, released = threading.Event(), threading.Event(), threading.Event()
+    builds = app.WorkerBuilds()
+    def acquire(name):
+        entered.set()
+        assert proceed.wait(5)
+        return "token"
+    monkeypatch.setattr(app, "_WORKER_BUILDS", builds)
+    monkeypatch.setattr(app, "_worker_build_command", lambda name: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(app, "_begin_worker_mutation", acquire)
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda name, token: released.set())
+    monkeypatch.setattr(app, "_docker_client", lambda: SimpleNamespace(images=SimpleNamespace(get=lambda tag: None)))
+
+    async def cancel():
+        task = asyncio.create_task(app.backend_build("lerobot"))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+        assert await asyncio.to_thread(released.wait, 5)
+    try:
+        asyncio.run(cancel())
+        assert builds.status("lerobot")["state"] == "succeeded"
+    finally:
+        proceed.set()
+        builds.close()
+
+
+def test_trial_results_crud_and_persistent_model_isolation(trial_client, tmp_path):
+    client = trial_client
+    model = trial_model("run/checkpoints/100000")
+    empty = client.get("/try-results", params={"model": model})
+    assert empty.status_code == 200 and empty.json()["rows"] == []
+    assert empty.headers["cache-control"] == "no-store"
+    assert not app._TRIAL_RESULTS_DIR.exists()
+    for result in ["success", "fail", "success"]:
+        response = client.post("/try-results", json={"model": model, "result": result})
+        assert response.status_code == 200
+    original = response.json()
+    assert Path(original["file"]) == Path(model) / "evaluation_manifest.json"
+    document = json.loads(Path(original["file"]).read_text())
+    assert document["schema_version"] == 1
+    assert set(document) == {"schema_version", "model", "context", "trials"}
+    assert document["model"] == {}
+    assert document["context"] == {"mode": "real_robot"}
+    assert [trial["trial_id"] for trial in document["trials"]] == [1, 2, 3]
+    assert all(
+        datetime.fromisoformat(trial["recorded_at"]).utcoffset() == timedelta(hours=9)
+        for trial in document["trials"]
+    )
+    edited = client.patch("/try-results", json={
+        "model": model, "try": 2, "result": "success", "revision": original["revision"],
+    })
+    assert edited.status_code == 200
+    assert edited.json()["rows"][1]["result"] == "success"
+    assert edited.json()["rows"][1]["created_at"] == original["rows"][1]["created_at"]
+    assert datetime.fromisoformat(edited.json()["rows"][1]["updated_at"]).utcoffset() == timedelta(hours=9)
+    assert [trial["trial_id"] for trial in json.loads(Path(original["file"]).read_text())["trials"]] == [1, 2, 3]
+    other_model = trial_model("other")
+    other = client.post("/try-results", json={"model": other_model, "result": "fail"}).json()
+    assert other["file"] != original["file"]
+    deleted = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1, 3], "revision": edited.json()["revision"],
+    })
+    assert deleted.status_code == 200
+    assert [row["try"] for row in deleted.json()["rows"]] == ["1"]
+    assert deleted.json()["rows"][0]["created_at"] == original["rows"][1]["created_at"]
+    assert [trial["trial_id"] for trial in json.loads(Path(original["file"]).read_text())["trials"]] == [1]
+    added = client.post("/try-results", json={"model": model + "/", "result": "fail"}).json()
+    assert added["file"] == original["file"]
+    assert [row["try"] for row in added["rows"]] == ["1", "2"]
+    assert client.get("/try-results", params={"model": model}).json() == added
+    assert client.get("/try-results", params={"model": other_model}).json() == other
+    exported = client.get("/try-results", params={"model": model, "download": True})
+    assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
+    assert "1,success" in exported.text and "2,fail" in exported.text
+    assert len(list(app._TRIAL_MODEL_ROOT.rglob("evaluation_manifest.json"))) == 2
+    cleared = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1, 2], "revision": added["revision"],
+    }).json()
+    assert cleared["rows"] == [] and cleared["file"] == original["file"]
+    fresh = client.post("/try-results", json={"model": model, "result": "success"}).json()
+    assert fresh["rows"][0]["try"] == "1" and fresh["file"] == original["file"]
+    assert not app._TRIAL_RESULTS_DIR.exists()
+
+
+def test_trial_edits_and_deletes_reject_stale_or_missing_revision(trial_client):
+    client = trial_client
+    model = trial_model("a")
+    stale = client.post("/try-results", json={"model": model, "result": "success"}).json()
+    current = client.post("/try-results", json={"model": model, "result": "fail"}).json()
+    for revision in [None, stale["revision"]]:
+        assert client.patch("/try-results", json={
+            "model": model, "try": 1, "result": "fail", "revision": revision,
+        }).status_code == 409
+        assert client.request("DELETE", "/try-results", json={
+            "model": model, "tries": [1], "revision": revision,
+        }).status_code == 409
+    deleted = client.request("DELETE", "/try-results", json={
+        "model": model, "tries": [1], "revision": current["revision"],
+    }).json()
+    # Old try 1 now refers to a different row; never apply an old edit to it.
+    assert client.patch("/try-results", json={
+        "model": model, "try": 1, "result": "success", "revision": current["revision"],
+    }).status_code == 409
+    assert client.get("/try-results", params={"model": model}).json() == deleted
+
+
+def test_trial_results_invalid_requests_do_not_write(trial_client, tmp_path):
+    client = trial_client
+    model = trial_model("a")
+    assert client.get("/try-results", params={"model": " / "}).status_code == 400
+    assert client.post("/try-results", json={"model": model, "result": "invalid"}).status_code == 422
+    assert client.post("/try-results", json={"model": model}).status_code == 400
+    assert client.patch("/try-results", json={"model": model, "try": 1, "result": "fail"}).status_code == 404
+    assert client.request("DELETE", "/try-results", json={"model": model}).status_code == 400
+    assert client.request("DELETE", "/try-results", json={"model": model, "tries": [0]}).status_code == 400
+    assert not list(Path(model).iterdir())
+
+
+def test_trial_concurrent_appends_do_not_lose_results(trial_client):
+    from concurrent.futures import ThreadPoolExecutor
+    model = trial_model("a")
+    def append(_):
+        return app.add_trial_result(app.TrialResultRequest(model=model, result="success"))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(append, range(24)))
+    history = trial_client.get("/try-results", params={"model": model}).json()
+    assert [row["try"] for row in history["rows"]] == [str(n) for n in range(1, 25)]
+    assert len({result["file"] for result in results}) == 1
+
+
+def test_trial_write_failure_preserves_existing_json(trial_client, monkeypatch):
+    model = trial_model("a")
+    original = trial_client.post("/try-results", json={"model": model, "result": "success"}).json()
+    def fail_write(_):
+        raise OSError("disk full")
+    with monkeypatch.context() as context:
+        context.setattr(app.os, "fsync", fail_write)
+        with pytest.raises(OSError, match="disk full"):
+            app.add_trial_result(app.TrialResultRequest(model=model, result="fail"))
+    assert trial_client.get("/try-results", params={"model": model}).json() == original
+
+
+def test_trial_files_and_legacy_records_remain_portable(trial_client, tmp_path):
+    import hashlib
+    import re
+    model = trial_model("legacy-act")
+    app._TRIAL_RESULTS_DIR.mkdir()
+    legacy = app._TRIAL_RESULTS_DIR / (re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[-90:] + "_" + hashlib.sha256(model.encode()).hexdigest()[:16] + ".csv")
+    row = {"try": "1", "result": "success", "created_at": "2026-09-18T01:02:03+00:00",
+           "updated_at": "2026-09-18T01:02:03+00:00", "model_path": model}
+    app._write_trials(legacy, [row])
+    migrated = trial_client.get("/try-results", params={"model": model}).json()
+    assert Path(migrated["file"]) == Path(model) / "evaluation_manifest.json"
+    assert migrated["rows"] == [row] and not legacy.exists()
+    preserved = app._TRIAL_RESULTS_DIR / json.loads((app._TRIAL_RESULTS_DIR / "files.json").read_text())[model]
+    assert preserved.exists()
+    assert trial_client.get("/try-results", params={"model": model}).json() == migrated
+    converted = trial_client.post("/try-results", json={"model": model, "result": "fail"}).json()
+    assert Path(converted["file"]) == Path(model) / "evaluation_manifest.json"
+    assert len(converted["rows"]) == 2
+    assert [trial["trial_id"] for trial in json.loads(Path(converted["file"]).read_text())["trials"]] == [1, 2]
+    assert preserved.exists()
+    assert trial_client.get("/try-results", params={"model": model}).json() == converted
+    # A request cannot write into an arbitrary directory outside the model root.
+    assert trial_client.post("/try-results", json={
+        "model": "../../outside", "result": "fail",
+    }).status_code == 400
+
+
+def test_trial_json_uses_manifest_when_available_and_omits_missing_fields(trial_client):
+    model = Path(trial_model("lerobot/act_1k_000024"))
+    (model / "training_manifest.json").write_text(json.dumps({
+        "model_id": "lerobot-act", "run_id": "1a3a129b-9687-452e-a941-b63ef82c04a4",
+        "source_artifact": "checkpoints/001000/pretrained_model",
+        "dataset": {"dataset_id": "Dongkkka/Task_000004_Peanut_Pick_Place_lerobot_Intern"},
+    }))
+    body = {"model": str(model), "robot_type": "ffw_sg2_rev1", "result": "success"}
+    response = trial_client.post("/try-results", json=body)
+    assert response.status_code == 200
+    saved = json.loads(Path(response.json()["file"]).read_text())
+    assert saved["model"] == {
+        "model_id": "lerobot-act",
+        "run_id": "1a3a129b-9687-452e-a941-b63ef82c04a4",
+        "source_artifact": "checkpoints/001000/pretrained_model",
+    }
+    assert saved["context"] == {
+        "mode": "real_robot", "robot_type": "ffw_sg2_rev1",
+        "dataset_repo_id": "Dongkkka/Task_000004_Peanut_Pick_Place_lerobot_Intern",
+    }
+    assert len(saved["trials"]) == 1
+    assert saved["trials"][0]["result"] == "success"
+    assert saved["trials"][0]["trial_id"] == 1
+    assert saved["trials"][0]["recorded_at"]
+    assert set(model.iterdir()) == {model / "training_manifest.json", model / "evaluation_manifest.json"}
+    (model / "training_manifest.json").unlink()
+    other = Path(trial_model("lerobot/no_manifest"))
+    missing = trial_client.post("/try-results", json={
+        "model": str(other), "robot_type": "ffw_sg2_rev1", "result": "fail",
+    })
+    assert missing.status_code == 200
+    saved = json.loads(Path(missing.json()["file"]).read_text())
+    assert saved["model"] == {}
+    assert saved["context"] == {"mode": "real_robot", "robot_type": "ffw_sg2_rev1"}
+    assert list(other.iterdir()) == [other / "evaluation_manifest.json"]
+
+
+def test_trial_json_rejects_a_different_robot_without_changing_history(trial_client):
+    model = trial_model("lerobot/act")
+    first = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "success",
+    }).json()
+    original = Path(first["file"]).read_text()
+    second = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "f2", "result": "fail",
+    })
+    assert second.status_code == 409
+    assert Path(first["file"]).read_text() == original
+    assert trial_client.get("/try-results", params={
+        "model": model, "robot_type": "ffw_sg2_rev1",
+    }).json()["rows"] == first["rows"]
+    assert trial_client.get("/try-results", params={
+        "model": model, "robot_type": "f2",
+    }).status_code == 409
+
+
+def test_old_external_json_is_imported_without_losing_trials(trial_client):
+    model = trial_model("lerobot/act")
+    app._TRIAL_RESULTS_DIR.mkdir()
+    old_path = app._old_evaluation_file(model, "f2")
+    old = app._new_evaluation(model, "f2")
+    old["trials"].append({
+        "trial_id": "original-trial", "result": "success", "recorded_at": "2026-10-02T05:00:00Z",
+    })
+    app._write_evaluation(old_path, old)
+    imported = trial_client.get("/try-results", params={"model": model, "robot_type": "f2"}).json()
+    assert imported["rows"][0]["result"] == "success"
+    trial_client.post("/try-results", json={"model": model, "robot_type": "f2", "result": "fail"})
+    saved = json.loads((Path(model) / "evaluation_manifest.json").read_text())
+    assert "evaluation_id" not in saved
+    assert [trial["trial_id"] for trial in saved["trials"]] == [1, 2]
+    assert "local_path" not in saved["model"]
+    assert json.loads(old_path.read_text()) == old
+
+
+def test_existing_single_evaluation_wrapper_is_migrated_without_losing_trials(trial_client):
+    model = trial_model("lerobot/act")
+    old = app._new_evaluation(model, "ffw_sg2_rev1")
+    old["model"]["local_path"] = model
+    old["trials"] = [{"trial_id": "old-uuid", "result": "success", "recorded_at": "2026-10-02T05:00:00Z"}]
+    path = Path(model) / "evaluation_manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "evaluations": [old]}))
+    assert trial_client.get("/try-results", params={"model": model, "robot_type": "ffw_sg2_rev1"}).status_code == 200
+    trial_client.post("/try-results", json={"model": model, "robot_type": "ffw_sg2_rev1", "result": "fail"})
+    saved = json.loads(path.read_text())
+    assert "evaluation_id" not in saved
+    assert [trial["trial_id"] for trial in saved["trials"]] == [1, 2]
+    assert saved["trials"][0]["recorded_at"] == "2026-10-02T05:00:00Z"
+
+
+def test_multiple_evaluation_wrapper_requires_manual_separation(trial_client):
+    model = trial_model("lerobot/act")
+    path = Path(model) / "evaluation_manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "evaluations": [
+        app._new_evaluation(model, "ffw_sg2_rev1"), app._new_evaluation(model, "f2"),
+    ]}))
+    before = path.read_text()
+    assert trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "fail",
+    }).status_code == 409
+    assert path.read_text() == before
+
+
+def test_trial_write_requires_a_model_directory(trial_client, tmp_path):
+    missing = app._TRIAL_MODEL_ROOT / "does-not-exist"
+    assert trial_client.post("/try-results", json={
+        "model": str(missing), "result": "success",
+    }).status_code == 404
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert trial_client.post("/try-results", json={
+        "model": str(outside), "result": "success",
+    }).status_code == 400
+    assert not list(outside.iterdir())
+    app._TRIAL_MODEL_ROOT.mkdir()
+    link = app._TRIAL_MODEL_ROOT / "escaped-link"
+    link.symlink_to(outside, target_is_directory=True)
+    assert trial_client.post("/try-results", json={
+        "model": str(link), "result": "success",
+    }).status_code == 400
+    assert not list(outside.iterdir())
+
+
+def test_legacy_rows_are_not_assigned_to_a_new_robot(trial_client, tmp_path):
+    model = trial_model("old")
+    legacy = app._trial_file(model, create=True)
+    app._write_trials(legacy, [{
+        "try": "1", "result": "success", "created_at": "2026-10-02T05:00:00Z",
+        "updated_at": "2026-10-02T05:00:00Z", "model_path": model,
+    }])
+    response = trial_client.post("/try-results", json={
+        "model": model, "robot_type": "ffw_sg2_rev1", "result": "fail",
+    }).json()
+    saved = json.loads(Path(response["file"]).read_text())
+    assert len(saved["trials"]) == 1
+    assert saved["context"]["robot_type"] == "ffw_sg2_rev1"
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 409
+    assert legacy.exists()
+
+
+def test_trial_json_rejects_symlink_without_touching_target(trial_client, tmp_path):
+    model = trial_model("a")
+    target = tmp_path / "outside.json"
+    target.write_text('{"private": true}')
+    app._evaluation_file(model).symlink_to(target)
+    response = trial_client.get("/try-results", params={"model": model})
+    assert response.status_code == 500
+    response = trial_client.post("/try-results", json={"model": model, "result": "success"})
+    assert response.status_code == 500
+    assert target.read_text() == '{"private": true}'
+
+
+def test_trial_json_does_not_overwrite_invalid_history(trial_client):
+    model = trial_model("a")
+    path = app._evaluation_file(model)
+    path.write_text("{not json")
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 500
+    assert trial_client.post("/try-results", json={"model": model, "result": "success"}).status_code == 500
+    assert path.read_text() == "{not json"
+
+
+def test_ten_trials_store_five_successes_and_five_failures(trial_client):
+    model = trial_model("lerobot/act_1k_000024")
+    files = set()
+    for result in ["success", "fail"] * 5:
+        response = trial_client.post("/try-results", json={
+            "model": model, "robot_type": "ffw_sg2_rev1", "result": result,
+        }).json()
+        files.add(response["file"])
+    assert len(files) == 1
+    document = json.loads(Path(response["file"]).read_text())
+    assert "evaluation_id" not in document and "uploaded" not in document
+    trials = document["trials"]
+    assert len(trials) == 10
+    assert sum(trial["result"] == "success" for trial in trials) == 5
+    assert sum(trial["result"] == "fail" for trial in trials) == 5
+    assert [trial["trial_id"] for trial in trials] == list(range(1, 11))
+    assert "success_rate" not in document
+    assert "task_id" not in document["context"]
+
+
+def test_existing_evaluation_drops_retired_fields_on_write(trial_client):
+    model = trial_model("legacy")
+    path = Path(model) / "evaluation_manifest.json"
+    document = app._new_evaluation(model, "")
+    document["evaluation_id"] = "old-id"
+    document["uploaded"] = True
+    path.write_text(json.dumps(document))
+    assert trial_client.get("/try-results", params={"model": model}).status_code == 200
+    trial_client.post("/try-results", json={"model": model, "result": "success"})
+    saved = json.loads(path.read_text())
+    assert set(saved) == {"schema_version", "model", "context", "trials"}
+    assert saved["trials"][0]["result"] == "success"
+
 def test_navigation_grid_cache_starts_with_supervisor_lifespan(monkeypatch):
     started = []
     monkeypatch.setattr(
@@ -93,6 +563,57 @@ def test_navigation_grid_cache_starts_with_supervisor_lifespan(monkeypatch):
             assert started == [True]
 
     asyncio.run(exercise_lifespan())
+
+
+def test_supervisor_lifespan_closes_builder_when_navigation_start_fails(monkeypatch):
+    closed = []
+    monkeypatch.setattr(app, "_WORKER_BUILDS", app._WORKER_BUILDS)
+    monkeypatch.setattr(app, "WorkerBuilds", lambda: SimpleNamespace(close=lambda: closed.append(True)))
+
+    def fail():
+        raise RuntimeError("navigation startup failed")
+
+    monkeypatch.setattr(app._navigation_module, "ensure_ros_grid_subscriber_started", fail)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="navigation startup failed"):
+            async with app.app.router.lifespan_context(app.app):
+                pytest.fail("startup must not succeed")
+
+    asyncio.run(exercise())
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("name", sorted(app._BACKENDS))
+def test_worker_start_missing_image_never_provisions_and_releases_lease(monkeypatch, name):
+    events = []
+
+    def missing_container(_name):
+        raise app.NotFound("not created")
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("missing images must not cause compose build, pull or start")
+
+    monkeypatch.setattr(app, "_docker_client", lambda: SimpleNamespace(
+        containers=SimpleNamespace(get=missing_container)))
+    monkeypatch.setattr(app, "_local_backend_image", lambda *_args: None)
+    monkeypatch.setattr(app, "_begin_worker_mutation", lambda runtime: events.append(("begin", runtime)) or "lease")
+    monkeypatch.setattr(app, "_end_worker_mutation", lambda runtime, token: events.append(("end", runtime, token)))
+    monkeypatch.setattr(app, "_run", forbidden)
+    with pytest.raises(app.HTTPException) as failure:
+        asyncio.run(app.backend_start(name))
+    assert failure.value.status_code == 409
+    assert f"/backends/{name}/build" in failure.value.detail
+    assert events == [("begin", name), ("end", name, "lease")]
+
+
+def test_backend_lifecycle_rejects_target_overrides():
+    with pytest.raises(app.HTTPException) as failure:
+        asyncio.run(app._ensure_backend_running(
+            "lerobot", {**app._BACKENDS["lerobot"], "service": "cyclo_intelligence"},
+            restart_running=False,
+        ))
+    assert failure.value.status_code == 400
 
 
 def test_navigation_parses_binary_pgm():
@@ -2993,6 +3514,85 @@ def test_backend_container_stale_reason_accepts_repo_symlink_workspace_mount(
     ) is None
 
 
+@pytest.mark.parametrize("source_kind", ["relative", "absolute"])
+@pytest.mark.parametrize("wrong_checkout", [False, True])
+@pytest.mark.parametrize("destination", [
+    "/app/configs/inference_inputs", "/app/lerobot_engine",
+    "/policy_runtime", "/catalog", "/robot_client_sdk", "/orchestrator_config",
+])
+def test_backend_config_mount_source_validation(
+    monkeypatch, tmp_path, source_kind, wrong_checkout, destination,
+):
+    project_dir = tmp_path / "repo" / "docker"
+    expected = tmp_path / "repo" / "configs"
+    expected.mkdir(parents=True)
+    source = "../configs" if source_kind == "relative" else str(expected)
+    actual = tmp_path / "other_repo" / "configs" if wrong_checkout else expected
+    monkeypatch.setattr(app, "_host_project_dir", lambda: str(project_dir))
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(tmp_path / "repo"))
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    for mount in container.attrs["Mounts"]:
+        if mount["Destination"] == destination:
+            mount["Source"] = str(actual)
+    spec = {"config_mounts": {destination: source}}
+    reason = (
+        "config_mount_source_mismatch=" + destination if wrong_checkout else None
+    )
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == reason
+    # Editing the same mounted file must not require recreating the Worker.
+    (expected / "act.yaml").write_text(
+        "backend: torch\noperations: [{type: identity}]\n"
+    )
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == reason
+
+
+def test_backend_config_mount_accepts_symlink(monkeypatch, tmp_path):
+    host_repo = tmp_path / "host_repo"
+    container_repo = tmp_path / "container_repo"
+    real_configs = tmp_path / "ssd" / "configs"
+    container_repo.mkdir()
+    real_configs.mkdir(parents=True)
+    (container_repo / "configs").symlink_to(real_configs)
+    monkeypatch.setattr(app, "_host_project_dir", lambda: str(host_repo / "docker"))
+    monkeypatch.setattr(app, "_CYCLO_REPO_MOUNT", str(container_repo))
+    destination = "/app/configs/inference_inputs"
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    for mount in container.attrs["Mounts"]:
+        if mount["Destination"] == destination:
+            mount["Source"] = str(real_configs)
+    spec = {"config_mounts": {destination: "../configs"}}
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) is None
+
+
+def test_backend_config_mount_requires_known_host_project(monkeypatch):
+    monkeypatch.setattr(app, "_host_project_dir", lambda: None)
+    destination = "/app/configs/inference_inputs"
+    container = _container_with_mounts(*app._REQUIRED_BACKEND_MOUNTS["lerobot"])
+    spec = {"config_mounts": {destination: "../configs"}}
+    assert _backend_container_stale_reason("lerobot", None, container, spec, None) == (
+        "config_mount_source_unverified=" + destination
+    )
+
+
+def test_backend_config_mount_is_read_from_compose():
+    for backend in ("lerobot", "groot"):
+        expected = {
+            f"/app/{backend}_engine": f"../cyclo_brain/policy/{backend}/{backend}_engine",
+            "/app/policy_manifest.yaml": f"../cyclo_brain/policy/{backend}/manifest.yaml",
+            "/policy_runtime": "../cyclo_brain/policy/common/runtime",
+            "/catalog": "../cyclo_brain/policy/common/catalog",
+            "/zenoh_sdk": "../cyclo_brain/sdk/zenoh_ros2_sdk",
+            "/robot_client_sdk": "../cyclo_brain/sdk/robot_client",
+            "/orchestrator_config": "../shared/shared/robot_configs",
+        }
+        if backend == "lerobot":
+            expected["/app/extensions"] = "../cyclo_brain/policy/lerobot/extensions"
+            expected["/app/configs/inference_inputs"] = (
+                "../cyclo_brain/policy/lerobot/configs/inference_inputs"
+            )
+        assert _BACKENDS[backend]["config_mounts"] == expected
+
+
 def test_mount_source_for_destination_resolves_workspace_host_path():
     mounts = [
         {"Destination": "/root/ros2_ws/src/cyclo_intelligence", "Source": "/repo"},
@@ -3087,8 +3687,8 @@ def test_compose_uses_repo_local_workspace_mounts():
 
     assert "CYCLO_WORKSPACE_DIR" not in compose
     assert "CYCLO_HUGGINGFACE_DIR" not in compose
-    assert compose.count("./workspace:/workspace") == 3
-    assert compose.count("./huggingface:/root/.cache/huggingface") == 3
+    assert compose.count("./workspace:/workspace") == 6
+    assert compose.count("./huggingface:/root/.cache/huggingface") == 6
 
 
 def test_container_helper_does_not_export_workspace_mount_overrides():
@@ -3202,6 +3802,59 @@ def test_groot_backend_uses_current_release_image():
     )
 
 
+def test_policy_catalog_endpoint_exposes_validated_runtimes():
+    catalog = asyncio.run(app.policy_catalog())
+
+    assert catalog["schema_version"] == 1
+    assert {runtime["id"] for runtime in catalog["runtimes"]} == {
+        "groot",
+        "lerobot",
+        "rldx",
+        "lingbot_vla",
+        "abot",
+    }
+    assert "lerobot:act" in {
+        model["policy_id"]
+        for runtime in catalog["runtimes"]
+        for model in runtime["models"]
+    }
+
+
+def test_compose_configuration_uses_override_and_arch(monkeypatch, tmp_path):
+    compose_path = tmp_path / "docker-compose.yml"
+    override_path = tmp_path / "docker-compose.override.yml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    override_path.write_text("services: {}\n", encoding="utf-8")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"services":{"sample":{}}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(app, "_catalog_compose_path", lambda: compose_path)
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+
+    assert _load_compose_configuration() == {"services": {"sample": {}}}
+    assert captured["command"] == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_path),
+        "-f",
+        str(override_path),
+        "config",
+        "--format",
+        "json",
+        "--no-path-resolution",
+    ]
+    assert captured["env"]["ARCH"] == app._BACKEND_ARCH
+
+
 def test_backend_status_model_exposes_stale_image_status():
     status = app.BackendStatus(
         name="groot",
@@ -3215,178 +3868,69 @@ def test_backend_status_model_exposes_stale_image_status():
     assert status.image_status == "stale"
 
 
-def _backend_lifecycle_client(*, image_present=False, pull_error=""):
-    state = {
-        "image_present": image_present,
-        "pull_error": pull_error,
-        "pull_calls": [],
-    }
-    spec = _BACKENDS["groot"]
-
-    class FakeImages:
-        def get(self, image):
-            if image != spec["image"] or not state["image_present"]:
-                raise ImageNotFound(image)
-            return SimpleNamespace(id="sha256:current")
-
-    class FakeApi:
-        def pull(self, image, *, stream, decode):
-            state["pull_calls"].append((image, stream, decode))
-            if state["pull_error"]:
-                raise DockerException(state["pull_error"])
-            state["image_present"] = True
-            yield {"status": "Pull complete"}
-
-    class FakeContainers:
-        def get(self, _name):
-            raise NotFound(_name)
-
-    client = SimpleNamespace(
-        api=FakeApi(),
-        images=FakeImages(),
-        containers=FakeContainers(),
-    )
-    return client, state
-
-
-def _patch_backend_compose(monkeypatch, fake_run):
-    monkeypatch.setattr(
-        app,
-        "_compose_base_cmd",
-        lambda: ["docker", "compose", "-f", "allowlisted-compose.yml"],
-    )
-    monkeypatch.setattr(app, "_compose_env", lambda: {"ARCH": "test"})
-    monkeypatch.setattr(app, "_run", fake_run)
-
-
-def test_backend_start_uses_existing_local_image_without_provision(monkeypatch):
-    client, state = _backend_lifecycle_client(image_present=True)
-    commands = []
-
-    async def fake_run(*cmd, **kwargs):
-        commands.append((cmd, kwargs))
-        return SimpleNamespace(rc=0, stdout="container started", stderr="")
-
+def test_backend_status_preserves_readiness_and_real_errors(monkeypatch):
+    container = SimpleNamespace(id="worker-container")
+    client = SimpleNamespace(containers=SimpleNamespace(get=lambda _: container))
     monkeypatch.setattr(app, "_docker_client", lambda: client)
-    _patch_backend_compose(monkeypatch, fake_run)
+    monkeypatch.setattr(app, "_local_backend_image", lambda *_: "local-image")
+    monkeypatch.setattr(app, "_host_workspace_dir", lambda: "/workspace")
+    monkeypatch.setattr(app, "_backend_container_stale_reason", lambda *_: "")
+    monkeypatch.setattr(app, "_container_raw_state", lambda _: "running")
+    monkeypatch.setattr(app, "_backend_service_statuses", lambda *_: [
+        app.ServiceStatus(name="engine-process", state="up", raw="up")
+    ])
+    for state in ("waiting", "error"):
+        monkeypatch.setattr(app, "_runtime_control_request", lambda _, state=state: {
+            "ok": True, "readiness": state, "message": "Worker response pending",
+        })
+        status = asyncio.run(app.backend_status("lerobot"))
+        assert status.worker_readiness == state
+        assert status.worker_compatible is False
+        assert status.worker_message == "Worker response pending"
 
-    result = asyncio.run(app._ensure_backend_running(
-        "groot",
-        _BACKENDS["groot"],
-        auto_provision=True,
-    ))
+    def incompatible(_):
+        raise RuntimeError("Worker protocol incompatible")
 
-    assert result.ok is True
-    assert "using local image" in result.message
-    assert state["pull_calls"] == []
-    assert [command[0][-4:] for command in commands] == [
-        ("up", "-d", "--no-build", "groot"),
-    ]
+    monkeypatch.setattr(app, "_runtime_control_request", incompatible)
+    status = asyncio.run(app.backend_status("lerobot"))
+    assert status.worker_readiness == "error"
+    assert status.worker_compatible is False
+    assert status.worker_message == "Worker protocol incompatible"
 
+    monkeypatch.setattr(app, "_runtime_control_request", lambda _: {
+        "ok": True, "heartbeat_age_s": 0.1, "engine_state": "unloaded",
+    })
+    assert asyncio.run(app.backend_status("lerobot")).worker_compatible is True
 
-def test_backend_start_auto_provision_pulls_missing_image(monkeypatch):
-    client, state = _backend_lifecycle_client(image_present=False)
-    commands = []
+    def missing_runtime(_):
+        raise app.PolicyRuntimeUnavailable("Cyclo Policy Runtime is not running or is starting")
 
-    async def fake_run(*cmd, **kwargs):
-        commands.append((cmd, kwargs))
-        return SimpleNamespace(rc=0, stdout="container started", stderr="")
-
-    monkeypatch.setattr(app, "_docker_client", lambda: client)
-    _patch_backend_compose(monkeypatch, fake_run)
-
-    result = asyncio.run(app._ensure_backend_running(
-        "groot",
-        _BACKENDS["groot"],
-        auto_provision=True,
-    ))
-
-    assert result.ok is True
-    assert "using registry pull" in result.message
-    assert state["pull_calls"] == [
-        (_BACKENDS["groot"]["image"], True, True),
-    ]
-    assert len(commands) == 1
-    assert commands[0][0][-4:] == ("up", "-d", "--no-build", "groot")
-
-
-def test_backend_start_builds_after_registry_pull_failure(monkeypatch):
-    client, state = _backend_lifecycle_client(
-        image_present=False,
-        pull_error="registry unavailable",
-    )
-    commands = []
-
-    async def fake_run(*cmd, **kwargs):
-        commands.append((cmd, kwargs))
-        if cmd[-2:] == ("build", "groot"):
-            state["image_present"] = True
-            return SimpleNamespace(rc=0, stdout="image built", stderr="")
-        return SimpleNamespace(rc=0, stdout="container started", stderr="")
-
-    monkeypatch.setattr(app, "_docker_client", lambda: client)
-    _patch_backend_compose(monkeypatch, fake_run)
-
-    result = asyncio.run(app._ensure_backend_running(
-        "groot",
-        _BACKENDS["groot"],
-        auto_provision=True,
-    ))
-
-    assert result.ok is True
-    assert "using local build after registry pull failed" in result.message
-    assert [command[0][-2:] for command in commands] == [
-        ("build", "groot"),
-        ("--no-build", "groot"),
-    ]
-    assert commands[0][1]["timeout"] == app._BACKEND_BUILD_TIMEOUT_SEC
-    assert commands[1][1]["timeout"] == 60.0
+    monkeypatch.setattr(app, "_runtime_control_request", missing_runtime)
+    status = asyncio.run(app.backend_status("lerobot"))
+    assert status.worker_readiness == "waiting"
+    assert status.worker_compatible is False
+    with pytest.raises(app.HTTPException) as exc:
+        app._begin_worker_mutation("lerobot")
+    assert exc.value.status_code == 503
 
 
-def test_backend_start_reports_pull_and_build_failures(monkeypatch):
-    client, _state = _backend_lifecycle_client(
-        image_present=False,
-        pull_error="registry denied",
-    )
-    commands = []
-
-    async def fake_run(*cmd, **kwargs):
-        commands.append((cmd, kwargs))
-        return SimpleNamespace(rc=17, stdout="", stderr="Dockerfile missing")
-
-    monkeypatch.setattr(app, "_docker_client", lambda: client)
-    _patch_backend_compose(monkeypatch, fake_run)
-
-    with pytest.raises(app.HTTPException) as exc_info:
-        asyncio.run(app._ensure_backend_running(
-            "groot",
-            _BACKENDS["groot"],
-            auto_provision=True,
-        ))
-
-    assert exc_info.value.status_code == 502
-    assert "registry pull failed: registry denied" in exc_info.value.detail
-    assert "local build failed (rc=17): Dockerfile missing" in exc_info.value.detail
-    assert [command[0][-2:] for command in commands] == [("build", "groot")]
+def test_absent_runtime_socket_has_distinct_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLICY_RUNTIME_CONTROL_SOCKET", str(tmp_path / "missing.sock"))
+    with pytest.raises(app.PolicyRuntimeUnavailable, match="Start cyclo_intelligence"):
+        app._runtime_control_request({"operation": "status"})
 
 
-def test_backend_start_is_idempotent_and_restart_resets_running_container(
-    monkeypatch,
-):
+def test_backend_start_keeps_running_container(monkeypatch):
     class FakeContainer:
         def __init__(self):
-            self.attrs = {"State": {"Status": "running"}}
-            self.restart_calls = []
-            self.start_calls = 0
-
-        def reload(self):
-            return None
-
-        def restart(self, *, timeout):
-            self.restart_calls.append(timeout)
+            self.started = False
+            self.restarted = False
 
         def start(self):
-            self.start_calls += 1
+            self.started = True
+
+        def restart(self, timeout):
+            self.restarted = timeout
 
     container = FakeContainer()
     client = SimpleNamespace(
@@ -3397,149 +3941,217 @@ def test_backend_start_is_idempotent_and_restart_resets_running_container(
     monkeypatch.setattr(
         app,
         "_backend_container_stale_reason",
-        lambda *_args, **_kwargs: None,
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-1",
+        },
     )
 
-    started = asyncio.run(app._ensure_backend_running(
-        "groot",
-        _BACKENDS["groot"],
-        restart_existing=False,
-    ))
-    restarted = asyncio.run(app._ensure_backend_running(
-        "groot",
-        _BACKENDS["groot"],
-        restart_existing=True,
-    ))
+    result = asyncio.run(app.backend_start("lerobot"))
 
-    assert started.ok is True
-    assert started.message == "groot_server already running"
-    assert restarted.ok is True
-    assert restarted.message == "groot_server restarted"
-    assert container.start_calls == 0
-    assert container.restart_calls == [10]
-
-
-def test_backend_start_and_restart_keep_auto_provision_opt_in(monkeypatch):
-    calls = []
-
-    async def fake_ensure(name, spec, **kwargs):
-        calls.append((name, spec, kwargs))
-        return app.ActionResult(ok=True, message="ok")
-
-    monkeypatch.setattr(app, "_ensure_backend_running", fake_ensure)
-
-    asyncio.run(app.backend_start("groot"))
-    asyncio.run(app.backend_restart("lerobot"))
-    asyncio.run(app.backend_start("groot", auto_provision=True))
-
-    assert [(name, kwargs) for name, _spec, kwargs in calls] == [
-        ("groot", {"restart_existing": False, "auto_provision": False}),
-        ("lerobot", {"restart_existing": True, "auto_provision": False}),
-        ("groot", {"restart_existing": False, "auto_provision": True}),
+    assert result.ok is True
+    assert result.message == "lerobot_server already running"
+    assert container.started is False
+    assert container.restarted is False
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
     ]
 
 
-def test_backend_lifecycle_rejects_non_allowlisted_compose_target():
-    overridden = dict(_BACKENDS["groot"])
-    overridden["service"] = "arbitrary-service"
-
-    with pytest.raises(app.HTTPException) as exc_info:
-        asyncio.run(app._ensure_backend_running(
-            "groot",
-            overridden,
-            auto_provision=True,
-        ))
-
-    assert exc_info.value.status_code == 400
-    assert "overrides are not allowed" in exc_info.value.detail
-
-
-def test_backend_lifecycle_serializes_concurrent_auto_provision(monkeypatch):
-    spec = _BACKENDS["groot"]
-    pull_started = threading.Event()
-    release_pull = threading.Event()
-    state = {
-        "image_present": False,
-        "container_running": False,
-        "pull_calls": 0,
-        "up_calls": 0,
-    }
-
-    class FakeImages:
-        def get(self, image):
-            if image != spec["image"] or not state["image_present"]:
-                raise ImageNotFound(image)
-            return SimpleNamespace(id="sha256:current")
-
-    class FakeApi:
-        def pull(self, image, *, stream, decode):
-            assert (image, stream, decode) == (spec["image"], True, True)
-            state["pull_calls"] += 1
-            pull_started.set()
-            assert release_pull.wait(timeout=2.0)
-            state["image_present"] = True
-            yield {"status": "Pull complete"}
-
+def test_backend_restart_restarts_running_container(monkeypatch):
     class FakeContainer:
-        attrs = {"State": {"Status": "running"}}
+        def __init__(self):
+            self.restart_timeout = None
 
-        def reload(self):
-            return None
+        def restart(self, timeout):
+            self.restart_timeout = timeout
 
-    class FakeContainers:
-        def get(self, name):
-            if name != spec["container"] or not state["container_running"]:
-                raise NotFound(name)
-            return FakeContainer()
-
+    container = FakeContainer()
     client = SimpleNamespace(
-        api=FakeApi(),
-        images=FakeImages(),
-        containers=FakeContainers(),
+        containers=SimpleNamespace(get=lambda _name: container),
     )
-
-    async def fake_run(*cmd, **_kwargs):
-        assert cmd[-4:] == ("up", "-d", "--no-build", "groot")
-        state["up_calls"] += 1
-        await asyncio.sleep(0.01)
-        state["container_running"] = True
-        return SimpleNamespace(rc=0, stdout="container started", stderr="")
-
     monkeypatch.setattr(app, "_docker_client", lambda: client)
     monkeypatch.setattr(app, "_host_workspace_dir", lambda: None)
     monkeypatch.setattr(
         app,
         "_backend_container_stale_reason",
-        lambda *_args, **_kwargs: None,
+        lambda *_args: None,
     )
-    _patch_backend_compose(monkeypatch, fake_run)
+    monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-2",
+        },
+    )
 
-    async def run_concurrently():
-        first = asyncio.create_task(app._ensure_backend_running(
-            "groot",
-            spec,
-            auto_provision=True,
-        ))
-        while not pull_started.is_set():
-            await asyncio.sleep(0.001)
-        second = asyncio.create_task(app._ensure_backend_running(
-            "groot",
-            spec,
-            auto_provision=True,
-        ))
-        await asyncio.sleep(0.02)
-        assert state["pull_calls"] == 1
-        release_pull.set()
-        return await asyncio.gather(first, second)
+    result = asyncio.run(app.backend_restart("lerobot"))
 
-    first_result, second_result = asyncio.run(run_concurrently())
+    assert result.ok is True
+    assert result.message == "lerobot_server restarted"
+    assert container.restart_timeout == 10
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
 
-    assert first_result.ok is True
-    assert second_result.ok is True
-    assert state["pull_calls"] == 1
-    assert state["up_calls"] == 1
-    assert "created/started" in first_result.message
-    assert second_result.message == "groot_server already running"
+
+def test_backend_start_releases_worker_lease_when_start_fails(monkeypatch):
+    async def fail_start(*_args, **_kwargs):
+        raise RuntimeError("start failed")
+
+    control_calls = []
+    monkeypatch.setattr(app, "_ensure_backend_running", fail_start)
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-failure",
+        },
+    )
+
+    try:
+        asyncio.run(app.backend_start("lerobot"))
+    except RuntimeError as exc:
+        assert str(exc) == "start failed"
+    else:
+        raise AssertionError("backend_start should propagate the start failure")
+
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
+
+
+def test_backend_stop_uses_worker_lease(monkeypatch):
+    class FakeContainer:
+        def __init__(self):
+            self.stop_timeout = None
+
+        def stop(self, timeout):
+            self.stop_timeout = timeout
+
+    container = FakeContainer()
+    monkeypatch.setattr(
+        app,
+        "_docker_client",
+        lambda: SimpleNamespace(
+            containers=SimpleNamespace(get=lambda _name: container),
+        ),
+    )
+    monkeypatch.setattr(app, "_container_raw_state", lambda _ctr: "running")
+    control_calls = []
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda payload: control_calls.append(payload) or {
+            "ok": True,
+            "allowed": True,
+            "token": "lease-stop",
+        },
+    )
+
+    result = asyncio.run(app.backend_stop("lerobot"))
+
+    assert result.ok is True
+    assert container.stop_timeout == 10
+    assert [call["operation"] for call in control_calls] == [
+        "begin_worker_mutation",
+        "end_worker_mutation",
+    ]
+
+
+def test_begin_worker_mutation_rejects_active_worker(monkeypatch):
+    monkeypatch.setattr(
+        app,
+        "_runtime_control_request",
+        lambda _payload: {
+            "ok": True,
+            "allowed": False,
+            "reason": "UNLOAD the active policy before changing its worker",
+        },
+    )
+
+    try:
+        app._begin_worker_mutation("lerobot")
+    except app.HTTPException as exc:
+        assert exc.status_code == 409
+        assert "UNLOAD" in exc.detail
+    else:
+        raise AssertionError("active worker mutation should be rejected")
+
+
+def test_worker_lifecycle_fails_closed_when_control_socket_is_unavailable(monkeypatch):
+    import pytest
+
+    def unavailable(_payload):
+        raise RuntimeError("Policy Runtime control socket unavailable: timed out")
+
+    def forbidden_docker():
+        raise AssertionError("Docker must not be called without safety approval")
+
+    monkeypatch.setattr(app, "_runtime_control_request", unavailable)
+    monkeypatch.setattr(app, "_docker_client", forbidden_docker)
+    for endpoint in (app.backend_start, app.backend_restart, app.backend_stop,
+                     app.backend_recreate):
+        with pytest.raises(app.HTTPException) as failure:
+            asyncio.run(endpoint("lerobot"))
+        assert failure.value.status_code == 503
+        assert "safety check unavailable" in failure.value.detail
+        assert "timed out" in failure.value.detail
+
+
+def test_runtime_control_rejects_invalid_responses_and_closes_socket(monkeypatch):
+    import pytest
+
+    class FakeSocket:
+        def __init__(self, response):
+            self.response = response
+            self.closed = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, _data):
+            pass
+
+        def shutdown(self, _how):
+            pass
+
+        def recv(self, _size):
+            response, self.response = self.response, b""
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def close(self):
+            self.closed = True
+
+    for response in (b"[]", b"null", b"broken", b'{"ok":false,"error":"busy"}',
+                     TimeoutError("timed out")):
+        client = FakeSocket(response)
+        monkeypatch.setattr(app.socket, "socket", lambda *_args: client)
+        with pytest.raises(RuntimeError):
+            app._runtime_control_request({"operation": "status"})
+        assert client.closed
 
 
 def test_host_project_dir_falls_back_to_compose_container_name(monkeypatch):

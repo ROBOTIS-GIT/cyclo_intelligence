@@ -1,0 +1,10 @@
+# Reuse the model runtime definition; add training data I/O, not upstream's Torch 2.6.
+-r ../requirements-inference.txt
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+pyarrow==21.0.0
+av==17.1.0
+setuptools==80.9.0
+wheel==0.48.0
+ninja==1.13.2
+packaging==26.3

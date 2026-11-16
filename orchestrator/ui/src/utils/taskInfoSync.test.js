@@ -9,6 +9,13 @@ import {
 } from './taskInfoSync';
 
 describe('taskInfoSync echo routing', () => {
+  test('Action Steps participates in central settings keys and topic hydration', () => {
+    expect(normalizeInferenceTaskInfo({}).actionSteps).toBe(0);
+    expect(rosTaskInfoToUiTaskInfo({ action_steps: 10 }).actionSteps).toBe(10);
+    expect(rosTaskInfoToUiTaskInfo({ action_steps: 0 }).actionSteps).toBe(0);
+    expect(getInferenceTaskInfoKey({ actionSteps: 10 }))
+      .not.toBe(getInferenceTaskInfoKey({ actionSteps: 0 }));
+  });
   test('detects inference task info even without record identity fields', () => {
     expect(hasRosTaskInfoPayload({
       task_type: 'inference',
@@ -114,5 +121,16 @@ describe('taskInfoSync echo routing', () => {
 
     expect(converted.initialPoseSync).toBe(false);
     expect(converted.initialPoseSyncDurationS).toBe(5.0);
+  });
+
+  test('restores policy selection and parameter JSON from ROS task info', () => {
+    const converted = rosTaskInfoToUiTaskInfo({
+      policy_id: 'sample:base',
+      policy_parameters_json: '{"temperature":0.25}',
+    });
+
+    expect(converted.policyId).toBe('sample:base');
+    expect(converted.policyParameters).toEqual({ temperature: 0.25 });
+    expect(hasRosTaskInfoPayload({ policy_id: 'sample:base' })).toBe(true);
   });
 });

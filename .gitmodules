@@ -7,3 +7,13 @@
 [submodule "cyclo_brain/policy/groot/Isaac-GR00T"]
 	path = cyclo_brain/policy/groot/Isaac-GR00T
 	url = https://github.com/ROBOTIS-GIT/Isaac-GR00T-n1.7.git
+[submodule "rldx-upstream"]
+	path = cyclo_brain/policy/rldx/RLDX-1
+	url = https://github.com/RLWRLD/RLDX-1.git
+[submodule "lingbot-vla-upstream"]
+	path = cyclo_brain/policy/lingbot_vla/lingbot-vla-v2
+	url = https://github.com/Robbyant/lingbot-vla-v2.git
+[submodule "abot-m0-upstream"]
+	path = cyclo_brain/policy/abot/ABot-Manipulation
+	url = https://github.com/amap-cvlab/ABot-Manipulation.git
+	branch = ABot-M0

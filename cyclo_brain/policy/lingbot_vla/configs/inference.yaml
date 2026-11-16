@@ -1,0 +1,8 @@
+# Cyclo passes current RGB HWC images and named, unnormalized state channels.
+# The saved upstream FeatureTransform owns resize, normalization, canonical
+# feature padding, instruction tokenization, and relative-action restoration.
+image_preprocessing: identity
+rotation: robot_config
+max_observation_age_s: 1.0
+# Match upstream evaluation precision. BF16 is opt-in and needs validation.
+precision: float32

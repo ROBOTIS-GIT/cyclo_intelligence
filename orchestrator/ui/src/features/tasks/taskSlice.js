@@ -78,6 +78,8 @@ const syncInitialState = {
 };
 
 const inferenceSyncInitialState = {
+  settingsSourceId: '',
+  settingsRevision: -1,
   serverTaskKey: '',
   editBaseServerTaskKey: '',
   staleEchoTaskKey: '',
@@ -114,8 +116,11 @@ const inferenceTaskInfoInitialState = {
   controlHz: 100,
   inferenceHz: 15,
   chunkAlignWindowS: 0.3,
+  actionSteps: 0,
   serviceType: 'lerobot',
   policyType: 'act',
+  policyId: '',
+  policyParameters: {},
   inferenceMode: 'simulation',
   actionRequestMode: 'async',
   accelerationMode: 'pytorch',
@@ -143,6 +148,9 @@ const copyInferenceTaskInfo = (
 ) => ({
   ...inferenceTaskInfoInitialState,
   ...inferenceTaskInfo,
+  policyParameters: {
+    ...(inferenceTaskInfo.policyParameters || {}),
+  },
   actionRequestMode:
     String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
       ? 'sync'
@@ -175,7 +183,7 @@ const buildInferenceTaskInfo = (tasks) => {
   return {
     ...inference,
     taskType: 'inference',
-    taskInstruction: shared.taskInstruction,
+    taskInstruction: inference.taskInstruction ?? shared.taskInstruction,
     subtaskInstruction: [],
   };
 };
@@ -219,7 +227,7 @@ const buildLegacyTaskInfo = (state, source = 'record') => {
     taskNum: record.taskNum,
     taskName: record.taskName,
     taskType: source === 'inference' ? 'inference' : record.taskType,
-    taskInstruction: stringArray(state.sharedTaskInfo.taskInstruction),
+    taskInstruction: source === 'inference' ? inference.taskInstruction : record.taskInstruction,
     subtaskInstruction: record.subtaskInstruction,
     includeRobotisLicense: record.includeRobotisLicense,
   };
@@ -278,7 +286,14 @@ const applyRecordTaskInfo = (state, taskInfo = {}, options = {}) => {
 };
 
 const applyInferenceTaskInfo = (state, taskInfo = {}) => {
-  applySharedTaskInfo(state, taskInfo);
+  if (state.inferenceTaskInfoSync.settingsSourceId) {
+    state.inferenceTaskInfo.taskInstruction = stringArray(
+      taskInfo.taskInstruction ?? state.inferenceTaskInfo.taskInstruction ??
+      state.sharedTaskInfo.taskInstruction
+    );
+  } else {
+    applySharedTaskInfo(state, taskInfo);
+  }
   state.inferenceTaskInfo = {
     ...state.inferenceTaskInfo,
     taskType: 'inference',
@@ -290,8 +305,13 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
     inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
+    actionSteps: taskInfo.actionSteps ?? state.inferenceTaskInfo.actionSteps ?? 0,
     serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
     policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
+    policyId: String(taskInfo.policyId ?? state.inferenceTaskInfo.policyId ?? ''),
+    policyParameters: {
+      ...(taskInfo.policyParameters ?? state.inferenceTaskInfo.policyParameters ?? {}),
+    },
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
@@ -336,6 +356,7 @@ const initialState = {
   // record-session state.
   recordStatus: {
     taskName: 'idle',
+    taskType: '',
     running: false,
     recordPhase: RecordPhase.READY,
     progress: 0,
@@ -363,12 +384,22 @@ const initialState = {
   },
 
   // Inference-side snapshot from /task/inference_status (orchestrator
-  // direct, one-shot per phase transition).
+  // direct, refreshed by one backend monitor).
   inferenceStatus: {
+    recordingSessionId: '',
     inferencePhase: InferencePhase.READY,
     error: '',
     topicReceived: false,
+    runtimeState: 'unknown',
+    loadedModelPath: '',
+    observedChunkSize: 0,
+    loadedPolicyId: '',
+    publishToRobot: false,
+    sourceId: '',
+    sequence: 0,
   },
+
+  robotPoseStatus: { returning: false },
 
   availableRobots: [],
   availableCameras: [],
@@ -430,7 +461,13 @@ const taskSlice = createSlice({
     resetRecordStatus: (state) => {
       state.recordStatus = initialState.recordStatus;
     },
+    setRobotPoseStatus: (state, action) => {
+      state.robotPoseStatus = { ...state.robotPoseStatus, ...action.payload };
+    },
     setInferenceStatus: (state, action) => {
+      const next = action.payload;
+      if (next.sourceId && next.sourceId === state.inferenceStatus.sourceId &&
+          next.sequence <= state.inferenceStatus.sequence) return;
       state.inferenceStatus = { ...state.inferenceStatus, ...action.payload };
     },
     resetInferenceStatus: (state) => {
@@ -611,6 +648,8 @@ const taskSlice = createSlice({
     markInferenceTaskInfoSyncSuccess: (state, action) => {
       const taskInfo = action.payload?.taskInfo || buildInferenceTaskInfo(state);
       const taskKey = action.payload?.taskKey || getInferenceTaskInfoKey(taskInfo);
+      // A completed request must not acknowledge a newer, still-unsent edit.
+      if (taskKey !== getInferenceTaskInfoKey(buildInferenceTaskInfo(state))) return;
       const editBaseServerTaskKey =
         state.inferenceTaskInfoSync.editBaseServerTaskKey ||
         state.inferenceTaskInfoSync.serverTaskKey;
@@ -632,6 +671,34 @@ const taskSlice = createSlice({
     },
     receiveServerRecordTaskInfo: (state, action) => {
       const serverTaskInfo = action.payload || {};
+      const settings = action.meta?.inferenceSettings;
+      if (settings) {
+        const sync = state.inferenceTaskInfoSync;
+        if (settings.sourceId === sync.settingsSourceId &&
+            settings.revision <= sync.settingsRevision) return;
+        // Keep an in-progress draft; the same snapshot can be retried later.
+        if (settings.hasTaskInfo && hasLocalInferenceTaskInfoEdit(state) &&
+            getInferenceTaskInfoKey({ ...buildInferenceTaskInfo(state), ...serverTaskInfo }) !==
+              getInferenceTaskInfoKey(buildInferenceTaskInfo(state))) return;
+        sync.settingsSourceId = settings.sourceId;
+        sync.settingsRevision = settings.revision;
+        if (!settings.hasTaskInfo) return;
+        applyInferenceTaskInfo(state, serverTaskInfo);
+        const taskInfo = buildInferenceTaskInfo(state);
+        const taskKey = getInferenceTaskInfoKey(taskInfo);
+        sync.serverTaskInfo = taskInfo;
+        sync.serverTaskKey = taskKey;
+        sync.editBaseServerTaskKey = taskKey;
+        sync.staleEchoTaskKey = '';
+        sync.dirty = false;
+        sync.syncStatus = 'synced';
+        sync.syncMessage = SYNCED_MESSAGE;
+        return;
+      } else if (serverTaskInfo.taskType === 'inference' &&
+                 state.inferenceTaskInfoSync.settingsSourceId) {
+        // RecordingStatus is no longer authoritative for inference settings.
+        return;
+      }
       const isInferenceEcho = serverTaskInfo.taskType === 'inference';
       if (isInferenceEcho) {
         const currentInferenceTaskInfo = buildInferenceTaskInfo(state);
@@ -786,6 +853,7 @@ export const {
   setRecordStatus,
   resetRecordStatus,
   setInferenceStatus,
+  setRobotPoseStatus,
   resetInferenceStatus,
   selectRobotType,
   setTaskType,
@@ -819,5 +887,10 @@ export const {
   receiveServerRecordTaskInfo,
   applyServerTaskInfo,
 } = taskSlice.actions;
+
+export const receiveServerInferenceTaskInfo = ({ taskInfo, ...settings }) => ({
+  ...receiveServerRecordTaskInfo(taskInfo),
+  meta: { inferenceSettings: settings },
+});
 
 export default taskSlice.reducer;

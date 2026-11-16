@@ -32,7 +32,7 @@ Session-state boundary (REVIEW §9.3):
 
 import shutil
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +82,8 @@ class RecordingService:
 
     def __init__(self, node, status_publisher):
         self._node = node
+        self._shutting_down = False
+        self._command_lock = threading.Lock()
         self._status_pub = status_publisher  # umbrella /data/status
         self._rosbag = RosbagControl(node)
 
@@ -121,8 +123,6 @@ class RecordingService:
         # _session_lock just brackets the pointer reads/writes — DataManager
         # has its own internal _state_lock so we never need to nest locks.
         self._session_lock = threading.Lock()
-        # Serialize dataset deletion with recording commands, not long merges.
-        self._dataset_edit_lock = threading.Lock()
         self._finish_episode_lock = threading.Lock()
         self._finish_episode_thread: Optional[threading.Thread] = None
 
@@ -157,23 +157,23 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._shutting_down = True
+        with self._command_lock:
+            self._shutdown()
+
+    def _shutdown(self) -> None:
         if self._status_timer is not None:
             try:
                 self._status_timer.cancel()
             except Exception:  # noqa: BLE001
                 pass
             self._status_timer = None
-        # Best-effort teardown of a live session before node destroy.
+        # Stop the remote writer while ROS is alive, then drain local writers.
+        # Shutdown preserves an interrupted episode; it is neither Save nor
+        # Discard and must not advance counters or claim an episode was saved.
+        self._rosbag.shutdown()
         with self._session_lock:
-            dm = self._data_manager
             self._data_manager = None
-        if dm is not None:
-            try:
-                if dm.is_recording():
-                    dm.stop_recording()
-            except Exception as exc:  # noqa: BLE001
-                self._node.get_logger().warning(
-                    f'DataManager stop on shutdown failed: {exc}')
         # Release persistent video/camera_info subscriptions held since
         # REFRESH_TOPICS. rclpy's node.destroy_node() would clean them
         # up anyway, but doing it explicitly lets leak audits see a
@@ -199,7 +199,6 @@ class RecordingService:
                 self._node.get_logger().warning(
                     f'TranscodeWorker.shutdown failed: {exc}')
             self._transcoder = None
-        self._rosbag.shutdown()
 
     # ------------------------------------------------------------------
     # Background episode archive
@@ -267,28 +266,32 @@ class RecordingService:
 
     @contextmanager
     def edit_task(self, task_dir: Path):
-        """Serialize deletion with commands and refresh the selected task."""
+        """Allow idle deletion without racing commands or video conversion."""
         # Recording commands need free executor threads for rosbag responses.
-        if not self._dataset_edit_lock.acquire(blocking=False):
+        if not self._command_lock.acquire(blocking=False):
             raise RuntimeError('Recording command or dataset edit in progress; retry shortly')
         try:
+            if self._shutting_down:
+                raise RuntimeError('Recording shutdown in progress')
             with self._session_lock:
                 dm = self._data_manager
-            if dm is None or Path(dm._save_rosbag_path).resolve() != task_dir.resolve():
-                yield
-                return
-            if dm.get_status() != 'idle' or self._finish_episode_in_progress():
+            # Even unrelated deletion must not hold up STOP of a live recording.
+            if (dm is not None and dm.get_status() != 'idle') or self._finish_episode_in_progress():
                 raise RuntimeError('Stop recording and wait for saving before editing this task')
-            if dm.saved_subtask_indices_for_full_episode():
+            selected = dm is not None and Path(dm._save_rosbag_path).resolve() == task_dir.resolve()
+            if selected and dm.saved_subtask_indices_for_full_episode():
                 raise RuntimeError('Finish or discard the current episode before editing this task')
-            try:
-                yield
-            finally:
-                # A filesystem error can leave a partially edited dataset too.
-                dm.refresh_episode_position()
-                self._publish_recording_status()
+            worker = self._transcoder
+            with worker.edit_task(task_dir) if worker is not None else nullcontext():
+                try:
+                    yield
+                finally:
+                    if selected:
+                        # A filesystem error can leave a partially edited dataset too.
+                        dm.refresh_episode_position()
+                        self._publish_recording_status()
         finally:
-            self._dataset_edit_lock.release()
+            self._command_lock.release()
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:
@@ -408,10 +411,14 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _callback(self, request, response):
-        with self._dataset_edit_lock:
-            return self._dispatch_command(request, response)
+        with self._command_lock:
+            return self._dispatch(request, response)
 
-    def _dispatch_command(self, request, response):
+    def _dispatch(self, request, response):
+        if getattr(self, '_shutting_down', False):
+            response.success = False
+            response.message = 'Recording shutdown in progress'
+            return response
         command_name = _COMMAND_NAMES.get(request.command)
         if command_name is None:
             response.success = False
@@ -645,6 +652,14 @@ class RecordingService:
                 'caller should populate from '
                 'orchestrator.Communicator.get_mcap_topics().')
 
+        if getattr(request.task_info, 'task_type', '') == 'inference':
+            from shared.inference_recording import validate_folder
+            root = Path(dm._save_rosbag_path)
+            root.mkdir(parents=True, exist_ok=True)
+            validate_folder(root.parent, dm._task_info.task_num, request.robot_type)
+            # Reserve the whole episode, not only its segment. A cached manager
+            # must never reuse a slot created by another writer in the meantime.
+            dm._full_episode_dir(dm.get_current_full_episode_index()).mkdir(exist_ok=False)
         rosbag_path = dm.get_save_rosbag_path(allow_idle=True)
         if not rosbag_path:
             response.success = False
@@ -652,6 +667,9 @@ class RecordingService:
             return response
 
         episode_dir = Path(rosbag_path)
+        if (getattr(request.task_info, 'task_type', '') == 'inference'
+                and episode_dir.exists() and any(episode_dir.iterdir())):
+            raise ValueError(f'Refusing to overwrite an existing episode: {episode_dir}')
         rosbag_started = False
         dm_started = False
         try:
@@ -679,12 +697,24 @@ class RecordingService:
 
             dm.start_recording()
             dm_started = True
+            self._inference_writers_stopped = False
+            self._inference_archive_pending = False
         except Exception as exc:  # noqa: BLE001
             self._cleanup_failed_start(
                 episode_dir=episode_dir,
                 data_manager=dm if dm_started else None,
                 rosbag_started=rosbag_started,
             )
+            if getattr(request.task_info, 'task_type', '') == 'inference':
+                # Release only an empty reservation owned by this failed START.
+                # Any surviving data keeps the slot protected from overwrite.
+                for directory in (episode_dir.parent, episode_dir.parent.parent):
+                    try:
+                        directory.rmdir()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        break
             response.success = False
             response.message = f'START failed: {exc}'
             self._node.get_logger().error(response.message)
@@ -870,6 +900,9 @@ class RecordingService:
                 request, response, command_name):
             return response
 
+        if getattr(getattr(self._data_manager, '_task_info', None), 'task_type', '') == 'inference':
+            return self._save_inference_episode(request, response, event)
+
         self._node.get_logger().info(
             f'{command_name}: episode={self._data_manager._record_episode_count} '
             f'status={self._data_manager.get_status()}')
@@ -924,6 +957,40 @@ class RecordingService:
             'MOVE_TO_NEXT': 'Episode saved',
             'STOP_SEGMENT': 'Subtask saved',
         }.get(command_name, f'{command_name} completed')
+        return response
+
+    def _save_inference_episode(self, request, response, event):
+        """Keep recording ownership until metadata and archival both succeed."""
+        dm = self._data_manager
+        if not getattr(self, '_inference_writers_stopped', False):
+            self._rosbag.stop_rosbag()
+            self._stop_episode_writers()
+            self._inference_writers_stopped = True
+        if not getattr(self, '_inference_archive_pending', False):
+            dm.save_robotis_metadata(
+                urdf_path=getattr(request, 'urdf_path', '') or '',
+                video_stats=self._last_video_stats,
+                camera_info_files=self._last_camera_info_files,
+                camera_rotations=self._last_camera_rotations,
+                image_topics=self._last_image_topics,
+                camera_info_topics=self._last_camera_info_topics,
+            )
+            self._inference_archive_pending = True
+        archived_dir = dm.finish_full_episode()
+        if archived_dir is None:
+            raise RuntimeError('Inference episode archive did not produce an episode')
+        dm.stop_recording(finish_full_episode=False)
+        self._inference_archive_pending = False
+        if (Path(archived_dir) / 'videos').exists():
+            self._submit_transcode(Path(archived_dir))
+        try:
+            self._rosbag.publish_action_event(event)
+            self._publish_umbrella_status(
+                DataOperationStatus.COMPLETED, 'STOP', 'Inference recording saved')
+        except Exception as exc:
+            self._node.get_logger().warning(f'Saved recording notification failed: {exc}')
+        response.success = True
+        response.message = 'Inference recording saved'
         return response
 
     def _do_discard_saved_segment(self, request, response):
@@ -1157,22 +1224,36 @@ class RecordingService:
 
         # 1. Close mp4/parquet writers + ffmpeg before the bag dir is
         #    deleted underneath them.
-        self._stop_episode_writers()
+        inference_recording = getattr(
+            getattr(self._data_manager, '_task_info', None), 'task_type', '') == 'inference'
+        already_stopped = inference_recording and getattr(self, '_inference_writers_stopped', False)
+        if not already_stopped:
+            self._stop_episode_writers()
 
         # 2. rosbag_recorder stops + removes its bag directory
         #    (= episode_dir). Synchronous so we don't race with step 3.
         try:
-            self._rosbag.stop_and_delete_rosbag()
+            if not already_stopped:
+                self._rosbag.stop_and_delete_rosbag()
+            if inference_recording:
+                self._inference_writers_stopped = True
         except Exception as exc:  # noqa: BLE001
+            if inference_recording:
+                raise
             self._node.get_logger().warning(
                 f'stop_and_delete_rosbag failed: {exc!r}')
 
         # 3. Belt-and-braces: if anything (videos/, camera_info/, stray
         #    .mcap.tmp from a crash) survived, sweep it.
+        if inference_recording:
+            episode_dir = self._data_manager._full_episode_dir(
+                self._data_manager.get_current_full_episode_index())
         if episode_dir.exists():
             try:
                 shutil.rmtree(episode_dir)
             except Exception as exc:  # noqa: BLE001
+                if inference_recording:
+                    raise
                 self._node.get_logger().warning(
                     f'episode_dir cleanup failed: {episode_dir}: {exc!r}')
 
@@ -1180,11 +1261,16 @@ class RecordingService:
         self._data_manager.discard_recording(
             reset_subtask_index=reset_subtask_index,
         )
-        self._rosbag.publish_action_event(event)
-
-        self._publish_umbrella_status(
-            DataOperationStatus.CANCELLED, 'CANCEL',
-            f'Recording discarded — episode removed: {episode_dir.name}')
+        self._inference_archive_pending = False
+        try:
+            self._rosbag.publish_action_event(event)
+            self._publish_umbrella_status(
+                DataOperationStatus.CANCELLED, 'CANCEL',
+                f'Recording discarded — episode removed: {episode_dir.name}')
+        except Exception as exc:
+            if not inference_recording:
+                raise
+            self._node.get_logger().warning(f'Discard notification failed: {exc}')
 
         response.success = True
         response.message = 'Recording discarded'

@@ -3,7 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-from threading import Event, RLock
+from threading import Event, RLock, Thread
+from unittest.mock import Mock
 from types import ModuleType, SimpleNamespace
 import sys
 
@@ -167,8 +168,161 @@ class _Logger:
 def _service_with_logger():
     logger = _Logger()
     service = RecordingService.__new__(RecordingService)
+    service._command_lock = RLock()
+    service._shutting_down = False
     service._node = SimpleNamespace(get_logger=lambda: logger)
     return service, logger
+
+
+def test_shutdown_stops_native_writer_before_closing_local_writers_without_saving():
+    service, _ = _service_with_logger()
+    events = []
+    manager = SimpleNamespace(is_recording=lambda: True, stop_recording=Mock())
+    service._status_timer = None
+    service._session_lock = RLock()
+    service._data_manager = manager
+    service._rosbag = SimpleNamespace(shutdown=lambda: events.append('bag stopped'))
+    service._video_recorder = SimpleNamespace(close=lambda: events.append('video closed'))
+    service._camera_info = SimpleNamespace(close=lambda: events.append('camera closed'))
+    service._transcoder = None
+
+    service.shutdown()
+
+    assert events == ['bag stopped', 'video closed', 'camera closed']
+    manager.stop_recording.assert_not_called()
+    assert service._data_manager is None
+
+
+def test_shutdown_rejects_late_commands_without_starting_another_episode():
+    service, _ = _service_with_logger()
+    service._shutting_down = True
+    service._do_start = Mock()
+    request = _request(command=_RecordingCommand.Request.START, robot_type='omy_f3m')
+    request.task_info.task_num = 'late'
+    response = SimpleNamespace(success=True, message='')
+
+    service._callback(request, response)
+
+    assert response.success is False
+    assert 'shutdown' in response.message.lower()
+    service._do_start.assert_not_called()
+
+
+def test_shutdown_waits_for_inflight_command_before_stopping_writers():
+    service, _ = _service_with_logger()
+    entered, release, stopped = Event(), Event(), Event()
+    service._status_timer = None
+    service._session_lock = RLock()
+    service._data_manager = None
+    service._video_recorder = service._camera_info = service._transcoder = None
+    service._rosbag = SimpleNamespace(shutdown=stopped.set)
+
+    def start(request, response):
+        entered.set()
+        assert release.wait(2)
+        return response
+
+    service._do_start = start
+    request = _request(command=_RecordingCommand.Request.START, robot_type='omy_f3m')
+    request.task_info.task_num = 'inflight'
+    callback = Thread(target=service._callback, args=(request, SimpleNamespace()))
+    shutdown_thread = Thread(target=service.shutdown)
+    callback.start()
+    assert entered.wait(1)
+    shutdown_thread.start()
+    try:
+        assert not stopped.wait(0.1), 'must not tear down an in-flight START'
+    finally:
+        release.set()
+        callback.join(2)
+        shutdown_thread.join(2)
+    assert stopped.is_set()
+    assert not callback.is_alive() and not shutdown_thread.is_alive()
+
+
+def test_inference_save_failure_retains_ownership_and_retry_does_not_rewrite_metadata(tmp_path):
+    service, _ = _service_with_logger()
+    service._rosbag = SimpleNamespace(stop_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    service._last_video_stats = {}
+    service._last_camera_info_files = {}
+    service._last_camera_rotations = {}
+    service._last_image_topics = {}
+    service._last_camera_info_topics = {}
+    dm = SimpleNamespace(
+        save_robotis_metadata=Mock(),
+        finish_full_episode=Mock(side_effect=[OSError('disk full'), tmp_path]),
+        stop_recording=Mock(),
+    )
+    service._data_manager = dm
+    request = SimpleNamespace(urdf_path='')
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(OSError, match='disk full'):
+        service._save_inference_episode(request, response, 'save')
+    assert not response.success
+    dm.stop_recording.assert_not_called()
+    assert service._inference_archive_pending
+    service._save_inference_episode(request, response, 'save')
+    assert response.success
+    dm.save_robotis_metadata.assert_called_once()
+    service._rosbag.stop_rosbag.assert_called_once()
+    dm.stop_recording.assert_called_once_with(finish_full_episode=False)
+    assert not service._inference_archive_pending
+
+
+def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path, monkeypatch):
+    import shutil
+    service, _ = _service_with_logger()
+    episode = tmp_path / '4'
+    segment = episode / 'segments/0'
+    segment.mkdir(parents=True)
+    (segment / 'partial.mcap').write_bytes(b'data')
+    service._data_manager = SimpleNamespace(
+        _task_info=SimpleNamespace(task_type='inference'),
+        get_save_rosbag_path=lambda: str(segment),
+        get_current_full_episode_index=lambda: 4,
+        _full_episode_dir=lambda index: tmp_path / str(index),
+        discard_recording=Mock(),
+    )
+    service._rosbag = SimpleNamespace(stop_and_delete_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    original = shutil.rmtree
+    monkeypatch.setattr(shutil, 'rmtree', Mock(side_effect=PermissionError('denied')))
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(PermissionError):
+        service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
+    service._data_manager.discard_recording.assert_not_called()
+    monkeypatch.setattr(shutil, 'rmtree', original)
+    service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
+    assert response.success
+    assert not episode.exists()
+    service._rosbag.stop_and_delete_rosbag.assert_called_once()
+    service._stop_episode_writers.assert_called_once()
+
+
+def test_inference_metadata_failure_keeps_original_video_statistics(tmp_path):
+    service, _ = _service_with_logger()
+    service._rosbag = SimpleNamespace(stop_rosbag=Mock(), publish_action_event=Mock())
+    service._stop_episode_writers = Mock()
+    service._publish_umbrella_status = Mock()
+    service._last_video_stats = {'cam': {'frames_written': 20}}
+    service._last_camera_info_files = {}
+    service._last_camera_rotations = {}
+    service._last_image_topics = {}
+    service._last_camera_info_topics = {}
+    service._data_manager = SimpleNamespace(
+        save_robotis_metadata=Mock(side_effect=[OSError('disk full'), None]),
+        finish_full_episode=Mock(return_value=tmp_path), stop_recording=Mock())
+    response = SimpleNamespace(success=False, message='')
+    with pytest.raises(OSError):
+        service._save_inference_episode(SimpleNamespace(), response, 'save')
+    service._save_inference_episode(SimpleNamespace(), response, 'save')
+    service._stop_episode_writers.assert_called_once()
+    service._rosbag.stop_rosbag.assert_called_once()
+    assert response.success
+    assert service._data_manager.save_robotis_metadata.call_args.kwargs['video_stats']['cam']['frames_written'] == 20
 
 
 def test_ensure_data_manager_reuses_same_task_without_candidate_scan(
@@ -602,7 +756,8 @@ def _episode_edit_services(tmp_path, monkeypatch, *, segments=1):
 
     recording, logger = _service_with_logger()
     recording._session_lock = RLock()
-    recording._dataset_edit_lock = RLock()
+    recording._command_lock = RLock()
+    recording._transcoder = None
     recording._data_manager = dm
     recording._finish_episode_in_progress = lambda: False
     published = []
@@ -681,8 +836,6 @@ def test_delete_other_task_leaves_recording_session_untouched(tmp_path, monkeypa
     (other / "0" / "0_0.mcap").write_bytes(b"test")
     request.delete_task_dir = str(other)
     request.delete_episode_num = [0]
-    dm._status = "recording"
-
     response = edit._callback(request, SimpleNamespace())
 
     assert response.success
@@ -718,6 +871,79 @@ def test_delete_without_recording_session(tmp_path, monkeypatch):
     assert published == []
 
 
+def test_delete_does_not_resume_interrupted_inference_episode(tmp_path, monkeypatch):
+    edit, _, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch, segments=2)
+    dm._task_info = SimpleNamespace(task_type="inference")
+    dm._current_full_episode_index = dm._record_episode_count = 7
+    segment = Path(dm._save_rosbag_path) / "6" / "segments" / "0"
+    segment.mkdir(parents=True)
+    info = segment / "episode_info.json"
+    original = json.dumps({"episode_index": 6, "recording_mode": "subtask",
+                           "full_episode_index": 6, "subtask_index": 0, "subtask_total": 2})
+    info.write_text(original)
+    request.delete_episode_num = [5]
+    request.delete_compact = False
+    result = edit._callback(request, SimpleNamespace())
+    assert result.success, result.message
+    assert dm.get_current_full_episode_index() == 7
+    assert dm._current_subtask_index == 0
+    assert info.read_text() == original
+
+
+@pytest.mark.parametrize("busy", ["recording", "archive", "shutdown"])
+def test_delete_other_task_rejected_without_blocking_stop(tmp_path, monkeypatch, busy):
+    edit, recording, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch)
+    other = tmp_path / "other"
+    (other / "0").mkdir(parents=True)
+    (other / "0" / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
+    (other / "0" / "0_0.mcap").write_bytes(b"test")
+    request.delete_task_dir = str(other)
+    request.delete_episode_num = [0]
+    if busy == "archive":
+        recording._finish_episode_in_progress = lambda: True
+    elif busy == "shutdown":
+        recording._shutting_down = True
+    else:
+        dm._status = "recording"
+    result = edit._callback(request, SimpleNamespace())
+    assert not result.success
+    assert (other / "0" / "0_0.mcap").read_bytes() == b"test"
+    # A rejected edit must not retain the lock needed by STOP or shutdown.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def acquire_and_release():
+            acquired = recording._command_lock.acquire(blocking=False)
+            if acquired:
+                recording._command_lock.release()
+            return acquired
+        assert pool.submit(acquire_and_release).result(timeout=2)
+
+
+@pytest.mark.parametrize("selected", [True, False])
+def test_delete_waits_for_background_transcode(tmp_path, monkeypatch, selected):
+    from concurrent.futures import Future
+    from cyclo_data.recorder.transcoder import TranscodeWorker
+
+    edit, recording, dm, request, published = _episode_edit_services(tmp_path, monkeypatch)
+    root = Path(dm._save_rosbag_path)
+    worker = recording._transcoder = TranscodeWorker()
+    pending = Future()
+    worker._inflight[str(root / "5")] = pending
+    if not selected:
+        recording._data_manager = None
+    request.delete_episode_num = [5]
+    request.delete_compact = False
+    result = edit._callback(request, SimpleNamespace())
+    assert not result.success
+    assert "transcod" in result.message.lower()
+    assert (root / "5" / "episode_info.json").is_file()
+    assert dm.get_current_full_episode_index() == 6
+    assert published == []
+    pending.set_result(None)
+    assert edit._callback(request, SimpleNamespace()).success
+    if selected:
+        assert dm.get_current_full_episode_index() == 5
+
+
 def test_recording_command_waits_for_delete_and_cursor_refresh(tmp_path, monkeypatch):
     edit, recording, dm, request, _ = _episode_edit_services(tmp_path, monkeypatch)
     deleting = Event()
@@ -740,7 +966,7 @@ def test_recording_command_waits_for_delete_and_cursor_refresh(tmp_path, monkeyp
         return recording._callback(None, None)
 
     monkeypatch.setattr(edit._editor, "delete_rosbag_episodes", slow_delete)
-    monkeypatch.setattr(recording, "_dispatch_command", dispatch)
+    monkeypatch.setattr(recording, "_dispatch", dispatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         deletion = pool.submit(edit._callback, request, SimpleNamespace())
         try:
@@ -778,7 +1004,7 @@ def test_delete_does_not_starve_recording_command_response(tmp_path, monkeypatch
         delete_started.set()
         return edit._callback(request, SimpleNamespace())
 
-    monkeypatch.setattr(recording, "_dispatch_command", dispatch)
+    monkeypatch.setattr(recording, "_dispatch", dispatch)
     # Model a two-thread ROS executor: command, edit, then rosbag response.
     with ThreadPoolExecutor(max_workers=2) as pool:
         command = pool.submit(recording._callback, None, None)

@@ -66,25 +66,18 @@ class CameraFeatureSourceMappingTest(unittest.TestCase):
             },
         )
 
-    def test_maps_legacy_single_head_camera_to_left_head_source(self):
+    def test_maps_legacy_camera_keys_without_cam_prefix(self):
         self.assertEqual(
             resolve_camera_feature_sources(
                 [
-                    "cam_head",
-                    "cam_wrist_left",
-                    "cam_wrist_right",
+                    "observation.images.head_left",
+                    "observation.images.wrist_right",
                 ],
-                [
-                    "cam_left_head",
-                    "cam_right_head",
-                    "cam_left_wrist",
-                    "cam_right_wrist",
-                ],
+                ["cam_left_head", "cam_right_wrist"],
             ),
             {
-                "cam_head": "cam_left_head",
-                "cam_wrist_left": "cam_left_wrist",
-                "cam_wrist_right": "cam_right_wrist",
+                "observation.images.head_left": "cam_left_head",
+                "observation.images.wrist_right": "cam_right_wrist",
             },
         )
 

@@ -19,10 +19,24 @@
 from __future__ import annotations
 
 import collections
+from dataclasses import dataclass
 import threading
 from typing import Dict, List, Optional
 
 import numpy as np
+
+
+def validate_action_steps(value):
+    """Zero means all; this is a waypoint limit, not a resampling length."""
+    if type(value) is not int or not 0 <= value <= 2147483647:
+        raise ValueError("action_steps must be a non-negative int32 (0 means all)")
+    return value
+
+
+@dataclass(frozen=True)
+class PreparedChunk:
+    actions: np.ndarray
+    source_start: int
 
 
 class ActionChunkProcessor:
@@ -78,29 +92,16 @@ class ActionChunkProcessor:
         chunk: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        action_steps: int = 0,
     ) -> int:
         if chunk.ndim != 2:
             raise ValueError(f"chunk must be 2D (T, D); got shape {chunk.shape}")
 
         with self._lock:
             anchor = self._alignment_anchor()
-            if not self._postprocess:
-                for action in chunk:
-                    self._buffer.append(np.asarray(action).copy())
-                if len(chunk) > 0:
-                    self._last_action = np.asarray(chunk[-1]).copy()
-                return len(chunk)
-
-            aligned = (
-                self._align(chunk, anchor, scheduled_start_delay_s)
-                if align
-                else chunk
-            )
-            if len(aligned) == 0:
-                return 0
-
-            interpolated = self._interpolate(aligned)
-            blended = self._blend(interpolated, anchor)
+            blended = self.prepare_chunk(
+                chunk, anchor, scheduled_start_delay_s, align, action_steps,
+            ).actions
 
             for action in blended:
                 self._buffer.append(action)
@@ -109,13 +110,53 @@ class ActionChunkProcessor:
                 self._last_action = blended[-1].copy()
             return len(blended)
 
+    def prepare_chunk(
+        self,
+        chunk: np.ndarray,
+        anchor: Optional[np.ndarray] = None,
+        scheduled_start_delay_s: Optional[float] = None,
+        align: bool = True,
+        action_steps: int = 0,
+    ) -> PreparedChunk:
+        """Pure numerical pipeline shared by legacy and traced execution buffers.
+
+        source_start records the actual alignment decision, not an estimate
+        reconstructed from the number of interpolated commands.
+        """
+        if chunk.ndim != 2:
+            raise ValueError(f"chunk must be 2D (T, D); got shape {chunk.shape}")
+        validate_action_steps(action_steps)
+        if not self._postprocess:
+            return PreparedChunk(chunk[:action_steps or None].copy(), 0)
+        start = self._alignment_start(chunk, anchor, scheduled_start_delay_s) if align else 0
+        aligned = chunk[start:start + action_steps] if action_steps else chunk[start:]
+        if len(aligned) == 0:
+            return PreparedChunk(aligned.copy(), start)
+        return PreparedChunk(self._blend(self._interpolate(aligned), anchor), start)
+
+    def source_positions(self, source_count: int) -> np.ndarray:
+        """Fractional source indices on the exact interpolation grid, pre-blend."""
+        positions = np.arange(source_count, dtype=np.float64).reshape(-1, 1)
+        if not self._postprocess or source_count == 0:
+            return positions[:, 0]
+        return self._interpolate(positions)[:, 0]
+
+    def blend_weights(self, count: int, has_anchor: bool) -> np.ndarray:
+        """Weight of the incoming trajectory; the remainder belongs to anchor."""
+        weights = np.ones(count)
+        if self._postprocess and has_anchor:
+            n_blend = min(self._blend_steps, count)
+            weights[:n_blend] = np.arange(1, n_blend + 1) / (n_blend + 1)
+        return weights
+
     def push_actions(
         self,
         actions: np.ndarray,
         scheduled_start_delay_s: Optional[float] = None,
         align: bool = True,
+        action_steps: int = 0,
     ) -> int:
-        return self.push_chunk(actions, scheduled_start_delay_s, align=align)
+        return self.push_chunk(actions, scheduled_start_delay_s, align=align, action_steps=action_steps)
 
     def pop_action(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -146,11 +187,14 @@ class ActionChunkProcessor:
         anchor: Optional[np.ndarray],
         scheduled_start_delay_s: Optional[float],
     ) -> np.ndarray:
+        return chunk[self._alignment_start(chunk, anchor, scheduled_start_delay_s):]
+
+    def _alignment_start(self, chunk, anchor, scheduled_start_delay_s) -> int:
         if self._alignment_mode == "none":
-            return chunk
+            return 0
         if self._alignment_mode == "rtc":
-            return self._rtc_align(chunk)
-        return self._l2_align(chunk, anchor, scheduled_start_delay_s)
+            raise NotImplementedError("RTC alignment is not implemented yet")
+        return self._l2_start_index(chunk, anchor, scheduled_start_delay_s)
 
     def _l2_align(
         self,
@@ -158,8 +202,11 @@ class ActionChunkProcessor:
         anchor: Optional[np.ndarray],
         scheduled_start_delay_s: Optional[float],
     ) -> np.ndarray:
+        return chunk[self._l2_start_index(chunk, anchor, scheduled_start_delay_s):]
+
+    def _l2_start_index(self, chunk, anchor, scheduled_start_delay_s) -> int:
         if anchor is None or len(chunk) <= 1:
-            return chunk
+            return 0
         window_n = int(round(self._chunk_align_window_s * self._inference_hz))
         window_n = max(1, window_n)
         if scheduled_start_delay_s is None:
@@ -185,9 +232,9 @@ class ActionChunkProcessor:
         start_idx = best_idx + 1
         if start_idx >= len(chunk):
             if late_fallback:
-                return chunk
-            return chunk[:0]
-        return chunk[start_idx:]
+                return 0
+            return len(chunk)
+        return start_idx
 
     def _rtc_align(self, chunk: np.ndarray) -> np.ndarray:
         raise NotImplementedError("RTC alignment is not implemented yet")
@@ -197,7 +244,7 @@ class ActionChunkProcessor:
         if self._target_chunk_size is not None:
             target = int(self._target_chunk_size)
             if T == target:
-                return chunk
+                return chunk.copy()
             if T == 1:
                 return np.repeat(chunk, target, axis=0)
             t_original = np.linspace(0.0, 1.0, T)
@@ -207,7 +254,7 @@ class ActionChunkProcessor:
                 out[:, d] = np.interp(t_interp, t_original, chunk[:, d])
             return out
         if T < 2:
-            return chunk
+            return chunk.copy()
         t_original = np.arange(T) / self._inference_hz
         duration = (T - 1) / self._inference_hz
         # Publish one command per control tick over the source trajectory

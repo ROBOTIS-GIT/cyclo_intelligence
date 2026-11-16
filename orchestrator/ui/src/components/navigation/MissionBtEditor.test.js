@@ -17,7 +17,7 @@
 import {
   act,
   fireEvent,
-  render,
+  render as renderComponent,
   screen,
   waitFor,
   within,
@@ -25,6 +25,18 @@ import {
 import MissionBtEditor, {
   isValidBtConnection,
 } from "./MissionBtEditor";
+import { PolicyCatalogProvider } from "../../contexts/PolicyCatalogContext";
+import { testPolicyCatalog } from "../../testUtils/policyCatalog";
+
+function render(component) {
+  return renderComponent(component, {
+    wrapper: ({ children }) => (
+      <PolicyCatalogProvider initialCatalog={testPolicyCatalog}>
+        {children}
+      </PolicyCatalogProvider>
+    ),
+  });
+}
 
 jest.mock("../../hooks/useBTNodeCatalog", () => ({
   useBTNodeCatalog: () => ({ catalog: [] }),

@@ -8,3 +8,4 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.29,<1.0
 pydantic>=2.6,<3.0
 docker>=6.0,<8.0
+PyYAML>=6.0,<7.0

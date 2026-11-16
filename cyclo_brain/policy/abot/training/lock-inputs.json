@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": {
+    "requirements.in": "fb535a88fb18303a78442facb33adf50af42bd73f1a20540cb0acb6f2df193f3",
+    "requirements.lock": "560a869ab6a158122bad9342f6d54ac41f74015f7ca1853a2c781af235fa785b",
+    "../requirements-inference.txt": "0656db9615bf6de4c1252a855e5d629062740485d86c24af877aedb9c03d5573"
+  }
+}

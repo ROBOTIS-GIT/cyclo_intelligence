@@ -1,190 +1,399 @@
-# LeRobot Integration for Cyclo Intelligence
+# LeRobot Worker
 
-## Overview
+This directory provides the LeRobot Engine-only Worker used by Cyclo.
+Training remains available through the LeRobot CLI, while inference lifecycle,
+action processing, safety, and robot command publication are owned by the
+central Policy Runtime in `cyclo_intelligence`.
 
-LeRobot integration for Cyclo Intelligence. This folder contains the executor and Docker configuration for running LeRobot training and inference via Zenoh communication.
+## Layout
 
-## Folder Structure
-
+```text
+policy/lerobot/
+├── manifest.yaml              # policies and runtime capabilities
+├── lerobot/                   # ROBOTIS LeRobot fork submodule
+├── lerobot_engine/            # InferenceEngine adapter
+├── dependency_profile/        # Cyclo-owned image dependency selection
+├── configs/inference_inputs/ # user settings for additional preprocessing only
+├── Dockerfile.amd64
+├── Dockerfile.arm64
+└── tests/
 ```
-cyclo_brain/policy/lerobot/
-├── lerobot/                 # LeRobot repository (git submodule)
-│   └── (HuggingFace LeRobot source code)
-├── executor.py              # Zenoh communication + train/infer execution
-├── Dockerfile               # Container build file
-├── entrypoint.sh            # Container entrypoint
-├── workspace/               # Dataset/Model/Results (gitignore)
-├── test_executor.py         # Unit tests
-├── README.md                # This document
-└── INTEGRATION_REPORT.md    # Integration detail report
-```
 
-## Prerequisites
+The container starts only the `engine-process` s6 service. It hosts
+`/lerobot/engine_command`, publishes `/lerobot/worker_heartbeat`, subscribes
+to the observations required by the selected checkpoint, and returns action
+chunks. It does not own `ControlLoop` and does not publish robot commands.
 
-- Docker with NVIDIA GPU support
-- NVIDIA GPU (CUDA 12.1+)
-- Cyclo Intelligence repository
+## Build And Start
 
-## Quick Start
-
-### 1. Clone LeRobot (if not already done)
+From the repository root:
 
 ```bash
-cd cyclo_intelligence/cyclo_brain/policy/lerobot
-git clone https://github.com/huggingface/lerobot.git lerobot
+./docker/container.sh start-policy lerobot --build
+./docker/container.sh enter-policy lerobot
 ```
 
-### 2. Build Docker Image
+The compatibility commands remain available:
 
 ```bash
-cd cyclo_intelligence
-docker compose -f docker/docker-compose.yml build lerobot
+./docker/container.sh start-lerobot --build
+./docker/container.sh enter-lerobot
 ```
 
-### 3. Download Test Dataset
+Compose mounts Cyclo's adapter, common runtime, SDK, and configuration sources
+from this checkout. After the initial container recreation, Python edits require
+a Worker process restart, not an image rebuild. Dependencies and the upstream
+LeRobot installation remain image-owned; use `--build` when those change.
+See [source-mounted containers](../../../docker/README.md) for application steps.
+
+`dependency_profile/dependencies.toml` is Cyclo's source of truth for the model-to-extra
+mapping and installation profiles. LeRobot's `pyproject.toml` still owns the
+dependencies of each extra. `dependency_profile/install.py` checks that every selected
+extra exists in the pinned LeRobot checkout before installing anything. It
+prints the profile, `pyproject.toml`, and `uv.lock` SHA-256 hashes for build
+provenance. The amd64 image uses `uv sync --locked`; the Jetson arm64 image
+uses pip to retain the base image's platform-specific CUDA PyTorch build.
+`container.sh start-lerobot --build` passes the selected profile and lockfile
+hashes to Docker, where the copied files are checked before installation. The
+image labels record both source commits, clean/dirty flags, and those hashes.
+Direct `docker build` without these arguments leaves the provenance labels
+unrecorded; it does not establish a reproducible build. The arm64 pip install
+checks lockfile identity but does not install locked package versions.
+
+For an external training build, assemble `lerobot/` from the submodule commit
+of a pinned Cyclo checkout and copy this `dependency_profile/` directory into the context.
+Then replace the training Dockerfile's per-model extra list with:
 
 ```bash
-# Create workspace directory
-mkdir -p cyclo_brain/policy/lerobot/workspace
-
-# Download lerobot/pusht dataset
-huggingface-cli download lerobot/pusht \
-  --local-dir cyclo_brain/policy/lerobot/workspace/lerobot/pusht \
-  --repo-type dataset
+python3 /opt/cyclo-lerobot-profile/install.py \
+  --profile training-image --project /lerobot --manager uv
 ```
 
-### 4. Run Container
+The `training-image` profile selects packages only. It does not assert that
+`cyclo_bench` has a working training adapter or tested training path for every
+listed model. Run creation must check those capabilities separately. Before a
+run, record the Cyclo and LeRobot commits, these file hashes, and the final
+image ID (plus registry digest if published). Reject an uncommitted source
+checkout or record its diff hash. Multi-Task DiT is not selected by either
+profile.
+
+## Models And Data
+
+The shared host directory `docker/workspace` is mounted at `/workspace`.
+LeRobot checkpoints are selected under `/workspace/model/lerobot`. The list of
+policies shown by Cyclo comes from `manifest.yaml`; the Worker `DESCRIBE`
+response must match that manifest before LOAD is accepted.
+
+Inference is called externally through `/policy/inference_command` with a
+namespaced policy ID such as `lerobot:act`. `/lerobot/inference_command` is a
+temporary compatibility alias hosted by the central Runtime, not by this
+Worker.
+
+## ROS And Zenoh
+
+Edit the Cyclo block near the top of the Worker's `/root/.bashrc`, then restart
+the container so s6 starts `engine-process` with the new settings:
 
 ```bash
-docker compose -f docker/docker-compose.yml up lerobot
+export ROS_DOMAIN_ID=30
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 ```
 
-## Architecture
+For a remote router, use the commented client endpoint example already present
+in the image bashrc. `docker restart` preserves a container-local edit;
+recreate/update resets it to the image default.
 
-```
-Cyclo Intelligence Web UI (React UI)
-        │
-        ▼ WebSocket (7090)
-Cyclo Intelligence Orchestrator (ROS2 + rmw_zenoh_cpp)
-        │
-        ▼ Zenoh Protocol (7447)
-LeRobot Executor (Docker Container)
-        │
-        ▼
-LeRobot Training/Inference APIs
-```
+## Training
 
-## Supported Policies
-
-| Policy | Category | Description |
-|--------|----------|-------------|
-| act | Imitation Learning | Action Chunking Transformer |
-| diffusion | Imitation Learning | Diffusion Policy |
-| vqbet | Imitation Learning | VQ-BeT |
-| tdmpc | RL | TD-MPC |
-| pi0 | VLA | Physical Intelligence VLA |
-| pi0_fast | VLA | Optimized Pi0 |
-| smolvla | VLA | SmolVLA |
-| sac | RL | Soft Actor-Critic |
-
-## ROS2 Services (via Zenoh)
-
-| Service | Description |
-|---------|-------------|
-| /lerobot/train | Start training |
-| /lerobot/infer | Start inference |
-| /lerobot/stop | Stop current task |
-| /lerobot/status | Get status |
-| /lerobot/policy_list | List available policies |
-| /lerobot/checkpoint_list | List checkpoints |
-| /lerobot/model_list | List cached models |
-
-## ROS2 Topics (via Zenoh)
-
-| Topic | Direction | Description |
-|-------|-----------|-------------|
-| /lerobot/progress | Published | Training metrics (step, loss, epoch) |
-| /lerobot/action | Published | Inference action outputs |
-
-## Docker Configuration
-
-### Volume Mappings
-
-| Host Path | Container Path | Purpose |
-|-----------|----------------|---------|
-| cyclo_brain/policy/lerobot/workspace | /workspace | Dataset/Model storage |
-| cyclo_brain/sdk/zenoh_ros2_sdk | /zenoh_sdk | Zenoh SDK |
-
-### Environment Variables
-
-| Variable | Value | Description |
-|----------|-------|-------------|
-| RMW_IMPLEMENTATION | rmw_zenoh_cpp | ROS2 Zenoh middleware |
-| ROS_DOMAIN_ID | 30 | ROS2 domain |
-| ZENOH_CONFIG_OVERRIDE | local shared-memory default or remote router example in `/root/.bashrc` | Zenoh client configuration |
-
-At runtime, `lerobot_server` sources `/root/.bashrc` before starting
-`main-runtime` and `engine-process`. Enter the container, edit the Cyclo
-ROS/Zenoh block near the top of `/root/.bashrc`, and choose either the local
-`ZENOH_CONFIG_OVERRIDE` line or the commented remote router example. Then restart
-`lerobot_server`. `docker restart` preserves the edit;
-recreating or updating the container resets `/root/.bashrc` to the image
-default.
-
-## Testing
-
-### Unit Tests
+Enter the Worker and use the version-pinned LeRobot CLI. For example:
 
 ```bash
-cd cyclo_intelligence/cyclo_brain/policy/lerobot
-python -m pytest test_executor.py -v
+lerobot-train \
+  --dataset.repo_id=<dataset_repo_id> \
+  --dataset.root=/workspace/lerobot/<dataset_folder> \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --output_dir=/workspace/model/lerobot/<output_folder>
 ```
 
-### Integration Test
+Training output placed below `/workspace/model/lerobot` is immediately visible
+to the Cyclo model browser.
+
+## State And Action Channels
+
+The optional `cyclo_channels` training adapter selects actual dataset channels
+and exports `cyclo_io_mapping.json` beside each checkpoint's `config.json`,
+including intermediate checkpoints and Hub uploads. Without the adapter,
+training remains unchanged. The mapping records the ordered external channels:
+
+```json
+{
+  "version": 1,
+  "state_names": ["joint_a", "joint_b", "head_joint"],
+  "action_names": ["joint_b", "joint_a"],
+  "dataset": {"repo_id": "owner/dataset", "revision": null}
+}
+```
+
+Names must match the robot configuration's joint names (or velocity channels
+such as `linear_x`, `linear_y`, `angular_z`). Input and output lists are
+independent. Cyclo selects state before normalization, then rearranges actions
+after the saved postprocessor into command-group order. Camera and temporal
+preprocessing remain in the existing YAML; channel lists are not duplicated there.
+Name matching does not convert units, coordinate frames, or action representations.
+
+Complete omitted command groups receive no inference commands, including during
+Slow Start and inference Stop. Selecting only part of a command group is rejected
+at LOAD. Saved Pose remains a separate feature. Relative-action processors that
+require matching state/action prefixes retain that constraint. Native GR00T
+relative groups are checked against their saved state-group references; EEF or
+additional relative action transforms require a separate contract and are rejected.
+
+Training selection uses a separate YAML with `state_names` and `action_names`:
+each is an ordered list of dataset channel names or `all`. Both are required.
 
 ```bash
-# Start container
-docker compose -f docker/docker-compose.yml up -d lerobot
-
-# Enter container
-docker exec -it lerobot_server bash
-
-# Test import
-python -c "from executor import LeRobotExecutor; print('OK')"
+lerobot-train \
+  --training_adapter.name=cyclo_channels \
+  --training_adapter.config_path=/workspace/channels.yaml \
+  --policy.type=act --dataset.repo_id=owner/dataset \
+  --policy.push_to_hub=false
 ```
 
-## Troubleshooting
+This selects the last tensor axis and corresponding features/statistics without
+rewriting the dataset. Names are mandatory; invalid or contradictory metadata
+fails before model construction. The resolved selection is saved for portable
+resume even without the original YAML. Changed selections cannot resume a run.
+The former `io_mapping_path` label-only option is not a selection option and is
+no longer supported. See [Training Extension](extensions/README.md) for installation,
+supported paths, resume commands and migration details.
 
-### GPU not detected
+Existing or externally trained models do not require retraining. Generate a
+draft from the dataset actually used for training:
 
 ```bash
-# Check NVIDIA driver
-nvidia-smi
-
-# Check Docker GPU support
-docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
+cyclo-io-mapping \
+  --checkpoint /workspace/model/lerobot/owner/model \
+  --dataset-info /workspace/lerobot/owner/dataset/meta/info.json
 ```
 
-### Zenoh connection failed
+Check the actual training selection/order, then repeat with `--write` to add the
+file. Use `--mapping /path/to/verified.json` instead of `--dataset-info` when
+training changed the dataset layout. Existing files are never overwritten.
+The tool does not modify weights, processor statistics, or model configuration.
+
+Without this file, only exact state/action dimension matches are accepted using
+legacy robot order, with a warning; equal sizes alone do not prove semantic
+compatibility. There is no implicit truncation or zero-padding. Invalid mapping
+files never fall back to legacy mode. Clear and LOAD reload the mapping even
+when weights are cached. Install the updated LeRobot generic hooks and external
+`cyclo-lerobot-io` package together. Rebuild the LeRobot image once for these
+installation changes; subsequent extension edits use the read-only source mount.
+
+## Inference Inputs And Camera Preprocessing
+
+Edit `cyclo_brain/policy/lerobot/configs/inference_inputs/<policy_type>.yaml`.
+The type comes from the checkpoint's `config.json`, not the UI label. Compose
+mounts this directory read-only at `/app/configs/inference_inputs`; standalone
+images contain the same defaults. No additional file is required in model folders.
+
+The YAML declares only additional Cyclo preprocessing. With no extra transforms:
+
+```yaml
+preprocessing: identity
+```
+
+Input keys, tensor packaging, processor stages and the internal graph are owned
+by Python, not user YAML. See the [configuration guide](configs/inference_inputs/README.md)
+for ordered transforms, camera overrides and registered custom handlers.
+The [developer guide](../../docs/inference_input_design.md) covers temporal inputs,
+execution feedback and memory contracts inside those handlers.
+
+Default processing order (adapter-owned):
+
+```text
+RGB camera -> rotation -> spatial/tensor conversion -> device placement
+-> saved LeRobot preprocessor -> after graph -> original policy
+-> saved postprocessor -> optional result graph
+```
+
+`identity` skips additional Cyclo preprocessing. Robot-config rotation and basic
+conversion to batched RGB float32 CHW remain part of the adapter. Model-internal transforms
+are never disabled or rewritten. Checkpoint dimensions alone do not describe
+the interpolation/crop used to create the training dataset.
+
+| YAML | Shipped Cyclo operation | Basis / limitation |
+| --- | --- | --- |
+| ACT | identity | Separate camera backbones; external training transforms must be configured explicitly. |
+| SmolVLA, Pi0, Pi0.5 | identity | Preserve native aspect ratio for policy-owned resize/padding. |
+| XVLA | identity | Training and inference share internal resize + padding when checkpoint `resize_imgs_with_padding` is set. With `None`, both require equal camera sizes before stacking; reproduce any external training transform in YAML. |
+| MolmoAct2 | identity | Retain the checkpoint image processor. |
+| FastWAM | identity | Retain internal per-view resize/concatenation. |
+| Diffusion | OpenCV uint8 bilinear to each checkpoint feature size | Preserves previous Cyclo behavior to align cameras before stacking. This is NOT a verified training interpolation default. |
+| VLA-JEPA | identity | Standard training has no external area resize. Saved processor/model transforms, including an explicitly configured inference resize_images_to, remain active. |
+
+Only if a VLA-JEPA checkpoint was trained with an additional Torch area
+resize to 224x224, declare a resize under `preprocessing.images` with
+`size: [224, 224]`, `interpolation: area`, and `backend: torch`.
+That is a checkpoint-specific training recipe, not the shipped default.
+
+To reproduce a training pipeline that used Torch bilinear antialiased resize:
+
+```yaml
+preprocessing:
+  images:
+    - resize:
+        size: [224, 224] # [height, width], NOT OpenCV's (width, height)
+        backend: torch
+        interpolation: bilinear
+        antialias: true
+```
+
+Use `images: identity` (or `[]`) for no spatial transforms. Supported list operations
+are `resize`, `center_crop`, and `letterbox`.
+Operations execute in list order. `size: checkpoint` explicitly selects each
+camera's input-feature height/width instead of a literal size. It does not infer
+an interpolation method. Resize/letterbox require `interpolation` (`nearest`,
+`bilinear`, `bicubic`, or `area`). Torch bilinear/bicubic use
+`align_corners=False`; `antialias` defaults to false and is a Torch-only option.
+
+OpenCV operates on RGB uint8. Torch operates on float32 / 255. The adapter makes
+that conversion once, before the first Torch operation (or at the end of an
+OpenCV-only sequence). Torch followed by OpenCV is rejected, not silently
+quantized or reordered. No tensor or graph wiring needs to be edited in YAML.
+
+`center_crop` rejects targets larger than the input and rounds the half-offsets
+like torchvision CenterCrop. `letterbox` fits with `min(target_h/h, target_w/w)`, rounds the resized
+dimensions, and pads using `placement: center` (default) or `top_left` (image
+anchored top-left, padding on bottom/right). `fill` is an integer RGB gray level
+from 0 to 255, default 0. This optional Cyclo operation is NOT a replacement
+for policy-specific padding implementations.
+
+Optional camera overrides use exact checkpoint keys and REPLACE the default
+operations for that camera:
+
+```yaml
+preprocessing:
+  cameras:
+    observation.images.rgb.cam_left_wrist:
+      - center_crop:
+          size: [200, 200]
+          backend: torch
+      - resize:
+          size: [224, 224]
+          backend: torch
+          interpolation: area
+```
+
+One file applies to all checkpoints of that policy type. If their training
+recipes differ, update the YAML before loading each checkpoint. Unknown keys,
+missing files, invalid sizes/options, and duplicate YAML keys fail LOAD rather
+than silently choosing a transform. The selected configuration path is logged on LOAD.
+
+After initially building/recreating the LeRobot Worker with these changes,
+YAML-only edits require **Clear/UNLOAD then LOAD**, not an image rebuild. Edits
+do not affect a running session; START/RESUME alone does not reload YAML. Even
+a cached-model LOAD reads a new snapshot. The original checkpoint files are
+never modified. The Worker adapter is now source-mounted as well, but running
+Python processes still need a restart after code edits.
+Apply the source-mounted Cyclo image layout once so Supervisor reads this
+checkout's Compose definition. Supervisor checks source/config mount paths as
+well as their destinations, so a Worker using another checkout is marked stale.
+Editing files inside a correctly mounted directory does not require recreation.
+
+Compare the SAME decoded RGB frame through training and inference transforms,
+including rotation, dtype conversion, interpolation, antialias, padding/crop,
+and the saved processor/model. Equal shapes alone are not a parity test.
+External training hooks are not automatically serialized into saved processors.
+Image sizing and temporal history are separate: matching image sizes does not
+fix an `n_obs_steps` mismatch. See the online Diffusion adapter below.
+
+## Additional Policies
+
+### Diffusion Online Execution
+
+Diffusion uses the publication-paced public-step infrastructure.
+Each request supplies one current observation to the saved
+processor and `select_action()`. LeRobot owns both its `n_obs_steps` observation
+queue and its `n_action_steps` action queue; it calls the neural model only when
+the latter is empty. Cyclo does not populate private model queues or duplicate
+them in a callback history buffer. Initial observation repetition is LeRobot's
+documented bootstrap, not fabricated robot reception by Cyclo.
+
+This replaces the broken latest-only `predict_action_chunk()` call, which lacked
+the temporal state axis. It does not alter ACT or other existing chunk adapters.
+Diffusion now bypasses Cyclo chunk interpolation/alignment and async prefetch.
+Use the training FPS for Dataset FPS; it sets a minimum step period, not a
+guarantee that network, camera and inference latency achieve that frequency.
+Only successfully published steps advance the model. Preview-only is unsupported;
+a simulator receiving real command topics is supported by the publication contract.
+Stop/reset and cached LOAD clear the policy queues without reloading weights.
+
+Saved processors still run before/after the public model API. Mixed camera sizes
+are checked after preprocessing and before the policy stacks images. Enabled
+LeRobot relative-action processors are rejected at LOAD: reanchoring cached
+actions against every new observation is not a valid chunk-relative execution
+contract. Do not remove a training transform to bypass that error.
+
+See [input design decision](../../docs/inference_input_design.md) for the choice
+between policy-owned queues, explicit temporal input plans and execution feedback.
+
+### WALL-X And GR00T
+
+WALL-X and GR00T N1.7 (LeRobot) use the same LeRobot
+Worker. Model settings come from the checkpoint, not new UI overrides.
+Their dependency extras are installed on both AMD64 and ARM64; spatial
+preprocessing defaults preserve RGB sizes and leave model-owned transforms active.
+
+`lerobot:groot` loads **LeRobot-format** checkpoints (`config.json` with
+`type: groot`), saved pre/post processors, statistics and the referenced base
+model assets. It is separate from `groot:n17` in `groot_server`, including its
+TensorRT options. The legacy `groot` alias still selects that independent Worker.
+Missing processor files, incompatible embodiment metadata and observation history
+beyond one frame are rejected, not reconstructed using generic defaults. Raw
+NVIDIA checkpoints are not automatically converted to LeRobot checkpoints.
+N1.7 requires equal camera H/W at its pack step, not necessarily at Cyclo input.
+A saved `image_crop_resize_processor` before packing can align different raw
+sizes. Keep `groot.yaml` at identity in that case; the saved processor owns the
+transform. Use YAML only to reproduce training transforms not saved in that
+pipeline. Cyclo does not invent an automatic resize recipe.
+
+WALL-X's pinned core has a fixed 20-dimensional state/action limit. Cyclo checks
+each dimension independently and requires the effective robot layout to match
+the checkpoint. A 22-channel robot can run a mapped 16-channel checkpoint when
+the selected action groups are complete; an actual 22-channel WALL-X input or
+output is still rejected rather than truncated.
+Matching dimensions alone does not prove semantic joint ordering compatibility.
+
+EO1, Evo1 and Pi0-FAST are excluded from Cyclo's inference Catalog and its
+preprocessing presets. Saved selections for these models are unavailable; select
+a supported model and matching checkpoint. Pi0 and Pi0.5 remain supported.
+The pinned upstream repository and existing user checkpoints are unchanged.
+
+New policy integration tests do not prove trained-checkpoint or robot performance.
+No new-model weights are downloaded by the test suite. Real dependency checks
+run separately from mocked Engine tests inside the candidate LeRobot environment:
 
 ```bash
-# Ensure the externally managed Zenoh router is running on the endpoint in ZENOH_CONFIG_OVERRIDE.
-ss -ltnp 'sport = :7447'
+CYCLO_TEST_POLICY_DEPENDENCIES=1 python -m pytest \
+  cyclo_brain/policy/lerobot/tests/test_new_policy_processors.py
 ```
 
-### LeRobot import error
+## Validation
 
 ```bash
-# Check LeRobot is properly cloned
-ls -la cyclo_brain/policy/lerobot/lerobot/
-
-# Ensure PYTHONPATH includes lerobot
-export PYTHONPATH="/app/lerobot:$PYTHONPATH"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  cyclo_brain/policy/lerobot/tests \
+  cyclo_brain/policy/lerobot/lerobot_engine/tests
 ```
+
+Container readiness requires `engine-process` and its ready marker. Cyclo's
+Supervisor additionally verifies fresh heartbeat and a compatible `DESCRIBE`
+response before reporting `Backend ready`.
 
 ## References
 
-- [LeRobot GitHub](https://github.com/huggingface/lerobot)
-- [LeRobot Documentation](https://huggingface.co/lerobot)
-- [Zenoh ROS2 SDK](https://github.com/ROBOTIS-GIT/zenoh_ros2_sdk)
-- [Cyclo Intelligence Workflow](../../ai_system_agents/opensource_integration_workflow/)
+- [LeRobot](https://github.com/huggingface/lerobot)
+- [Cyclo architecture](../../docs/architecture.html)

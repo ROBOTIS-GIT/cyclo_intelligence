@@ -1,0 +1,53 @@
+schema_version = 1
+
+# These are installation profiles, not declarations that a policy can train.
+# cyclo_bench must separately validate its adapter and training path.
+[profiles.inference]
+features = ["training", "hilserl", "async", "peft"]
+
+[profiles.training-image]
+features = ["training", "peft"]
+
+[models.act]
+extra = ""
+profiles = ["inference", "training-image"]
+
+[models.diffusion]
+extra = "diffusion"
+profiles = ["inference", "training-image"]
+
+[models.smolvla]
+extra = "smolvla"
+profiles = ["inference", "training-image"]
+
+[models.xvla]
+extra = "xvla"
+profiles = ["inference", "training-image"]
+
+[models.pi0]
+extra = "pi"
+profiles = ["inference", "training-image"]
+
+[models.pi05]
+extra = "pi"
+profiles = ["inference", "training-image"]
+
+[models.molmoact2]
+extra = "molmoact2"
+profiles = ["inference", "training-image"]
+
+[models.vla_jepa]
+extra = "vla_jepa"
+profiles = ["inference", "training-image"]
+
+[models.fastwam]
+extra = "fastwam"
+profiles = ["inference", "training-image"]
+
+[models.wall_x]
+extra = "wallx"
+profiles = ["inference", "training-image"]
+
+[models.groot]
+extra = "groot"
+profiles = ["inference", "training-image"]
