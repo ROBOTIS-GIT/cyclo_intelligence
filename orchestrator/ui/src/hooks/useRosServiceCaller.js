@@ -121,6 +121,17 @@ export function buildInitialPoseSyncTaskInfo(taskInfo = {}) {
   };
 }
 
+export function buildPolicySelectionTaskInfo(taskInfo = {}) {
+  const parameters = Object.fromEntries(
+    Object.entries(taskInfo.policyParameters || {})
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+  return {
+    policy_id: String(taskInfo.policyId || ''),
+    policy_parameters_json: JSON.stringify(parameters),
+  };
+}
+
 export function useRosServiceCaller() {
   const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -156,7 +167,8 @@ export function useRosServiceCaller() {
   useEffect(() => { pageRef.current = page; }, [page]);
 
   const callService = useCallback(
-    async (serviceName, serviceType, request, timeoutMs = DEFAULT_SERVICE_TIMEOUT_MS) => {
+    async (serviceName, serviceType, request, timeoutMs = DEFAULT_SERVICE_TIMEOUT_MS,
+      cancelOnDisconnect = false) => {
       try {
         console.log(`Attempting to call service: ${serviceName}`);
         const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
@@ -176,8 +188,18 @@ export function useRosServiceCaller() {
             if (settled) return;
             settled = true;
             clearTimeout(serviceTimeout);
+            if (cancelOnDisconnect) {
+              ros.off('close', cancel);
+              ros.off(serviceCallId, onResponse);
+              if (rosConnectionManager.getCurrentConnection() !== ros) {
+                resolve(null);
+                return;
+              }
+            }
             handler();
           };
+          // A cancelled pose command must not trigger Clear on a new session.
+          const cancel = () => finish(() => resolve(null));
 
           // Set a local guard only for finite-timeout calls. Long recording
           // saves pass timeout=0 through rosbridge so the service response can
@@ -188,7 +210,7 @@ export function useRosServiceCaller() {
             }, timeoutMs + 5000);
           }
 
-          ros.once(serviceCallId, (message) => {
+          const onResponse = (message) => {
             if (message.result !== undefined && message.result === false) {
               finish(() => {
                 const error = message.values;
@@ -207,7 +229,9 @@ export function useRosServiceCaller() {
               console.log('Service call successful:', result);
               resolve(result);
             });
-          });
+          };
+          ros.once(serviceCallId, onResponse);
+          if (cancelOnDisconnect) ros.once('close', cancel);
 
           ros.callOnConnection({
             op: 'call_service',
@@ -278,6 +302,9 @@ export function useRosServiceCaller() {
           case 'start_inference_record':
             command_enum = TaskCommand.START_INFERENCE_RECORD;
             break;
+          case 'set_inference_record_folder':
+            command_enum = TaskCommand.SET_INFERENCE_RECORD_FOLDER;
+            break;
           case 'stop_inference_record':
             command_enum = TaskCommand.STOP_INFERENCE_RECORD;
             break;
@@ -313,6 +340,9 @@ export function useRosServiceCaller() {
             break;
           case 'cancel_segment':
             command_enum = TaskCommand.CANCEL_SEGMENT;
+            break;
+          case 'get_inference_status':
+            command_enum = TaskCommand.GET_INFERENCE_STATUS;
             break;
           default:
             throw new Error(`Unknown command: ${command}`);
@@ -370,12 +400,10 @@ export function useRosServiceCaller() {
         const imageResize = options.imageResize || null;
         const inferenceMode = options.inferenceMode || taskInfo.inferenceMode || 'simulation';
         const policyPath = String(taskInfo.policyPath || '').trim();
-        const accelerationMode = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationMode || 'pytorch').trim()
-          : 'pytorch';
-        const accelerationEnginePath = taskInfo.serviceType === 'groot'
-          ? String(taskInfo.accelerationEnginePath || '').trim()
-          : '';
+        const accelerationMode = String(taskInfo.accelerationMode || 'pytorch').trim();
+        const accelerationEnginePath = accelerationMode === 'pytorch'
+          ? ''
+          : String(taskInfo.accelerationEnginePath || '').trim();
         const actionRequestMode = (
           String(taskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
             ? 'sync'
@@ -383,7 +411,9 @@ export function useRosServiceCaller() {
         );
         const request = {
           task_info: {
-            task_num: String(taskInfo.taskNum ?? ''),
+            task_num: command === 'set_inference_record_folder'
+              ? String(options.recordingSessionId ?? '')
+              : String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
             task_type: String(taskType),
             task_instruction: taskInstruction,
@@ -393,6 +423,7 @@ export function useRosServiceCaller() {
             tags: [`inference_mode:${inferenceMode}`],
             control_hz: Number(taskInfo.controlHz || 100),
             inference_hz: Number(taskInfo.inferenceHz || 15),
+            action_steps: Number(taskInfo.actionSteps ?? 0),
             chunk_align_window_s: Number(
               taskInfo.chunkAlignWindowS !== '' && taskInfo.chunkAlignWindowS != null
                 ? taskInfo.chunkAlignWindowS
@@ -404,6 +435,7 @@ export function useRosServiceCaller() {
             action_request_mode: actionRequestMode,
             acceleration_mode: accelerationMode || 'pytorch',
             acceleration_engine_path: accelerationEnginePath,
+            ...buildPolicySelectionTaskInfo(taskInfo),
             ...buildInitialPoseSyncTaskInfo(taskInfo),
           },
           command: Number(command_enum),
@@ -444,6 +476,21 @@ export function useRosServiceCaller() {
       }
     },
     [callService]
+  );
+
+  const sendRobotPoseCommand = useCallback(
+    (command, robotType, durationS = 0) => callService(
+      '/policy/pose_command', 'interfaces/srv/RobotPoseCommand',
+      { command, robot_type: robotType, duration_s: durationS }, 5000, true
+    ), [callService]
+  );
+
+  const getInferenceStatus = useCallback(
+    () => sendRecordCommand('get_inference_status', {
+      autofillEmptyTaskFields: false,
+      serviceTimeoutMs: 4000,
+    }),
+    [sendRecordCommand]
   );
 
   const getImageTopicList = useCallback(async () => {
@@ -1004,6 +1051,8 @@ export function useRosServiceCaller() {
   return {
     callService,
     sendRecordCommand,
+    sendRobotPoseCommand,
+    getInferenceStatus,
     getImageTopicList,
     getRobotInfo,
     getNodeCatalog,

@@ -46,6 +46,7 @@ happens in the background.
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -193,6 +194,20 @@ class TranscodeWorker:
     # Public API
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def edit_task(self, task_dir: Path):
+        """Keep task paths stable until queued/running video jobs have finished."""
+        task_dir = Path(task_dir).resolve()
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("Transcode scheduling in progress; retry shortly")
+        try:
+            if any(Path(path).is_relative_to(task_dir) and not future.done()
+                   for path, future in self._inflight.items()):
+                raise RuntimeError("Wait for video transcoding before editing this task")
+            yield
+        finally:
+            self._lock.release()
+
     def submit(
         self,
         episode_dir: Path,
@@ -205,7 +220,6 @@ class TranscodeWorker:
         # crash-mid-transcode (handled by submit_pending_recovery) and
         # a same-key retry after failure. Both go through submit(), so
         # the worker thread doesn't have to glob on every job.
-        self._cleanup_orphan_tmps(episode_dir)
         key = str(episode_dir)
         with self._lock:
             if self._shutdown:
@@ -217,6 +231,7 @@ class TranscodeWorker:
                 # finished — fall through to re-submit (e.g. retry after
                 # a previous failed status was patched).
                 del self._inflight[key]
+            self._cleanup_orphan_tmps(episode_dir)
             self._ensure_pool()
             future = self._pool.submit(self._run_one, episode_dir)  # type: ignore[union-attr]
             self._inflight[key] = future

@@ -1,0 +1,21 @@
+# The upstream VLA pins remain authoritative for the core stack.
+-r ../lingbot-vla-v2/requirements.txt
+
+# Frozen teacher execution, not MoGe/MDM teacher training or web demos.
+accelerate==1.7.0
+click==8.1.7
+trimesh==4.5.1
+moderngl==5.12.0
+utils3d @ https://github.com/EasternJournalist/utils3d/archive/3fab839f0be9931dac7c8488eb0e1600c236e183.tar.gz
+
+# The upstream script installs numpydantic 1.9 with --no-deps, contradicting
+# NumPy 1.26. Version 1.6.11 supports that NumPy pin; normalization is tested.
+numpydantic==1.6.11
+
+# Dependencies used by the pinned LeRobot dataset source, not its training CLI.
+draccus==0.10.0
+deepdiff==8.6.1
+termcolor==3.1.0
+
+# Build tools are locked too; FlashAttention is a separate hash-pinned source.
+-r requirements-build.in

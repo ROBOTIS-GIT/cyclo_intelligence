@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+import threading
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,15 +20,27 @@ from main_runtime.service_handler import (  # noqa: E402
     CMD_PAUSE,
     CMD_RESUME,
     CMD_START,
+    CMD_STATUS,
     CMD_STOP,
     CMD_UNLOAD,
+    CMD_UPDATE_INSTRUCTION,
     ServiceHandler,
 )
 from main_runtime.session_state import SessionState  # noqa: E402
+from catalog import load_catalog  # noqa: E402
+
+
+POLICY_ROOT = RUNTIME_ROOT.parents[1]
 
 
 class FakeRequester:
+    def __init__(self):
+        self.loaded_with = None
+        self.unload_success = True
+        self.unload_count = 0
+
     def load_policy(self, _request):
+        self.loaded_with = _request
         return SimpleNamespace(
             success=True,
             message="loaded",
@@ -33,28 +48,45 @@ class FakeRequester:
         )
 
     def unload_policy(self):
-        return SimpleNamespace(success=True, message="unloaded")
+        self.unload_count += 1
+        return SimpleNamespace(
+            success=self.unload_success,
+            message="unloaded" if self.unload_success else "worker unload failed",
+        )
 
 
 class FakeControlLoop:
     def __init__(self) -> None:
         self.configures = []
         self.starts = []
+        self.action_step_updates = []
         self.task_instructions = []
         self.start_result = False
         self.start_error = None
+        self.configure_error = None
         self.pause_result = True
         self.stop_result = True
         self.hold_pending = False
+        self.emergency_stop_result = True
+        self.emergency_stop_reasons = []
         self.deconfigure_count = 0
+        self.chunk_size = 0
+
+    def observed_chunk_size(self):
+        return self.chunk_size
 
     def configure(self, **kwargs) -> None:
         self.configures.append(kwargs)
+        if self.configure_error is not None:
+            raise self.configure_error
 
-    def start(self, publish_to_robot=None) -> bool:
+    def start(self, publish_to_robot=None, *, action_steps=None, task_instruction=None) -> bool:
         self.starts.append(publish_to_robot)
+        self.action_step_updates.append(action_steps)
         if self.start_error is not None:
             raise self.start_error
+        if task_instruction is not None:
+            self.set_task_instruction(task_instruction)
         return self.start_result
 
     def set_task_instruction(self, task_instruction: str) -> None:
@@ -69,29 +101,591 @@ class FakeControlLoop:
     def deconfigure(self) -> None:
         self.deconfigure_count += 1
 
+    def configuration_snapshot(self) -> dict:
+        config = self.configures[-1]
+        return {
+            "action_steps": config.get("action_steps", 0),
+            "action_request_mode": config.get("action_request_mode") or "async",
+            "control_hz": int(config.get("control_hz") or 100),
+            "inference_hz": int(config.get("inference_hz") or 15),
+            "chunk_align_window_s": float(
+                config.get("chunk_align_window_s") or 0.3
+            ),
+            "initial_pose_sync": bool(config.get("initial_pose_sync", False)),
+            "initial_pose_sync_duration_s": float(
+                config.get("initial_pose_sync_duration_s") or 5.0
+            ),
+        }
+
     def initial_pose_sync_hold_required(self) -> bool:
         return self.hold_pending
 
+    def emergency_stop(self, reason: str) -> bool:
+        self.emergency_stop_reasons.append(reason)
+        self.hold_pending = not self.emergency_stop_result
+        return self.emergency_stop_result
 
-def make_response(success, message="", action_keys=None):
+
+def make_response(
+    success,
+    message="",
+    action_keys=None,
+    runtime_state="unloaded",
+    loaded_model_path="",
+    loaded_policy_id="",
+    loaded_policy_parameters_json="{}",
+    publish_to_robot=False,
+    loaded_action_request_mode="async",
+    loaded_acceleration_mode="pytorch",
+    loaded_acceleration_engine_path="",
+    loaded_control_hz=0,
+    loaded_inference_hz=0,
+    loaded_chunk_align_window_s=0.0,
+    loaded_action_steps=0,
+    observed_chunk_size=0,
+    loaded_initial_pose_sync=False,
+    loaded_initial_pose_sync_duration_s=5.0,
+    runtime_error="",
+):
     return SimpleNamespace(
         success=success,
         message=message,
         action_keys=list(action_keys or []),
+        runtime_state=runtime_state,
+        loaded_model_path=loaded_model_path,
+        loaded_policy_id=loaded_policy_id,
+        loaded_policy_parameters_json=loaded_policy_parameters_json,
+        publish_to_robot=publish_to_robot,
+        loaded_action_request_mode=loaded_action_request_mode,
+        loaded_acceleration_mode=loaded_acceleration_mode,
+        loaded_acceleration_engine_path=loaded_acceleration_engine_path,
+        loaded_control_hz=loaded_control_hz,
+        loaded_inference_hz=loaded_inference_hz,
+        loaded_chunk_align_window_s=loaded_chunk_align_window_s,
+        loaded_action_steps=loaded_action_steps,
+        observed_chunk_size=observed_chunk_size,
+        loaded_initial_pose_sync=loaded_initial_pose_sync,
+        loaded_initial_pose_sync_duration_s=loaded_initial_pose_sync_duration_s,
+        runtime_error=runtime_error,
     )
 
 
 class ServiceHandlerPublishModeTests(unittest.TestCase):
-    def _handler(self):
+    def test_rejected_instruction_update_preserves_session_and_retry_can_succeed(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        self.assertTrue(handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="test",
+            task_instruction="pick",
+        )).success)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_START)).success)
+        setter = loop.set_task_instruction
+        previous_updates = list(loop.task_instructions)
+
+        def reject(_instruction):
+            raise RuntimeError("stop pose sync before changing a contextual instruction")
+
+        loop.set_task_instruction = reject
+        request = SimpleNamespace(command=CMD_UPDATE_INSTRUCTION, task_instruction="place")
+        for _ in range(3):
+            failed = handler.handle(request)
+            self.assertFalse(failed.success)
+            self.assertIn("stop pose sync", failed.message)
+            self.assertEqual(session.task_instruction, "pick")
+            self.assertEqual(loop.task_instructions, previous_updates)
+        loop.set_task_instruction = setter
+        self.assertTrue(handler.handle(request).success)
+        self.assertEqual(session.task_instruction, "place")
+        self.assertEqual(loop.task_instructions[-1], "place")
+
+    def test_status_reports_observation_without_worker_rpc_or_setting_mutation(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        loaded = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                                robot_type="test", task_instruction="pick", action_steps=2))
+        self.assertTrue(loaded.success, loaded.message)
+        self.assertEqual(loaded.observed_chunk_size, 0)
+        loop.chunk_size = 15
+        status = handler.handle(SimpleNamespace(command=CMD_STATUS))
+        self.assertTrue(status.success, status.message)
+        self.assertEqual(status.observed_chunk_size, 15)
+        self.assertEqual(status.loaded_action_steps, 2)
+        session.mark_unloaded()
+        self.assertEqual(handler.handle(SimpleNamespace(command=CMD_STATUS)).observed_chunk_size, 0)
+
+    def test_action_steps_load_resume_preserve_and_status(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        loaded = handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                                robot_type="test", task_instruction="pick", action_steps=10))
+        self.assertTrue(loaded.success, loaded.message)
+        self.assertEqual(loop.configures[-1]["action_steps"], 10)
+        self.assertEqual(loaded.loaded_action_steps, 10)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_START, action_steps=-1)).success)
+        self.assertIsNone(loop.action_step_updates[-1])
+        handler.handle(SimpleNamespace(command=CMD_PAUSE))
+        resumed = handler.handle(SimpleNamespace(command=CMD_RESUME, task_instruction="pick", action_steps=3))
+        self.assertTrue(resumed.success, resumed.message)
+        self.assertEqual(loop.action_step_updates[-1], 3)
+        self.assertEqual(resumed.loaded_action_steps, 3)
+        handler.handle(SimpleNamespace(command=CMD_PAUSE))
+        loop.start_error = ValueError("rejected limit")
+        failed = handler.handle(SimpleNamespace(command=CMD_RESUME, task_instruction="place", action_steps=4))
+        self.assertFalse(failed.success)
+        self.assertEqual(failed.loaded_action_steps, 3)
+        self.assertEqual(loop.task_instructions[-1], "pick")
+        self.assertEqual(session.task_instruction, "pick")
+
+    def test_shutdown_rejects_lifecycle_requests_and_worker_mutations(self):
+        handler, _, _ = self._handler(backend="lerobot")
+        handler.begin_shutdown()
+        for command in (CMD_LOAD, CMD_START, CMD_RESUME, CMD_UNLOAD):
+            response = handler.handle(SimpleNamespace(command=command))
+            self.assertFalse(response.success)
+            self.assertIn("shutting down", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(handler._requester.unload_count, 0)
+        allowed, reason, token = handler.begin_worker_mutation("lerobot")
+        self.assertFalse(allowed)
+        self.assertIn("shutting down", reason)
+        self.assertEqual(token, "")
+
+    def test_worker_mutation_does_not_wait_for_load(self):
+        handler, _, _ = self._handler(backend="lerobot")
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        result = []
+        original = handler._requester.load_policy
+
+        def slow_load(request):
+            entered.set()
+            release.wait(3)
+            return original(request)
+
+        handler._requester.load_policy = slow_load
+        loader = threading.Thread(target=handler.handle, args=(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="pick",
+        ),))
+
+        def mutate():
+            result.append(handler.begin_worker_mutation("lerobot"))
+            self.assertFalse(handler.can_mutate_worker("lerobot")[0])
+            with self.assertRaisesRegex(RuntimeError, "busy"):
+                handler.runtime_snapshot(blocking=False)
+            finished.set()
+
+        manager = threading.Thread(target=mutate)
+        loader.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            manager.start()
+            self.assertTrue(finished.wait(0.5), "management blocked behind LOAD")
+            self.assertFalse(result[0][0])
+            self.assertEqual(result[0][2], "")
+        finally:
+            release.set()
+            loader.join(3)
+            if manager.ident is not None:
+                manager.join(3)
+        self.assertEqual(handler._worker_mutations, {})
+
+    def test_undelivered_response_does_not_release_another_token(self):
+        handler, _, _ = self._handler()
+        allowed, _, token = handler.begin_worker_mutation("lerobot")
+        self.assertTrue(allowed)
+        handler.release_undelivered_worker_mutation(
+            {"operation": "begin_worker_mutation", "runtime_id": "lerobot"},
+            {"ok": True, "allowed": True, "token": "old-token"},
+        )
+        self.assertFalse(handler.begin_worker_mutation("lerobot")[0])
+        self.assertTrue(handler.end_worker_mutation("lerobot", token))
+
+    def _handler(self, *, catalog=None, backend=""):
         session = SessionState()
         loop = FakeControlLoop()
+        requester = FakeRequester()
         handler = ServiceHandler(
             session,
-            FakeRequester(),
+            requester,
             loop,
             make_response,
+            catalog=catalog,
+            backend=backend,
         )
         return handler, session, loop
+
+    def test_status_reports_complete_session_lifecycle(self) -> None:
+        handler, _session, loop = self._handler()
+
+        unloaded = handler.handle(SimpleNamespace(command=CMD_STATUS))
+        self.assertTrue(unloaded.success)
+        self.assertEqual(unloaded.runtime_state, "unloaded")
+        self.assertEqual(unloaded.loaded_model_path, "")
+
+        loaded = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+            policy_id="lerobot:act",
+            policy_parameters_json="{}",
+            publish_to_robot=True,
+        ))
+        self.assertEqual(loaded.runtime_state, "loaded")
+        self.assertEqual(loaded.loaded_model_path, "/models/policy")
+        self.assertEqual(loaded.loaded_policy_id, "lerobot:act")
+        self.assertTrue(loaded.publish_to_robot)
+        self.assertEqual(loaded.loaded_action_request_mode, "async")
+        self.assertEqual(loaded.loaded_control_hz, 100)
+        self.assertEqual(loaded.loaded_inference_hz, 15)
+        self.assertEqual(loaded.loaded_chunk_align_window_s, 0.3)
+
+        running = handler.handle(SimpleNamespace(
+            command=CMD_START,
+            publish_to_robot=True,
+        ))
+        self.assertEqual(running.runtime_state, "running")
+
+        loop.hold_pending = True
+        syncing = handler.handle(SimpleNamespace(command=CMD_STATUS))
+        self.assertEqual(syncing.runtime_state, "syncing")
+
+        loop.hold_pending = False
+        paused = handler.handle(SimpleNamespace(command=CMD_PAUSE))
+        self.assertEqual(paused.runtime_state, "paused")
+
+        unloaded = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+        self.assertEqual(unloaded.runtime_state, "unloaded")
+        self.assertEqual(unloaded.loaded_model_path, "")
+        self.assertFalse(unloaded.publish_to_robot)
+
+    def test_preparation_is_reported_and_pending_prediction_blocks_unload(self):
+        handler, session, loop = self._handler()
+        handler.handle(SimpleNamespace(command=CMD_LOAD, model_path="/model", robot_type="test",
+                                      task_instruction="pick", publish_to_robot=True))
+        loop.preparing = lambda: True
+        result = handler.handle(SimpleNamespace(command=CMD_START, publish_to_robot=True))
+        self.assertTrue(result.success)
+        self.assertEqual(result.runtime_state, "preparing")
+        self.assertEqual(result.message, "preparing")
+        self.assertEqual(handler.runtime_snapshot()["runtime_state"], "preparing")
+        loop.preparing = lambda: False
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_STOP)).success)
+        loop.prediction_pending = lambda: True
+        response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+        self.assertFalse(response.success)
+        self.assertIn("still finishing", response.message)
+        self.assertTrue(session.loaded)
+        self.assertEqual(loop.deconfigure_count, 0)
+        loop.prediction_pending = lambda: False
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_UNLOAD)).success)
+
+    def test_unload_failure_preserves_loaded_session_and_control_loop(self) -> None:
+        handler, session, loop = self._handler()
+        handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+        handler._requester.unload_success = False
+
+        response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+
+        self.assertFalse(response.success)
+        self.assertEqual(response.runtime_state, "loaded")
+        self.assertTrue(session.loaded)
+        self.assertEqual(session.model_path, "/models/policy")
+        self.assertEqual(loop.deconfigure_count, 0)
+
+    def test_load_configuration_failure_rolls_back_worker_and_session(self) -> None:
+        handler, session, loop = self._handler()
+        loop.configure_error = RuntimeError("robot config unavailable")
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+
+        self.assertFalse(response.success)
+        self.assertIn("robot config unavailable", response.message)
+        self.assertEqual(response.runtime_state, "unloaded")
+        self.assertFalse(session.loaded)
+        self.assertEqual(handler._requester.unload_count, 1)
+        self.assertEqual(loop.deconfigure_count, 1)
+
+    def test_failed_load_rollback_keeps_recoverable_error_session(self) -> None:
+        handler, session, loop = self._handler()
+        loop.configure_error = RuntimeError("robot config unavailable")
+        handler._requester.unload_success = False
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+
+        self.assertFalse(response.success)
+        self.assertEqual(response.runtime_state, "error")
+        self.assertTrue(session.loaded)
+        self.assertIn("worker rollback failed", response.runtime_error)
+
+        handler._requester.unload_success = True
+        recovered = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+        self.assertTrue(recovered.success)
+        self.assertEqual(recovered.runtime_state, "unloaded")
+
+    def test_central_runtime_cleanup_after_load_rollback_is_idempotent(self):
+        handler, session, loop = self._handler(backend="lerobot")
+        requester = handler._requester
+        handler._requester = None
+        handler._active_requester = None
+        handler._worker_registry = SimpleNamespace(requester=lambda *_args: requester)
+        loop.set_requester = lambda _requester: None
+        loop.configure_error = ValueError("preview-only is unsupported")
+        request = SimpleNamespace(command=CMD_LOAD, model_path="/models/policy",
+                                  robot_type="ffw", task_instruction="pick")
+        self.assertFalse(handler.handle(request).success)
+        self.assertFalse(session.loaded)
+        self.assertIsNone(handler._active_requester)
+        self.assertEqual(requester.unload_count, 1)
+        self.assertTrue(handler.handle(SimpleNamespace(command=CMD_STOP)).success)
+        for _ in range(2):
+            response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+            self.assertTrue(response.success, response.message)
+            self.assertEqual(response.runtime_state, "unloaded")
+        self.assertEqual(requester.unload_count, 1)
+        loop.configure_error = None
+        self.assertTrue(handler.handle(request).success)
+
+    def test_absent_requester_cannot_hide_loaded_hold_or_prediction_state(self):
+        for state in ("loaded", "hold", "prediction"):
+            with self.subTest(state=state):
+                handler, session, loop = self._handler()
+                if state == "loaded":
+                    self.assertTrue(handler.handle(SimpleNamespace(
+                        command=CMD_LOAD, model_path="/models/policy",
+                        robot_type="ffw", task_instruction="pick",
+                    )).success)
+                loop.hold_pending = state == "hold"
+                loop.prediction_pending = lambda: state == "prediction"
+                handler._requester = None
+                handler._active_requester = None
+                self.assertFalse(handler.handle(SimpleNamespace(command=CMD_UNLOAD)).success)
+                self.assertEqual(loop.deconfigure_count, 0)
+
+    def test_unload_is_blocked_while_policy_is_running(self) -> None:
+        handler, session, _loop = self._handler()
+        handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+        handler.handle(SimpleNamespace(command=CMD_START, publish_to_robot=False))
+
+        response = handler.handle(SimpleNamespace(command=CMD_UNLOAD))
+
+        self.assertFalse(response.success)
+        self.assertIn("STOP or PAUSE", response.message)
+        self.assertTrue(session.running)
+        self.assertEqual(handler._requester.unload_count, 0)
+
+    def test_load_canonicalizes_policy_selection_before_engine_request(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        handler, _session, _loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+        request = SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+            policy_id="act",
+            policy_parameters_json="",
+        )
+
+        response = handler.handle(request)
+
+        self.assertTrue(response.success)
+        self.assertEqual(request.policy_id, "lerobot:act")
+        self.assertEqual(request.policy_parameters_json, "{}")
+        self.assertIs(handler._requester.loaded_with, request)
+
+    def test_load_rejects_unknown_policy_before_engine_request(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        handler, _session, loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            policy_id="groot:n17",
+            policy_parameters_json="{}",
+        ))
+
+        self.assertFalse(response.success)
+        self.assertIn("belongs to runtime", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_step_count_is_rejected_before_loading_weights(self):
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            policy_id="lerobot:diffusion", policy_parameters_json="{}", action_steps=5,
+        ))
+        self.assertFalse(response.success)
+        self.assertIn("use All", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+        self.assertFalse(session.loaded)
+
+    def test_loaded_contract_must_match_declaration_and_rolls_back(self):
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        # The fake Worker returns legacy chunk metadata for a declared step policy.
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="pick", policy_id="lerobot:diffusion",
+            policy_parameters_json="{}", action_steps=0,
+        ))
+        self.assertFalse(response.success)
+        self.assertIn("does not match", response.message)
+        self.assertEqual(handler._requester.unload_count, 1)
+        self.assertEqual(loop.configures, [])
+        self.assertFalse(session.loaded)
+
+    def test_declared_step_load_with_all_accepts_matching_worker_contract(self):
+        from inference_context.contract import ExecutionContract, LoadedExecution
+        from inference_context.execution import ExecutionContext
+        handler, session, loop = self._handler(catalog=load_catalog(POLICY_ROOT), backend="lerobot")
+        handler._requester.load_policy = lambda request: SimpleNamespace(
+            success=True, message='loaded', action_keys=['arm'],
+            capabilities_json=LoadedExecution(
+                ExecutionContract('step'), ExecutionContext('test', 0, 0, 'ready'),
+            ).to_json(),
+        )
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path='/models/policy', robot_type='ffw',
+            task_instruction='pick', policy_id='lerobot:diffusion',
+            policy_parameters_json='{}', action_steps=0,
+        ))
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(session.loaded)
+        self.assertEqual(loop.configures[-1]['action_steps'], 0)
+
+    def test_undeclared_execution_rejects_numeric_load_without_loading_weights(self):
+        catalog = load_catalog(POLICY_ROOT)
+        for runtime in catalog['runtimes']:
+            for model in runtime['models']:
+                model.pop('execution_mode', None)
+        handler, _, loop = self._handler(catalog=catalog, backend='lerobot')
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path='/models/policy', robot_type='ffw',
+            policy_id='lerobot:act', policy_parameters_json='{}', action_steps=5,
+        ))
+        self.assertFalse(response.success)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_load_rejects_invalid_parameters_before_engine_request(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        handler, _session, loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            policy_id="lerobot:act",
+            policy_parameters_json='{"unknown":true}',
+        ))
+
+        self.assertFalse(response.success)
+        self.assertIn("unknown policy parameters", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_load_rejects_action_mode_not_supported_by_runtime(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        catalog = deepcopy(catalog)
+        lerobot_runtime = next(
+            runtime for runtime in catalog["runtimes"] if runtime["id"] == "lerobot"
+        )
+        lerobot_runtime["capabilities"]["action_request_modes"] = ["sync"]
+        handler, _session, loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            policy_id="lerobot:act",
+            policy_parameters_json="{}",
+            action_request_mode="async",
+        ))
+
+        self.assertFalse(response.success)
+        self.assertIn("does not support action request mode", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_load_rejects_unknown_action_mode_before_engine_request(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        handler, _session, loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+
+        response = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            policy_id="lerobot:act",
+            policy_parameters_json="{}",
+            action_request_mode="rtc",
+        ))
+
+        self.assertFalse(response.success)
+        self.assertIn("unsupported action request mode", response.message)
+        self.assertIsNone(handler._requester.loaded_with)
+        self.assertEqual(loop.configures, [])
+
+    def test_empty_policy_id_uses_checkpoint_metadata_and_warns(self) -> None:
+        catalog = load_catalog(POLICY_ROOT, compose_services={"lerobot", "groot", "rldx", "lingbot_vla", "abot"})
+        handler, _session, _loop = self._handler(
+            catalog=catalog,
+            backend="lerobot",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "config.json").write_text(
+                '{"type":"act"}',
+                encoding="utf-8",
+            )
+            request = SimpleNamespace(
+                command=CMD_LOAD,
+                model_path=temp_dir,
+                robot_type="ffw",
+                task_instruction="",
+                policy_id="",
+                policy_parameters_json="",
+            )
+
+            with self.assertLogs("main_runtime.service_handler", level="WARNING"):
+                response = handler.handle(request)
+
+        self.assertTrue(response.success)
+        self.assertEqual(request.policy_id, "lerobot:act")
 
     def test_load_configures_dry_run_by_default(self) -> None:
         handler, _session, loop = self._handler()
@@ -315,6 +909,46 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertTrue(session.loaded)
         self.assertEqual(loop.deconfigure_count, 0)
+
+    def test_worker_mutation_lease_blocks_load_until_released(self) -> None:
+        handler, _session, _loop = self._handler(backend="lerobot")
+        allowed, _reason, token = handler.begin_worker_mutation("lerobot")
+        self.assertTrue(allowed)
+
+        blocked = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+        self.assertFalse(blocked.success)
+        self.assertIn("being changed", blocked.message)
+
+        self.assertTrue(handler.end_worker_mutation("lerobot", token))
+        loaded = handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+        self.assertTrue(loaded.success)
+
+    def test_fail_safe_records_runtime_error(self) -> None:
+        handler, session, loop = self._handler(backend="lerobot")
+        handler.handle(SimpleNamespace(
+            command=CMD_LOAD,
+            model_path="/models/policy",
+            robot_type="ffw",
+            task_instruction="pick",
+        ))
+
+        self.assertTrue(handler.fail_safe("worker heartbeat stale"))
+        status = handler.handle(SimpleNamespace(command=CMD_STATUS))
+
+        self.assertEqual(status.runtime_state, "error")
+        self.assertEqual(status.runtime_error, "worker heartbeat stale")
+        self.assertEqual(loop.emergency_stop_reasons, ["worker heartbeat stale"])
+        self.assertFalse(session.running)
 
 
 if __name__ == "__main__":

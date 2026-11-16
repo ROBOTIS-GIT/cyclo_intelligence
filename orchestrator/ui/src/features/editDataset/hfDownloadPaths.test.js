@@ -13,6 +13,11 @@ describe('hfDownloadPaths', () => {
     expect(getDefaultDownloadPath('model', 'groot')).toBe(
       DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
     );
+    expect(getDefaultDownloadPath('model', 'rldx')).toBe('/workspace/model/rldx');
+    expect(getDefaultDownloadPath('model', 'lingbot_vla')).toBe('/workspace/model/lingbot_vla');
+    expect(isManagedDownloadPath('/workspace/model/lingbot_vla/owner/checkpoint')).toBe(true);
+    expect(getDefaultDownloadPath('model', 'abot')).toBe('/workspace/model/abot');
+    expect(isManagedDownloadPath('/workspace/model/abot/run')).toBe(true);
   });
 
   test('keeps dataset downloads under the rosbag2 root', () => {
@@ -34,6 +39,9 @@ describe('hfDownloadPaths', () => {
       true
     );
     expect(isManagedDownloadPath(`${DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH}/repo_a/`)).toBe(
+      true
+    );
+    expect(isManagedDownloadPath(`${DEFAULT_PATHS.RLDX_CHECKPOINTS_PATH}/owner/repo/`)).toBe(
       true
     );
     expect(isManagedDownloadPath(' /workspace/model ')).toBe(true);

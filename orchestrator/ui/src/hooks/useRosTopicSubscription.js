@@ -21,8 +21,10 @@ import ROSLIB from 'roslib';
 import { RecordPhase, InferencePhase } from '../constants/taskPhases';
 import {
   receiveServerRecordTaskInfo,
+  receiveServerInferenceTaskInfo,
   setRecordStatus,
   setInferenceStatus,
+  setRobotPoseStatus,
   selectRobotType,
   setHeartbeatStatus,
   setLastHeartbeatTime,
@@ -69,6 +71,9 @@ import {
 export function useRosTopicSubscription() {
   const recordingStatusTopicRef = useRef(null);
   const inferenceStatusTopicRef = useRef(null);
+  const poseStatusTopicRef = useRef(null);
+  const poseStatusExpiryRef = useRef(null);
+  const inferenceStatusExpiryRef = useRef(null);
   const dataStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
@@ -209,7 +214,13 @@ export function useRosTopicSubscription() {
 
     // Unsubscribe from all topics
     unsubscribeFromTopic(recordingStatusTopicRef, 'Recording status');
+    dispatch(setRecordStatus({ topicReceived: false }));
     unsubscribeFromTopic(inferenceStatusTopicRef, 'Inference status');
+    unsubscribeFromTopic(poseStatusTopicRef, 'Saved pose status');
+    clearTimeout(poseStatusExpiryRef.current);
+    dispatch(setRobotPoseStatus({ connected: false, available: false }));
+    clearTimeout(inferenceStatusExpiryRef.current);
+    dispatch(setInferenceStatus({ topicReceived: false, runtimeState: 'unknown' }));
     unsubscribeFromTopic(dataStatusTopicRef, 'Data operation status');
     unsubscribeFromTopic(heartbeatTopicRef, 'Heartbeat');
     unsubscribeFromTopic(trainingStatusTopicRef, 'Training status');
@@ -309,6 +320,7 @@ export function useRosTopicSubscription() {
           dispatch(
             setRecordStatus({
               taskName: msg.task_info?.task_name || 'idle',
+              taskType: msg.task_info?.task_type || '',
               running: isRunning,
               recordPhase: currentPhase || 0,
               progress: Math.round(encodingProgress),
@@ -426,6 +438,26 @@ export function useRosTopicSubscription() {
     }
   }, [dispatch, rosbridgeUrl]);
 
+  const subscribeToPoseStatus = useCallback(async () => {
+    const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
+    if (!ros || poseStatusTopicRef.current) return;
+    poseStatusTopicRef.current = new ROSLIB.Topic({
+      ros, name: '/policy/pose_status', messageType: 'std_msgs/msg/String',
+    });
+    poseStatusTopicRef.current.subscribe((msg) => {
+      try {
+        const status = JSON.parse(msg.data);
+        dispatch(setRobotPoseStatus({ ...status, available: true }));
+        clearTimeout(poseStatusExpiryRef.current);
+        poseStatusExpiryRef.current = setTimeout(() => {
+          dispatch(setRobotPoseStatus({ connected: false, available: false }));
+        }, 2000);
+      } catch (error) {
+        console.warn('Invalid saved-pose status', error);
+      }
+    });
+  }, [dispatch, rosbridgeUrl]);
+
   const subscribeToInferenceStatus = useCallback(async () => {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
@@ -444,6 +476,19 @@ export function useRosTopicSubscription() {
       });
 
       inferenceStatusTopicRef.current.subscribe((msg) => {
+        if (msg.source_id && typeof msg.has_task_info === 'boolean') {
+          dispatch(receiveServerInferenceTaskInfo({
+            sourceId: msg.source_id,
+            revision: Number(msg.task_info_revision || 0),
+            hasTaskInfo: msg.has_task_info,
+            taskInfo: msg.has_task_info ? rosTaskInfoToUiTaskInfo(msg.task_info) : null,
+          }));
+        }
+        clearTimeout(inferenceStatusExpiryRef.current);
+        // Detect a silent publisher without issuing another runtime query.
+        inferenceStatusExpiryRef.current = setTimeout(() => {
+          dispatch(setInferenceStatus({ topicReceived: false, runtimeState: 'unknown' }));
+        }, 8000);
         // Show the toast once when a new error appears, but DO NOT bail out:
         // we still need to dispatch setInferenceStatus below so the phase
         // update (e.g. backend resetting LOADING → READY after a failed
@@ -472,7 +517,15 @@ export function useRosTopicSubscription() {
           setInferenceStatus({
             inferencePhase: msg.inference_phase || 0,
             error: msg.error || '',
-            topicReceived: true,
+            topicReceived: Boolean(msg.status_known),
+            runtimeState: msg.runtime_state || 'unknown',
+            loadedModelPath: msg.model_path || '',
+            loadedPolicyId: msg.policy_id || '',
+            observedChunkSize: Number(msg.observed_chunk_size || 0),
+            recordingSessionId: msg.task_info?.task_num || '',
+            publishToRobot: Boolean(msg.publish_to_robot),
+            sourceId: msg.source_id || '',
+            sequence: Number(msg.sequence || 0),
           })
         );
       });
@@ -803,6 +856,7 @@ export function useRosTopicSubscription() {
     try {
       await subscribeToRecordingStatus();
       await subscribeToInferenceStatus();
+      await subscribeToPoseStatus();
       await subscribeToDataStatus();
       await subscribeToHeartbeat();
       await subscribeToActionEvent();
@@ -819,6 +873,7 @@ export function useRosTopicSubscription() {
     cleanup,
     subscribeToRecordingStatus,
     subscribeToInferenceStatus,
+    subscribeToPoseStatus,
     subscribeToDataStatus,
     subscribeToHeartbeat,
     subscribeToActionEvent,
@@ -854,6 +909,7 @@ export function useRosTopicSubscription() {
     connected,
     subscribeToRecordingStatus,
     subscribeToInferenceStatus,
+    subscribeToPoseStatus,
     cleanup,
     getRecordPhaseName,
     getInferencePhaseName,

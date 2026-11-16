@@ -64,15 +64,28 @@ class InferenceEngine(ABC):
 
         ``request`` carries the InferenceCommand srv body:
         ``request.model_path``, ``request.robot_type``,
-        ``request.task_instruction``.
+        ``request.task_instruction``, ``request.policy_id``, and validated
+        canonical ``request.policy_parameters_json``.
         """
 
     @abstractmethod
     def get_action_chunk(self, request: Any) -> Dict[str, Any]:
         """Build observation from RobotClient, run inference once.
 
-        ``request`` is a ``SimpleNamespace`` with ``.task_instruction``
-        only — model_path / robot_type are baked in by ``load_policy``.
+        ``request`` is a ``SimpleNamespace`` with ``.task_instruction`` and
+        optional ``.execution_context``, plus ``.prediction_id`` supplied by the
+        Worker. This ID associates returned waypoints with later execution facts.
+        Legacy requests have context=None;
+        model_path / robot_type are baked in by ``load_policy``.
+
+        An engine opting into contextual requests must implement
+        ``update_execution_context(context)``. It must reset its temporal/model
+        state when the generation changes, without reloading weights. The
+        Worker rejects contextual LOAD before allocating weights when this
+        hook is absent. Merely accepting extra kwargs is not context support.
+        The hook receives only new terminal events after a lost-ACK replay;
+        planned commands remain a snapshot of the remaining plan. Apply event
+        deltas in the hook, not again on every get_action_chunk call.
         """
 
     @abstractmethod

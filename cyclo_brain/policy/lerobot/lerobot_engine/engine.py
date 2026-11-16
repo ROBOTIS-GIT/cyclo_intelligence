@@ -12,15 +12,14 @@
 
 Implements ``InferenceEngine`` (cyclo_brain.policy.common.runtime.engine)
 on top of upstream LeRobot's pretrained-policy + processor-pipeline
-APIs. Bind-mounted into the policy container as the ``/app/lerobot_engine/``
-package; the common Engine process imports it via
+APIs. Installed into the Worker image as the ``/app/lerobot_engine/`` package;
+the common Engine process imports it via
 ``POLICY_ENGINE_MODULE=lerobot_engine`` (the package's ``__init__.py``
 re-exports ``LeRobotEngine`` + ``create_engine``).
 
 Mirrors groot's ``inference_engine.py`` structure (RobotClient owns
-sensor subscriptions; engine builds observations on demand) so the
-upstream-agnostic two-process runtime can route both backends through
-the same shape.
+sensor subscriptions; engine builds observations on demand) so the central
+Policy Runtime can route both Workers through the same Engine contract.
 
 This file holds the ``LeRobotEngine`` core — ``__init__``, the
 ``InferenceEngine`` API surface (``is_ready``, ``load_policy``,
@@ -29,7 +28,6 @@ module-level ``create_engine()`` factory. The implementation details
 live in three mixin siblings inside the ``lerobot_engine`` sub-package:
 
 - ``loading.LoadingMixin``: policy weights + processor load helpers.
-- ``optimization.OptimizationMixin``: optional backend optimization hook.
 - ``io_mapping.IoMappingMixin``: RobotClient wiring / camera+state map.
 - ``preprocessing.PreprocessingMixin``: RobotClient observation -> model input.
 - ``prediction.PredictionMixin``: model input -> action chunk.
@@ -54,6 +52,7 @@ import logging
 import os
 import sys
 from typing import Any, Dict, List, Optional
+from dataclasses import replace
 
 import numpy as np
 
@@ -80,10 +79,12 @@ from lerobot.policies.pretrained import PreTrainedPolicy  # noqa: E402
 # re-exports LeRobotEngine + create_engine, so relative imports here
 # resolve against /app/lerobot_engine/.
 from .loading import LoadingMixin  # noqa: E402
-from .optimization import OptimizationMixin  # noqa: E402
 from .io_mapping import IoMappingMixin  # noqa: E402
 from .preprocessing import PreprocessingMixin  # noqa: E402
 from .prediction import PredictionMixin  # noqa: E402
+from .input_pipeline import load_input_pipeline, PipelineProcessor  # noqa: E402
+from .policy_validation import validate_requested_policy  # noqa: E402
+from .adapters import resolve_adapter  # noqa: E402
 
 
 logger = logging.getLogger("lerobot_engine")
@@ -91,7 +92,6 @@ logger = logging.getLogger("lerobot_engine")
 
 class LeRobotEngine(
     LoadingMixin,
-    OptimizationMixin,
     IoMappingMixin,
     PreprocessingMixin,
     PredictionMixin,
@@ -115,17 +115,20 @@ class LeRobotEngine(
         self._cameras: Dict[str, str] = {}
         self._state_modalities: List[str] = []
         self._action_keys: List[str] = []
+        self._channel_mapping = None
         self._has_mobile_state: bool = False
         # Cached robot_type for repeated LOAD requests before an explicit
         # UNLOAD. cleanup() must clear this together with the policy cache.
         self._loaded_robot_type: Optional[str] = None
 
-        # Resize targets for input cameras. The preprocessor's stored
-        # ImageProcessorStep handles normalization and CHW reorder; we
-        # only need to pre-resize each camera to the policy feature's
-        # expected size. If config doesn't expose a target shape for a
-        # camera, we leave that image at native resolution.
-        self._image_resize: Dict[str, tuple[int, int]] = {}
+        self._input_pipeline_config = None
+        self._input_evaluation = None
+        self._step_adapter = None
+        self._chunk_predictor = None
+        self._input_plans = {}
+        self._adapter_definition = None
+        self._observation_sessions = {}
+        self._input_context = None
 
     # ------------------------------------------------------------------ #
     # InferenceEngine API
@@ -138,6 +141,7 @@ class LeRobotEngine(
             and self._preprocessor is not None
             and self._postprocessor is not None
             and self._robot is not None
+            and self._input_pipeline_config is not None
         )
 
     def load_policy(self, request: Any) -> Dict[str, Any]:
@@ -149,6 +153,9 @@ class LeRobotEngine(
             # a training-output root containing ``training_state/``
             # alongside (lerobot-train layout).
             model_path = self._resolve_model_dir(model_path)
+            validate_requested_policy(model_path, getattr(request, "policy_id", ""))
+            # Validate before allocating weights, including on cached LOAD.
+            input_pipeline_config = load_input_pipeline(model_path)
 
             # Skip weights load when a second LOAD arrives before UNLOAD and
             # we're just reattaching the robot client for the same model.
@@ -160,6 +167,8 @@ class LeRobotEngine(
                 logger.info("Reusing cached policy: %s", model_path)
                 self._teardown_robot()
             else:
+                # Release the old policy before constructing another large model.
+                self.cleanup()
                 logger.info("Loading LeRobot policy from: %s", model_path)
                 self._device = torch.device(
                     "cuda" if torch.cuda.is_available() else "cpu"
@@ -171,13 +180,43 @@ class LeRobotEngine(
                 self._preprocessor = preprocessor
                 self._postprocessor = postprocessor
                 self._loaded_model_path = model_path
-                self._apply_policy_optimization(model_path, request)
+                self._prepare_policy_predictor(request)
 
+            self._input_pipeline_config = input_pipeline_config
+            self._input_evaluation = None
+            self._input_plans = {}
+            self._adapter_definition = resolve_adapter(self._policy.config.type)
+            contract = self._adapter_definition.contract
+            if getattr(input_pipeline_config, "requires_feedback", False):
+                prerequisite = input_pipeline_config.request_after
+                contract = replace(contract, feedback_schema=2, request_after=prerequisite.event,
+                                   request_after_count=prerequisite.count)
+            self._step_adapter = self._adapter_definition.create_execution_adapter(
+                self._policy, PipelineProcessor(self), self._postprocessor, self._to_numpy_chunk,
+            )
             self._init_robot(robot_type)
             self._loaded_robot_type = robot_type
-            self._image_resize = self._infer_image_resize(self._policy)
-
-            return {
+            if self._robot is not None:
+                self._observation_plan(contract.is_step)
+            has_result_nodes = any(
+                any(node.stage == "result" for node in getattr(plan, "nodes", ()))
+                for plan in self._input_plans.values()
+            )
+            if has_result_nodes and self._step_adapter is not None:
+                observer = getattr(self._step_adapter, "set_result_observer", None)
+                if not callable(observer):
+                    raise ValueError("step adapter does not expose public prediction outputs")
+                observer(self._record_prediction_inputs)
+            self._capture_prediction_inputs = has_result_nodes
+            needs_context = contract.requires_context or any(session.requires_execution_context for session in self._observation_sessions.values())
+            if cache_hit and not (contract.is_step or needs_context):
+                # Contextual policies reset on their initial context; legacy
+                # chunk policies have no such message after a cached LOAD.
+                self._reset_policy_state()
+            warmup = max((session.warmup_timeout_s or 0. for session in self._observation_sessions.values()), default=0.)
+            if warmup:
+                contract = replace(contract, observation_warmup_timeout_s=warmup)
+            result = {
                 "success": True,
                 "message": (
                     "LeRobot inference restarted (policy cached)"
@@ -186,6 +225,13 @@ class LeRobotEngine(
                 ),
                 "action_keys": list(self._action_keys),
             }
+            if contract.is_step or needs_context:
+                counts = [session.pending_command_count for session in self._observation_sessions.values()]
+                if counts and all(count is not None for count in counts):
+                    contract = replace(contract, pending_command_count=max(counts))
+                result["execution_contract"] = contract
+                result["requires_execution_context"] = True
+            return result
         except Exception as e:
             logger.error("load_policy failed: %s", e, exc_info=True)
             self.cleanup()
@@ -195,19 +241,47 @@ class LeRobotEngine(
         if not self.is_ready:
             return self._fail("Not in inference mode")
         try:
-            obs = self._build_observation(getattr(request, "task_instruction", ""))
+            self._observation_wait_s = None
+            pipeline_config = getattr(self, "_input_pipeline_config", None)
+            memory = pipeline_config.memory if getattr(pipeline_config, "requires_feedback", False) else None
+            if memory is not None:
+                memory.begin(request.prediction_id)
+            step = self._step_adapter
+            options = (
+                {"require_received": True, "observation_after_s": step.observation_after_s}
+                if step else {}
+            )
+            with torch.inference_mode():
+                obs = self._build_observation(getattr(request, "task_instruction", ""), **options)
             if "success" in obs:
+                if memory is not None:
+                    memory.fail()
                 return obs
 
             with torch.inference_mode():
-                preprocessed = self._preprocessor(obs)
-                action = self._predict_chunk(preprocessed)
-                action = self._postprocessor(action)
+                if step:
+                    chunk = step.predict(obs, request.prediction_id)
+                    expected_dim = self._policy.config.output_features["action"].shape[0]
+                    if chunk.shape != (1, expected_dim):
+                        raise ValueError(f"step action must have shape (1, {expected_dim}), got {chunk.shape}")
+                else:
+                    preprocessed = PipelineProcessor(self)(obs)
+                    self._validate_camera_shapes(preprocessed)
+                    action = self._predict_chunk(preprocessed)
+                    model_action = action.clone() if getattr(self, "_capture_prediction_inputs", False) else None
+                    action = self._postprocessor(action)
+                    chunk = self._to_numpy_chunk(action)
+                    if model_action is not None:
+                        self._record_prediction_inputs(model_action, action)
+                    chunk = self._channel_mapping.action(chunk)
 
-            chunk = self._to_numpy_chunk(action)
             T, D = chunk.shape
+            if T <= 0 or D <= 0 or not np.isfinite(chunk).all():
+                raise ValueError("model action must be a nonempty finite chunk")
+            if memory is not None:
+                memory.success()
             logger.info("Action chunk: T=%d, D=%d", T, D)
-            return {
+            result = {
                 "success": True,
                 # Keep flat numpy — zenoh_ros2_sdk's publisher uses .view()
                 # for fast CDR encoding and crashes on plain Python lists.
@@ -217,13 +291,70 @@ class LeRobotEngine(
                 "chunk_size": int(T),
                 "action_dim": int(D),
             }
+            if self._observation_wait_s is not None:
+                result["observation_wait_s"] = self._observation_wait_s
+            return result
         except Exception as e:
+            pipeline_config = getattr(self, "_input_pipeline_config", None)
+            if getattr(pipeline_config, "requires_feedback", False):
+                pipeline_config.memory.fail()
             logger.error("get_action_chunk failed: %s", e, exc_info=True)
             return self._fail(str(e))
+
+        finally:
+            self._input_evaluation = None
+
+    def _record_prediction_inputs(self, model_action, postprocessed_action):
+        self._input_evaluation.run("result", {"model_action": model_action,
+                                                "postprocessed_action": postprocessed_action})
+
+    def update_execution_context(self, context):
+        sessions = self._observation_sessions
+        pipeline_config = getattr(self, "_input_pipeline_config", None)
+        contextual_inputs = getattr(pipeline_config, "requires_feedback", False)
+        if self._step_adapter is None and not contextual_inputs and not any(s.requires_execution_context for s in sessions.values()):
+            raise ValueError("this LeRobot policy has no reviewed contextual execution contract")
+        previous = self._input_context
+        reset_inputs = previous is None or (
+            (previous.session_id, previous.generation) != (context.session_id, context.generation)
+            or (previous.phase != context.phase and context.phase in {"paused", "stopped", "error"})
+        )
+        if reset_inputs:
+            self._input_evaluation = None
+            for plan in self._input_plans.values():
+                reset = getattr(plan, "reset", None)
+                if callable(reset):
+                    reset()
+            for session in sessions.values():
+                session.reset()
+            if self._step_adapter is None:
+                self._reset_policy_state()
+        if self._step_adapter is not None:
+            self._step_adapter.update_execution_context(context)
+        if contextual_inputs:
+            pipeline_config.memory.update(context)
+        for session in sessions.values():
+            session.update_execution_context(context)
+        self._input_context = context
+
+    def _reset_policy_state(self) -> None:
+        """Clear public session caches, without reconstructing model weights."""
+        for component in (self._policy, self._preprocessor, self._postprocessor):
+            reset = getattr(component, "reset", None)
+            if callable(reset):
+                reset()
 
     def cleanup(self) -> None:
         """Release robot and policy resources for a true UNLOAD."""
         self._teardown_robot()
+        for plan in self._input_plans.values():
+            close = getattr(plan, "close", None)
+            if callable(close):
+                close()
+        config = getattr(self, "_input_pipeline_config", None)
+        memory = getattr(config, "memory", None)
+        if memory is not None:
+            memory.reset()
 
         had_policy = any(
             obj is not None
@@ -233,12 +364,18 @@ class LeRobotEngine(
             logger.info("Releasing LeRobot policy: %s", self._loaded_model_path)
 
         self._policy = None
+        self._chunk_predictor = None
         self._preprocessor = None
         self._postprocessor = None
         self._device = None
         self._loaded_model_path = None
         self._loaded_robot_type = None
-        self._image_resize = {}
+        self._input_pipeline_config = None
+        self._input_evaluation = None
+        self._step_adapter = None
+        self._input_plans = {}
+        self._adapter_definition = None
+        self._input_context = None
 
         self._cameras = {}
         self._state_modalities = []

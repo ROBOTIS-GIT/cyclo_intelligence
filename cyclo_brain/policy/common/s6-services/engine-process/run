@@ -2,6 +2,8 @@
 # Engine process — policy loading, RobotClient sensor reads, inference.
 
 set -e
+mkdir -p /run/cyclo
+rm -f /run/cyclo/engine-process.ready
 
 exec bash -ic '
 set -e

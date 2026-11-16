@@ -19,11 +19,11 @@
 """
 ContainerServiceClient - Unified ROS2 Service Client for container communication.
 
-Generic client that works with any container (GR00T, LeRobot, etc.)
-by parameterizing the service prefix (e.g., "/groot", "/lerobot").
+Generic client that manages a selected model worker while sending inference
+lifecycle commands to the central Cyclo Policy Runtime.
 
 Supports both inference and training services:
-  - /{prefix}/inference_command (InferenceCommand, Step 4 §10.5)
+  - /policy/inference_command   (central Policy Runtime)
   - /{prefix}/train             (TrainModel)
   - /{prefix}/stop              (StopTraining — training only)
   - /{prefix}/status            (TrainingStatus)
@@ -115,6 +115,15 @@ class ServiceResponse:
         for attr in [
             'job_id', 'state', 'step', 'total_steps', 'loss',
             'learning_rate', 'chunk_size', 'action_dim',
+            'runtime_state', 'loaded_model_path', 'loaded_policy_id',
+            'loaded_policy_parameters_json', 'publish_to_robot',
+            'loaded_action_request_mode', 'loaded_acceleration_mode',
+            'loaded_acceleration_engine_path', 'loaded_control_hz',
+            'loaded_inference_hz', 'loaded_chunk_align_window_s',
+            'loaded_action_steps',
+            'observed_chunk_size',
+            'loaded_initial_pose_sync', 'loaded_initial_pose_sync_duration_s',
+            'runtime_error',
         ]:
             if hasattr(response, attr):
                 data[attr] = getattr(response, attr)
@@ -145,6 +154,7 @@ class ContainerServiceClient:
     CMD_STOP = 4
     CMD_UNLOAD = 5
     CMD_UPDATE_INSTRUCTION = 6
+    CMD_STATUS = 7
 
     def __init__(
         self,
@@ -152,9 +162,13 @@ class ContainerServiceClient:
         service_prefix: str = "/groot",
         timeout_sec: float = 180.0,
         callback_group: Optional[CallbackGroup] = None,
+        command_observer: Optional[Callable[[bool], None]] = None,
+        inference_only: bool = False,
     ):
         self._node = node
         self._service_prefix = service_prefix
+        self._command_observer = command_observer
+        self._inference_only = inference_only
         self.timeout_sec = timeout_sec
         self.load_timeout_sec = _env_float(
             "INFERENCE_LOAD_TIMEOUT_SEC",
@@ -181,7 +195,11 @@ class ContainerServiceClient:
 
     @property
     def service_inference_command(self) -> str:
-        return f"{self._service_prefix}/inference_command"
+        return "/policy/inference_command"
+
+    @property
+    def service_prefix(self) -> str:
+        return self._service_prefix
 
     @property
     def service_stop(self) -> str:
@@ -219,6 +237,9 @@ class ContainerServiceClient:
                 self.service_inference_command,
                 callback_group=self._callback_group,
             )
+            if self._inference_only:
+                self._connected = True
+                return True
             self._stop_client = self._node.create_client(
                 StopTraining,
                 self.service_stop,
@@ -381,9 +402,12 @@ class ContainerServiceClient:
         chunk_align_window_s: float = 0.0,
         initial_pose_sync: bool = False,
         initial_pose_sync_duration_s: float = 5.0,
+        policy_id: str = "",
+        policy_parameters_json: str = "",
         timeout_sec: Optional[float] = None,
+        action_steps: Optional[int] = None,
     ) -> ServiceResponse:
-        """Call /{prefix}/inference_command (InferenceCommand.srv).
+        """Call /policy/inference_command (InferenceCommand.srv).
 
         Use the ``CMD_*`` class constants for ``command``. Only LOAD needs
         the model/embodiment/robot_type fields; pass empty strings for the
@@ -391,12 +415,12 @@ class ContainerServiceClient:
         conditioning) and RESUME (online re-conditioning). ``publish_to_robot``
         gates the policy container's robot command publishers; false is
         simulation / 3D preview only. ``action_request_mode`` controls whether
-        the policy Main runtime prefetches chunks ("async") or waits for the
+        the central Policy Runtime prefetches chunks ("async") or waits for the
         current buffer to drain ("sync"). ``acceleration_mode`` and
         ``acceleration_engine_path`` are LOAD-time runtime optimization knobs.
         ``control_hz``, ``inference_hz``, and ``chunk_align_window_s`` configure
-        the Main runtime's action processing at LOAD time. Zero values keep
-        the policy container's environment/default settings.
+        the Policy Runtime's action processing at LOAD time. Zero values keep
+        the Cyclo container's environment/default settings.
 
         Timeout defaults to INFERENCE_LOAD_TIMEOUT_SEC for LOAD (CUDA init,
         weight load, and first-time gated backbone downloads) and 10 s for
@@ -424,12 +448,22 @@ class ContainerServiceClient:
             request.chunk_align_window_s = _positive_float_or_zero(
                 chunk_align_window_s
             )
+        if action_steps is not None and (type(action_steps) is not int or not 0 <= action_steps <= 2147483647):
+            raise ValueError("action_steps must be a non-negative int32")
+        if hasattr(request, "action_steps"):
+            request.action_steps = -1 if action_steps is None else action_steps
+        elif action_steps:
+            raise RuntimeError("Rebuild interfaces before using Action Steps")
         if hasattr(request, "initial_pose_sync"):
             request.initial_pose_sync = bool(initial_pose_sync)
         if hasattr(request, "initial_pose_sync_duration_s"):
             request.initial_pose_sync_duration_s = float(
                 initial_pose_sync_duration_s
             )
+        if hasattr(request, "policy_id"):
+            request.policy_id = str(policy_id or "")
+        if hasattr(request, "policy_parameters_json"):
+            request.policy_parameters_json = str(policy_parameters_json or "")
 
         if timeout_sec is None:
             timeout_sec = (
@@ -438,16 +472,23 @@ class ContainerServiceClient:
         availability_timeout_sec = (
             self.load_availability_timeout_sec
             if command == self.CMD_LOAD
-            else 10.0
+            else (timeout_sec if command == self.CMD_STATUS else 10.0)
         )
 
-        return self._call_service(
-            self._inference_command_client,
-            request,
-            self.service_inference_command,
-            timeout_sec=timeout_sec,
-            availability_timeout_sec=availability_timeout_sec,
-        )
+        observer = self._command_observer if command != self.CMD_STATUS else None
+        if observer:
+            observer(True)
+        try:
+            return self._call_service(
+                self._inference_command_client,
+                request,
+                self.service_inference_command,
+                timeout_sec=timeout_sec,
+                availability_timeout_sec=availability_timeout_sec,
+            )
+        finally:
+            if observer:
+                observer(False)
 
     # --- Training services ---
 

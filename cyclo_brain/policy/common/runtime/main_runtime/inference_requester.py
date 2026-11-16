@@ -4,7 +4,7 @@
 #
 # Licensed under the Apache License, Version 2.0
 
-"""Client-side EngineCommand helper used by the Main process."""
+"""Client-side EngineCommand helper used by the central Policy Runtime."""
 
 from __future__ import annotations
 
@@ -12,13 +12,17 @@ import threading
 from typing import Any
 
 from engine_process.protocol import (
+    CMD_DESCRIBE,
     CMD_GET_ACTION,
     CMD_LOAD_POLICY,
+    CMD_STATUS,
     CMD_UNLOAD_POLICY,
+    CMD_UPDATE_CONTEXT,
     EngineCommandRequest,
     EngineCommandResponse,
     response_from_message,
 )
+from inference_context.execution import ExecutionContext
 
 
 DEFAULT_LOAD_POLICY_TIMEOUT_S = 7200.0
@@ -38,11 +42,17 @@ class InferenceRequester:
         self._load_policy_timeout_s = float(load_policy_timeout_s)
         self._seq_id = 0
         self._lock = threading.Lock()
+        self._call_lock = threading.Lock()
         self._get_action_in_flight = False
+        self._failed_context = None
 
     def has_pending_get_action(self) -> bool:
         with self._lock:
             return self._get_action_in_flight
+
+    @property
+    def get_action_timeout_s(self) -> float:
+        return self._get_action_timeout_s
 
     def load_policy(self, request: Any, timeout_s: float | None = None) -> EngineCommandResponse:
         seq_id = self._next_seq_id()
@@ -57,14 +67,28 @@ class InferenceRequester:
             acceleration_engine_path=str(
                 getattr(request, "acceleration_engine_path", "") or ""
             ),
+            policy_id=str(getattr(request, "policy_id", "") or ""),
+            policy_parameters_json=str(
+                getattr(request, "policy_parameters_json", "") or ""
+            ),
+            execution_context_json=str(getattr(request, "execution_context_json", "") or ""),
         )
         return self._call(
             engine_request,
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
-    def get_action(self, task_instruction: str, timeout_s: float | None = None) -> EngineCommandResponse:
+    def get_action(
+        self, task_instruction: str, timeout_s: float | None = None,
+        *, context: ExecutionContext | None = None,
+    ) -> EngineCommandResponse:
+        context_json = "" if context is None else context.to_json()
         with self._lock:
+            context_key = (context.session_id, context.generation) if context is not None else None
+            if context_key is not None and context_key == self._failed_context:
+                return EngineCommandResponse(
+                    success=False, message="previous inference failed; reset execution generation before retrying",
+                )
             if self._get_action_in_flight:
                 return EngineCommandResponse(
                     success=False,
@@ -77,15 +101,29 @@ class InferenceRequester:
             command=CMD_GET_ACTION,
             seq_id=seq_id,
             task_instruction=task_instruction or "",
+            execution_context_json=context_json,
         )
         try:
-            return self._call(
+            response = self._call(
                 request,
                 self._get_action_timeout_s if timeout_s is None else timeout_s,
             )
+            if context_key is not None and not response.success:
+                with self._lock:
+                    self._failed_context = context_key
+            return response
         finally:
             with self._lock:
                 self._get_action_in_flight = False
+
+    def update_context(self, context: ExecutionContext, timeout_s: float = 2.0) -> EngineCommandResponse:
+        """Send from a lifecycle/feedback dispatcher, never the control tick."""
+        request = EngineCommandRequest(
+            command=CMD_UPDATE_CONTEXT,
+            seq_id=self._next_seq_id(),
+            execution_context_json=context.to_json(),
+        )
+        return self._call(request, timeout_s)
 
     def unload_policy(self, timeout_s: float | None = None) -> EngineCommandResponse:
         seq_id = self._next_seq_id()
@@ -95,6 +133,26 @@ class InferenceRequester:
             self._load_policy_timeout_s if timeout_s is None else timeout_s,
         )
 
+    def describe(self, timeout_s: float = 2.0) -> EngineCommandResponse:
+        request = EngineCommandRequest(
+            command=CMD_DESCRIBE,
+            seq_id=self._next_seq_id(),
+        )
+        return self._call(request, timeout_s, raise_timeout=True)
+
+    def status(self, timeout_s: float = 1.0) -> EngineCommandResponse:
+        request = EngineCommandRequest(
+            command=CMD_STATUS,
+            seq_id=self._next_seq_id(),
+        )
+        return self._call(request, timeout_s)
+
+    def close(self) -> None:
+        with self._call_lock:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+
     def _next_seq_id(self) -> int:
         with self._lock:
             return self._next_seq_id_locked()
@@ -103,10 +161,15 @@ class InferenceRequester:
         self._seq_id += 1
         return self._seq_id
 
-    def _call(self, request: EngineCommandRequest, timeout_s: float) -> EngineCommandResponse:
+    def _call(
+        self, request: EngineCommandRequest, timeout_s: float, *, raise_timeout: bool = False
+    ) -> EngineCommandResponse:
         try:
-            response = self._client.call(request, timeout_s=timeout_s)
+            with self._call_lock:
+                response = self._client.call(request, timeout_s=timeout_s)
         except TimeoutError:
+            if raise_timeout:
+                raise
             return EngineCommandResponse(
                 success=False,
                 seq_id=request.seq_id,

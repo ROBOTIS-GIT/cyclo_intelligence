@@ -14,15 +14,42 @@
 //
 // Author: Seongwoo Kim
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render as renderComponent, screen, waitFor } from '@testing-library/react';
 import BTParamPanel from './BTParamPanel';
+import FileBrowserModal from '../FileBrowserModal';
+import { PolicyCatalogProvider } from '../../contexts/PolicyCatalogContext';
+import { testPolicyCatalog } from '../../testUtils/policyCatalog';
+import { FALLBACK_CATALOG } from '../../constants/btNodeCatalogFallback';
 
 jest.mock('react-redux', () => ({
   useDispatch: () => jest.fn(),
   useSelector: (selector) => selector({ tasks: { robotType: 'ffw_sg2' } }),
 }));
 
-jest.mock('../FileBrowserModal', () => () => null);
+jest.mock('../FileBrowserModal', () => jest.fn(() => null));
+
+function render(component, catalog = testPolicyCatalog) {
+  return renderComponent(
+    <PolicyCatalogProvider initialCatalog={catalog}>
+      {component}
+    </PolicyCatalogProvider>,
+  );
+}
+
+function catalogNode(nodeType, overrides = {}) {
+  return {
+    id: 'catalog_node',
+    data: {
+      label: nodeType,
+      nodeType,
+      params: {
+        ...Object.fromEntries(FALLBACK_CATALOG.find((entry) => entry.tag === nodeType)
+          .ports.map((port) => [port.name, port.default])),
+        ...overrides,
+      },
+    },
+  };
+}
 
 const node = {
   id: 'bt_1',
@@ -294,4 +321,88 @@ test('switches SendCommand to Docker controls and enables only target, command, 
     'acceleration_mode',
     'acceleration_engine_path',
   ].forEach((key) => expect(fieldControl(key)).toBeDisabled());
+});
+
+test('uses catalog models and checkpoint roots and commits model changes once', () => {
+  const command = catalogNode('SendCommand');
+  const onParamChange = jest.fn();
+  render(<BTParamPanel nodes={[command]} selectedNodeId={command.id} onParamChange={onParamChange} />);
+
+  expect(Array.from(fieldControl('model').options, (option) => option.value)).toEqual(
+    testPolicyCatalog.runtimes.flatMap((runtime) => runtime.models.map((model) => model.policy_id)),
+  );
+  fireEvent.change(fieldControl('model'), { target: { value: 'groot:n17' } });
+  expect(onParamChange).toHaveBeenCalledTimes(1);
+  expect(onParamChange).toHaveBeenCalledWith(command.id, 'model', 'groot:n17');
+  fireEvent.click(screen.getByRole('button', { name: 'Browse for policy model folder' }));
+  const browser = FileBrowserModal.mock.calls.at(-1)[0];
+  expect(browser).toMatchObject({
+    isOpen: true,
+    initialPath: '/workspace/model/groot',
+    defaultPath: '/workspace/model/groot',
+  });
+});
+
+test('keeps an unavailable legacy model without silently replacing it', () => {
+  const command = catalogNode('SendCommand', { model: 'future:custom' });
+  const onParamChange = jest.fn();
+  render(<BTParamPanel nodes={[command]} selectedNodeId={command.id} onParamChange={onParamChange} />);
+
+  expect(fieldControl('model')).toHaveValue('future:custom');
+  expect(screen.getByRole('option', { name: 'future:custom (legacy)' })).toBeInTheDocument();
+  expect(onParamChange).not.toHaveBeenCalled();
+});
+
+test('disables model selection while the catalog is loading or unavailable', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+  try {
+    const command = catalogNode('SendCommand');
+    render(<BTParamPanel nodes={[command]} selectedNodeId={command.id} onParamChange={jest.fn()} />, null);
+    expect(fieldControl('model')).toBeDisabled();
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/policies/catalog'));
+    expect(fieldControl('model')).toBeDisabled();
+    expect(fieldControl('model')).toHaveValue('lerobot:act');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('preserves action_steps through target and command switches', () => {
+  const command = catalogNode('SendCommand');
+  const onParamChange = jest.fn();
+  render(<BTParamPanel nodes={[command]} selectedNodeId={command.id} onParamChange={onParamChange} />);
+
+  expect(fieldControl('action_steps')).toHaveAttribute('type', 'number');
+  expect(fieldControl('action_steps')).toBeEnabled();
+  fireEvent.change(fieldControl('action_steps'), { target: { value: '7' } });
+  expect(onParamChange).toHaveBeenCalledWith(command.id, 'action_steps', '7');
+  fireEvent.change(fieldControl('target'), { target: { value: 'DOCKER' } });
+  expect(fieldControl('action_steps')).toBeDisabled();
+  fireEvent.change(fieldControl('target'), { target: { value: 'INFERENCE' } });
+  expect(fieldControl('command')).toHaveValue('LOAD');
+  expect(fieldControl('action_steps')).toBeEnabled();
+  expect(fieldControl('action_steps')).toHaveValue(7);
+  fireEvent.change(fieldControl('command'), { target: { value: 'RESUME' } });
+  expect(fieldControl('action_steps')).toBeDisabled();
+  expect(fieldControl('task_instruction')).toBeEnabled();
+});
+
+test('ArmStateGate exposes numeric thresholds, gripper toggles, and aligned joint targets', () => {
+  const gate = catalogNode('ArmStateGate', {
+    left_target_joints: 'arm_l_joint2', left_target_positions: '0.2',
+  });
+  const onParamChange = jest.fn();
+  render(<BTParamPanel nodes={[gate]} selectedNodeId={gate.id} onParamChange={onParamChange} />);
+
+  ['joint_threshold', 'gripper_closed_value', 'gripper_open_value', 'gripper_threshold', 'timeout_sec']
+    .forEach((key) => expect(fieldControl(key)).toHaveAttribute('type', 'number'));
+  expect(fieldControl('left_gripper_joint')).toBeDisabled();
+  fireEvent.click(fieldControl('detect_left_gripper'));
+  expect(fieldControl('left_gripper_joint')).toBeEnabled();
+  expect(fieldControl('right_gripper_joint')).toBeDisabled();
+  expect(onParamChange).toHaveBeenCalledWith(gate.id, 'detect_left_gripper', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'arm_l_joint1' }));
+  expect(onParamChange).toHaveBeenCalledWith(gate.id, 'left_target_joints', 'arm_l_joint1, arm_l_joint2');
+  expect(onParamChange).toHaveBeenCalledWith(gate.id, 'left_target_positions', '0.0, 0.2');
 });

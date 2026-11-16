@@ -1,0 +1,3 @@
+# The checkpoint's Molmo image processor owns image preparation.
+# Only additional Cyclo preprocessing is configured here; API packing stays in Python.
+preprocessing: identity

@@ -1,0 +1,46 @@
+# Example for Dongkkka/cyclo_dashboard_0904_test_v30 (ffw_sg2_rev1).
+# Keep arms, grippers, head and lift; omit linear_x, linear_y and angular_z.
+# Both vectors become 19-dimensional. Verify names before using another dataset.
+# This is an opt-in training selection, not a global robot configuration.
+
+state_names:
+  - arm_l_joint1
+  - arm_l_joint2
+  - arm_l_joint3
+  - arm_l_joint4
+  - arm_l_joint5
+  - arm_l_joint6
+  - arm_l_joint7
+  - gripper_l_joint1
+  - arm_r_joint1
+  - arm_r_joint2
+  - arm_r_joint3
+  - arm_r_joint4
+  - arm_r_joint5
+  - arm_r_joint6
+  - arm_r_joint7
+  - gripper_r_joint1
+  - head_joint1
+  - head_joint2
+  - lift_joint
+
+action_names:
+  - arm_l_joint1
+  - arm_l_joint2
+  - arm_l_joint3
+  - arm_l_joint4
+  - arm_l_joint5
+  - arm_l_joint6
+  - arm_l_joint7
+  - gripper_l_joint1
+  - arm_r_joint1
+  - arm_r_joint2
+  - arm_r_joint3
+  - arm_r_joint4
+  - arm_r_joint5
+  - arm_r_joint6
+  - arm_r_joint7
+  - gripper_r_joint1
+  - head_joint1
+  - head_joint2
+  - lift_joint

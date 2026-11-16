@@ -20,12 +20,13 @@ import { MdClose, MdFolderOpen } from 'react-icons/md';
 import FileBrowserModal from '../FileBrowserModal';
 import { setSelectedNodeId } from '../../features/actionCanvas/actionCanvasSlice';
 import { DEFAULT_PATHS } from '../../constants/paths';
+import { findPolicy, policyOptions, usePolicyCatalog } from '../../contexts/PolicyCatalogContext';
 
 const NUMBER_PARAMS = new Set([
   'duration', 'angle_deg', 'lift_position', 'control_hz', 'inference_hz',
   'chunk_align_window_s', 'max_iterations', 'joint_threshold',
   'gripper_closed_value', 'gripper_open_value', 'gripper_threshold',
-  'timeout_sec',
+  'timeout_sec', 'action_steps',
 ]);
 
 const SG2_LEFT_JOINTS = [
@@ -154,20 +155,6 @@ function normalizeSendCommandParams(params, nodeType) {
 // Enum params surface as <select> dropdowns. Keep value lists in sync with
 // the Python action definitions (send_command.COMMAND_MAP).
 const ENUM_PARAMS = {
-  model: [
-    'lerobot:act',
-    'lerobot:diffusion',
-    'lerobot:smolvla',
-    'lerobot:xvla',
-    'lerobot:pi0',
-    'lerobot:pi05',
-    'lerobot:molmoact2',
-    'lerobot:vla_jepa',
-    'lerobot:fastwam',
-    'groot:n17',
-    'groot',
-    'lerobot',
-  ],
   inference_mode: ['simulation', 'robot'],
   action_request_mode: ['async', 'sync'],
   acceleration_mode: ['pytorch', 'tensorrt_dit'],
@@ -194,6 +181,7 @@ const SEND_COMMAND_ACTIVE_FIELDS = {
     'target', 'command', 'model', 'policy_path', 'task_instruction',
     'inference_mode', 'action_request_mode', 'inference_hz', 'control_hz',
     'chunk_align_window_s', 'acceleration_mode', 'acceleration_engine_path',
+    'action_steps',
   ]),
   // Resume can re-condition language mid-run; output mode is fixed by LOAD.
   RESUME: new Set(['target', 'command', 'task_instruction']),
@@ -259,6 +247,8 @@ export default function BTParamPanel({
   variant = 'legacy',
 }) {
   const dispatch = useDispatch();
+  const { catalog, status: catalogStatus } = usePolicyCatalog();
+  const modelOptions = useMemo(() => policyOptions(catalog), [catalog]);
   const robotType = useSelector((state) => state.tasks?.robotType || '');
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
@@ -272,11 +262,9 @@ export default function BTParamPanel({
   const [showPolicyBrowser, setShowPolicyBrowser] = useState(false);
 
   const policyBrowserPath = useMemo(() => {
-    const model = String(localParams.model || '').toLowerCase();
-    return model.startsWith('groot')
-      ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
-      : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
-  }, [localParams.model]);
+    const selected = findPolicy(catalog, String(localParams.model || ''));
+    return selected?.runtime?.checkpoint_root || '/workspace/model';
+  }, [catalog, localParams.model]);
 
   // Reset local state only when switching to a different node
   useEffect(() => {
@@ -430,6 +418,25 @@ export default function BTParamPanel({
     const disabledCls = disabled
       ? ' !bg-[var(--mc-surface-hover)] !text-[var(--mc-text-subtle)] cursor-not-allowed'
       : '';
+
+    if (key === 'model') {
+      const currentIsLegacy = value && !modelOptions.some((option) => option.policy_id === value);
+      return (
+        <select
+          value={value}
+          disabled={disabled || catalogStatus !== 'ready'}
+          onChange={(e) => handleChange(key, e.target.value)}
+          className={`w-full px-2 py-1.5 border border-[var(--mc-border-strong)] rounded-lg text-sm bg-[var(--mc-surface)] text-[var(--mc-text)] focus:outline-none focus:ring-1 focus:ring-[var(--mc-accent)]${disabledCls}`}
+        >
+          {currentIsLegacy && <option value={value}>{value} (legacy)</option>}
+          {modelOptions.map((option) => (
+            <option key={option.policy_id} value={option.policy_id}>
+              {option.runtime.label} / {option.label}
+            </option>
+          ))}
+        </select>
+      );
+    }
 
     if (JOINT_SELECTOR_NODE_TYPES.has(nodeType) && TARGET_POSITION_PARAM[key]) {
       return renderTargetJointSelector(key, value, disabled);

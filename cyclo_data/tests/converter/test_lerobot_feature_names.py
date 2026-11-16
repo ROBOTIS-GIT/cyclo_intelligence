@@ -146,7 +146,7 @@ def test_feature_names_ignore_none_name_sources(tmp_path):
 @pytest.mark.parametrize("instructions", [
     [],
     ["Pick up the object."],
-    ["Place the object.", "Pick up the object.", "물체를 잡으세요."],
+    ["Place the object.", "Pick up the object.", "\ubb3c\uccb4\ub97c \uc7a1\uc73c\uc138\uc694."],
 ])
 def test_v30_tasks_restore_instruction_as_pandas_index(tmp_path, instructions):
     converter = RosbagToLerobotV30Converter(

@@ -172,12 +172,12 @@ describe('assembleMissionBtFilesForSave', () => {
     const spots = [
       {
         id: 'spot_a',
-        label: '픽업',
+        label: '\ud53d\uc5c5',
         metadata: { local_bt: 'locals/pickup_a.xml' },
       },
       {
         id: 'spot_b',
-        label: '도착',
+        label: '\ub3c4\ucc29',
         metadata: { local_bt: 'locals/dropoff_b.xml' },
       },
     ];

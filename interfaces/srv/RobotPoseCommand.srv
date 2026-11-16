@@ -1,0 +1,23 @@
+uint8 STATUS = 0
+uint8 SAVE = 1
+uint8 RETURN = 2
+uint8 STOP = 3
+uint8 SET_DURATION = 4
+
+uint8 command
+string robot_type
+# SET_DURATION: new value. RETURN: expected value; zero uses the stored value.
+float64 duration_s
+---
+bool success
+string message
+string robot_type
+string device_id
+bool connected
+bool saved
+bool returning
+float64 duration_s
+string error
+string[] joint_names
+float64[] positions
+string[] units

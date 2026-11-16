@@ -35,7 +35,8 @@ export default function RobotTypeSelector() {
   const inferencePhase = useSelector(
     (state) => state.tasks.inferenceStatus.inferencePhase
   );
-  const taskInProgress =
+  const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
+  const taskInProgress = poseReturning ||
     recordPhase !== RecordPhase.READY ||
     inferencePhase !== InferencePhase.READY;
 

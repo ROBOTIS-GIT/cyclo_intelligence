@@ -32,6 +32,8 @@ from std_msgs.msg import String
 
 _DEFAULT_REQUEST_TIMEOUT_SEC = 5.0
 _STOP_REQUEST_TIMEOUT_SEC = 30.0
+# Leave cleanup headroom before ROS launch's default five-second SIGTERM escalation.
+_SHUTDOWN_REQUEST_TIMEOUT_SEC = 3.0
 _SERVICE_WAIT_TIMEOUT_SEC = 3.0
 _PUB_QOS_SIZE = 10
 
@@ -130,11 +132,11 @@ class RosbagControl:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Best-effort stop of any active recording before node shutdown."""
+        """Bounded stop before context shutdown; preserve the bag on failure."""
         if not self._service_available:
             return
         try:
-            self.stop_rosbag(wait_for_response=False)
+            self.stop_rosbag(timeout_sec=_SHUTDOWN_REQUEST_TIMEOUT_SEC)
         except Exception as exc:  # noqa: BLE001 — shutdown is best-effort
             self._node.get_logger().warning(
                 f'Best-effort rosbag stop on shutdown failed: {exc}')

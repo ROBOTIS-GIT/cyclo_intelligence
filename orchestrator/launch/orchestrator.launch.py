@@ -21,6 +21,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import EmitEvent
+from launch.events import Shutdown
 from launch_ros.actions import Node
 
 
@@ -37,7 +39,8 @@ def generate_launch_description():
         executable='orchestrator_node',
         name='orchestrator',
         output='screen',
-        parameters=config_files
+        parameters=config_files,
+        on_exit=[EmitEvent(event=Shutdown(reason='Orchestrator exited; stopping bringup'))],
     )
 
     return LaunchDescription([
