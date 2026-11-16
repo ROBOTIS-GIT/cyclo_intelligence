@@ -2,7 +2,7 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-11)
+1.5.0 (2026-11-16)
 ------------------
 * Reused explicitly selected inference recording folders across episodes and preserved model metadata captured at recording start.
 * Validated recording folder identity and episode numbering without overwriting incomplete recordings.
@@ -13,6 +13,8 @@ Changelog for package cyclo_data
 * Rejected task deletion during active recording or archiving so unrelated edits cannot delay recording STOP.
 * Protected task deletion and renumbering against queued or running background video conversion, including tasks without an active recording session.
 * Kept interrupted inference episodes reserved when refreshing recording positions after deletion.
+* Prevented shutdown signals from acquiring a threading event lock interrupted on the main thread; normal teardown still drains recording before closing ROS.
+* Added regression coverage for signals during a threading wait and rejected forced or nonzero child-process exits in recording restart tests.
 * Contributors: Seungwoo Lim, Taehyeong Kim
 
 1.4.5 (2026-11-09)

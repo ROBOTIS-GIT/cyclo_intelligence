@@ -2,7 +2,7 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-11)
+1.5.0 (2026-11-16)
 ------------------
 * Separated robot command execution into the central Policy Runtime and model computation into manifest-discovered Worker Engines.
 * Added ABot-M0, LingBot-VLA, and RLDX inference adapters and native training entrypoints with channel selection and checkpoint metadata.

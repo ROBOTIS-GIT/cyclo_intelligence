@@ -2,7 +2,7 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-11)
+1.5.0 (2026-11-16)
 ------------------
 * Routed inference lifecycle commands through the central Policy Runtime and manifest-based policy catalog.
 * Added recording folder selection and recording/archiving interlocks independently of inference trial evaluation.

@@ -2,7 +2,7 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-11)
+1.5.0 (2026-11-16)
 ------------------
 * Added manifest-driven model selection with LeRobot first, Worker build progress, and explicit container update controls.
 * Added Action Steps selection and observed chunk limits, Slow Start, and saved-pose Save/Return/Stop controls with configurable duration.

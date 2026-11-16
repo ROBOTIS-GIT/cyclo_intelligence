@@ -58,9 +58,35 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         return process
 
     def stop(process, sig=signal.SIGINT):
-        if process.poll() is None:
-            os.killpg(process.pid, sig)
-            process.wait(timeout=15)
+        name = next(name for name, child, _ in processes if child is process)
+        started = time.monotonic()
+        entry = {'name': name, 'pid': process.pid, 'signal': sig.name,
+                 'already_exited': process.poll() is not None}
+        report.setdefault('process_stops', []).append(entry)
+        try:
+            if process.poll() is None:
+                os.killpg(process.pid, sig)
+                if name in ('data', 'data-restart'):
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        # Only the Python test wrapper registers SIGUSR1. Dump
+                        # every thread before the existing 15-second deadline.
+                        try:
+                            os.kill(process.pid, signal.SIGUSR1)
+                            entry['stack_dump_requested'] = True
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=max(0, 15 - (time.monotonic() - started)))
+                else:
+                    process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            report.setdefault('forced_kills', []).append(name)
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        finally:
+            entry['exit_code'] = process.poll()
+            entry['seconds'] = time.monotonic() - started
         return process.returncode
 
     def wait(predicate, timeout=20):
@@ -90,6 +116,12 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         return {str(p.relative_to(path)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in path.rglob('*') if p.is_file()}
 
+    data_argv = ['python3', '-c', (
+        'import faulthandler, runpy, signal; '
+        'faulthandler.register(signal.SIGUSR1, all_threads=True); '
+        'runpy.run_module("cyclo_data.cyclo_data_node", run_name="__main__")'
+    )]
+
     try:
         launch('router', [str(Path(get_package_prefix('rmw_zenoh_cpp')) /
                               'lib/rmw_zenoh_cpp/rmw_zenohd')], router=True)
@@ -101,7 +133,7 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         assert bag_client.wait_for_service(timeout_sec=20)
         camera = node.create_publisher(CompressedImage, '/camera/cam_wrist/color/image_rect_raw/compressed', 10)
         joints = node.create_publisher(JointState, '/joint_states', 10)
-        data = launch('data', ['python3', '-m', 'cyclo_data.cyclo_data_node'])
+        data = launch('data', data_argv)
         client = node.create_client(RecordingCommand, '/data/recording')
         assert client.wait_for_service(timeout_sec=30)
         command(RecordingCommand.Request.REFRESH_TOPICS)
@@ -179,11 +211,18 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         bag = launch('bag-restart', [str(Path(get_package_prefix('rosbag_recorder')) /
                                         'lib/rosbag_recorder/service_bag_recorder')])
         assert bag_client.wait_for_service(timeout_sec=20)
-        data = launch('data-restart', ['python3', '-m', 'cyclo_data.cyclo_data_node'])
+        data = launch('data-restart', data_argv)
         assert wait(lambda: 'cyclo_data node ready.' in (tmp_path / 'data-restart.log').read_text(), 30)
         result = command(RecordingCommand.Request.START, expected=False)
         report['restart_error'] = result.message
         report['restart_no_overwrite'] = hashes(folder) == before_restart
+        started_shutdown = time.monotonic()
+        report['restart_exit'] = stop(data, shutdown_signal)
+        report['restart_shutdown_seconds'] = time.monotonic() - started_shutdown
+        report['restart_shutdown_no_overwrite'] = hashes(folder) == before_restart
+        assert report['restart_exit'] == 0, report
+        assert report['restart_shutdown_seconds'] < 5.0, report
+        assert report['restart_shutdown_no_overwrite'], report
         assert report['metadata_flushed_before_recorder_exit'], report
         assert report['messages_after_data_exit'] == 0, report
         assert report['data_exit'] == 0, report
@@ -198,14 +237,13 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         done.set()
         if producer is not None:
             producer.join(timeout=5)
+            report['producer_stopped'] = not producer.is_alive()
         for name, process, log in reversed(processes):
             try:
                 stop(process)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-                report.setdefault('forced_kills', []).append(name)
-            log.close()
+            finally:
+                log.close()
+        report['process_exit_codes'] = {name: process.returncode for name, process, _ in processes}
         if node is not None:
             node.destroy_node()
         if rclpy.ok():
@@ -214,3 +252,6 @@ def test_active_shutdown_stops_bag_and_retains_partial_without_overwrite(
         tmp_path.chmod(0o755)
         tmp_path.parent.chmod(0o755)
         print(json.dumps(report), flush=True)
+    assert not report.get('forced_kills'), report
+    assert all(code == 0 for code in report['process_exit_codes'].values()), report
+    assert report['producer_stopped'], report

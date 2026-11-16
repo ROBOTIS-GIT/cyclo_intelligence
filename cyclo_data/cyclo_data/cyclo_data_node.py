@@ -74,11 +74,17 @@ class CycloDataNode(Node):
 
 def main(args=None):
     shutdown_requested = threading.Event()
+    shutdown_signal = None
     stop_spinning = threading.Event()
     previous_handlers = {}
     node = executor = spin_thread = None
     spin_thread_started = False
     errors = []
+
+    def request_shutdown(signum, _frame):
+        nonlocal shutdown_signal
+        # A signal can interrupt Event.wait while its non-reentrant lock is held.
+        shutdown_signal = signum
 
     def spin():
         try:
@@ -102,14 +108,15 @@ def main(args=None):
         rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(
-                signum, lambda *_: shutdown_requested.set())
+                signum, request_shutdown)
         node = CycloDataNode()
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
         spin_thread = threading.Thread(target=spin, name='cyclo_data_executor')
         spin_thread.start()
         spin_thread_started = True
-        shutdown_requested.wait()
+        while shutdown_signal is None and not shutdown_requested.wait(0.1):
+            pass
     finally:
         try:
             if node is not None:

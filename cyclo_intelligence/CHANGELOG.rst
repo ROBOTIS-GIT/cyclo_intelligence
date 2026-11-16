@@ -2,7 +2,7 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2026-11-11)
+1.5.0 (2026-11-16)
 ------------------
 * Added a central Policy Runtime with manifest-discovered Workers and ABot-M0, LingBot-VLA, and RLDX integrations.
 * Added explicit action-step selection, saved initial poses, inference recording folder reuse, and per-model evaluation manifests.
@@ -13,6 +13,8 @@ Changelog for package cyclo_intelligence
 * Initialize only the common SDK during installation; selected Worker builds require their pinned sources but not optional simulation benchmarks. See docker/README.md for setup and upgrade instructions.
 * Integrated main's 1.4.5 fixes and Discord release notifications while preserving the published changelog history.
 * Protected episode deletion against background video conversion and prevented unrelated deletion from delaying recording STOP.
+* Avoided signal-handler reentry into a threading lock during recording shutdown and verified child-process exit status in shutdown regression tests.
+* Resolved the core images' inherited HTTP dependency conflict and added a final dependency consistency check for AMD64 and ARM64 builds.
 * Contributors: Seungwoo Lim, Taehyeong Kim
 
 1.4.5 (2026-11-09)

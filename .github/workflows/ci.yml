@@ -178,6 +178,7 @@ jobs:
           set -euo pipefail
           python -m pytest \
             cyclo_data/tests/recorder/test_recording_service.py \
+            cyclo_data/tests/recorder/test_node_shutdown.py \
             cyclo_data/tests/recorder/test_session_archive.py \
             cyclo_data/tests/recorder/test_transcoder.py \
             cyclo_data/tests/recorder/test_video_recorder.py
@@ -266,7 +267,7 @@ jobs:
           python -m pip install -r docker/supervisor_api/requirements.txt pytest httpx
 
       - name: Run Docker helper tests
-        run: python -m pytest test_install_sh.py docker/test_dockerfiles.py docker/test_container_sh.py
+        run: python -m pytest test_install_sh.py docker/test_dockerfiles.py docker/test_container_sh.py docker/test_core_http_dependencies.py
 
       - name: Run supervisor API tests
         env:
