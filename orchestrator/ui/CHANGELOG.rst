@@ -2,6 +2,11 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* Updated evaluation UI regression coverage to use the W2 robot identifier.
+* Contributors: Taehyeong Kim
+
 1.5.0 (2026-11-16)
 ------------------
 * Added manifest-driven model selection with LeRobot first, Worker build progress, and explicit container update controls.

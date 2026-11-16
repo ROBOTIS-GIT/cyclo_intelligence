@@ -55,7 +55,7 @@ def test_release_workflows_only_publish_cyclo_core():
 def test_merged_compose_preserves_runtime_navigation_and_release_contracts():
     services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
     main = services["cyclo_intelligence"]
-    assert main["image"] == "robotis/cyclo-intelligence:1.5.0"
+    assert main["image"] == "robotis/cyclo-intelligence:1.5.1"
     assert services["lerobot"]["image"] == "robotis/lerobot-zenoh:1.4.2-${ARCH:-arm64}"
     for name, service in services.items():
         assert service["build"]["context"] == ".."

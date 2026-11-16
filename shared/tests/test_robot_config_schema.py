@@ -2,11 +2,31 @@ from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "shared"))
 
 from shared.robot_configs import schema as robot_schema  # noqa: E402
+
+
+def test_robot_config_discovery_uses_w_names_without_legacy_aliases():
+    config_dir = REPO_ROOT / "shared" / "shared" / "robot_configs"
+    robot_types = {
+        path.name.removesuffix("_config.yaml")
+        for path in config_dir.glob("*_config.yaml")
+    }
+    assert {"w1", "w2"} <= robot_types
+    assert not {"f1", "f2"} & robot_types
+
+
+@pytest.mark.parametrize("robot_type", ["f1", "f2"])
+def test_legacy_robot_types_do_not_silently_load_new_configs(robot_type, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("ROBOT_CLIENT_CONFIG_DIR", raising=False)
+    with pytest.raises(FileNotFoundError):
+        robot_schema.load_robot_section(robot_type)
 
 
 def _assert_urdf_path_and_mesh_assets_resolve(robot_type, expected_urdf_name):
@@ -24,6 +44,8 @@ def _assert_urdf_path_and_mesh_assets_resolve(robot_type, expected_urdf_name):
     assert urdf_path.exists()
 
     tree = ET.parse(urdf_path)
+    if robot_type in ("w1", "w2"):
+        assert tree.getroot().attrib["name"] == f"ffw_{robot_type}_follower"
     mesh_filenames = {
         mesh.attrib["filename"]
         for mesh in tree.findall(".//mesh")
@@ -94,8 +116,10 @@ def test_sh5_urdf_path_and_mesh_assets_resolve():
     )
 
 
-def test_f2_config_uses_realsense_head_camera_layout():
-    section = robot_schema.load_robot_section("f2")
+def test_w2_config_uses_realsense_head_camera_layout():
+    section = robot_schema.load_robot_section("w2")
+
+    assert robot_schema.get_robot_name(section) == "FFW W2"
 
     assert robot_schema.get_image_topics(section) == {
         "cam_head": {
@@ -121,8 +145,8 @@ def test_f2_config_uses_realsense_head_camera_layout():
     assert "/zed/zed_node/right/camera_info" not in extra_topics
 
 
-def test_f2_state_and_action_dimensions_match_layout():
-    section = robot_schema.load_robot_section("f2")
+def test_w2_state_and_action_dimensions_match_layout():
+    section = robot_schema.load_robot_section("w2")
 
     state_dim = sum(
         len(cfg["joint_names"])
@@ -137,15 +161,17 @@ def test_f2_state_and_action_dimensions_match_layout():
     assert action_dim == 22
 
 
-def test_f2_urdf_path_and_mesh_assets_resolve():
+def test_w2_urdf_path_and_mesh_assets_resolve():
     _assert_urdf_path_and_mesh_assets_resolve(
-        "f2",
-        "ffw_f2_follower.urdf",
+        "w2",
+        "ffw_w2_follower.urdf",
     )
 
 
-def test_f1_state_and_action_dimensions_match_layout():
-    section = robot_schema.load_robot_section("f1")
+def test_w1_state_and_action_dimensions_match_layout():
+    section = robot_schema.load_robot_section("w1")
+
+    assert robot_schema.get_robot_name(section) == "FFW W1"
 
     state_dim = sum(
         len(cfg["joint_names"])
@@ -160,10 +186,10 @@ def test_f1_state_and_action_dimensions_match_layout():
     assert action_dim == 19
 
 
-def test_f1_urdf_path_and_mesh_assets_resolve():
+def test_w1_urdf_path_and_mesh_assets_resolve():
     _assert_urdf_path_and_mesh_assets_resolve(
-        "f1",
-        "ffw_f1_follower.urdf",
+        "w1",
+        "ffw_w1_follower.urdf",
     )
 
 

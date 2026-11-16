@@ -299,7 +299,7 @@ def test_fail_safe_reports_reason_even_without_loaded_policy(handler, manager):
 
 
 @pytest.mark.parametrize("robot_type", [
-    "ffw_sg2_rev1", "ffw_sh5_rev1", "ffw_bg2_rev4", "f1", "f2", "omx_f", "omy_f3m",
+    "ffw_sg2_rev1", "ffw_sh5_rev1", "ffw_bg2_rev4", "w1", "w2", "omx_f", "omy_f3m",
 ])
 def test_pose_joint_names_and_units_come_from_robot_configuration(robot_type):
     root = Path(__file__).resolve().parents[5]

@@ -2,6 +2,10 @@
 Changelog for package rosbag_recorder
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* None
+
 1.5.0 (2026-11-16)
 ------------------
 * Aligned package metadata with Cyclo 1.5.0; no native recorder implementation change relative to 1.4.5.

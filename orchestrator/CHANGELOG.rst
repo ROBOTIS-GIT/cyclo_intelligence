@@ -2,6 +2,11 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* Robot selection discovers W1/W2 through the renamed shared configurations instead of F1/F2.
+* Contributors: Taehyeong Kim
+
 1.5.0 (2026-11-16)
 ------------------
 * Routed inference lifecycle commands through the central Policy Runtime and manifest-based policy catalog.

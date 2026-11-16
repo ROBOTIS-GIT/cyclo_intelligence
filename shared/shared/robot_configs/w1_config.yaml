@@ -1,8 +1,8 @@
 orchestrator:
   ros__parameters:
-    f1:
-      robot_name: "FFW F1"
-      urdf_path: urdf/ffw_f1_follower.urdf
+    w1:
+      robot_name: "FFW W1"
+      urdf_path: urdf/ffw_w1_follower.urdf
       joystick:
         trigger_topic: /leader/joystick_controller/tact_trigger
 
