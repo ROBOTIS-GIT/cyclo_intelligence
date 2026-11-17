@@ -1352,7 +1352,7 @@ async def _lifespan(_app):
 app = FastAPI(
     title="cyclo_intelligence supervisor_api",
     description=__doc__,
-    version="1.5.0",
+    version="1.5.1",
     lifespan=_lifespan,
 )
 

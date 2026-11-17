@@ -126,10 +126,10 @@ test('shows the server conflict when the selected robot changes for the same mod
     .mockResolvedValueOnce({ ok: false, json: async () => ({ detail: 'Different robot evaluation' }) });
   const { rerender } = render(<InferenceTryResults />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Success' })).toBeEnabled());
-  mockState.tasks.robotType = 'f2';
+  mockState.tasks.robotType = 'w2';
   rerender(<InferenceTryResults />);
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-  expect(fetch.mock.calls[1][0]).toContain('robot_type=f2');
+  expect(fetch.mock.calls[1][0]).toContain('robot_type=w2');
   expect(await screen.findByRole('alert')).toHaveTextContent('Different robot evaluation');
   expect(screen.getByRole('button', { name: 'Success' })).toBeDisabled();
 });
@@ -243,7 +243,7 @@ test.each(['model', 'robot', 'unmount'])('ignores conflict refresh after %s chan
     if (change === 'model') {
       mockState.info.policyPath = '/models/new';
       mockState.tasks.inferenceStatus.loadedModelPath = '/models/new';
-    } else mockState.tasks.robotType = 'f2';
+    } else mockState.tasks.robotType = 'w2';
     rerender(<InferenceTryResults />);
     await waitFor(() => expect(screen.getByText('Success')).toBeEnabled());
   }

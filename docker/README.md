@@ -110,6 +110,17 @@ images. Restoring only an image is insufficient with source bind mounts. Preserv
 data backups when changing formats. Merging into main does not publish images;
 publication follows the existing main-to-jazzy release workflow.
 
+### W1/W2 Robot Names (1.5.1)
+
+F1 and F2 are now W1 and W2. Select `w1` or `w2` and use
+`w1_config.yaml` or `w2_config.yaml`; legacy `f1`/`f2` aliases are not provided.
+Update external launch/configuration references and reselect the robot in the UI.
+For an existing source-built workspace, clean the `shared` package's build and
+install outputs before rebuilding so deleted F1/F2 configuration and URDF files
+do not remain in the installed robot list. A fresh core image build also avoids
+these stale assets. Existing datasets and model artifacts are not rewritten or
+automatically migrated.
+
 ### UI Builds
 
 In the UI, use **Build** for a missing image, or the wrench to rebuild an existing

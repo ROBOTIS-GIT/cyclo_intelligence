@@ -2,6 +2,11 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.5.1 (2026-11-16)
+------------------
+* Updated saved-pose regression coverage to use W1 and W2 robot configurations.
+* Contributors: Taehyeong Kim
+
 1.5.0 (2026-11-16)
 ------------------
 * Separated robot command execution into the central Policy Runtime and model computation into manifest-discovered Worker Engines.
