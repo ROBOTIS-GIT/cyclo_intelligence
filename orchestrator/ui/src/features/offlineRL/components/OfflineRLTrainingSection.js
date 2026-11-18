@@ -1998,6 +1998,7 @@ function WorkflowTrainingView({
 
 export default function OfflineRLTrainingSection({
   grootOnly = true,
+  rltCheckpointName = 'latest',
   isActive = true,
   inferencePhase = InferencePhase.READY,
   onRunningChange,
@@ -2569,7 +2570,9 @@ export default function OfflineRLTrainingSection({
     parsedRltStage1SaveFreq >= 1 &&
     parsedRltStage1SaveFreq <= parsedRltStage1Steps
   );
+  const checkpointName = rltCheckpointName;
   const rltStage2ConfigValid = (
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(checkpointName) &&
     Number.isInteger(parsedRltStage2Steps) &&
     parsedRltStage2Steps >= 1 &&
     parsedRltStage2Steps <= 1000000 &&
@@ -3587,6 +3590,7 @@ export default function OfflineRLTrainingSection({
             }))
         : isRltStage2Selection
           ? await startRLTStage2Training({
+            ...(checkpointName !== 'latest' ? { checkpoint_name: checkpointName } : {}),
             ...(rltDataValidation.ready ? { data_validation_id: rltDataValidation.result.validation_id } : {}),
             initialization_mode: effectiveRltInitializationMode,
             replay_bundle_path: mapWorkspacePathToContainer(rltReplayBundlePath),

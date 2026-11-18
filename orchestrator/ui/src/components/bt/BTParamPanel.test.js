@@ -384,3 +384,38 @@ test('opens legacy TT-RTC nodes with the migrated request mode', () => {
   expect(fieldControl('action_request_mode')).toHaveValue('tt_rtc');
   expect(screen.queryByText('ttrtc_enabled')).not.toBeInTheDocument();
 });
+
+test('retired q/v option is absent when opening an old TT-RTC node', () => {
+  const node = { id: 'legacy', data: { nodeType: 'SendCommand', params: {
+    model: 'groot:n17', command: 'LOAD', action_request_mode: 'tt_rtc',
+    tt_rtc_joint_trajectory: 'true',
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="legacy" onParamChange={jest.fn()} />);
+  expect(screen.queryByRole('checkbox', { name: 'tt_rtc_joint_trajectory' })).not.toBeInTheDocument();
+  expect(fieldControl('action_request_mode')).toHaveValue('tt_rtc');
+});
+
+test('SwitchActionPolicy exposes VLA/MLP and Actor/Critic/RL choices', () => {
+  const onParamChange = jest.fn();
+  const node = { id: 'switch', data: { nodeType: 'SwitchActionPolicy', params: {
+    action_source: 'vla', training_stage: 'actor', bundle_name: 'latest',
+  } } };
+  render(<BTParamPanel nodes={[node]} selectedNodeId="switch" onParamChange={onParamChange} />);
+  const checkbox = screen.getByRole('checkbox', { name: 'Use MLP Action' });
+  expect(checkbox).not.toBeChecked();
+  expect(screen.getByText('Use VLA Action')).toBeInTheDocument();
+  expect(fieldControl('training_stage')).toBeDisabled();
+  expect(fieldControl('bundle_name')).toBeDisabled();
+  fireEvent.click(checkbox);
+  expect(checkbox).toBeChecked();
+  expect(onParamChange).toHaveBeenCalledWith('switch', 'action_source', 'mlp');
+  expect(fieldControl('training_stage')).toBeEnabled();
+  expect(fieldControl('bundle_name')).toBeEnabled();
+  expect(Array.from(fieldControl('training_stage').options, opt => opt.text)).toEqual(['Actor', 'Critic', 'RL']);
+  fireEvent.change(fieldControl('training_stage'), { target: { value: 'rl' } });
+  expect(onParamChange).toHaveBeenCalledWith('switch', 'training_stage', 'rl');
+  fireEvent.click(checkbox);
+  expect(checkbox).not.toBeChecked();
+  expect(onParamChange).toHaveBeenCalledWith('switch', 'action_source', 'vla');
+  expect(fieldControl('training_stage')).toBeDisabled();
+});

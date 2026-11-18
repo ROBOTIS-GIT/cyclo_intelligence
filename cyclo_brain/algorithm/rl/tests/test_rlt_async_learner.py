@@ -1,11 +1,14 @@
 """CPU-only checks for cooperative RLT scheduling; no robot is connected."""
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import threading
 import unittest
 from unittest.mock import Mock
+import torch
 
 from cyclo_brain.algorithm.rl.rlt import RLTAsyncLearner
 from cyclo_brain.algorithm.rl.tests.test_rlt_stage2_core import (
@@ -14,6 +17,30 @@ from cyclo_brain.algorithm.rl.tests.test_rlt_stage2_core import (
 
 
 class RLTAsyncLearnerTests(unittest.TestCase):
+    def test_explicit_rl_divergence_stops_before_publish_and_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = _run(Path(directory))
+            l = run.learner
+            l.completed_phases.append('critic_warmup')
+            l.begin_phase('rl')
+            with torch.no_grad():
+                for p in l.critic_target.parameters():
+                    p.zero_()
+                l.critic_target.q1.network[-1].bias.fill_(100)
+                l.critic_target.q2.network[-1].bias.fill_(100)
+            batch = replace(_batch(run), episode_success=torch.tensor([True, False, True]))
+            published = []
+            worker = RLTAsyncLearner(l, lambda: batch, after_update=published.append)
+            self.addCleanup(worker.close)
+            worker._trained_context = {'replay': SimpleNamespace(metadata={
+                'reward_contract': 'tt_rtc_decision_td_with_observed_terminal_return/v1'})}
+            worker.set_enabled(True, max_updates=1)
+            self.wait_for(worker, lambda: not worker._enabled and not worker._busy)
+            self.assertIn('target_abs_max', worker.status()['error'] or '')
+            self.assertEqual(published, [])
+            with self.assertRaisesRegex(RuntimeError, 'failed learner'):
+                worker.checkpoint_snapshot()
+
     def test_budget_pauses_after_complete_updates_and_resume_keeps_state(self):
         with tempfile.TemporaryDirectory() as directory:
             run = _run(Path(directory))

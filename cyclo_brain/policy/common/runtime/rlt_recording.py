@@ -23,6 +23,7 @@ class RLTTracePublisher:
         from zenoh_ros2_sdk import ROS2Publisher, ROS2Subscriber, get_message_class
 
         self._session = {}
+        self._diagnostic_session = {}
         self._producer = uuid.uuid4().hex
         self._queue = queue.Queue(maxsize=2048)
         self._closed = False
@@ -36,6 +37,10 @@ class RLTTracePublisher:
         self._subscriber = ROS2Subscriber(
             topic="/inference/rlt_recording", msg_type="std_msgs/msg/String",
             callback=self._set_session,
+        )
+        self._diagnostic_subscriber = ROS2Subscriber(
+            topic="/inference/rlt_diagnostics", msg_type="std_msgs/msg/String",
+            callback=self._set_diagnostic_session,
         )
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -75,9 +80,22 @@ class RLTTracePublisher:
                 "RLT publisher summary could not be queued"
             )
 
+    def _set_diagnostic_session(self, message):
+        try:
+            session = json.loads(message.data)
+            self._diagnostic_session = session if (
+                isinstance(session, dict)
+                and isinstance(session.get('recording_id'), str)
+                and type(session.get('valid_until_ns')) is int
+            ) else {}
+        except (ValueError, TypeError):
+            self._diagnostic_session = {}
+
     @property
     def recording_id(self):
         session = self._session
+        if not session.get('recording_id') or time.time_ns() >= session.get('valid_until_ns', 0):
+            session = self._diagnostic_session
         if self._closed or time.time_ns() >= session.get("valid_until_ns", 0):
             return ""
         return session.get("recording_id", "")
@@ -128,6 +146,7 @@ class RLTTracePublisher:
             self._enqueue_session_summary(recording_id)
         self._closed = True
         self._subscriber.close()
+        self._diagnostic_subscriber.close()
         try:
             self._queue.put(None, timeout=1.0)
         except queue.Full:

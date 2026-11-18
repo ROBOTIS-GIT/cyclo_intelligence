@@ -30,9 +30,12 @@ def validate_normalization(value, dimension=None):
         raise ValueError('MLP normalization requires the canonical SG2 joint order')
     for key in ('state', 'action', 'vla_action'):
         lo, hi = (np.asarray(value[key][k], dtype=np.float64) for k in ('lower','upper'))
-        if lo.shape != (d,) or hi.shape != (d,) or not np.isfinite([lo,hi]).all() or np.any(hi <= lo):
+        # Frozen VLA bounds are decoded only: a zero span is a fixed action.
+        # MLP state/action bounds must remain nonzero for forward normalization.
+        if (lo.shape != (d,) or hi.shape != (d,) or not np.isfinite([lo,hi]).all()
+                or np.any(hi < lo if key == 'vla_action' else hi <= lo)):
             raise ValueError(f'Invalid MLP normalization {key} bounds')
-    if value.get('hold_indices') != list(range(7)) or value.get('fixed_actions') != {'15': .9}:
+    if value.get('hold_indices') != list(range(7)) or value.get('fixed_actions') not in ({}, {'15': .9}):
         raise ValueError('Unsupported MLP fixed-output policy')
     return copy.deepcopy(value)
 
@@ -41,7 +44,7 @@ def fit_normalization(states, actions, *, joint_names, vla_lower, vla_upper, sou
     """Inputs must contain only actual frames from successful episodes."""
     d = len(joint_names)
     result = dict(format=FORMAT, margin_fraction=.05, joint_names=list(joint_names),
-                  source_fingerprint=source_fingerprint, hold_indices=list(range(7)), fixed_actions={'15':.9})
+                  source_fingerprint=source_fingerprint, hold_indices=list(range(7)), fixed_actions={})
     for key, values in [('state',states),('action',actions)]:
         a=np.asarray(values,dtype=np.float64)
         if a.ndim!=2 or a.shape[1]!=d or not len(a) or not np.isfinite(a).all():
@@ -80,10 +83,11 @@ def reference_to_mlp(values, config):
 def apply_fixed_actions(physical, config, hold):
     result=np.asarray(physical,dtype=np.float32).copy()
     result[...,config['hold_indices']]=np.asarray(hold,dtype=np.float32)[...,None,:]
-    for index,value in config['fixed_actions'].items():result[...,int(index)]=value
+    # Legacy bundles record right-gripper 0.9; retain their signed metadata
+    # for loading, but never apply that retired override.
     return result
 
 
 def active_joint_indices(config):
-    ignored=set(config['hold_indices'])|{int(k) for k in config['fixed_actions']}
+    ignored=set(config['hold_indices'])
     return [i for i in range(len(config['joint_names'])) if i not in ignored]

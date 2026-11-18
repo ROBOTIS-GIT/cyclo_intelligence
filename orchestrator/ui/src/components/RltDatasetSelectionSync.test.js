@@ -14,7 +14,7 @@ test('selection changes while ON, including empty, never toggle training', async
   jest.useFakeTimers();
   let state = { async_enabled: true, selected_paths: [], replay_source: { transitions: 0 } };
   const callService = jest.fn(async (_service, _type, request) => {
-    if (request.command === 14) state = { ...state, selected_paths: request.rlt_dataset_paths };
+    if (request.command === 27) state = { ...state, selected_paths: request.rlt_dataset_paths };
     return { success: true, message: JSON.stringify(state) };
   });
   const props = { callService, bundlePath: '/bundle', enabled: true };
@@ -29,10 +29,10 @@ test('selection changes while ON, including empty, never toggle training', async
     await act(async () => jest.advanceTimersByTime(1000));
     expect(state.selected_paths).toEqual([]);
     expect(state.async_enabled).toBe(true);
-    expect(callService.mock.calls.every((call) => [8, 14].includes(call[2].command))).toBe(true);
-    const before = callService.mock.calls.filter((call) => call[2].command === 14).length;
+    expect(callService.mock.calls.every((call) => [21, 27].includes(call[2].command))).toBe(true);
+    const before = callService.mock.calls.filter((call) => call[2].command === 27).length;
     await act(async () => jest.advanceTimersByTime(1000));
-    expect(callService.mock.calls.filter((call) => call[2].command === 14)).toHaveLength(before);
+    expect(callService.mock.calls.filter((call) => call[2].command === 27)).toHaveLength(before);
   } finally { view.unmount(); jest.useRealTimers(); }
 });
 
@@ -49,7 +49,7 @@ test('connected checkbox selections sync without toggling Async RL, after explic
   jest.useFakeTimers();
   let state = { async_enabled: false, selected_paths: [] };
   const callService = jest.fn(async (_service, _type, request) => {
-    if (request.command === 14) state = { ...state, selected_paths: request.rlt_dataset_paths };
+    if (request.command === 27) state = { ...state, selected_paths: request.rlt_dataset_paths };
     return { success: true, message: JSON.stringify(state) };
   });
   useRosServiceCaller.mockReturnValue({ callService });
@@ -75,7 +75,7 @@ test('connected checkbox selections sync without toggling Async RL, after explic
     await act(async () => jest.advanceTimersByTime(1000));
     expect(state.selected_paths).toEqual([]);
     expect(state.async_enabled).toBe(false);
-    expect(callService.mock.calls.every((call) => [8, 14].includes(call[2].command))).toBe(true);
+    expect(callService.mock.calls.every((call) => [21, 27].includes(call[2].command))).toBe(true);
     act(() => store.dispatch(setInferenceTaskInfo({ rltEnabled: false })));
     const count = callService.mock.calls.length;
     await act(async () => jest.advanceTimersByTime(2000));
@@ -94,6 +94,6 @@ test('LOAD-first errors recover by polling, without starting training or loading
     expect(screen.getByRole('status')).toHaveTextContent('Unavailable: LOAD first');
     await act(async () => jest.advanceTimersByTime(1000));
     expect(screen.getByRole('status')).toHaveTextContent('1 datasets selected');
-    expect(callService.mock.calls.map((call) => call[2].command)).toEqual([8, 8]);
+    expect(callService.mock.calls.map((call) => call[2].command)).toEqual([21, 21]);
   } finally { view.unmount(); jest.useRealTimers(); }
 });

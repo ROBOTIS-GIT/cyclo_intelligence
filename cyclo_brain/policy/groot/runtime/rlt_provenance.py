@@ -228,8 +228,11 @@ def _validate_modality_config(processor: Mapping[str, Any]) -> Mapping[str, Any]
             "RLT state/action modality order must be arm_left, arm_right[, odometry]"
         )
     horizon = 16 if action_keys == RLT_ACTION_GROUPS else 32
-    if action_offsets != tuple(range(horizon)):
-        raise RLTProvenanceError(f"RLT GR00T reference horizon must be indices 0..{horizon - 1}")
+    allowed_offsets = (tuple(range(horizon)),)
+    if horizon == 32:
+        allowed_offsets += (tuple(range(0, 64, 2)),)
+    if action_offsets not in allowed_offsets:
+        raise RLTProvenanceError(f"RLT GR00T reference horizon has unsupported delta_indices: {action_offsets}")
     action_configs = _sequence(
         embodiment["action"].get("action_configs"), "RLT action action_configs"
     )

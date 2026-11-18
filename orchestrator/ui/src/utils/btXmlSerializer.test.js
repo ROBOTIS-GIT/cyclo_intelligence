@@ -52,7 +52,31 @@ function sampleGraph() {
 }
 
 describe('btXmlSerializer', () => {
+  it('round trips SwitchActionPolicy choices', () => {
+    const node = { id: 'switch', type: 'btAction', position: { x: 0, y: 0 } };
+    const params = { action_source: 'mlp', training_stage: 'rl', bundle_name: 'latest' };
+    const xml = serializeFromGraph([node], [], new Map([
+      ['switch', { tag: 'SwitchActionPolicy', name: 'Use MLP', params }],
+    ]));
+    expect([...parseBTXml(xml).nodeDataMap.values()].find(entry => entry.tag === 'SwitchActionPolicy').params)
+      .toMatchObject(params);
+  });
+
+  it.each(['true', 'false'])('drops retired q/v=%s while preserving TT-RTC', (selected) => {
+    const node = { id: 'load', type: 'btAction', position: { x: 0, y: 0 } };
+    const params = { command: 'LOAD', model: 'groot:n17', action_request_mode: 'tt_rtc',
+      tt_rtc_joint_trajectory: selected };
+    const xml = serializeFromGraph([node], [], new Map([
+      ['load', { tag: 'SendCommand', name: 'Load', params }],
+    ]));
+    expect(xml).not.toContain('tt_rtc_joint_trajectory');
+    expect(xml).toContain('action_request_mode="tt_rtc"');
+  });
+
   it.each([
+    ['initial_pose_sync', 'false'],
+    ['initial_pose_sync', 'true'],
+    ['initial_pose_sync_duration_s', '5'],
     ['vla_rail_enabled', 'true'],
     ['vla_rail_enabled', 'false'],
     ['action_request_mode', 'tt_rtc'],
@@ -324,4 +348,13 @@ describe('btXmlSerializer', () => {
   expect(xml).toContain('control_hz="100"');
   expect(xml).not.toContain('ttrtc_enabled');
   expect(xml).not.toContain('ttrtc_prefix_steps');
+ });
+
+ test('preserves explicit MLP preload ports on LOAD', () => {
+  const params = { target: 'INFERENCE', command: 'LOAD', model: 'groot:n17', action_request_mode: 'tt_rtc', training_stage: 'actor', bundle_name: 'latest' };
+  const xml = serializeFromGraph([{ id: 'load', position: { x: 0, y: 0 } }], [], new Map([
+    ['load', { tag: 'SendCommand', name: 'LoadGroot', params }],
+  ]));
+  expect(xml).toContain('training_stage="actor"');
+  expect(xml).toContain('bundle_name="latest"');
  });

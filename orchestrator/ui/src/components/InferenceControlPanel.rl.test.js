@@ -582,6 +582,24 @@ describe('InferenceControlPanel deploy safety', () => {
     );
   });
 
+  test.each([
+    [false, '', InferencePhase.READY, 'Enable RLT in Settings'],
+    [true, '', InferencePhase.READY, 'Set RLT Bundle Path in Settings'],
+    [true, '/workspace/checkpoint/rlt/bundle', InferencePhase.READY, 'Start inference with the RLT bundle loaded'],
+  ])('shows disabled routing with missing prerequisites', (enabled, bundle, phase, message) => {
+    const { sendRecordCommand } = renderPanel({
+      variant: 'offlineRL', showRecordingControls: true,
+      inferencePhase: phase,
+      taskOverrides: { serviceType: 'groot', policyType: 'n17',
+        actionRequestMode: 'tt_rtc', rltEnabled: enabled, rltBundlePath: bundle },
+    });
+    const button = screen.getByRole('button', { name: 'Use MLP Action' });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(message)).toBeInTheDocument();
+    fireEvent.click(button);
+    expect(sendRecordCommand).not.toHaveBeenCalledWith('set_action_policy', expect.anything());
+  });
+
   test('labels the preloaded TT-RTC routes as VLA and MLP actions', async () => {
     const { store, sendRecordCommand } = renderPanel({
       variant: 'offlineRL',

@@ -33,7 +33,7 @@ def validate_tree(xml):
     if not main or len(trees) != 1 or len(trees[0]) != 1:
         raise ValueError('Supervised task requires one valid main BehaviorTree')
     controls = {'Sequence', 'Loop'}
-    leaves = {'Wait', 'Rotate', 'JointControl', 'HomeMeal', 'HomeLaundry', 'HomeTV', 'ArmStateGate', 'SendCommand', 'ArucoDock', 'DockRetreat', 'ReturnToWaypoint'}
+    leaves = {'Wait', 'Rotate', 'JointControl', 'HomeMeal', 'HomeLaundry', 'HomeTV', 'ArmStateGate', 'SendCommand', 'SwitchActionPolicy', 'ArucoDock', 'DockRetreat', 'ReturnToWaypoint'}
     inference_loaded = inference_active = False
     backend = None
     for node in trees[0].iter():
@@ -60,6 +60,9 @@ def validate_tree(xml):
                 inference_active = command == 'RESUME'
                 if command == 'CLEAR':
                     inference_loaded = False
+        if kind == 'SwitchActionPolicy':
+            if not inference_loaded or backend != 'groot':
+                raise ValueError('SwitchActionPolicy requires a preceding GR00T LOAD')
         if kind in leaves and len(node):
             raise ValueError(f'Action {kind} cannot contain child actions')
     if inference_active:

@@ -35,6 +35,8 @@ from robot_client import RobotClient  # noqa: E402
 
 from .confirmed_hold import hold_current_pose
 from .tt_rtc_timeline import TTActionTimeline
+from .common_time_timeline import CommonTimeTimeline
+from .policy_time_timeline import PolicyTimeTimeline
 from .arm_command_smoothing import ArmCommandSmoother, ArmSmoothingConfig, smoothing_enabled
 from .position_deadband import PositionDeadband, left_arm_deadband_enabled
 from .left_pose_hold import LeftPoseHold, HoldConfig, REFERENCE as LEFT_HOLD_REFERENCE, enabled_for_model
@@ -69,8 +71,6 @@ TT_RTC_HORIZON = 16
 TT_RTC_DELAY_STEPS = 6
 TT_RTC_ACTION_DIM = 19
 TT_RTC_RLT_CHUNK_SIZE = 10
-GRIPPER_COMMAND_THRESHOLD = 0.7
-GRIPPER_COMMAND_VALUE = 0.9
 TT_RTC_PREFIX_MODE_ENV = "CYCLO_TT_RTC_PREFIX_MODE"
 TT_RTC_PREFIX_MODE_FIXED_FIRST_SIX = "fixed_first_6"
 TT_RTC_PREFIX_MODE_FIXED_FIRST_EIGHT = "fixed_first_8"
@@ -518,6 +518,9 @@ class ControlLoop:
             ):
                 raise RuntimeError("initial pose sync cancelled")
             processor.clear()
+            # Explicit pose sync discards the trajectory, including on a
+            # running RESUME. Its completion must start a fresh TT-RTC stream.
+            self._tt_rtc_bootstrap_pending = True
             self._tt_rtc_rlt_vla_reference = None
             try:
                 effective_duration_s = robot.publish_initial_pose_sync(
@@ -834,7 +837,26 @@ class ControlLoop:
                     "blocked unauthorized RLT action before robot publish"
                 )
 
-            action = processor.pop_action()
+            try:
+                if isinstance(processor, CommonTimeTimeline):
+                    now = time.monotonic()
+                    dt = 1.0 / processor.output_hz
+                    if processor.last_action is None and processor.buffer_size:
+                        anchor = (robot.get_current_action_positions(action_keys)
+                                  if publish_to_robot else processor.peek_actions(1)[0])
+                        processor.seed_action(anchor)
+                    elif self._arm_smoothing_last_time is not None:
+                        dt = now - self._arm_smoothing_last_time
+                        if dt > 0.2:
+                            raise RuntimeError("control command gap exceeded 200ms; fresh START/RESUME required")
+                    self._arm_smoothing_last_time = now
+                    action = processor.pop_action(elapsed_s=dt)
+                else:
+                    action = processor.pop_action()
+            except Exception as error:
+                self._stream_handoff_pending = True
+                self._latch_tt_rtc_failure_locked(f"common time trajectory failed; inference paused: {error}")
+                return
             if action is not None:
                 planned_action = np.asarray(action, dtype=np.float64).copy()
                 try:
@@ -847,7 +869,6 @@ class ControlLoop:
                     self._stream_handoff_pending = True
                     self._latch_tt_rtc_failure_locked(message)
                     return
-                action = self._apply_gripper_command_threshold_locked(action)
                 command_started_ns = time.time_ns()
                 command_started_monotonic_ns = time.monotonic_ns()
                 publish_success = False
@@ -886,6 +907,8 @@ class ControlLoop:
                     action_request_mode=action_request_mode,
                     action_keys=action_keys,
                     remaining_control_samples=processor.buffer_size,
+                    execution_policy_mode=(processor.executing_policy
+                        if isinstance(processor, PolicyTimeTimeline) else self._active_action_policy_mode),
                 )
             elif publish_to_robot:
                 idle = getattr(robot, "publish_idle_action", None)
@@ -1564,6 +1587,7 @@ class ControlLoop:
         if (
             action_policy_mode == ACTION_POLICY_RLT
             and not self._stream_handoff_pending
+            and not isinstance(processor, CommonTimeTimeline)
         ):
             boundary_anchor = (
                 remaining_actions[-1]
@@ -1665,6 +1689,8 @@ class ControlLoop:
                     postfix,
                     scheduled_start_delay_s=None,
                     align=False,
+                    **({"action_policy_mode": action_policy_mode}
+                       if isinstance(processor, PolicyTimeTimeline) else {}),
                 )
         except Exception as error:
             if handoff_applied:
@@ -1714,6 +1740,8 @@ class ControlLoop:
             return
         if self._robot_type != "ffw_sg2_rev1" or "arm_left" not in self._action_keys:
             raise ValueError("left pose hold requires SG2 left arm")
+        if isinstance(self._processor, CommonTimeTimeline):
+            raise ValueError("common time scaling cannot combine with legacy left pose hold")
         if (self._action_request_mode != ACTION_REQUEST_MODE_TT_RTC
                 or self._tt_rtc_temporal_overlap_steps
                 or self._arm_smoother is not None or self._left_arm_deadband is not None):
@@ -1762,6 +1790,8 @@ class ControlLoop:
         indices = [i for i, joint in enumerate(layout) if joint['name'] in wanted]
         if len(indices) != 7 or {layout[i]['name'] for i in indices} != wanted:
             raise ValueError("left arm deadband requires exactly seven named left arm joints")
+        if isinstance(self._processor, CommonTimeTimeline):
+            raise ValueError("common time scaling cannot combine with independent arm deadband")
         radius = float(os.environ.get("CYCLO_LEFT_ARM_DEADBAND_RAD", "0.003"))
         self._left_arm_deadband = PositionDeadband(
             indices, radius, lower=[layout[i]['lower'] for i in indices],
@@ -1785,6 +1815,27 @@ class ControlLoop:
             raise ValueError("arm trajectory lookahead requires a TT-RTC timeline")
         if any(config.max_velocity_rad_s > layout[i]['velocity'] for i in indices):
             raise ValueError("arm smoothing velocity exceeds configured URDF velocity")
+        common = os.environ.get("CYCLO_SG2_COMMON_TIME_SCALING", "false").strip().lower()
+        if common not in {"true", "false", "1", "0"}:
+            raise ValueError("CYCLO_SG2_COMMON_TIME_SCALING must be true or false")
+        if common in {"true", "1"} and self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            if config.lookahead_s or self._tt_rtc_temporal_overlap_steps:
+                raise ValueError("common time scaling requires no independent lookahead or temporal overlap")
+            rlt_only = os.environ.get("CYCLO_SG2_COMMON_TIME_RLT_ONLY", "false").strip().lower()
+            if rlt_only not in {"true", "false", "1", "0"}:
+                raise ValueError("CYCLO_SG2_COMMON_TIME_RLT_ONLY must be true or false")
+            timeline_type = PolicyTimeTimeline if rlt_only in {"true", "1"} else CommonTimeTimeline
+            self._processor = timeline_type(
+                **({"base_config": config} if timeline_type is PolicyTimeTimeline else {}),
+                source_hz=TT_RTC_SOURCE_HZ, control_hz=self._processor.output_hz,
+                indices=indices, max_velocity=config.max_velocity_rad_s,
+                max_acceleration=config.max_acceleration_rad_s2,
+                max_jerk=config.max_jerk_rad_s3,
+                lower=[layout[i]['lower'] for i in indices],
+                upper=[layout[i]['upper'] for i in indices],
+            )
+            logger.info("SG2 common time scaling enabled: %s", config)
+            return
         self._arm_smoother = ArmCommandSmoother(
             indices, config=config,
             lower=[layout[i]['lower'] for i in indices],
@@ -1835,40 +1886,6 @@ class ControlLoop:
         self._arm_smoothing_last_time = now
         return command
 
-    def _apply_gripper_command_threshold_locked(
-        self, action: np.ndarray,
-    ) -> np.ndarray:
-        """Snap SG2 grippers after interpolation, for both preview and command.
-
-        This is a per-command rule, not a latch: values below 0.7 can reopen
-        the gripper. Keep the model-rate TT-RTC prefix untouched.
-        """
-        if self._robot_type != "ffw_sg2_rev1":
-            return action
-        # SG2 action group widths follow ffw_sg2_rev1_config.yaml. Resolve
-        # offsets in selected-key order, including single-arm policies.
-        widths = {
-            "arm_left": 8, "arm_right": 8, "head": 2,
-            "lift": 1, "mobile": 3, "odometry": 3,
-        }
-        if any(key not in widths for key in self._action_keys):
-            return action
-        command = np.asarray(action, dtype=np.float64)
-        if command.ndim != 1 or command.size != sum(
-            widths[key] for key in self._action_keys
-        ):
-            return action
-        result = command.copy()
-        offset = 0
-        for key in self._action_keys:
-            if key in ("arm_left", "arm_right"):
-                index = offset + 7
-                value = result[index]
-                if math.isfinite(value) and value >= GRIPPER_COMMAND_THRESHOLD:
-                    result[index] = GRIPPER_COMMAND_VALUE
-            offset += widths[key]
-        return result
-
     @staticmethod
     def _smooth_rlt_chunk_boundary(
         chunk: np.ndarray,
@@ -1888,10 +1905,6 @@ class ControlLoop:
             smoothed[index] = (
                 (1.0 - weight) * anchor + weight * blend_target
             )
-        # A constant 0.9 gripper command is an explicit hold policy, not an
-        # arm waypoint. Do not weaken it during the first boundary sample.
-        if smoothed.shape[1] >= 16 and np.all(np.isclose(chunk[:, 15], 0.9, atol=1e-6, rtol=0)):
-            smoothed[:, 15] = chunk[:, 15]
         return smoothed
 
     @staticmethod
@@ -1915,6 +1928,12 @@ class ControlLoop:
             raise RuntimeError("RobotClient is unavailable")
         if chunk.ndim != 2 or len(chunk) == 0:
             raise ValueError("policy handoff requires a non-empty action chunk")
+        if (isinstance(self._processor, CommonTimeTimeline)
+                and not isinstance(self._processor, PolicyTimeTimeline)):
+            # The first control tick seeds the shared trajectory from fresh
+            # feedback. A second, model-rate ramp would double-retime startup.
+            self._stream_handoff_pending = False
+            return chunk, 0.0
         ramp, duration_s = self._robot.build_policy_handoff_ramp(
             chunk[0],
             list(self._action_keys),
@@ -2167,6 +2186,19 @@ class ControlLoop:
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC:
             return processor.buffer_size <= 0
         if self._action_request_mode == ACTION_REQUEST_MODE_TT_RTC:
+            if isinstance(processor, CommonTimeTimeline):
+                threshold = self._tt_rtc_refill_threshold(action_policy_mode)
+                if self._pending_action_policy_mode is not None:
+                    # Preserve the active segment and clean prefix; abandon only
+                    # the old route's later tail so slow execution cannot exhaust
+                    # the policy-switch service timeout before requesting it.
+                    queued = processor.peek_actions()
+                    if len(queued) > threshold:
+                        processor.replace_queued_actions(queued, queued[:threshold])
+                    return True
+                # Count only reached source targets. Retiming therefore delays
+                # refills naturally while preserving the trained prefix length;
+                # a wall-time trigger would shorten fixed-six prefixes.
             return processor.buffer_size <= self._tt_rtc_refill_threshold(
                 action_policy_mode=action_policy_mode,
             )

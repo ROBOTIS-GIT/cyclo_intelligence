@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 
-const COMMAND = { STATUS: 8, AUTO_ON: 9, AUTO_OFF: 10, APPLY: 11, TRAIN_ON: 12, TRAIN_OFF: 13, SAVE: 15 };
+import { RLT_COMMAND as COMMAND } from '../constants/rltCommands';
 
 async function requestStatus(callService, bundlePath, command, extra = {}) {
   const response = await callService('/groot/inference_command',

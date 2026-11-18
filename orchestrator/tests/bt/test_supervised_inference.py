@@ -259,3 +259,30 @@ def test_supervised_sync_waits_for_runtime_effective_duration(monkeypatch):
     future = supervisor.submit(1, owner)
     assert supervisor.poll(future)
     assert supervisor.sync_until == 112.0
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_load_passes_pose_sync_setting_without_starting(enabled):
+    node = Node()
+    supervisor = InferenceSupervisor(node)
+    owner = Owner('LOAD')
+    owner.initial_pose_sync = enabled
+    owner.initial_pose_sync_duration_s = 7.0
+    assert run(SupervisedCommand(owner, supervisor)) == NodeStatus.SUCCESS
+    request = node.client.requests[-1]
+    assert request.command == 0
+    assert request.initial_pose_sync is enabled
+    assert request.initial_pose_sync_duration_s == 7.0
+    assert not supervisor.running
+
+
+def test_load_numeric_fields_survive_native_ros_serialization():
+    from interfaces.srv import InferenceCommand
+    from rclpy.serialization import serialize_message, deserialize_message
+    node, supervisor = loaded()
+    request = node.client.requests[-1]
+    restored = deserialize_message(serialize_message(request), InferenceCommand.Request)
+    assert restored.control_hz == 100.0
+    assert restored.inference_hz == 15
+    assert restored.chunk_align_window_s == .3
+    assert restored.initial_pose_sync_duration_s == 5.0

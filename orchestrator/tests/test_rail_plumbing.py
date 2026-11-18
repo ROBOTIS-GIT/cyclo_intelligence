@@ -86,7 +86,9 @@ class RailLoadPlumbingTests(unittest.TestCase):
                 call_async=lambda req: requests.append(req) or SimpleNamespace(done=lambda: True)),
         )
         namespace = dict(InferenceCommand=SimpleNamespace(Request=request_type),
-                         LOAD=0, START=1, STOP=4, UNLOAD=5, CAPABILITIES=7)
+                         LOAD=0, START=1, STOP=4, UNLOAD=5, CAPABILITIES=7, SET_ACTION_POLICY=20)
+        send = method('bt/inference/supervisor.py', 'InferenceSupervisor', 'submit_request', namespace)
+        supervisor.submit_request = lambda request, **kwargs: send(supervisor, request, **kwargs)
         submit = method('bt/inference/supervisor.py', 'InferenceSupervisor', 'submit', namespace)
         return supervisor, owner, submit, requests
 

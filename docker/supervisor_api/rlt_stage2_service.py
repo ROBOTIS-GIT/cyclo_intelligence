@@ -7,8 +7,8 @@
 
 """Supervisor routes for GR00T RLT Stage 2 actor-critic training.
 
-Stage 2 trains in an immutable hidden run and publishes one named bundle per
-phase. ``new`` initializes the Action MLP and critics from a frozen GR00T checkpoint plus a completed
+Stage 2 writes named checkpoints directly to a new phase/name directory.
+Unnamed compatibility requests use a hidden run and publish the current bundle. ``new`` initializes the Action MLP and critics from a frozen GR00T checkpoint plus a completed
 Stage-1 RL-token encoder.  ``resume`` restores all trainable state from a
 completed Stage-2 bundle, but still writes the next round to a new directory.
 The input datasets and bundles are consequently never modified in place.
@@ -138,6 +138,7 @@ class RLTStage2StartRequest(BaseModel):
     actor_warmup_data_scope: Literal["all", "success_only"] = "all"
     replay_bundle_path: str = ""
     allow_stale_replay: bool = False
+    checkpoint_name: str = Field(default="", pattern=r"^([A-Za-z0-9][A-Za-z0-9_-]{0,63})?$")
     data_validation_id: str = Field(default="", max_length=32, pattern="^([0-9a-f]{32})?$")
 
     @model_validator(mode="after")
@@ -784,6 +785,7 @@ def _output_path(
     steps: int,
     datasets: list[Path],
     training_phase: str,
+    checkpoint_name: str = "",
 ) -> Path:
     root = RLT_STAGE2_OUTPUT_ROOT
     try:
@@ -795,14 +797,17 @@ def _output_path(
         raise HTTPException(500, "RLT Stage 2 output root must not be a symlink")
     if training_phase not in _STAGE2_PHASE_FOLDERS:
         raise HTTPException(400, "RLT Stage 2 training phase is invalid")
-    # Work in an immutable, hidden run directory. Only verified results become
-    # visible in the picker, so failed/restarted jobs cannot replace a good model.
+    # Named jobs write directly to their chosen folder; unnamed callers keep
+    # the hidden-run publication flow. Neither path overwrites an existing run.
     phase_root = root / _STAGE2_PHASE_FOLDERS[training_phase]
     runs = phase_root / ".runs"
     if _has_symlink_component(root, runs):
         raise HTTPException(400, "RLT output directories must not be symlinks")
     runs.mkdir(parents=True, exist_ok=True)
-    output = runs / f"steps_{steps:07d}_{job_id[:12]}"
+    if checkpoint_name and not _PUBLICATION_NAME.fullmatch(checkpoint_name):
+        raise HTTPException(400, "Invalid checkpoint name")
+    output = (phase_root / checkpoint_name if checkpoint_name else
+              runs / f"steps_{steps:07d}_{job_id[:12]}")
     if output.exists() or output.is_symlink():
         raise HTTPException(409, f"RLT Stage 2 output already exists: {output}")
     try:
@@ -1734,6 +1739,7 @@ class RLTStage2Supervisor:
                 request.steps,
                 datasets,
                 request.training_phase,
+                checkpoint_name=request.checkpoint_name,
             )
             if bundle_path and Path(bundle_path) == output:
                 raise HTTPException(400, "RLT resume output must differ from its input bundle")

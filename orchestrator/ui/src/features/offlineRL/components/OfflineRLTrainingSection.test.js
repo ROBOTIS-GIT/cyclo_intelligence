@@ -2660,7 +2660,7 @@ describe('OfflineRLTrainingSection', () => {
       encoder_artifact_path: encoderPath,
       groot_checkpoint: grootPath,
     });
-    const { testStore } = renderSection();
+    const { testStore } = renderSection({ rltCheckpointName: 'second_bottle' });
     await screen.findByRole('button', { name: 'Start' });
     act(() => {
       testStore.dispatch(setOfflineRLDatasetSelection({
@@ -2705,6 +2705,7 @@ describe('OfflineRLTrainingSection', () => {
     fireEvent.click(start);
 
     await waitFor(() => expect(startRLTStage2Training).toHaveBeenCalledWith({
+      checkpoint_name: 'second_bottle',
       initialization_mode: 'new',
       replay_bundle_path: replayBundlePath,
       training_phase: 'actor_warmup',

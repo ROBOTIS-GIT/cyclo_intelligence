@@ -37,6 +37,7 @@ import ReplayBufferVessel from './ReplayBufferVessel';
 import OfflineRLEpisodeMediaModal from './OfflineRLEpisodeMediaModal';
 
 const REPLAY_CAPACITY = 200;
+const REPLAY_PATH_STORAGE_KEY = 'cyclo.offlineRL.replayBufferPath';
 
 const OUTCOME_STYLE = {
   success: {
@@ -550,6 +551,13 @@ export default function OfflineRLReplayBuffer({ isActive = true }) {
     (state) => state.editDataset?.conversionStatus?.status || 'idle'
   );
   const retainedReplayPath = useSelector(selectOfflineRLReplayBufferPath);
+  const [savedReplayPath] = useState(() => {
+    try { return localStorage.getItem(REPLAY_PATH_STORAGE_KEY) || ''; }
+    catch { return ''; }
+  });
+  const [selectedReplayPath, setSelectedReplayPath] = useState('');
+  const [folderInput, setFolderInput] = useState('');
+  const [refreshCount, setRefreshCount] = useState(0);
   const {
     getDatasetInfo,
     getReplayData,
@@ -578,13 +586,33 @@ export default function OfflineRLReplayBuffer({ isActive = true }) {
     taskInfo.recordingFolder,
     recordStatus.taskNum
   ), [recordStatus.taskNum, taskInfo.recordingFolder]);
-  const replayPath = liveReplayPath || retainedReplayPath;
+  const replayPath = selectedReplayPath || liveReplayPath || retainedReplayPath || savedReplayPath;
 
   useEffect(() => {
-    if (liveReplayPath && liveReplayPath !== retainedReplayPath) {
+    setFolderInput(replayPath);
+    if (replayPath) {
+      try { localStorage.setItem(REPLAY_PATH_STORAGE_KEY, replayPath); }
+      catch { /* Browsing remains available when storage is disabled. */ }
+    }
+  }, [replayPath]);
+
+  const loadFolder = (event) => {
+    event.preventDefault();
+    const path = folderInput.trim().replace(/\/+$/, '');
+    if (!path.startsWith(`${DEFAULT_PATHS.ROSBAG2_PATH.replace(/\/+$/, '')}/`)) {
+      toast.error('Select a dataset folder under /workspace/rosbag2');
+      return;
+    }
+    setSelectedReplayPath(path);
+    dispatch(setOfflineRLReplayBufferPath(path));
+    setRefreshCount((count) => count + 1);
+  };
+
+  useEffect(() => {
+    if (!selectedReplayPath && liveReplayPath && liveReplayPath !== retainedReplayPath) {
       dispatch(setOfflineRLReplayBufferPath(liveReplayPath));
     }
-  }, [dispatch, liveReplayPath, retainedReplayPath]);
+  }, [dispatch, liveReplayPath, retainedReplayPath, selectedReplayPath]);
 
   const readReplayBuffer = useCallback(async (path) => {
     const result = await getDatasetInfo(path);
@@ -641,6 +669,7 @@ export default function OfflineRLReplayBuffer({ isActive = true }) {
     conversionStatus,
     readReplayBuffer,
     replayPath,
+    refreshCount,
   ]);
 
   const handleDelete = useCallback(async (
@@ -838,7 +867,19 @@ export default function OfflineRLReplayBuffer({ isActive = true }) {
 
   return (
     <>
+      <form onSubmit={loadFolder} className="mb-2 flex gap-2">
+        <input aria-label="Episode manager MCAP folder" value={folderInput}
+          onChange={(event) => setFolderInput(event.target.value)}
+          placeholder="/workspace/rosbag2/Task_..."
+          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
+          disabled={recordingControl.lifecycleLocked || conversionStatus === 'running'} />
+        <button type="submit" className="rounded border px-2 py-1 text-xs"
+          disabled={loading || recordingControl.lifecycleLocked || conversionStatus === 'running'}>
+          Load episodes
+        </button>
+      </form>
       <ReplayBufferStack
+        key={replayPath}
         episodes={episodes}
         totalCount={totalCount}
         loading={loading}

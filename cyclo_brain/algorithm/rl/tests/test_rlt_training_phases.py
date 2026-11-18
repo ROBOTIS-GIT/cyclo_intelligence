@@ -97,7 +97,6 @@ class RLTPhaseTests(unittest.TestCase):
             run = _run(Path(tmp), action_dim=16)
             learner = run.learner
             learner.completed_phases.append("critic_warmup")
-            learner.begin_phase("rl")
             learner.config = replace(learner.config, critic_updates_per_actor=1)
             batch = _batch(run)
             batch = replace(
@@ -113,11 +112,12 @@ class RLTPhaseTests(unittest.TestCase):
                     for parameter in module.parameters():
                         parameter.zero_()
                 learner.actor.fixed_standard_deviation.zero_()
+            learner.begin_phase("rl")
 
             update = learner.update_phase(batch)
 
             # Two successful rows contribute 10*16 unit errors; the failure
-            # row targets its zero VLA reference and contributes no error.
+            # row targets its frozen zero Actor and contributes no error.
             self.assertTrue(update.actor_updated)
             self.assertAlmostEqual(
                 update.actor_reference_constraint,
@@ -144,7 +144,8 @@ class RLTPhaseTests(unittest.TestCase):
             state = deepcopy(run.learner.state_dict())
             state.pop('phase_state')
             run.learner.load_state_dict(state)
-            run.learner.begin_phase('rl')
+            with self.assertRaisesRegex(ValueError, 'Critic warmup'):
+                run.learner.begin_phase('rl')
             with self.assertRaisesRegex(ValueError, 'already trained'):
                 run.learner.begin_phase('actor_warmup')
             state = deepcopy(run.learner.state_dict())

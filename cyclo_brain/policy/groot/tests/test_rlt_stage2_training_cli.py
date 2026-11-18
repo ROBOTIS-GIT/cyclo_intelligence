@@ -29,6 +29,26 @@ from runtime.rlt_provenance import GR00TRLTProvenance  # noqa: E402
 
 
 class RLTStage2TrainingCLITests(unittest.TestCase):
+    def test_rl_diagnostics_reject_finite_divergence_with_reward_contract(self):
+        values = dict(target_mean=.3, actor_negative_q=-.4,
+                      actor_reference_constraint=.02, target_abs_max=.9,
+                      policy_q_abs_max=.95, policy_deviation_max=.1)
+        contract = 'tt_rtc_decision_td_with_observed_terminal_return/v1'
+        metrics = cli._rl_diagnostics(SimpleNamespace(**values),
+                                      reward_contract=contract, normalized_actions=True)
+        self.assertEqual(metrics, values)
+        for field in ('target_abs_max', 'policy_q_abs_max', 'policy_deviation_max'):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(FloatingPointError, field):
+                    cli._rl_diagnostics(SimpleNamespace(**{**values, field: 10.01}),
+                                        reward_contract=contract, normalized_actions=True)
+        # Statistical MLP limits must not be applied to other coordinate systems;
+        # the sparse-terminal value bound must not be assumed for arbitrary rewards.
+        cli._rl_diagnostics(SimpleNamespace(**{**values, 'policy_deviation_max': 50}),
+                            reward_contract=contract, normalized_actions=False)
+        cli._rl_diagnostics(SimpleNamespace(**{**values, 'target_abs_max': 50}),
+                            reward_contract='other', normalized_actions=True)
+
     def test_resume_bind_enforces_parent_replay_lineage_before_binding(self) -> None:
         parent_round = {"round": "parent"}
         current_round = {"round": "current"}

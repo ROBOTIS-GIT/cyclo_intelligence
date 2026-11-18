@@ -1,3 +1,4 @@
+import { RLT_COMMAND } from '../constants/rltCommands';
 import React, { useEffect, useRef, useState } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -21,11 +22,11 @@ export function RltDatasetSelectionSync({ callService, bundlePath, paths, enable
     };
     const poll = async () => {
       try {
-        let status = await request(8);
+        let status = await request(RLT_COMMAND.STATUS);
         if (!active) return;
         const selected = [...new Set(currentPaths.current)];
         if (JSON.stringify(status.selected_paths) !== JSON.stringify(selected)) {
-          status = await request(14, { rlt_dataset_paths: selected });
+          status = await request(RLT_COMMAND.DATASETS, { rlt_dataset_paths: selected });
         }
         if (active) setMessage(status.replay_error
           ? `Async RL: ${status.replay_error} (previous replay retained)`

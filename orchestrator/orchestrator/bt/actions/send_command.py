@@ -37,11 +37,13 @@ compatibility with trees saved before the target port existed. Its LOAD command
 now ensures the selected backend is ready before the existing ROS stages.
 """
 
+import re
 import json
 import os
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from urllib.error import HTTPError
 from urllib.error import URLError
@@ -364,6 +366,8 @@ class SendCommand(BaseAction):
             chunk_align_window_s=params.get('chunk_align_window_s', 0.3),
             inference_mode=inference_mode,
             action_request_mode=action_request_mode,
+            training_stage=params.get('training_stage', ''),
+            bundle_name=params.get('bundle_name', 'latest'),
             initial_pose_sync=params.get('initial_pose_sync', True),
             initial_pose_sync_duration_s=params.get('initial_pose_sync_duration_s', 5.0),
             vla_rail_enabled=params.get('vla_rail_enabled', False),
@@ -404,6 +408,8 @@ class SendCommand(BaseAction):
         service_name: str = '/task/command',
         ttrtc_enabled: bool = False,
         ttrtc_prefix_steps: int = 7,
+        training_stage: str = '',
+        bundle_name: str = 'latest',
     ):
         """Initialize an inference or Docker lifecycle action."""
         super().__init__(node, name='SendCommand')
@@ -411,6 +417,17 @@ class SendCommand(BaseAction):
         self.target_str = (target or 'INFERENCE').strip().upper()
         self.model = model
         self.backend = _service_type_from_model(model)
+        self.training_stage = str(training_stage).strip().lower()
+        self.bundle_name = str(bundle_name).strip()
+        if self.training_stage:
+            from orchestrator.bt.actions.switch_action_policy import STAGES
+            if self.training_stage not in STAGES:
+                raise ValueError('training_stage must be actor, critic or rl')
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', self.bundle_name):
+                raise ValueError('bundle_name must be a bundle name, such as latest')
+            if self.target_str != 'INFERENCE' or self.command_str != 'LOAD' or self.backend != 'groot':
+                raise ValueError('MLP selection belongs on GR00T INFERENCE LOAD')
+            self.mlp_preload_selection = (self.training_stage, self.bundle_name)
         self.initial_pose_sync = str(initial_pose_sync).strip().lower() in {'true', '1'}
         self.initial_pose_sync_duration_s = float(initial_pose_sync_duration_s)
         if not 1.0 <= self.initial_pose_sync_duration_s <= 60.0:
@@ -511,8 +528,9 @@ class SendCommand(BaseAction):
         self._phase_deadline = None
         self._backend_job = None
         self._supervised = None
+        self._backend_cleanup = None
         supervisor = getattr(self.node, 'inference_supervisor', None)
-        if supervisor is not None:
+        if supervisor is not None and self.target_str == 'INFERENCE':
             from orchestrator.bt.inference.supervised_command import SupervisedCommand
             self._supervised = SupervisedCommand(self, supervisor)
 
@@ -783,6 +801,24 @@ class SendCommand(BaseAction):
                 self._result = False
                 return NodeStatus.FAILURE
 
+            supervisor = getattr(self.node, 'inference_supervisor', None)
+            if (self.target_str == 'DOCKER' and self.command_str in {'STOP', 'RESTART'}
+                    and supervisor is not None and supervisor.backend == self.backend):
+                if supervisor.loaded or self._backend_cleanup is not None:
+                    if self._backend_cleanup is None:
+                        from orchestrator.bt.inference.supervised_command import SupervisedCommand
+                        owner = SimpleNamespace(target_str='INFERENCE', command_str='CLEAR',
+                                                log_error=self.log_error)
+                        self._backend_cleanup = SupervisedCommand(owner, supervisor)
+                    result = self._backend_cleanup.tick()
+                    if result == NodeStatus.RUNNING:
+                        return result
+                    if result == NodeStatus.FAILURE:
+                        self._state, self._result = self._STATE_DONE, False
+                        return result
+                # The next process must re-confirm capabilities and LOAD.
+                supervisor.verified = False
+
             if self.target_str == 'DOCKER':
                 self.log_info(
                     'SendCommand started '
@@ -969,7 +1005,7 @@ class SendCommand(BaseAction):
     def _build_task_info(self) -> TaskInfo:
         ti = TaskInfo()
         ti.task_type = 'inference'
-        if self.command_str == 'RESUME':
+        if self.command_str in {'LOAD', 'RESUME'}:
             ti.initial_pose_sync = self.initial_pose_sync
             ti.initial_pose_sync_duration_s = self.initial_pose_sync_duration_s
         ti.policy_path = self.policy_path
@@ -1012,14 +1048,24 @@ class SendCommand(BaseAction):
         return ti
 
     def pause(self):
-        if self._supervised is None:
+        if self._supervised is not None:
+            self._supervised.pause()
+        elif self.target_str == 'DOCKER' and getattr(self.node, 'inference_supervisor', None) is not None:
+            # Docker workers may finish container lifecycle work while paused;
+            # they never START robot output. The BT cursor remains frozen.
+            if self._backend_cleanup is not None:
+                self._backend_cleanup.pause()
+        else:
             raise RuntimeError('SendCommand pause requires a supervised task tree')
-        self._supervised.pause()
 
     def resume(self):
-        if self._supervised is None:
+        if self._supervised is not None:
+            self._supervised.resume()
+        elif self.target_str == 'DOCKER' and getattr(self.node, 'inference_supervisor', None) is not None:
+            if self._backend_cleanup is not None:
+                self._backend_cleanup.resume()
+        else:
             raise RuntimeError('SendCommand resume requires a supervised task tree')
-        self._supervised.resume()
 
     def reset(self):
         """Cancel pending work without letting a late START escape cleanup."""
@@ -1036,6 +1082,7 @@ class SendCommand(BaseAction):
                 # compensating STOP before publishing its terminal result.
                 backend_job.cancel_event.set()
         self._backend_job = None
+        self._backend_cleanup = None
         if self._future is not None and not self._future.done():
             self._future.cancel()
         self._future = None

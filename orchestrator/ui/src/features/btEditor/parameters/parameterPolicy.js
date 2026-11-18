@@ -31,9 +31,13 @@ export const NUMBER_PARAMS = new Set([
 // Per-param helper text shown beneath the input. Keep these short — they
 // render directly under the field as a small gray hint.
 export const HELP_TEXT = {
+  action_source: 'Checked: MLP. Unchecked: VLA. Requires a preceding GR00T TT-RTC LOAD. Use MLP Action selects the trained Actor and authorizes it for the LOAD output target. The selected MLP is preloaded with GR00T LOAD; switching does not reload weights. Use one stage/bundle per tree.',
+  training_stage: 'Actor / Critic / RL chooses the saved training-stage bundle. Critic uses the Actor stored in the Critic warmup bundle.',
+  bundle_name: 'Saved bundle name (default: latest), loaded during GR00T LOAD. Updated weights take effect on the next LOAD. Paused inference stays paused until RESUME.',
+
   camera_profile: 'VGA: 672x376 (default). HD720: 1280x720. Requires source resolution at least as large; images are never upscaled. Leave both camera topics empty to select Gazebo native or physical ZED left rectified automatically.',
   image_mode: 'raw: rectify internally. rectified: use an already rectified image topic. Detection always uses rectified pixels.',
-  initial_pose_sync: 'Align to the first predicted pose before RESUME. Enabled by default for robot output.',
+  initial_pose_sync: 'Configure initial pose alignment on LOAD; RESUME can override this setting. Disable to skip alignment.',
   initial_pose_sync_duration_s: 'Pose alignment duration in seconds (1–60).',
   vla_rail_enabled: 'VLA-RAIL cubic smoothing and dual-quintic transitions for ordinary GR00T Async. Off by default.',
   action_request_mode: 'TT-RTC requires a 32 × 16 prefix-conditioned checkpoint. Runtime supports 0–8 prefix actions within the checkpoint’s declared training range and publishes at control_hz.',
@@ -54,6 +58,7 @@ export const BOOL_PARAMS = new Set([
 
 // Drop unsupported flags when opening nodes saved by earlier Canvas versions.
 export const RETIRED_INFERENCE_PARAMS = new Set([
+  'tt_rtc_joint_trajectory',
   'ttrtc_rate_limit_enabled', 'chunk_spline_smoothing',
   'chunk_endpoint_interpolation', 'remac_enabled',
 ]);
@@ -73,6 +78,7 @@ export function normalizeSendCommandTarget(target) {
 
 export function normalizeSendCommandParams(params, nodeType) {
   const next = withJointSelectionDefaults(nodeType === 'SendCommand' ? normalizeLegacyTtRtcParams(params) : params, nodeType);
+  if (nodeType === 'SwitchActionPolicy') return { action_source: 'vla', training_stage: 'actor', bundle_name: 'latest', ...next };
   if (nodeType !== 'SendCommand') return next;
 
   const target = normalizeSendCommandTarget(next.target);
@@ -111,6 +117,10 @@ export const ENUM_PARAMS = {
 };
 
 export function enumOptionsFor(nodeType, key, params) {
+  if (nodeType === 'SwitchActionPolicy') {
+    if (key === 'action_source') return ['vla', 'mlp'];
+    if (key === 'training_stage') return ['actor', 'critic', 'rl'];
+  }
   if (['ArucoDock', 'DockRetreat'].includes(nodeType) && key === 'footprint_profile') return ['circle', 'sg2_autonomy_base'];
   if (nodeType === 'ArucoDock' && key === 'camera_profile') return ['VGA', 'HD720'];
   if (nodeType === 'ArucoDock' && key === 'image_mode') return ['raw', 'rectified'];
@@ -134,7 +144,8 @@ export const SEND_COMMAND_ACTIVE_FIELDS = {
   LOAD: new Set([
     'target', 'command', 'model', 'policy_path', 'task_instruction',
     'inference_mode', 'action_request_mode', 'vla_rail_enabled',
-    'inference_hz', 'control_hz',
+    'inference_hz', 'control_hz', 'training_stage', 'bundle_name',
+    'initial_pose_sync', 'initial_pose_sync_duration_s',
     'chunk_align_window_s', 'acceleration_mode', 'acceleration_engine_path',
   ]),
   // Resume can re-condition language mid-run; output mode is fixed by LOAD.
@@ -168,9 +179,21 @@ export function isSendCommandFieldDisabled(nodeType, key, params) {
 }
 
 export function isFieldDisabled(nodeType, key, params) {
+  if (nodeType === 'SwitchActionPolicy' && ['training_stage', 'bundle_name'].includes(key)) {
+    return params.action_source !== 'mlp';
+  }
   return (
     isSendCommandFieldDisabled(nodeType, key, params) ||
     isJointControlFieldDisabled(nodeType, key, params) ||
     isArmStateGateFieldDisabled(nodeType, key, params)
   );
+}
+
+export function enumOptionLabel(nodeType, key, value) {
+  if (nodeType !== 'SwitchActionPolicy') return value;
+  const labels = {
+    action_source: { vla: 'Use VLA Action', mlp: 'Use MLP Action' },
+    training_stage: { actor: 'Actor', critic: 'Critic', rl: 'RL' },
+  };
+  return labels[key]?.[value] || value;
 }

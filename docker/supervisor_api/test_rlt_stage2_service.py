@@ -1191,12 +1191,15 @@ def test_start_new_and_resume_validate_then_launch(roots, monkeypatch):
         service.RLTStage2StartRequest(
             training_phase="actor_warmup",
             initialization_mode="new",
+            checkpoint_name="second_bottle",
             dataset_paths=[str(dataset)],
             groot_checkpoint=str(groot),
             rl_token_encoder_path=str(encoder),
             steps=20,
         )
     )
+    assert new_status.output_dir == str(stage2_root / "actor" / "second_bottle")
+    assert captured[0][0][captured[0][0].index("--output-dir") + 1] == new_status.output_dir
     assert new_status.status == "running"
     assert new_status.initialization_mode == "new"
     supervisor._job.status = "completed"
@@ -1434,9 +1437,10 @@ def test_migration_archives_failed_runs_and_keeps_only_latest_complete(roots):
     assert service.migrate_legacy_stage2_layout() == {}
 
 
-def test_monitor_publishes_completed_hidden_run(roots):
+@pytest.mark.parametrize("named", [False, True])
+def test_monitor_publishes_completed_hidden_run(roots, named):
     *_, root, _ = roots
-    output = _write_stage2_bundle(root / "rl_training/.runs/steps_0000100_aaaaaaaaaaaa")
+    output = _write_stage2_bundle(root / ("rl_training/second_bottle" if named else "rl_training/.runs/steps_0000100_aaaaaaaaaaaa"))
     payload = {"event": "stage2_training_result", "status": "completed",
                "actor_artifact": str(output / "artifacts/rlt_actor.pt"),
                "encoder_artifact": str(output / "artifacts/rl_token_encoder.pt"),
@@ -1445,5 +1449,26 @@ def test_monitor_publishes_completed_hidden_run(roots):
     job = _job(root, output_dir=str(output), process=FakeProcess(stdout=[json.dumps(payload)]))
     _supervisor()._monitor(job)
     assert job.status == "completed"
-    assert service._resolve_resume_bundle(str(root / "rl_training/latest")).is_dir()
+    if named:
+        assert not (root / "rl_training/latest").exists()
+        assert service._discover_latest_completed_stage2().output_dir == str(output)
+    else:
+        assert service._resolve_resume_bundle(str(root / "rl_training/latest")).is_dir()
     assert job.output_dir == str(output)  # candidate identity changes on every new run
+
+
+def test_named_training_output_is_direct_and_never_overwrites(roots):
+    dataset_root, *_, stage2_root, _ = roots
+    output = service._output_path('a'*32, 100, [dataset_root], 'actor_warmup', checkpoint_name='second_bottle')
+    assert output == stage2_root / 'actor' / 'second_bottle'
+    output.mkdir(parents=True)
+    (output / 'keep.txt').write_text('original')
+    with pytest.raises(HTTPException, match='already exists'):
+        service._output_path('b'*32, 100, [dataset_root], 'actor_warmup', checkpoint_name='second_bottle')
+    assert (output / 'keep.txt').read_text() == 'original'
+
+
+@pytest.mark.parametrize('name', ['../escape', '.runs', 'a/b', 'x'*65])
+def test_named_training_output_rejects_unsafe_names(roots, name):
+    with pytest.raises(HTTPException):
+        service._output_path('a'*32, 100, [], 'actor_warmup', checkpoint_name=name)

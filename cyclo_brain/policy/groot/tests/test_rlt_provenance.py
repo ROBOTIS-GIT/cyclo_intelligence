@@ -138,6 +138,21 @@ class RLTProvenanceTests(unittest.TestCase):
             self.assertEqual(mapping["selected_source_indices"], list(range(16)))
             self.assertEqual(mapping["dropped_source_indices"], list(range(16, 22)))
 
+    def test_dual_arm_32x16_profile_accepts_two_frame_action_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "model"
+            _write_checkpoint(root)
+            processor = _processor()
+            modalities = processor["processor_kwargs"]["modality_configs"]["new_embodiment"]
+            for domain in ("state", "action"):
+                modalities[domain]["modality_keys"] = ["arm_left", "arm_right"]
+            modalities["action"]["delta_indices"] = list(range(0, 64, 2))
+            modalities["action"]["action_configs"] = modalities["action"]["action_configs"][:2]
+            (root / "processor_config.json").write_text(json.dumps(processor))
+
+            provenance = build_groot_rlt_provenance(root)
+            self.assertEqual((provenance.reference_horizon, provenance.action_dim), (32, 16))
+
     def test_identity_is_path_and_json_format_independent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

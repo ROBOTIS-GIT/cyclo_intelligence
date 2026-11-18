@@ -3,9 +3,9 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import InferenceControlPanel from './InferenceControlPanel';
-import taskReducer, { setInferenceStatus } from '../features/tasks/taskSlice';
+import taskReducer, { setInferenceStatus, setRecordStatus, setInferenceRecordingUiPhase, setInferenceTaskInfo } from '../features/tasks/taskSlice';
 import rosReducer from '../features/ros/rosSlice';
-import { InferencePhase } from '../constants/taskPhases';
+import { InferencePhase, RecordPhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 jest.mock('react-hot-toast', () => {
@@ -105,6 +105,35 @@ const renderPanel = ({
 describe('InferenceControlPanel deploy safety', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('resumes a paused session while its inference recording remains active after mounting', async () => {
+    const { store, sendRecordCommand } = renderPanel({ inferencePhase: InferencePhase.PAUSED });
+    act(() => store.dispatch(setRecordStatus({ taskType: 'inference', recordPhase: RecordPhase.RECORDING })));
+    const start = screen.getByRole('button', { name: /resume inference/i });
+    expect(start).toBeEnabled();
+    expect(screen.getByRole('button', { name: /stop inference and unload/i })).toBeDisabled();
+    fireEvent.click(start);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', expect.any(Object)));
+    expect(sendRecordCommand).not.toHaveBeenCalledWith('start_inference', expect.any(Object));
+  });
+
+  test.each(['starting', 'saving', 'cancelling'])('blocks resume while recording is %s', (phase) => {
+    const { store } = renderPanel({ inferencePhase: InferencePhase.PAUSED });
+    act(() => {
+      store.dispatch(setRecordStatus({ taskType: 'inference', recordPhase: RecordPhase.RECORDING }));
+      store.dispatch(setInferenceRecordingUiPhase(phase));
+    });
+    expect(screen.getByRole('button', { name: /recording/i })).toBeDisabled();
+  });
+
+  test('blocks a different policy from starting during active recording', () => {
+    const { store } = renderPanel({ inferencePhase: InferencePhase.PAUSED });
+    act(() => {
+      store.dispatch(setRecordStatus({ taskType: 'inference', recordPhase: RecordPhase.RECORDING }));
+      store.dispatch(setInferenceTaskInfo({ policyPath: '/another/model' }));
+    });
+    expect(screen.getByRole('button', { name: /recording/i })).toBeDisabled();
   });
 
   test('shows a warning instead of starting immediately for Real Robot Deploy', async () => {

@@ -18,6 +18,15 @@ export const FALLBACK_SCHEMA_VERSION = '1.0';
 
 export const FALLBACK_CATALOG = [
   {
+    tag: 'SwitchActionPolicy',
+    category: 'action',
+    ports: [
+      { name: 'action_source', type: 'string', default: 'vla' },
+      { name: 'training_stage', type: 'string', default: 'actor' },
+      { name: 'bundle_name', type: 'string', default: 'latest' },
+    ],
+  },
+  {
     tag: 'Sequence',
     category: 'control',
     ports: [],

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import List, Optional
 import json
 import math
+import logging
 from engine_process.protocol import POLICY_UPDATE_COMMANDS, CMD_ASYNC_RL_DATASETS, CMD_ASYNC_RL_ON
 import os
 import threading
@@ -51,6 +52,7 @@ class ServiceHandler:
             # Set before waiting for an in-flight START to finish. A delayed
             # START delivered after STOP must also be rejected, not re-enable
             # publishing. Only a Main process restart clears this fault latch.
+            logging.getLogger(__name__).warning("Supervision FAULT_STOP received: pid=%s already_latched=%s", os.getpid(), self._fault_latched.is_set())
             self._fault_latched.set()
         with self._lifecycle_lock:
             return self._handle_serialized(request)
@@ -64,6 +66,7 @@ class ServiceHandler:
                 CMD_LOAD, CMD_START, CMD_RESUME, CMD_UPDATE_INSTRUCTION, CMD_SET_ACTION_POLICY,
                 *POLICY_UPDATE_COMMANDS,
             ):
+                logging.getLogger(__name__).warning("Supervision latch rejected command=%s pid=%s", cmd, os.getpid())
                 return self._make_response(False, "supervision fault latched; restart policy runtime")
             if cmd == CMD_FAULT_STOP:
                 return self._stop()
@@ -201,7 +204,7 @@ class ServiceHandler:
             self._require_loaded_publish_mode(request)
         options = {}
         if getattr(request, 'initial_pose_sync', False) or (
-                request.command == CMD_RESUME and hasattr(request, 'initial_pose_sync')):
+                request.command in (CMD_START, CMD_RESUME) and hasattr(request, 'initial_pose_sync')):
             options = {
                 'initial_pose_sync': bool(getattr(request, 'initial_pose_sync', False)),
                 'initial_pose_sync_duration_s': float(getattr(request, 'initial_pose_sync_duration_s', 0.0)) or 5.0,

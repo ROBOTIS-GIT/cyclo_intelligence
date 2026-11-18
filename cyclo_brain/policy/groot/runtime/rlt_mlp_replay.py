@@ -63,7 +63,7 @@ def _vla_action_bounds(checkpoint: str | Path, action_dim: int) -> tuple[list[fl
         len(lower) != action_dim
         or len(upper) != action_dim
         or not np.isfinite([lower, upper]).all()
-        or np.any(np.asarray(upper) <= np.asarray(lower))
+        or np.any(np.asarray(upper) < np.asarray(lower))
     ):
         raise ValueError("GR00T action minmax statistics are invalid")
     return lower, upper

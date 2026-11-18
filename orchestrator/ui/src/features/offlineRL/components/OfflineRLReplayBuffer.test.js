@@ -22,6 +22,8 @@ import OfflineRLReplayBuffer, {
   resolveReplayBufferPath,
 } from './OfflineRLReplayBuffer';
 
+beforeEach(() => localStorage.clear());
+
 jest.mock('../../../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: jest.fn(),
 }));
@@ -708,4 +710,30 @@ test('opens an MCAP episode video and deletes it through the existing safe handl
       .not.toBeInTheDocument();
   });
   expect(getDatasetInfo).toHaveBeenCalledTimes(2);
+});
+
+test('restores saved episodes after recording state resets on restart', async () => {
+  localStorage.setItem('cyclo.offlineRL.replayBufferPath', '/workspace/rosbag2/Task_refilling_dispenser_rl_MCAP');
+  const getDatasetInfo = jest.fn().mockResolvedValue({success: true, dataset_info: {
+    episode_count: 3, success_episode_indices: [25, 28, 29], failure_episode_indices: [], unlabeled_episode_indices: [],
+  }});
+  useRosServiceCaller.mockReturnValue({getDatasetInfo});
+  const store = configureStore({reducer: {tasks: taskReducer, offlineRL: offlineRLReducer}});
+  render(<Provider store={store}><OfflineRLReplayBuffer /></Provider>);
+  await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(3));
+  expect(getDatasetInfo).toHaveBeenCalledWith('/workspace/rosbag2/Task_refilling_dispenser_rl_MCAP');
+  expect(screen.getByText('episode_025')).toBeInTheDocument();
+});
+
+test('loads a selected MCAP folder directly in the episode manager', async () => {
+  const getDatasetInfo = jest.fn().mockResolvedValue({success: true, dataset_info: {
+    episode_count: 3, success_episode_indices: [25, 28, 29], failure_episode_indices: [], unlabeled_episode_indices: [],
+  }});
+  useRosServiceCaller.mockReturnValue({getDatasetInfo});
+  const store = configureStore({reducer: {tasks: taskReducer, offlineRL: offlineRLReducer}});
+  render(<Provider store={store}><OfflineRLReplayBuffer /></Provider>);
+  fireEvent.change(screen.getByLabelText('Episode manager MCAP folder'), {target: {value: '/workspace/rosbag2/Task_refilling_dispenser_rl_MCAP'}});
+  fireEvent.click(screen.getByRole('button', {name: 'Load episodes'}));
+  await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(3));
+  expect(localStorage.getItem('cyclo.offlineRL.replayBufferPath')).toBe('/workspace/rosbag2/Task_refilling_dispenser_rl_MCAP');
 });

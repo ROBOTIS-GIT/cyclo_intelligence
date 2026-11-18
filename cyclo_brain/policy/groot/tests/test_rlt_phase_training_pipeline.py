@@ -14,6 +14,7 @@ import torch
 
 from cyclo_brain.algorithm.rl.tests.test_rlt_stage2_core import _run, _batch
 from cyclo_brain.algorithm.rl.rlt import RLTStage2Run
+from cyclo_brain.algorithm.rl.rlt.stage2 import RLTStage2Learner
 from cyclo_brain.policy.groot.runtime import rlt_stage2_training_cli as cli
 from cyclo_brain.policy.groot.runtime.rlt_stage2_dataset import RLTStage2FeatureReplay
 from cyclo_brain.policy.groot.runtime.rlt_saved_replay import load_saved_replay
@@ -53,7 +54,8 @@ class PhasePipelineTests(unittest.TestCase):
                 output = root / phase
                 argv = ['--training-phase', phase, '--initialization-mode', 'new' if parent is None else 'resume',
                         '--dataset-root', str(dataset), '--output-dir', str(output), '--job-id', phase,
-                        '--steps', '3', '--batch-size', '2', '--save-freq', '2', '--device', 'cpu']
+                        '--steps', '3', '--batch-size', '2', '--save-freq', '2',
+                        '--progress-interval', '1', '--device', 'cpu']
                 if phase == 'actor_warmup':
                     argv += ['--actor-warmup-data-scope', 'success_only']
                 if parent is None:
@@ -68,10 +70,29 @@ class PhasePipelineTests(unittest.TestCase):
                            side_effect=lambda replay, *_args, **_kwargs: (replay, None)), \
                      patch.object(cli, 'json_line', side_effect=lambda event: events.append(event)):
                     self.assertEqual(cli.run(cli.build_parser().parse_args(argv)), 0)
-                result = events[-1]
+                    if phase == 'rl':
+                        # Inject a finite but impossible Bellman target at the
+                        # learner boundary; the real CLI must stop before save.
+                        failed_args = cli.build_parser().parse_args(argv)
+                        failed_args.output_dir = str(root / 'diverged')
+                        with patch.object(RLTStage2Learner, 'bellman_target',
+                                          side_effect=lambda batch: torch.full_like(batch.reward, 100)):
+                            with self.assertRaisesRegex(FloatingPointError, 'target_abs_max'):
+                                cli.run(failed_args)
+                        self.assertFalse((root / 'diverged/manifest.json').exists())
+                        self.assertFalse((root / 'diverged/artifacts/rlt_actor.pt').exists())
+                result = next(e for e in events if e.get('event') == 'stage2_training_result')
                 self.assertEqual(result['training_phase'], phase)
                 request = json.loads((output / 'training_request.json').read_text())
                 self.assertEqual(request['actor_warmup_target'], 'executed_actions')
+                if phase == 'rl':
+                    self.assertEqual(request['actor_rl_failure_target'], 'frozen_warmup_actor')
+                    self.assertEqual(request['actor_rl_objective'], 'q_plus_human_or_frozen_actor/v2')
+                    actor_progress = next(e for e in events if e.get('actor_negative_q') is not None)
+                    self.assertIsNotNone(actor_progress['actor_reference_constraint'])
+                    self.assertIsNotNone(actor_progress['policy_q_abs_max'])
+                    self.assertIsNotNone(actor_progress['policy_deviation_max'])
+                    self.assertIsNotNone(result['target_abs_max'])
                 if phase == 'actor_warmup':
                     self.assertEqual(
                         request['actor_warmup_data']['eligible_transition_count'],

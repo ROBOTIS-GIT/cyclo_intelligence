@@ -885,7 +885,10 @@ class GR00TRLTStage2Extractor:
         self.action_dim = sum(len(ACTION_GROUP_NAMES[key]) for key in action_keys)
         self.reference_horizon = 32 if self.action_dim == 16 else 16
         offsets = getattr(self.policy.modality_configs["action"], "delta_indices", None)
-        if offsets is not None and tuple(offsets) != tuple(range(self.reference_horizon)):
+        allowed_offsets = (tuple(range(self.reference_horizon)),)
+        if self.reference_horizon == 32:
+            allowed_offsets += (tuple(range(0, 64, 2)),)
+        if offsets is not None and tuple(offsets) not in allowed_offsets:
             raise ValueError("RLT Stage 2 reference horizon disagrees with GR00T processor")
 
     def _prepare(self, observation: Mapping[str, object]) -> Mapping[str, Any]:

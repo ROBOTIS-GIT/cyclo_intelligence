@@ -21,7 +21,7 @@ from cyclo_brain.algorithm.rl.tests.test_rlt_stage2_core import _batch, _run
 from cyclo_brain.policy.groot.tests.test_rlt_tt_rtc_actor_replay import Source, Extractor
 from runtime import rlt_tt_rtc_actor_replay as rtc
 from runtime.rlt_adapter import GR00TRLTInferenceAdapter
-from runtime.rlt_mlp_replay import prepare_mlp_replay, prepare_mlp_transition_replay
+from runtime.rlt_mlp_replay import _vla_action_bounds, prepare_mlp_replay, prepare_mlp_transition_replay
 from runtime.rlt_provenance import rlt_action_group_names
 from runtime.rlt_tt_rtc_transition_replay import build_tt_rtc_transition_replay
 
@@ -52,6 +52,35 @@ def _write_checkpoint(root, dimension=16):
 
 
 class MLPNormalizationTests(unittest.TestCase):
+    def test_constant_vla_bounds_decode_without_changing_model_statistics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'checkpoint'
+            _write_checkpoint(root)
+            path = root / 'statistics.json'
+            statistics = json.loads(path.read_text())
+            statistics['new_embodiment']['action']['arm_left'] = {
+                'min': [.25] * 8, 'max': [.25] * 8,
+            }
+            path.write_text(json.dumps(statistics))
+            lower, upper = _vla_action_bounds(root, 16)
+            config = fit_normalization(np.zeros((2, 16)), np.zeros((2, 16)),
+                joint_names=_names(), vla_lower=lower, vla_upper=upper,
+                source_fingerprint='a' * 64)
+            reference = np.linspace(-2, 2, 160).reshape(1, 10, 16)
+            physical = denormalize(reference_to_mlp(reference, config), config)
+            np.testing.assert_allclose(physical[..., :8], .25, atol=1e-6)
+            self.assertEqual(config['vla_action']['lower'][:8], [.25] * 8)
+            self.assertEqual(config['vla_action']['upper'][:8], [.25] * 8)
+            statistics['new_embodiment']['action']['arm_left']['max'][0] = 0.0
+            path.write_text(json.dumps(statistics))
+            with self.assertRaisesRegex(ValueError, 'minmax statistics'):
+                _vla_action_bounds(root, 16)
+            upper[0] = 0.0
+            with self.assertRaisesRegex(ValueError, 'vla_action bounds'):
+                fit_normalization(np.zeros((2, 16)), np.zeros((2, 16)),
+                    joint_names=_names(), vla_lower=lower, vla_upper=upper,
+                    source_fingerprint='a' * 64)
+
     def test_fitted_bounds_margin_floor_and_round_trip_are_unclipped(self):
         d=16;states=np.zeros((3,d),dtype=np.float32);actions=np.zeros((3,d),dtype=np.float32)
         config=fit_normalization(states,actions,joint_names=_names(d),vla_lower=[-1]*d,
@@ -66,7 +95,7 @@ class MLPNormalizationTests(unittest.TestCase):
     def test_validation_fingerprint_canonical_order_and_fixed_policy(self):
         config=_normalization()
         self.assertEqual(validate_normalization(config,16),config)
-        self.assertEqual(active_joint_indices(config),list(range(7,15)))
+        self.assertEqual(active_joint_indices(config),list(range(7,16)))
         damaged=dict(config);damaged['fingerprint']='0'*64
         with self.assertRaisesRegex(ValueError,'fingerprint'):
             validate_normalization(damaged,16)
@@ -79,9 +108,10 @@ class MLPNormalizationTests(unittest.TestCase):
         expected=normalize(np.full((1,10,16),4.0,dtype=np.float32),config)
         np.testing.assert_allclose(converted,expected)
         physical=np.zeros((1,10,16),dtype=np.float32)
+        physical[0,:,15]=np.linspace(0.0,1.1,10,dtype=np.float32)
         held=apply_fixed_actions(physical,config,np.full((1,7),.25,dtype=np.float32))
         np.testing.assert_array_equal(held[0,:,0:7],np.full((10,7),.25,dtype=np.float32))
-        np.testing.assert_array_equal(held[0,:,15],np.full(10,.9,dtype=np.float32))
+        np.testing.assert_array_equal(held[0,:,15],physical[0,:,15])
 
     def test_terminal_hold_replay_is_rebuilt_from_raw_success_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,7 +138,7 @@ class MLPNormalizationTests(unittest.TestCase):
                 copied,same=prepare_mlp_replay(prepared,checkpoint,output_root=root/'copy',expected_normalization=config)
             self.assertEqual(copied.metadata['mlp_normalization_id'],same['fingerprint'])
 
-    def test_actor_warmup_ignores_held_and_fixed_outputs(self):
+    def test_actor_warmup_learns_right_gripper_and_ignores_held_arm(self):
         with tempfile.TemporaryDirectory() as tmp:
             run=_run(Path(tmp),action_dim=16);config=_normalization()
             run.learner.config=replace(run.learner.config,mlp_normalization=config)
@@ -117,11 +147,11 @@ class MLPNormalizationTests(unittest.TestCase):
             batch=replace(batch,executed_actions=torch.ones_like(batch.executed_actions),
                 mlp_normalization_id=config['fingerprint'])
             batch.executed_actions[...,0:7]=1000
-            batch.executed_actions[...,15]=1000
+            batch.executed_actions[...,15]=2
             for parameter in run.learner.actor.parameters():parameter.data.zero_()
             run.learner.begin_phase('actor_warmup')
             update=run.learner.update_phase(batch)
-            self.assertAlmostEqual(update.actor_loss,1.0,places=6)
+            self.assertAlmostEqual(update.actor_loss,12/9,places=6)
             run.learner.complete_phase()
             prefix=torch.randn(batch.batch_size,6,16)
             batch=replace(batch,committed_prefix=prefix,next_committed_prefix=prefix.clone())
@@ -132,9 +162,7 @@ class MLPNormalizationTests(unittest.TestCase):
                 projected[...,0:7],
                 prefix[:,-1:,0:7].expand(-1,projected.shape[1],-1),
             )
-            expected_gripper=normalize(
-                np.full((1,1,16),.9,dtype=np.float32),config
-            )[0,0,15]
+            expected_gripper=0.0
             torch.testing.assert_close(
                 projected[...,15],
                 torch.full_like(projected[...,15],float(expected_gripper)),
@@ -199,7 +227,12 @@ class MLPNormalizationTests(unittest.TestCase):
             self.assertEqual(batch.committed_prefix.shape,(1,6,16))
 
     def test_runtime_uses_raw_state_mlp_codec_and_prefix_hold(self):
-        config=_normalization();a=object.__new__(GR00TRLTInferenceAdapter)
+        config=_normalization()
+        from cyclo_brain.algorithm.rl.rlt.normalization import _fingerprint
+        config['fixed_actions']={'15':.9}
+        config['fingerprint']=_fingerprint({k:v for k,v in config.items() if k!='fingerprint'})
+        validate_normalization(config,16)
+        a=object.__new__(GR00TRLTInferenceAdapter)
         a.shadow_policy=SimpleNamespace(actor=SimpleNamespace(mlp_normalization=config))
         a.spec=SimpleNamespace(action_dim=16)
         a.policy=SimpleNamespace(modality_configs={
@@ -211,7 +244,7 @@ class MLPNormalizationTests(unittest.TestCase):
         np.testing.assert_allclose(ref.numpy(),reference_to_mlp(np.zeros((1,32,16),dtype=np.float32),config))
         decoded=a._decode_candidate(torch.zeros(1,10,16),states)
         np.testing.assert_array_equal(decoded['arm_left'][...,0:7],np.full((1,10,7),.3,dtype=np.float32))
-        np.testing.assert_array_equal(decoded['arm_right'][...,7],np.full((1,10),.9,dtype=np.float32))
+        np.testing.assert_array_equal(decoded['arm_right'][...,7],np.zeros((1,10),dtype=np.float32))
 
 
 if __name__=='__main__':unittest.main()

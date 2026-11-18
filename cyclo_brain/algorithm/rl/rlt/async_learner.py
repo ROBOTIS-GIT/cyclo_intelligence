@@ -15,7 +15,7 @@ from dataclasses import asdict
 from copy import deepcopy
 import threading
 
-from .stage2 import RLTStage2Batch, RLTStage2Learner
+from .stage2 import RLTStage2Batch, RLTStage2Learner, rl_update_diagnostics
 
 
 class RLTAsyncLearner:
@@ -86,6 +86,13 @@ class RLTAsyncLearner:
 
     def _complete_update(self):
         update = self.learner.finish_update()
+        if update is not None and self.learner.training_phase == 'rl':
+            replay = self._trained_context['replay'] if self._trained_context else None
+            rl_update_diagnostics(
+                update,
+                reward_contract=getattr(replay, 'metadata', {}).get('reward_contract', ''),
+                normalized_actions=self.learner.config.mlp_normalization is not None,
+            )
         if self.replay_history and update is not None:
             self.replay_history[-1]['ending_critic_updates'] = update.completed_critic_updates
         if update is not None:

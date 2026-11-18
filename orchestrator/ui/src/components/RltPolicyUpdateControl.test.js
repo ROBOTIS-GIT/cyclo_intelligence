@@ -12,7 +12,7 @@ test('sends a budget on ON and displays the backend stop without issuing OFF', a
   jest.useFakeTimers();
   let server = { ...initial };
   const callService = jest.fn(async (_name, _type, request) => {
-    if (request.command === 12) server = { ...server, async_enabled: true, max_updates: request.rlt_max_updates };
+    if (request.command === 25) server = { ...server, async_enabled: true, max_updates: request.rlt_max_updates };
     return response(server);
   });
   const view = render(<RltPolicyUpdateControl callService={callService} available bundlePath="/bundle" />);
@@ -21,13 +21,13 @@ test('sends a budget on ON and displays the backend stop without issuing OFF', a
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Async RL max updates' }), { target: { value: '3' } });
     await act(async () => fireEvent.click(screen.getByRole('switch', { name: 'Async RL' })));
     expect(callService).toHaveBeenLastCalledWith('/groot/inference_command', 'interfaces/srv/InferenceCommand',
-      { command: 12, rlt_bundle_path: '/bundle', rlt_max_updates: 3 });
+      { command: 25, rlt_bundle_path: '/bundle', rlt_max_updates: 3 });
     server = { ...server, async_enabled: false, updates_this_run: 3, limit_reached: true,
       total_critic_updates: 193, total_actor_updates: 96 };
     await act(async () => jest.advanceTimersByTime(2000));
     expect(screen.getByText(/Run: 3 \/ 3/)).toHaveTextContent('Total Critic 193 / Actor 96 · Limit reached — paused');
     expect(screen.getByRole('switch', { name: 'Async RL' })).toHaveAttribute('aria-checked', 'false');
-    expect(callService.mock.calls.every(call => [8, 12].includes(call[2].command))).toBe(true);
+    expect(callService.mock.calls.every(call => [21, 25].includes(call[2].command))).toBe(true);
   } finally { view.unmount(); jest.useRealTimers(); }
 });
 
@@ -65,7 +65,7 @@ test('Save Bundle is separate from Apply and shows the completed output path', a
   jest.useFakeTimers();
   let server = { ...initial, last_update: { completed_critic_updates: 4 } };
   const callService = jest.fn(async (_name, _type, request) => {
-    if (request.command === 15) server = { ...server, saving: true };
+    if (request.command === 28) server = { ...server, saving: true };
     return response(server);
   });
   const view = render(<RltPolicyUpdateControl callService={callService} available bundlePath="/bundle" />);
@@ -77,7 +77,7 @@ test('Save Bundle is separate from Apply and shows the completed output path', a
       saved_critic_updates: 4, saved_actor_updates: 2 };
     await act(async () => jest.advanceTimersByTime(2000));
     expect(screen.getByText(/Saved · Critic 4 \/ Actor 2/)).toHaveTextContent('/checkpoint/async_rlt_c4_new');
-    expect(callService.mock.calls.map(call => call[2].command)).toEqual([8, 15, 8]);
+    expect(callService.mock.calls.map(call => call[2].command)).toEqual([21, 28, 21]);
     expect(screen.getByRole('status')).toHaveTextContent('Inference v0');
   } finally {
     view.unmount();
@@ -102,7 +102,7 @@ test('manual apply queues a candidate without claiming it is active', async () =
   fireEvent.click(screen.getByRole('button', { name: 'Apply Policy' }));
   await screen.findByText(/Inference v0 · Pending v2/);
   expect(callService).toHaveBeenLastCalledWith('/groot/inference_command',
-    'interfaces/srv/InferenceCommand', { command: 11, rlt_bundle_path: '/bundle' });
+    'interfaces/srv/InferenceCommand', { command: 24, rlt_bundle_path: '/bundle' });
   expect(screen.getByRole('button', { name: 'Apply Policy' })).toBeDisabled();
 });
 
@@ -138,9 +138,9 @@ test('polling follows prepare, candidate, pending apply, applied and paused stat
   jest.useFakeTimers();
   let server = { ...initial };
   const callService = jest.fn(async (_name, _type, request) => {
-    if (request.command === 12) server = { ...server, async_enabled: true, preparing: true };
-    if (request.command === 11) server = { ...server, pending_version: server.training_version };
-    if (request.command === 13) server = { ...server, async_enabled: false };
+    if (request.command === 25) server = { ...server, async_enabled: true, preparing: true };
+    if (request.command === 24) server = { ...server, pending_version: server.training_version };
+    if (request.command === 26) server = { ...server, async_enabled: false };
     return response(server);
   });
   const view = render(<RltPolicyUpdateControl callService={callService} available bundlePath="/bundle" />);
@@ -164,7 +164,7 @@ test('polling follows prepare, candidate, pending apply, applied and paused stat
     expect(screen.getByRole('status')).not.toHaveTextContent('Pending');
     await act(async () => fireEvent.click(training));
     expect(training).toHaveAttribute('aria-checked', 'false');
-    expect(callService.mock.calls.map((call) => call[2].command)).toEqual([8, 12, 8, 11, 8, 13]);
+    expect(callService.mock.calls.map((call) => call[2].command)).toEqual([21, 25, 21, 24, 21, 26]);
     expect(callService.mock.calls.every((call) => call[2].rlt_bundle_path === '/bundle')).toBe(true);
   } finally {
     view.unmount();

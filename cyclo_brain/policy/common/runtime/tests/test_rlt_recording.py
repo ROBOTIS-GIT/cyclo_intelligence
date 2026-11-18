@@ -49,6 +49,26 @@ class RLTRecordingTests(unittest.TestCase):
             get_logger=lambda: SimpleNamespace(error=self.errors.append),
         )
 
+    def test_diagnostics_expire_and_never_override_episode_recording(self):
+        import time
+        publisher = RLTTracePublisher()
+        self.addCleanup(publisher.close)
+        def message(identity, expiry):
+            return SimpleNamespace(data=json.dumps({
+                'recording_id': identity, 'valid_until_ns': expiry,
+            }))
+        future = time.time_ns() + 60_000_000_000
+        publisher._set_diagnostic_session(message('diagnostic', future))
+        publisher._set_session(message('', future))
+        self.assertEqual(publisher.recording_id, 'diagnostic')
+        publisher._set_session(message('episode', future))
+        self.assertEqual(publisher.recording_id, 'episode')
+        publisher._set_session(message('', future))
+        publisher._set_diagnostic_session(message('diagnostic', 0))
+        self.assertEqual(publisher.recording_id, '')
+        publisher._set_diagnostic_session(SimpleNamespace(data='invalid'))
+        self.assertEqual(publisher.recording_id, '')
+
     def test_round_trip_numeric_tensors_and_recording_boundaries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

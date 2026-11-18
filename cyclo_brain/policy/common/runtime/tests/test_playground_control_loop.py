@@ -221,7 +221,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
         np.testing.assert_allclose(robot.commands[0][0], action)
         np.testing.assert_allclose(robot.previews[0][0], action)
 
-    def test_sg2_gripper_threshold_is_per_command_for_both_hands(self) -> None:
+    def test_sg2_gripper_outputs_are_preserved_for_both_hands(self) -> None:
         # Exercise final preview/command routing, not only the helper.
         values = [0.69, 0.7, 0.8, 0.95, 1.1, 0.1]
         for mode in ("base", "rlt"):
@@ -238,7 +238,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
                     loop._active_rlt_robot_override = mode == "rlt"
                     for _ in values:
                         loop.tick()
-                    expected_grippers = [0.69, 0.9, 0.9, 0.9, 0.9, 0.1]
+                    expected_grippers = values
                     for index in (7, 15):
                         np.testing.assert_allclose(
                             [p[0][index] for p in robot.previews], expected_grippers)
@@ -252,7 +252,7 @@ class ControlLoopSafetyTests(unittest.TestCase):
                     for command, preview in zip(robot.commands, robot.previews):
                         np.testing.assert_array_equal(command[0], preview[0])
 
-    def test_sg2_threshold_after_tt_rtc_interpolation_preserves_prefix(self) -> None:
+    def test_sg2_gripper_interpolation_preserves_output_and_prefix(self) -> None:
         processor = TTActionTimeline(source_hz=15.0, control_hz=100.0)
         chunk = np.full((32, 16), 0.2)
         chunk[:, 7] = np.linspace(0.6, 1.0, 32)
@@ -269,30 +269,17 @@ class ControlLoopSafetyTests(unittest.TestCase):
             raw = reference.pop_action()
             loop.tick()
             expected = raw.copy()
-            for i in (7, 15):
-                if expected[i] >= 0.7:
-                    expected[i] = 0.9
             np.testing.assert_array_equal(robot.previews[-1][0], expected)
             np.testing.assert_array_equal(processor.peek_actions(), reference.peek_actions())
         self.assertEqual(robot.commands, [])
 
-    def test_sg2_threshold_respects_selected_action_layout(self) -> None:
-        for keys, size, indices in (
-            (["arm_right"], 8, [7]),
-            (["head", "arm_right", "arm_left", "lift"], 19, [9, 17]),
-            (["mobile", "arm_left"], 11, [10]),
-        ):
-            loop = ControlLoop(requester=object())
-            loop._robot_type = "ffw_sg2_rev1"
-            loop._action_keys = keys
-            original = np.full(size, 0.8)
-            expected = original.copy()
-            expected[indices] = 0.9
-            np.testing.assert_array_equal(
-                loop._apply_gripper_command_threshold_locked(original), expected)
-        loop._robot_type = "other_robot"
-        np.testing.assert_array_equal(
-            loop._apply_gripper_command_threshold_locked(original), original)
+    def test_rlt_boundary_has_no_special_constant_gripper_value(self) -> None:
+        anchor = np.zeros(16)
+        for value in (0.7, 0.9, 1.1):
+            chunk = np.full((10, 16), value)
+            result = ControlLoop._smooth_rlt_chunk_boundary(chunk, anchor)
+            np.testing.assert_allclose(result[0], np.full(16, value * 0.5))
+            np.testing.assert_array_equal(result[1:], chunk[1:])
 
     def test_rlt_trace_records_the_final_command_passed_to_robot(self) -> None:
         class Trace:
@@ -506,6 +493,43 @@ class ControlLoopSafetyTests(unittest.TestCase):
         self.assertEqual(request["rtc_action_dim"], 16)
         self.assertEqual(request["rtc_prefix_action_list"], [])
         self.assertGreater(processor.buffer_size, 0)
+
+    def test_running_tt_rtc_resume_with_pose_sync_restarts_empty_timeline(self):
+        response = SimpleNamespace(success=True, message="ok", chunk_size=32,
+                                   action_dim=16, action_list=[0.0] * 512)
+        requester = FakeRequester(response)
+        loop = ControlLoop(requester=requester)
+        loop._robot = FakeRobot()
+        loop._processor = TTActionTimeline(source_hz=15.0, control_hz=100.0)
+        loop._action_keys = ["arm_left", "arm_right"]
+        loop._publish_to_robot = True
+        loop._action_request_mode = "tt_rtc"
+        loop._tt_rtc_horizon = 32
+        loop._tt_rtc_action_dim = 16
+        loop._tt_rtc_max_delay_steps = 8
+        loop._running = True
+        loop._tt_rtc_bootstrap_pending = False
+        loop._initial_pose_sync_completed = True
+        loop._processor.push_actions(np.zeros((8, 16)))
+
+        # Continuous RESUME retains the already committed trajectory.
+        loop.start(initial_pose_sync=False)
+        self.assertEqual(loop._processor.buffer_size, 8)
+        self.assertEqual(len(requester.calls), 0)
+
+        # Explicit pose sync discards its disposable prediction, then needs
+        # a fresh zero-prefix bootstrap even when RESUME began while running.
+        loop.start(initial_pose_sync=True, initial_pose_sync_duration_s=5.0)
+        self.assertEqual(loop._processor.buffer_size, 0)
+        loop._initial_pose_sync_deadline = 0.0
+        loop.tick()
+        loop._request_thread.join(timeout=1.0)
+        self.assertFalse(loop._request_thread.is_alive())
+        self.assertIsNone(loop.tt_rtc_failure_reason)
+        self.assertTrue(loop._running)
+        self.assertGreater(loop._processor.buffer_size, 0)
+        self.assertEqual(len(requester.calls), 2)
+        self.assertEqual(requester.keyword_calls[-1]["rtc_delay_steps"], 0)
 
     def test_action_policy_switch_is_rejected_during_initial_pose_sync(self):
         processor = FakeProcessor(buffer_size=0)

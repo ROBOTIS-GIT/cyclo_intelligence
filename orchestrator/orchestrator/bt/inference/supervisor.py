@@ -1,14 +1,18 @@
-"""One policy lifecycle owner for supervised BTs, without asynchronous /task LOAD.
+"""One policy lifecycle owner for supervised and policy-switch BTs.
 
 LOAD never starts actuators. START/STOP replies are serialized by Main and STOP
 acknowledges a feedback-confirmed hold. Tree pauses keep the same loaded policy.
 """
 import time
+import json
+from pathlib import Path
+from copy import deepcopy
 
 from interfaces.srv import InferenceCommand
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 LOAD, START, STOP, UNLOAD, CAPABILITIES, FAULT_STOP = 0, 1, 4, 5, 7, 8
+SET_ACTION_POLICY = 20
 HOLD_CAPABILITY = 'confirmed_pose_hold_v2'
 
 
@@ -25,8 +29,13 @@ def wait(future, timeout=15):
 
 
 class InferenceSupervisor:
-    def __init__(self, node):
+    def __init__(self, node, *, strict_completion=True):
         self.node = node
+        self.strict_completion = strict_completion
+        self.load_request = None
+        self.loaded_bundle_identity = None
+        self.pending_bundle_identity = None
+        self.desired_action_mode = 'base'
         self.client = None
         self.backend = None
         self.loaded = self.running = False
@@ -55,21 +64,14 @@ class InferenceSupervisor:
                 callback_group=self._group)
 
     def submit(self, command, owner=None):
-        if self.stopped and command not in (STOP, UNLOAD):
-            raise RuntimeError('Policy supervision stopped; late START is forbidden')
-        if self.pending is not None:
-            if not self.pending.done():
-                raise RuntimeError('A policy lifecycle request is still pending')
-            self.poll(self.pending)
-        if not self.client or not self.client.service_is_ready():
-            raise RuntimeError('Policy Main service unavailable')
-        if command != CAPABILITIES and not self.verified:
-            raise RuntimeError('Policy Main has not confirmed its pause capability')
+        bundle_identity = None
         request = InferenceCommand.Request()
         request.command = command
         request.publish_to_robot = self.publish_to_robot
         request.task_instruction = self.instruction
         if command == LOAD:
+            request.initial_pose_sync = getattr(owner, 'initial_pose_sync', True)
+            request.initial_pose_sync_duration_s = float(getattr(owner, 'initial_pose_sync_duration_s', 5.0))
             request.model_path = owner.policy_path
             request.embodiment_tag = 'new_embodiment'
             request.robot_type = self.node.robot_type
@@ -92,17 +94,47 @@ class InferenceSupervisor:
             if hasattr(request, 'action_chunk_size'):
                 # TT-RTC uses its trained checkpoint horizon, never the UI crop.
                 request.action_chunk_size = 0 if tt_rtc else int(getattr(owner, 'action_chunk_size', 0))
-            for field in ('action_request_mode', 'acceleration_mode', 'acceleration_engine_path',
-                          'control_hz', 'inference_hz', 'chunk_align_window_s'):
+            for field in ('action_request_mode', 'acceleration_mode', 'acceleration_engine_path'):
                 setattr(request, field, getattr(owner, field))
+            # ROS float64 serialization requires Python float even when field
+            # checks are disabled. An int can serialize as a denormal double.
+            request.control_hz = float(owner.control_hz)
+            request.inference_hz = int(owner.inference_hz)
+            request.chunk_align_window_s = float(owner.chunk_align_window_s)
             if tt_rtc:
                 request.inference_hz = 15
+            selection = getattr(owner, 'mlp_preload_selection', None)
+            if selection is not None:
+                from orchestrator.bt.actions.switch_action_policy import prepare_bundle
+                bundle_identity = prepare_bundle(selection)
+                request.rlt_enabled = True
+                request.rlt_bundle_path = bundle_identity[0]
+                request.action_policy_mode = 'base'
         elif command == START and owner is not None:
             request.initial_pose_sync = getattr(owner, 'initial_pose_sync', True)
-            request.initial_pose_sync_duration_s = getattr(owner, 'initial_pose_sync_duration_s', 5.0)
+            request.initial_pose_sync_duration_s = float(getattr(owner, 'initial_pose_sync_duration_s', 5.0))
             request.task_instruction = self._instruction(owner.task_instruction) or self.instruction
+        elif command == SET_ACTION_POLICY:
+            request.action_policy_mode = self.desired_action_mode
+            request.rlt_robot_override = self.desired_action_mode == 'rlt'
+        return self.submit_request(request, bundle_identity=bundle_identity)
+
+    def submit_request(self, request, *, bundle_identity=None):
+        """Submit a prepared request under the same lifecycle/cancellation guard."""
+        command = request.command
+        if self.stopped and command not in (STOP, UNLOAD):
+            raise RuntimeError('Policy supervision stopped; late START is forbidden')
+        if self.pending is not None:
+            if not self.pending.done():
+                raise RuntimeError('A policy lifecycle request is still pending')
+            self.poll(self.pending)
+        if not self.client or not self.client.service_is_ready():
+            raise RuntimeError('Policy Main service unavailable')
+        if command != CAPABILITIES and not self.verified:
+            raise RuntimeError('Policy Main has not confirmed its pause capability')
         if command in (START, STOP):
             self.motion_uncertain = True
+        self.pending_bundle_identity = bundle_identity
         self.pending_command, self.pending_owner = command, request
         self.pending = self.client.call_async(request)
         return self.pending
@@ -129,7 +161,17 @@ class InferenceSupervisor:
                 raise RuntimeError('Policy Main lacks feedback-confirmed pause support; update its runtime')
             self.verified = True
         elif command == LOAD:
+            identity = self.pending_bundle_identity
+            if identity is not None:
+                manifest = json.loads((Path(identity[0]) / 'manifest.json').read_text())
+                if manifest.get('manifest_fingerprint') != identity[1]:
+                    self.loaded = False
+                    self.loaded_bundle_identity = None
+                    raise RuntimeError('Selected bundle changed during LOAD; reload the tree')
             self.loaded = True
+            self.load_request = deepcopy(request)
+            self.loaded_bundle_identity = identity
+            self.desired_action_mode = 'base'
             self.publish_to_robot = request.publish_to_robot
             self.instruction = request.task_instruction
         elif command == START:
@@ -147,6 +189,11 @@ class InferenceSupervisor:
             self.motion_uncertain = False
         elif command == UNLOAD:
             self.loaded = self.running = False
+            self.load_request = None
+            self.loaded_bundle_identity = None
+            self.desired_action_mode = 'base'
+        elif command == SET_ACTION_POLICY:
+            self.desired_action_mode = request.action_policy_mode
         return True
 
     def _settle_motion(self):
@@ -219,6 +266,8 @@ class InferenceSupervisor:
             raise RuntimeError('Stopped policy cannot resume')
         if self.restore_running:
             self._command(START)
+            if self.desired_action_mode == 'rlt':
+                self._command(SET_ACTION_POLICY)
             self.restore_running = False
 
     def stop(self):
@@ -242,4 +291,5 @@ class InferenceSupervisor:
         self._settle_motion()
         if self.running:
             self.stop()
-            raise RuntimeError('Supervised tree completed with policy output still active')
+            if self.strict_completion:
+                raise RuntimeError('Supervised tree completed with policy output still active')

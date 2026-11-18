@@ -615,3 +615,44 @@ def test_stop_falls_back_to_compose_process_signal(tmp_path):
     supervisor._job = job
     supervisor.stop(service.RLTStage1StopRequest(job_id=job.job_id))
     assert process.signals == [signal.SIGINT]
+
+
+def test_explicit_imported_seed_preserves_remote_identity_and_overrides_discovery(roots, monkeypatch):
+    try:
+        from supervisor_api import rlt_stage2_service as stage2
+    except ModuleNotFoundError:
+        from docker.supervisor_api import rlt_stage2_service as stage2
+    _, model_root, _, output_root, _ = roots
+    groot = _write_groot(model_root / 'base')
+    output = _write_completed_stage1_run(
+        output_root, dataset=Path('/upstream/dataset'), groot=groot,
+        steps=10000, job_id='remote-training-job',
+    )
+    monkeypatch.setattr(stage2, 'RLT_STAGE2_ENCODER_ROOTS', (output_root,))
+    encoder = output / 'artifacts' / 'rl_token_encoder.pt'
+    (output_root / 'selected_seed.json').write_text(json.dumps({
+        'encoder_artifact_path': str(encoder), 'groot_checkpoint': str(groot),
+    }))
+    supervisor = _supervisor()
+    status = supervisor.status()
+    assert status.status == 'completed'
+    assert status.encoder_artifact_path == str(encoder)
+    assert status.job_id == 'remote-training-job'
+    assert status.dataset_paths == []  # Do not populate local dataset selectors with remote paths.
+    assert 'imported' in status.message
+    supervisor._job = _job(output_root, status='running')
+    assert supervisor.status().status == 'running'
+
+
+def test_invalid_explicit_seed_does_not_fall_back_to_previous_seed(roots):
+    _, model_root, _, output_root, _ = roots
+    groot = _write_groot(model_root / 'base')
+    _write_completed_stage1_run(
+        output_root, dataset=roots[0] / 'dataset', groot=groot,
+        steps=10000, job_id='a' * 32,
+    )
+    (output_root / 'selected_seed.json').write_text('{}')
+    status = _supervisor().status()
+    assert status.status == 'failed'
+    assert not status.encoder_artifact_path
+    assert 'Invalid selected' in status.message

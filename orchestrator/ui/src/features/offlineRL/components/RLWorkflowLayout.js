@@ -959,6 +959,7 @@ export default function RLWorkflowLayout({ isActive = true, embedded = false, on
                   )}
                   />
                   <OfflineRLTrainingSection
+                  rltCheckpointName={deploymentName}
                   isActive={isActive}
                   inferencePhase={inferencePhase}
                   currentPolicyEpoch={rlLineage.policyEpoch}
@@ -996,11 +997,11 @@ export default function RLWorkflowLayout({ isActive = true, embedded = false, on
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {isRltBundleCandidate && (
                       <label className="text-xs text-[#6f685d]">
-                        {candidateFolder} / Deployment name
+                        {candidateFolder} / Checkpoint and deployment name
                         <input
                           aria-label="RLT deployment name"
                           value={deploymentName}
-                          disabled={isPublishing}
+                          disabled={isPublishing || trainingInteractionLocked}
                           maxLength={64}
                           onChange={(event) => setDeploymentNames((names) => ({ ...names, [candidateFolder]: event.target.value }))}
                           className="ml-2 rounded border border-[#d9d2c5] bg-white px-2 py-1.5 text-sm"
@@ -1008,7 +1009,7 @@ export default function RLWorkflowLayout({ isActive = true, embedded = false, on
                           aria-describedby="rlt-deployment-name-help"
                         />
                         <span id="rlt-deployment-name-help" className="mt-1 block">
-                          {validDeploymentName ? 'One current bundle per phase. Redeploying updates this name.'
+                          {validDeploymentName ? 'Custom names save training checkpoints in that folder. Use a new name for each training run.'
                             : 'Use 1–64 letters, numbers, underscores or hyphens.'}
                         </span>
                       </label>

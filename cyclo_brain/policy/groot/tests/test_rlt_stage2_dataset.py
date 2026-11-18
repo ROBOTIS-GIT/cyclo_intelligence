@@ -94,7 +94,7 @@ class _FakeExtractor:
 
 
 class RLTStage2DatasetTests(unittest.TestCase):
-    def test_extractor_preserves_32x16_reference_and_arm_order(self) -> None:
+    def test_extractor_preserves_32x16_reference_with_two_frame_spacing(self) -> None:
         model, encoder = torch.nn.Module(), torch.nn.Module()
         encoder.config = SimpleNamespace(embedding_dim=8)
         encoder.forward = lambda *_: torch.ones(2, 8)
@@ -110,7 +110,7 @@ class RLTStage2DatasetTests(unittest.TestCase):
         policy = SimpleNamespace(
             model=model, embodiment_tag="new_embodiment",
             processor=SimpleNamespace(state_action_processor=SimpleNamespace(apply_action=apply_action)),
-            modality_configs={key: SimpleNamespace(modality_keys=("arm_left", "arm_right"), delta_indices=list(range(32))) for key in ("action", "state")},
+            modality_configs={key: SimpleNamespace(modality_keys=("arm_left", "arm_right"), delta_indices=list(range(0, 64, 2))) for key in ("action", "state")},
         )
         extractor = GR00TRLTStage2Extractor(policy, encoder)
         extractor._prepare = lambda _: {"inputs": {}}

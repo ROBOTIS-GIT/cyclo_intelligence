@@ -17,7 +17,7 @@
 import React from 'react';
 import { MdFolderOpen } from 'react-icons/md';
 import { JOINT_SELECTOR_NODE_TYPES, TARGET_POSITION_PARAM } from './jointParams';
-import { enumOptionsFor, BOOL_PARAMS, NUMBER_PARAMS } from './parameterPolicy';
+import { enumOptionsFor, enumOptionLabel, BOOL_PARAMS, NUMBER_PARAMS } from './parameterPolicy';
 import BtJointSelector from './BtJointSelector';
 
 export default function BtParameterInput({ paramName: key, value, disabled = false,
@@ -31,6 +31,24 @@ export default function BtParameterInput({ paramName: key, value, disabled = fal
         robotType={robotType} handleChange={handleChange} commitTargetJointSelection={commitTargetJointSelection} />;
     }
 
+    if (nodeType === 'SwitchActionPolicy' && key === 'action_source') {
+      return (
+        <label className={`flex items-center gap-2 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+          <input
+            type="checkbox"
+            aria-label="Use MLP Action"
+            disabled={disabled}
+            checked={value === 'mlp'}
+            onChange={(event) => handleChange(key, event.target.checked ? 'mlp' : 'vla')}
+            className="w-4 h-4 rounded border-[var(--mc-border-strong)] text-[var(--mc-accent)] focus:ring-[var(--mc-accent)]"
+          />
+          <span className="text-sm text-[var(--mc-text-muted)]">
+            {value === 'mlp' ? 'Use MLP Action' : 'Use VLA Action'}
+          </span>
+        </label>
+      );
+    }
+
     const enumOptions = enumOptionsFor(nodeType, key, localParams);
     if (enumOptions) {
       return (
@@ -41,7 +59,7 @@ export default function BtParameterInput({ paramName: key, value, disabled = fal
           className={`w-full px-2 py-1.5 border border-[var(--mc-border-strong)] rounded-lg text-sm bg-[var(--mc-surface)] text-[var(--mc-text)] focus:outline-none focus:ring-1 focus:ring-[var(--mc-accent)]${disabledCls}`}
         >
           {enumOptions.map((opt) => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={opt} value={opt}>{enumOptionLabel(nodeType, key, opt)}</option>
           ))}
         </select>
       );

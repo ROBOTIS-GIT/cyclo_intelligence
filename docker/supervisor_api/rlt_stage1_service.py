@@ -473,6 +473,18 @@ def _discover_latest_completed_stage1() -> RLTStage1Status | None:
     root = RLT_STAGE1_OUTPUT_ROOT
     if root.is_symlink() or not root.is_dir():
         return None
+    # Explicitly imported seeds retain their upstream job/dataset provenance;
+    # they need not follow this supervisor's local job naming convention.
+    selection = root / "selected_seed.json"
+    if selection.exists() or selection.is_symlink():
+        try:
+            return _selected_stage1_seed(selection)
+        except (HTTPException, OSError, ValueError) as exc:
+            # Never silently fall back to a different token after explicit selection.
+            return RLTStage1Status(
+                ready=False, status="failed", phase="failed",
+                message=f"Invalid selected RL Token seed: {getattr(exc, 'detail', str(exc))}",
+            )
     try:
         candidates = []
         for child in root.iterdir():
@@ -493,6 +505,36 @@ def _discover_latest_completed_stage1() -> RLTStage1Status | None:
         except (HTTPException, OSError, ValueError):
             continue
     return None
+
+
+def _selected_stage1_seed(selection: Path) -> RLTStage1Status:
+    try:
+        from supervisor_api.rlt_stage2_service import _resolve_stage1_encoder
+    except ModuleNotFoundError:
+        from docker.supervisor_api.rlt_stage2_service import _resolve_stage1_encoder
+
+    config = _read_json(selection, label="Selected RL Token seed")
+    groot = _resolve_groot_checkpoint(str(config.get("groot_checkpoint") or ""))
+    encoder = _resolve_stage1_encoder(str(config.get("encoder_artifact_path") or ""), groot)
+    manifest = _read_json(
+        encoder.parent.parent / "training_state" / "rlt_stage1.pt.run.json",
+        label="Selected RL Token manifest",
+    )
+    return RLTStage1Status(
+        status="completed",
+        phase="complete",
+        percentage=100.0,
+        job_id=manifest.get("job_id", ""),
+        groot_checkpoint=str(groot),
+        output_dir=str(encoder.parent.parent),
+        encoder_artifact_path=str(encoder),
+        checkpoint_path=str(encoder.parent.parent / "training_state" / "rlt_stage1.pt"),
+        completed_steps=manifest.get("completed_steps", 0),
+        total_steps=manifest.get("completed_steps", 0),
+        batch_size=manifest.get("batch_size", 0),
+        message="Selected imported RL Token seed (upstream provenance in run manifest)",
+        returncode=0,
+    )
 
 
 class RLTStage1Supervisor:

@@ -111,7 +111,7 @@ export default function InferenceControlPanel({
 
   const [hovered, setHovered] = useState(null);
   const [pressed, setPressed] = useState(null);
-  const [lastPolicyPath, setLastPolicyPath] = useState('');
+  const [lastPolicyPath, setLastPolicyPath] = useState(taskInfo.policyPath);
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
   const manualControlBusyRef = useRef(manualControlBusy);
@@ -135,6 +135,13 @@ export default function InferenceControlPanel({
   const inferencePhaseRef = useRef(phase);
   const isModelLoaded = isInferencing || isPaused || isSyncing;
   const shouldCheckBackend = isIdle || isPaused;
+  const canResume = isPaused && taskInfo.policyPath === lastPolicyPath;
+  // Recording may continue while inference is paused. Resume keeps that
+  // session intact; starting another policy or changing recording state does not.
+  const recordingBlocksStart = recordingControl.lifecycleLocked && !(
+    canResume && recordingControl.serverRecording &&
+    !recordingControl.pending && !recordingControl.serverSaving
+  );
 
   const {
     readiness: backendReadiness,
@@ -408,7 +415,7 @@ export default function InferenceControlPanel({
     }
 
     let startIntent;
-    if (isPaused && taskInfo.policyPath === lastPolicyPath) {
+    if (canResume) {
       startIntent = {
         commandName: 'Resume',
         commandString: 'resume_inference',
@@ -467,6 +474,7 @@ export default function InferenceControlPanel({
     dispatch,
     backendReadiness,
     refreshBackendStatus,
+    canResume,
     isPaused,
     taskInfo.policyPath,
     taskInfo.rltEnabled,
@@ -603,7 +611,7 @@ export default function InferenceControlPanel({
     backendReadiness.ready &&
     !manualControlBusy &&
     !externalStartBlocked &&
-    !recordingControl.lifecycleLocked &&
+    !recordingBlocksStart &&
     !isPreparingTensorRt
   );
   const stopEnabled = isInferencing || isSyncing;
@@ -614,7 +622,11 @@ export default function InferenceControlPanel({
     ? startBlockedReason
     : isBackendStartBlocked
       ? backendReadiness.message
-    : isPaused
+    : recordingBlocksStart
+      ? 'Finish the recording operation before starting inference'
+    : isPreparingTensorRt
+      ? 'Building TensorRT engine...'
+    : canResume
       ? 'Resume inference'
       : 'Start inference';
   const guideMessage = manualControlBusy
@@ -702,12 +714,16 @@ export default function InferenceControlPanel({
         { mode: 'base', label: 'Use GR00T Action' },
         { mode: 'rlt', label: 'Use RLT Action' },
       ];
-  const showActionPolicySwitcher = Boolean(
-    isInferencing &&
-    taskInfo.rltEnabled &&
-    String(taskInfo.rltBundlePath || '').trim() &&
-    supportsRltInference(taskInfo.serviceType, taskInfo.policyType)
+  const showActionPolicySwitcher = supportsRltInference(
+    taskInfo.serviceType, taskInfo.policyType
   );
+  const actionPolicyBlockedReason = !taskInfo.rltEnabled
+    ? 'Enable RLT in Settings'
+    : !String(taskInfo.rltBundlePath || '').trim()
+      ? 'Set RLT Bundle Path in Settings'
+      : !isInferencing
+        ? 'Start inference with the RLT bundle loaded'
+        : '';
   const isRealRobotRltTarget = taskInfo.inferenceMode === 'robot';
   const rltSwitchBlocked = Boolean(
     isRealRobotRltTarget && !taskInfo.rltRobotOverride
@@ -986,11 +1002,16 @@ export default function InferenceControlPanel({
           )}>
             Action Output
           </span>
+          {actionPolicyBlockedReason && (
+            <span role="status" className="text-[11px] text-[#9a604f]">
+              {actionPolicyBlockedReason}
+            </span>
+          )}
           {actionPolicyOptions.map(({ mode, label }) => {
             const active = activeActionPolicyMode === mode;
             const pending = pendingActionPolicyMode === mode;
             const disabled = Boolean(
-              pendingActionPolicyMode || active
+              pendingActionPolicyMode || active || actionPolicyBlockedReason
             );
             return (
               <button

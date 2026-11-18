@@ -1,8 +1,8 @@
-"""Non-blocking direct policy actions used only by server-owned autonomy BTs."""
+"""Non-blocking policy actions for BTs with a shared lifecycle owner."""
 import time
 
 from orchestrator.bt.bt_core import NodeStatus
-from orchestrator.bt.inference.supervisor import LOAD, START, STOP, UNLOAD, CAPABILITIES
+from orchestrator.bt.inference.supervisor import LOAD, START, STOP, UNLOAD, CAPABILITIES, SET_ACTION_POLICY
 from orchestrator.bt.execution.tree_pause import TimerPause
 
 
@@ -41,6 +41,8 @@ class SupervisedCommand(TimerPause):
             if not self.supervisor.loaded:
                 raise RuntimeError('Supervised inference requires LOAD in the same tree')
             self.steps = {'RESUME': [START], 'STOP': [STOP], 'CLEAR': [STOP, UNLOAD]}[command]
+            if command == 'RESUME' and self.supervisor.desired_action_mode == 'rlt':
+                self.steps.append(SET_ACTION_POLICY)
             self.phase = 'commands'
         if self.phase == 'backend':
             result, message = self.owner._backend_job.snapshot()
@@ -59,6 +61,9 @@ class SupervisedCommand(TimerPause):
                 return NodeStatus.RUNNING
             self.result = NodeStatus.SUCCESS
             return self.result
+        if (self.steps[self.index] == SET_ACTION_POLICY
+                and time.monotonic() < self.supervisor.sync_until):
+            return NodeStatus.RUNNING
         if self.future is None:
             command = self.steps[self.index]
             self.future = self.supervisor.submit(command, self.owner)

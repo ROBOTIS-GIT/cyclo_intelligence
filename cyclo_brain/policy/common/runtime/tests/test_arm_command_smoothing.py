@@ -103,7 +103,8 @@ class ArmSmoothingTests(unittest.TestCase):
                     with patch('main_runtime.playground_control_loop.time.monotonic', return_value=10 + i * .01):loop.tick()
                     np.testing.assert_array_equal(loop._processor.peek_actions(), reference.peek_actions())
             self.assertEqual(len(robot.commands), 150 if physical else 0)
-            for preview in robot.previews:np.testing.assert_array_equal(preview[0][[7, 15]], [.9, .9])
+            # Grippers pass through; the retired 0.9 threshold is not part of smoothing.
+            for preview in robot.previews:np.testing.assert_array_equal(preview[0][[7, 15]], chunk[0, [7, 15]])
             for command, preview in zip(robot.commands, robot.previews):np.testing.assert_array_equal(command[0], preview[0])
             if physical:
                 np.testing.assert_array_equal(robot.commands[0][0][INDICES], 0)

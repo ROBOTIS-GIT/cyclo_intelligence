@@ -305,6 +305,24 @@ class ServiceHandlerPublishModeTests(unittest.TestCase):
         self.assertFalse(session.loaded)
         self.assertEqual(loop.configures, [])
 
+    def test_explicit_start_sync_off_overrides_loaded_sync_on(self) -> None:
+        handler, _session, loop = self._handler()
+        handler.handle(SimpleNamespace(
+            command=CMD_LOAD, model_path="/models/policy", robot_type="ffw",
+            task_instruction="pick", publish_to_robot=True, initial_pose_sync=True,
+        ))
+        options_seen = {}
+        def start(**options):
+            options_seen.update(options)
+            return 0.0
+        loop.start = start
+        response = handler.handle(SimpleNamespace(
+            command=CMD_START, publish_to_robot=True, initial_pose_sync=False,
+            initial_pose_sync_duration_s=5.0,
+        ))
+        self.assertTrue(response.success)
+        self.assertIs(options_seen.get("initial_pose_sync"), False)
+
     def test_start_returns_effective_initial_pose_sync_duration(self) -> None:
         handler, _session, loop = self._handler()
         handler.handle(SimpleNamespace(

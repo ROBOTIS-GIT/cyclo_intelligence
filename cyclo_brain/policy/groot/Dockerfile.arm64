@@ -128,8 +128,12 @@ RUN TORCHCODEC_WHL="$(find /gr00t/scripts/deployment/orin/wheels -name 'torchcod
 
 # Zenoh + Cyclo runtime Python dependencies. SDKs are mounted as volumes at
 # runtime, matching docker/docker-compose.yml.
+# Ruckig 0.12.2 builds from source on ARM64 and needs the older cmake.targets API.
 RUN uv pip install --python /gr00t/.venv/bin/python --no-cache \
-    "ruckig==0.12.2" \
+    "scikit-build-core==0.9.10" "pybind11==2.13.6" \
+    && CMAKE_BUILD_PARALLEL_LEVEL=2 uv pip install --python /gr00t/.venv/bin/python \
+        --no-cache --no-build-isolation "ruckig==0.12.2"
+RUN uv pip install --python /gr00t/.venv/bin/python --no-cache \
     "eclipse-zenoh>=1.6.0,<1.7.0" \
     "rosbags>=0.11.0" \
     "GitPython>=3.1.18" \

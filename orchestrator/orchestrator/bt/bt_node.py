@@ -376,17 +376,29 @@ class BehaviorTreeNode(ExecutionPause, Node):
                     response.message = stop_response.message
                     return response
 
-            # Only server-owned tasks opt into direct, serialized policy calls.
-            # Ordinary Run keeps its existing orchestrator lifecycle path.
+            # Policy-switch trees also need one serialized lifecycle owner.
+            # Other ordinary trees retain the orchestrator lifecycle path.
             xml_root = ET.fromstring(request.tree_xml)
             self.inference_supervisor = None
-            if xml_root.get('autonomy_supervised') == 'true':
+            supervised = xml_root.get('autonomy_supervised') == 'true'
+            active_xml = next((tree for tree in xml_root.findall('BehaviorTree')
+                               if tree.get('ID') == xml_root.get('main_tree_to_execute')), xml_root)
+            switches_policy = any(n.tag == 'SwitchActionPolicy' or n.get('ID') == 'SwitchActionPolicy'
+                                  for n in active_xml.iter())
+            preloads_mlp = any((n.tag == 'SendCommand' or n.get('ID') == 'SendCommand')
+                               and bool(n.get('training_stage', '').strip())
+                               for n in active_xml.iter())
+            if supervised or switches_policy or preloads_mlp:
                 from .inference.supervisor import InferenceSupervisor
-                self.inference_supervisor = InferenceSupervisor(self)
+                self.inference_supervisor = InferenceSupervisor(self, strict_completion=supervised)
             # Load new tree from XML string
             self.root = self.tree_loader.load_tree_from_string(
                 request.tree_xml
             )
+
+            if self.inference_supervisor is not None:
+                from .actions.switch_action_policy import configure_preloads
+                configure_preloads(self.root)
 
             # Start execution
             self.tree_execution_mode = 'running'

@@ -40,6 +40,7 @@ from cyclo_brain.algorithm.rl.rlt import (
     load_frozen_rl_token_encoder,
     validate_stage2_replay_lineage,
 )
+from cyclo_brain.algorithm.rl.rlt.stage2 import rl_update_diagnostics as _rl_diagnostics
 from cyclo_brain.model.common import RLT_ACTION_HORIZON
 
 from .rlt_cli_common import (
@@ -203,6 +204,7 @@ def _progress(
     average_reward: float | None,
     percentage: float | None = None,
     message: str,
+    diagnostics: Mapping[str, float] | None = None,
 ) -> None:
     elapsed = time.monotonic() - started
     eta = (
@@ -228,6 +230,7 @@ def _progress(
             "elapsed_seconds": elapsed,
             "eta_seconds": eta,
             "message": message,
+            **(diagnostics or {}),
         }
     )
 
@@ -498,8 +501,8 @@ def run(args: argparse.Namespace) -> int:
         "mlp_normalization": mlp_normalization,
         "terminal_hold_policy": replay.metadata.get("terminal_hold_policy"),
         "actor_rl_success_target": "executed_actions",
-        "actor_rl_failure_target": "none",
-        "actor_rl_objective": "q_plus_success_behavior_cloning/v1",
+        "actor_rl_failure_target": "frozen_warmup_actor",
+        "actor_rl_objective": "q_plus_human_or_frozen_actor/v2",
         "initialization_mode": args.initialization_mode, "replay_source": "saved",
         "replay_bundle": replay_source,
         "steps": args.steps, "reward_contract": replay.metadata["reward_contract"],
@@ -550,6 +553,7 @@ def run(args: argparse.Namespace) -> int:
     )
     last_actor_loss: float | None = None
     last_critic_loss: float | None = None
+    last_diagnostics: dict[str, float] = {}
     _progress(
         phase=args.training_phase,
         completed_steps=0,
@@ -579,6 +583,13 @@ def run(args: argparse.Namespace) -> int:
                 dtype=stage2.learner.dtype,
             )
             update = stage2.learner.update_phase(batch)
+            if args.training_phase == "rl":
+                # Check every update, before recovery saves or final publication.
+                last_diagnostics.update(_rl_diagnostics(
+                    update,
+                    reward_contract=replay.metadata["reward_contract"],
+                    normalized_actions=stage2.learner.config.mlp_normalization is not None,
+                ))
             last_critic_loss = None if args.training_phase == "actor_warmup" else update.critic_loss
             if update.actor_loss is not None:
                 last_actor_loss = update.actor_loss
@@ -598,6 +609,7 @@ def run(args: argparse.Namespace) -> int:
                         f"Training RLT {args.training_phase} "
                         f"({update.completed_critic_updates} cumulative critic updates)"
                     ),
+                    diagnostics=last_diagnostics,
                 )
 
         stage2.learner.complete_phase()
@@ -629,6 +641,7 @@ def run(args: argparse.Namespace) -> int:
             "percentage": 100.0,
             "actor_loss": last_actor_loss,
             "critic_loss": last_critic_loss,
+            **last_diagnostics,
             "average_reward": replay.average_reward,
             "actor_artifact": str(actor_path),
             "encoder_artifact": str(bundled_encoder),

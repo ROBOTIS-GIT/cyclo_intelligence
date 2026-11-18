@@ -453,6 +453,40 @@ class RLTStage2Update:
     actor_reference_constraint: float | None
     completed_critic_updates: int
     completed_actor_updates: int
+    target_abs_max: float | None = None
+    policy_q_abs_max: float | None = None
+    policy_deviation_max: float | None = None
+
+
+def rl_update_diagnostics(update, *, reward_contract: str, normalized_actions: bool) -> dict[str, float]:
+    """Report objective components and abort unmistakable finite divergence.
+
+    Sparse terminal success returns are bounded by one; ten is a deliberately
+    loose alarm, not a value clamp. The action alarm is relative to the selected
+    behavior target and only applies to the independent MLP coordinate system.
+    """
+    metrics = {
+        name: float(value)
+        for name in (
+            "target_mean", "target_abs_max", "actor_negative_q",
+            "actor_reference_constraint", "policy_q_abs_max", "policy_deviation_max",
+        )
+        if (value := getattr(update, name)) is not None
+    }
+    bounded_return = reward_contract in {
+        "terminal_success_plus_one_discounted_within_chunk/v1",
+        "tt_rtc_decision_td_with_observed_terminal_return/v1",
+    }
+    for name, value in metrics.items():
+        limited = (bounded_return and name in {"target_abs_max", "policy_q_abs_max"}) or (
+            normalized_actions and name == "policy_deviation_max"
+        )
+        if not math.isfinite(value) or (limited and abs(value) > 10.0):
+            raise FloatingPointError(
+                f"RL divergence: {name}={value:.6g}; limit=10. "
+                "No completed bundle will be published. Resume a validated Critic warmup bundle."
+            )
+    return metrics
 
 
 @contextmanager
@@ -557,6 +591,8 @@ class RLTStage2Learner:
             raise ValueError("RLT Stage 2 training supports float32 or float64")
 
         self.actor = actor.train().requires_grad_(True)
+        # Captured once at the warmup -> RL boundary, never Polyak-updated.
+        self.actor_anchor: RLTGaussianChunkActor | None = None
         self.critic = critic.train().requires_grad_(True)
         self.critic_target = copy.deepcopy(critic).eval().requires_grad_(False)
         self.spec = spec
@@ -588,7 +624,7 @@ class RLTStage2Learner:
         self.actor_warmup_data: dict[str, Any] | None = None
         self.completed_phases: list[str] = []
         self.training_phase = "legacy_rl"
-        self._pending_update: tuple[RLTStage2Batch, float, float] | None = None
+        self._pending_update: tuple[RLTStage2Batch, float, float, float] | None = None
 
     @classmethod
     def create(
@@ -686,19 +722,7 @@ class RLTStage2Learner:
         hold_indices = tuple(normalization["hold_indices"])
         result = actions.clone()
         result[..., hold_indices] = committed_prefix[:, -1, hold_indices].unsqueeze(1)
-        lower = torch.as_tensor(
-            normalization["action"]["lower"], device=actions.device, dtype=actions.dtype
-        )
-        upper = torch.as_tensor(
-            normalization["action"]["upper"], device=actions.device, dtype=actions.dtype
-        )
-        for encoded_index, physical_value in normalization["fixed_actions"].items():
-            index = int(encoded_index)
-            result[..., index] = (
-                2.0 * (float(physical_value) - lower[index])
-                / (upper[index] - lower[index])
-                - 1.0
-            )
+        # Right gripper remains trainable, including when resuming legacy bundles.
         return result
 
     def _constraint_error(self, prediction: Tensor, target: Tensor) -> Tensor:
@@ -743,11 +767,6 @@ class RLTStage2Learner:
         """Existing synchronous entry point, with unchanged optimization order."""
         if self.training_phase not in {"legacy_rl", "rl"}:
             raise ValueError("Use the selected warmup phase; joint RL updates are disabled")
-        if self.training_phase == "rl" and batch.episode_success is None:
-            raise ValueError(
-                "Explicit RL requires episode_success provenance so successful "
-                "human behavior remains the Actor target"
-            )
         self.update_critic(batch)
         return self.finish_update()
 
@@ -772,6 +791,13 @@ class RLTStage2Learner:
             "critic_warmup" in self.completed_phases or legacy_trained
         ):
             raise ValueError("Complete Critic warmup before RL")
+        if phase == "rl" and self.actor_anchor is None:
+            if self.completed_actor_updates > self.completed_actor_warmup_updates:
+                raise ValueError(
+                    "RL checkpoint has no frozen warmup Actor; restart from a "
+                    "Critic warmup bundle"
+                )
+            self.actor_anchor = copy.deepcopy(self.actor).eval().requires_grad_(False)
         self.training_phase = phase
 
     def configure_actor_warmup_data(self, provenance: Mapping[str, Any]) -> None:
@@ -802,12 +828,13 @@ class RLTStage2Learner:
             return self.update(batch)
         if self.training_phase == "critic_warmup":
             self.update_critic(batch)
-            _, loss, target = self._pending_update
+            _, loss, target, target_max = self._pending_update
             self.completed_critic_warmup_updates += 1
             _polyak_update(self.critic, self.critic_target, self.config.target_update_rate)
             self._pending_update = None
             return RLTStage2Update(loss, target, False, None, None, None,
-                                   self.completed_critic_updates, self.completed_actor_updates)
+                                   self.completed_critic_updates, self.completed_actor_updates,
+                                   target_abs_max=target_max)
         if self.training_phase != "actor_warmup":
             raise ValueError("Select a training phase before updating")
         if self.update_pending:
@@ -863,6 +890,15 @@ class RLTStage2Learner:
         """
         if self.training_phase == "actor_warmup":
             raise ValueError("Critic updates are disabled during Actor warmup")
+        if self.training_phase == "rl" and self.actor_anchor is None:
+            raise ValueError(
+                "RL requires a frozen warmup Actor; restart from a Critic warmup bundle"
+            )
+        if self.training_phase == "rl" and batch.episode_success is None:
+            raise ValueError(
+                "Explicit RL requires episode_success provenance so successful "
+                "human behavior remains the Actor target"
+            )
         if self.update_pending:
             raise RuntimeError("Finish the pending RLT update before starting another")
         batch.validate(self.spec)
@@ -890,6 +926,7 @@ class RLTStage2Learner:
             batch,
             float(critic_loss.detach().cpu().item()),
             float(target.detach().mean().cpu().item()),
+            float(target.detach().abs().max().cpu().item()),
         )
 
     def finish_update(self) -> RLTStage2Update:
@@ -898,7 +935,7 @@ class RLTStage2Learner:
             raise ValueError("Joint RL updates are disabled during warmup")
         if self._pending_update is None:
             raise RuntimeError("No pending RLT update to finish")
-        batch, critic_loss, target_mean = self._pending_update
+        batch, critic_loss, target_mean, target_abs_max = self._pending_update
 
         actor_due = (
             (self.completed_critic_updates - self.completed_critic_warmup_updates)
@@ -907,6 +944,8 @@ class RLTStage2Learner:
         actor_loss: Tensor | None = None
         negative_q: Tensor | None = None
         reference_constraint: Tensor | None = None
+        policy_q_abs_max: Tensor | None = None
+        policy_deviation_max: Tensor | None = None
         if actor_due:
             rows = torch.rand(
                 (batch.batch_size,),
@@ -937,6 +976,7 @@ class RLTStage2Learner:
                 )
                 policy_q = self.critic.q1(batch.z_rl, batch.proprio, sampled)
                 negative_q = -policy_q.mean()
+                policy_q_abs_max = policy_q.detach().abs().max()
                 if batch.episode_success is None:
                     # Backward-compatible legacy RL checkpoints have no signed
                     # episode provenance and retain their original objective.
@@ -951,13 +991,24 @@ class RLTStage2Learner:
                     human_error = self._constraint_error(
                         action_mean, batch.executed_actions
                     )
-                    # Failed episodes remain in Q learning, but their VLA
-                    # references must not pull the Actor toward failed behavior.
-                    # Keep the existing full-batch reduction and success scale.
+                    # Failure states still need a behavior constraint: otherwise
+                    # offline Q maximization can exploit unobserved actions.
+                    # Evaluate the immutable warmup policy with full references,
+                    # even when the trainable policy received reference dropout.
+                    if self.actor_anchor is not None:
+                        with torch.no_grad():
+                            anchor_mean = self.actor_anchor(
+                                batch.z_rl, batch.proprio, batch.reference_actions
+                            )
+                        failure_error = self._constraint_error(action_mean, anchor_mean)
+                    else:
+                        # Preserve the legacy (non-explicit-RL) checkpoint path.
+                        failure_error = torch.zeros_like(human_error)
                     constraint_error = torch.where(
-                        success, human_error, torch.zeros_like(human_error)
+                        success, human_error, failure_error
                     )
                 reference_constraint = constraint_error.sum(dim=(1, 2)).mean()
+                policy_deviation_max = constraint_error.detach().max().sqrt()
                 actor_loss = (
                     negative_q
                     + self.config.policy_constraint_weight * reference_constraint
@@ -968,6 +1019,22 @@ class RLTStage2Learner:
             self._clip(self.actor, self.config.actor_gradient_clip_norm, "actor")
             self.actor_optimizer.step()
             self.actor_optimizer.zero_grad(set_to_none=True)
+            if self.training_phase == "rl":
+                # Include the updated inference policy, not only the policy that
+                # produced this gradient: the final step may immediately publish.
+                with torch.no_grad():
+                    updated_mean = self.actor(batch.z_rl, batch.proprio, batch.reference_actions)
+                    updated_actions = self._apply_mlp_action_policy(updated_mean, batch.committed_prefix)
+                    updated_q1, updated_q2 = self.critic(batch.z_rl, batch.proprio, updated_actions)
+                    policy_q_abs_max = torch.maximum(
+                        policy_q_abs_max,
+                        torch.maximum(updated_q1.abs(), updated_q2.abs()).max(),
+                    )
+                    behavior_target = torch.where(success, batch.executed_actions, anchor_mean)
+                    policy_deviation_max = torch.maximum(
+                        policy_deviation_max,
+                        self._constraint_error(updated_mean, behavior_target).max().sqrt(),
+                    )
             self.completed_actor_updates += 1
             _polyak_update(
                 self.critic,
@@ -992,6 +1059,9 @@ class RLTStage2Learner:
             actor_reference_constraint=scalar(reference_constraint),
             completed_critic_updates=self.completed_critic_updates,
             completed_actor_updates=self.completed_actor_updates,
+            target_abs_max=target_abs_max,
+            policy_q_abs_max=scalar(policy_q_abs_max),
+            policy_deviation_max=scalar(policy_deviation_max),
         )
         self._pending_update = None
         return result
@@ -1024,6 +1094,8 @@ class RLTStage2Learner:
                 "format": _LEARNER_STATE_FORMAT,
                 "contract": self._contract(),
                 "actor": self.actor.state_dict(),
+                **({"actor_anchor": self.actor_anchor.state_dict()}
+                   if self.actor_anchor is not None else {}),
                 "critic": self.critic.state_dict(),
                 "critic_target": self.critic_target.state_dict(),
                 "actor_optimizer": self.actor_optimizer.state_dict(),
@@ -1056,7 +1128,7 @@ class RLTStage2Learner:
         }
         if (
             not isinstance(state, Mapping)
-            or set(state) not in (required, required | {"phase_state"})
+            or set(state) - {"phase_state", "actor_anchor"} != required
             or state.get("format") != _LEARNER_STATE_FORMAT
             or state.get("contract") != self._contract()
         ):
@@ -1100,6 +1172,10 @@ class RLTStage2Learner:
             raise ValueError("RLT Stage 2 checkpoint update counters disagree")
         try:
             self.actor.load_state_dict(state["actor"], strict=True)
+            self.actor_anchor = None
+            if "actor_anchor" in state:
+                self.actor_anchor = copy.deepcopy(self.actor).eval().requires_grad_(False)
+                self.actor_anchor.load_state_dict(state["actor_anchor"], strict=True)
             self.critic.load_state_dict(state["critic"], strict=True)
             self.critic_target.load_state_dict(state["critic_target"], strict=True)
             self.actor_optimizer.load_state_dict(state["actor_optimizer"])
@@ -1124,11 +1200,14 @@ class RLTStage2Learner:
         self.actor.train().requires_grad_(True)
         self.critic.train().requires_grad_(True)
         self.critic_target.eval().requires_grad_(False)
-        for module, name in (
+        modules = [
             (self.actor, "actor"),
             (self.critic, "critic"),
             (self.critic_target, "target critic"),
-        ):
+        ]
+        if self.actor_anchor is not None:
+            modules.append((self.actor_anchor, "frozen warmup Actor"))
+        for module, name in modules:
             if any(
                 value.is_floating_point() and not bool(torch.isfinite(value).all())
                 for value in module.state_dict().values()
