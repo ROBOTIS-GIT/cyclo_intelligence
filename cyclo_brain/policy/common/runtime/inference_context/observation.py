@@ -1,10 +1,49 @@
 """Session-scoped robot reception selected by a model-independent InputSpec."""
 
 from dataclasses import replace
+import time
 
 from .inputs import ExecutionQuery, InputSpec, LatestValues, RoutedInputs, SampleQuery
 from .execution_inputs import ExecutionInputs
 from .reception import ReceptionHistory
+
+
+class ExecutionObservationBarrier:
+    """Translate reset acceptance into the Worker's reception-clock boundary.
+
+    ResetRecord.recorded_s belongs to the Runtime host, not the Worker clock.
+    Keep those wire facts intact; require observations received after local
+    acceptance instead. Replayed contexts must not move this boundary forward.
+    """
+
+    def __init__(self):
+        self.context = None
+        self.after_s = None
+
+    def update(self, context):
+        previous = self.context
+        inactive = {"paused", "stopped", "error"}
+        reset = previous is None or (
+            (previous.session_id, previous.generation) != (context.session_id, context.generation)
+            or (previous.phase != context.phase and (
+                context.phase in inactive or previous.phase in inactive
+            ))
+        )
+        if reset and previous is not None:
+            self.after_s = time.monotonic()
+        self.context = context
+        return reset
+
+    def read(self, robot, sources, *, max_age_s=None, timeout_s=1.0):
+        """Wait for post-reset reception, not arbitrary configuration errors."""
+        options = {"max_age_s": max_age_s}
+        if self.after_s is None:
+            return robot.get_required_input_snapshot(sources, **options)
+        options["after_s"] = self.after_s
+        wait = getattr(robot, "wait_for_required_input_snapshot", None)
+        if wait is not None:
+            return wait(sources, timeout_s=timeout_s, **options)
+        return robot.get_required_input_snapshot(sources, **options)
 
 
 class _HistoryWindow:

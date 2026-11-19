@@ -12,6 +12,7 @@ from pathlib import Path
 import uuid
 
 import yaml
+from inference_context.observation import ExecutionObservationBarrier
 
 from .mapping import RobotMapping
 
@@ -27,6 +28,7 @@ class RLDXEngine:
         self.context_key = None
         self.instruction = None
         self.session_id = str(uuid.uuid4())
+        self._observation_barrier = ExecutionObservationBarrier()
 
     @property
     def is_ready(self):
@@ -115,7 +117,7 @@ class RLDXEngine:
 
     def update_execution_context(self, context):
         key = (context.session_id, context.generation)
-        if key != self.context_key:
+        if self._observation_barrier.update(context):
             if self.policy is not None:
                 self.policy.reset()
             self.context_key = key
@@ -130,7 +132,7 @@ class RLDXEngine:
             reset = self.instruction != instruction
             if reset:
                 self.policy.reset()
-            snapshot = self.robot.get_required_input_snapshot(self.mapping.sources, max_age_s=self.max_age_s)
+            snapshot = self._observation_barrier.read(self.robot, self.mapping.sources, max_age_s=self.max_age_s)
             observation = self.mapping.observation(snapshot, instruction, self.language_key)
             actions, _ = self.policy.get_action(observation, options={
                 "session_ids": [self.session_id], "reset_memory": [reset],
@@ -150,6 +152,7 @@ class RLDXEngine:
         self.context_key = None
         self.instruction = None
         self.session_id = str(uuid.uuid4())
+        self._observation_barrier = ExecutionObservationBarrier()
         try:
             if robot is not None:
                 robot.close()

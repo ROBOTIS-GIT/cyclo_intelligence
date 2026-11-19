@@ -293,10 +293,11 @@ class EngineModelLifecycleTest(unittest.TestCase):
         request.prediction_id = 2
         self.assertFalse(engine.get_action_chunk(request)["success"])
         self.assertEqual(policy.select_action.call_count, 1)
-        engine.update_execution_context(replace(context, revision=2, phase="running", latest_event_id=1,
-            actions=(ActionRecord("1", "published", "command", (1., 2.), command_id=1, event_id=1, recorded_s=10.),)))
+        with mock.patch("time.monotonic", return_value=20.):
+            engine.update_execution_context(replace(context, revision=2, phase="running", latest_event_id=1,
+                actions=(ActionRecord("1", "published", "command", (1., 2.), command_id=1, event_id=1, recorded_s=10.),)))
         self.assertTrue(engine.get_action_chunk(request)["success"])
-        engine._build_observation.assert_called_with("pick", require_received=True, observation_after_s=10.)
+        engine._build_observation.assert_called_with("pick", require_received=True, observation_after_s=20.)
         self.assertEqual(pre.call_count, 2)
         self.assertEqual(post.call_count, 2)
         engine.cleanup()

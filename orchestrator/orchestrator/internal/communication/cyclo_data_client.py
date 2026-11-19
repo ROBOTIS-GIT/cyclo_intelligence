@@ -22,10 +22,9 @@ Wiring status (Step 3 Part C is split into three sub-commits):
   * Part C3: obsolete enum values / legacy srv types are retired.
 
 Design notes:
-  * All calls are call_async + future.result(timeout). The service
-    bodies in cyclo_data are cheap (validation + enqueue), so a short
-    timeout is enough; actual heavy work is observed via
-    DataOperationStatus topic.
+  * Calls use call_async with bounded waits. A timeout does not cancel
+    remote work. Recording commands reconcile by receipt ID rather than
+    resubmitting; background archive completion is observed separately.
   * Clients use a ReentrantCallbackGroup by default so the caller may
     live inside another ROS 2 service callback without deadlocking.
   * Missing cyclo_data node is surfaced as (False, "service unavailable")
@@ -35,6 +34,7 @@ Design notes:
 from dataclasses import dataclass
 import logging
 import threading
+import uuid
 from typing import Optional
 
 from interfaces.msg import TaskInfo
@@ -74,6 +74,8 @@ class CallResult:
     # Callers inspect it via `result.response.<field>` when they need
     # job_id / status / affected_count / etc.
     response: object = None
+    request_id: str = ''
+    outcome_unknown: bool = False
 
 
 class CycloDataClient:
@@ -114,13 +116,47 @@ class CycloDataClient:
     ) -> CallResult:
         req = RecordingCommand.Request()
         req.command = command
+        req.request_id = str(uuid.uuid4())
         if task_info is not None:
             req.task_info = task_info
         req.robot_type = robot_type
         req.topics = list(topics or [])
         req.urdf_path = urdf_path
         req.segment_index = int(segment_index)
-        return self._call(self._recording, req, timeout_sec, 'recording')
+        if not self._recording.wait_for_service(timeout_sec=0.0):
+            return CallResult(False, 'cyclo_data recording service unavailable')
+        try:
+            result = self._call(self._recording, req, timeout_sec, 'recording')
+        except Exception as exc:
+            logger.warning('Recording transport raised; querying receipt: %s', exc)
+            return self.query_recording_result(req.request_id)
+        if result.response is None:
+            return self.query_recording_result(req.request_id)
+        return self._recording_result(req.request_id, result)
+
+    def query_recording_result(self, request_id, timeout_sec=1.0):
+        req = RecordingCommand.Request()
+        req.command = RecordingCommand.Request.GET_RESULT
+        req.request_id = request_id
+        try:
+            result = self._call(self._recording, req, timeout_sec, 'recording')
+        except Exception as exc:
+            result = CallResult(False, f'Recording receipt query failed: {exc}')
+        return self._recording_result(request_id, result)
+
+    @staticmethod
+    def _recording_result(request_id, result):
+        response = result.response
+        state = getattr(response, 'command_state', '')
+        known = (getattr(response, 'request_id', '') == request_id
+                 and state in ('completed', 'rejected'))
+        return CallResult(
+            success=known and state == 'completed' and result.success,
+            message=result.message if known else (
+                f'Recording outcome unconfirmed ({request_id}); '
+                f'command was not replayed: {result.message}'),
+            response=response if known else None,
+            request_id=request_id, outcome_unknown=not known)
 
     def start_conversion(
         self,

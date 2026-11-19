@@ -22,8 +22,12 @@ uint8 FINISH_EPISODE = 13
 uint8 DISCARD_EPISODE = 14
 uint8 SET_TASK_INFO = 15
 uint8 CANCEL_SEGMENT = 16
+# Read the receipt of request_id without executing a recording operation.
+uint8 GET_RESULT = 17
 
 uint8 command
+# Caller-generated UUID. Keep it unchanged when querying a lost response.
+string request_id
 TaskInfo task_info
 # Planned subtask/segment index. For DISCARD_EPISODE only, 0 keeps legacy
 # behavior (delete current cursor) and N > 0 targets full_episode_index N - 1.
@@ -44,3 +48,9 @@ string urdf_path
 ---
 bool success
 string message
+# completed describes the command acknowledgement, not background transcoding.
+# Unknown receipts (including after a node restart) must never be auto-replayed.
+string request_id
+string command_state
+# Empty for non-archive commands; running/completed/failed for background save.
+string archive_state

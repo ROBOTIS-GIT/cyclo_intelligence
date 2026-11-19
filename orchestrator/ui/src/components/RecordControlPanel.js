@@ -35,27 +35,29 @@ export default function RecordControlPanel() {
   const classBody = clsx(
     'bg-white/90',
     'backdrop-blur-sm',
-    'rounded-full',
+    'rounded-md',
     'px-3',
     'py-1',
     'flex',
     'flex-row',
+    'flex-wrap',
+    'min-w-0',
+    'max-w-full',
     'items-center',
     'gap-1.5',
-    'shadow-md',
     'border',
     'border-gray-100'
   );
 
   return (
     <div className={classBody}>
-      <span className="text-lg font-semibold text-gray-500 whitespace-nowrap px-1 shrink-0">
+      <span className="text-sm font-semibold text-gray-700 whitespace-nowrap px-1 shrink-0">
         Record
       </span>
       <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
 
       <div className="flex items-center gap-1 shrink-0 px-1">
-        <span className="text-gray-600 font-semibold text-lg whitespace-nowrap">
+        <span className="text-gray-600 text-sm whitespace-nowrap">
           {phaseGuideMessages[phase] || ''}
         </span>
         {isBusy && (
@@ -69,35 +71,31 @@ export default function RecordControlPanel() {
         <>
           <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
           <div className="flex items-center gap-1 shrink-0 px-1">
-            <span className="text-gray-500 text-lg font-medium">
+            <span className="text-gray-500 text-sm font-medium">
               {recordStatus.proceedTime}s
             </span>
           </div>
         </>
       )}
 
-      <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
-      <div className="flex items-center gap-1 shrink-0 px-1">
-        <span className="text-gray-500 text-lg font-medium">EP</span>
-        <span className="bg-gray-100 rounded px-1.5 py-0.5 text-lg font-bold">
+      <div role="group" aria-label="Episode" className="flex items-stretch shrink-0 rounded border border-blue-400 bg-blue-50 text-blue-700 dark:text-blue-200 overflow-hidden">
+        <span className="px-2 py-1 text-sm font-semibold self-center">Episode</span>
+        <span className="min-w-[3rem] border-l border-blue-400 px-2 py-1 text-base leading-5 text-center font-bold tabular-nums">
           {recordStatus.currentEpisodeNumber}
         </span>
       </div>
 
       {hasSubtasks && (
-        <>
-          <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
-          <div className="flex items-center gap-1 shrink-0 px-1 max-w-[260px]">
-            <span className="text-gray-500 text-lg font-medium whitespace-nowrap">
+          <div role="group" aria-label="Current subtask" className="flex items-stretch min-w-0 max-w-[min(260px,100%)] rounded border border-gray-400 bg-gray-50 overflow-hidden">
+            <span className="shrink-0 bg-gray-100 px-2 py-1 text-gray-800 text-sm font-semibold whitespace-nowrap">
               ST {Math.min(currentSubtaskIndex + 1, subtaskCount)}/{subtaskCount}
             </span>
             {recordStatus.currentSubtaskInstruction && (
-              <span className="text-sm text-gray-600 truncate">
+              <span title={recordStatus.currentSubtaskInstruction} className="min-w-0 border-l border-gray-400 px-2 py-1 text-sm text-gray-700 truncate">
                 {recordStatus.currentSubtaskInstruction}
               </span>
             )}
           </div>
-        </>
       )}
     </div>
   );

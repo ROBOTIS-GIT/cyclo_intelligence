@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdAccountTree } from 'react-icons/md';
+import { MdHome, MdVideocam, MdWidgets, MdAccountTree } from 'react-icons/md';
 import { TbMapRoute } from 'react-icons/tb';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
@@ -24,8 +24,7 @@ import toast from 'react-hot-toast';
 import './App.css';
 import ThemeToggle from './components/ThemeToggle';
 import HomePage from './pages/HomePage';
-import RecordPage from './pages/RecordPage';
-import InferencePage from './pages/InferencePage';
+import OperationWorkspace from './pages/OperationWorkspace';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
@@ -260,36 +259,6 @@ function App() {
     dispatch(moveToPage(PageType.RECORD));
   };
 
-  const handleInferencePageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      console.log('handleInferencePageNavigation');
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.INFERENCE));
-      return;
-    }
-
-    // Allow navigation if task is in progress
-    if (robotType && robotType !== '') {
-      console.log('robot type:', robotType, '=> allowing navigation to Inference page');
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.INFERENCE));
-      return;
-    }
-
-    // Block navigation if robot type is not set
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
-        duration: 4000,
-      });
-      console.log('Robot type not set, blocking navigation to Inference page');
-      return;
-    }
-
-    // Allow navigation if conditions are met
-    console.log('Robot type set, allowing navigation to Inference page');
-    dispatch(moveToPage(PageType.INFERENCE));
-  };
-
   const handleTrainingPageNavigation = () => {
     if (process.env.REACT_APP_DEBUG === 'true') {
       console.log('handleTrainingPageNavigation');
@@ -441,13 +410,13 @@ function App() {
           {/* Record page button */}
           <button
             className={clsx(classPageButton, {
-              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.RECORD,
-              'bg-gray-300 dark:bg-slate-700': page === PageType.RECORD,
+              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.RECORD && page !== PageType.INFERENCE,
+              'bg-gray-300 dark:bg-slate-700': page === PageType.RECORD || page === PageType.INFERENCE,
             })}
             onClick={handleRecordPageNavigation}
           >
             <MdVideocam size={32} className="mb-1.5" />
-            <span className="mt-1 text-sm">Record</span>
+            <span className="mt-1 text-sm">Operate</span>
           </button>
           {/* Edit dataset page button */}
           <button
@@ -475,18 +444,6 @@ function App() {
             </span>
           </button>
 
-          {/* Inference page button */}
-          <button
-            className={clsx(classPageButton, {
-              'hover:bg-gray-200 active:bg-gray-400 dark:hover:bg-slate-800 dark:active:bg-slate-700': page !== PageType.INFERENCE,
-              'bg-gray-300 dark:bg-slate-700': page === PageType.INFERENCE,
-            })}
-            onClick={handleInferencePageNavigation}
-          >
-            <MdMemory size={32} className="mb-1.5" />
-            <span className="mt-1 text-sm">Inference</span>
-          </button>
-
           {/* Divider line */}
           <div
             role="separator"
@@ -511,13 +468,11 @@ function App() {
         </div>
         </aside>
       )}
-      <main className="flex-1 flex flex-col h-screen bg-white dark:bg-slate-950">
+      <main className="flex-1 min-w-0 flex flex-col h-screen bg-white dark:bg-slate-950">
         {page === PageType.HOME ? (
           <HomePage />
-        ) : page === PageType.RECORD ? (
-          <RecordPage isActive={page === PageType.RECORD} />
-        ) : page === PageType.INFERENCE ? (
-          <InferencePage isActive={page === PageType.INFERENCE} />
+        ) : page === PageType.RECORD || page === PageType.INFERENCE ? (
+          <OperationWorkspace />
         ) : page === PageType.TRAINING ? (
           <TrainingPage isActive={page === PageType.TRAINING} />
         ) : page === PageType.EDIT_DATASET ? (

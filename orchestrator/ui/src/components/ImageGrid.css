@@ -1,0 +1,209 @@
+.image-grid-region {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 3px solid transparent;
+}
+
+.image-grid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 2px 8px;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.image-grid-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.image-grid-recording { border-color: #16a34a; }
+.image-grid-recording .image-grid-header { background: #dcfce7; border-bottom-color: #16a34a; }
+.image-grid-recording-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: #15803d;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  white-space: nowrap;
+  border-radius: 4px;
+}
+.image-grid-recording-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.dark .image-grid-recording { border-color: #4ade80; }
+.dark .image-grid-recording .image-grid-header { background: #153d2a; border-bottom-color: #4ade80; }
+
+.image-grid-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.image-grid-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: minmax(200px, 1fr);
+  gap: 8px;
+  min-height: 100%;
+}
+
+.image-grid-cell {
+  position: relative;
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 200px;
+  overflow: hidden;
+  border-radius: 0;
+  background: #111;
+}
+
+.image-grid-manual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  align-content: flex-start;
+  min-height: 0;
+}
+
+.image-grid-manual > .image-grid-cell {
+  flex: 0 0 auto;
+}
+
+.image-grid-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #292929;
+  color: #fff;
+  cursor: nwse-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.image-grid-resizable { grid-template-rows: 36px minmax(0, 1fr) 20px; }
+
+.image-grid-resize-handle:hover { background: #404040; }
+.image-grid-resize-handle:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+
+.image-grid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 4px 2px 8px;
+  color: #f3f4f6;
+  background: #292929;
+}
+
+.image-grid-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.image-grid-tool {
+  display: flex;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 0;
+}
+
+.image-grid-tool:hover,
+.image-grid-tool:focus-visible {
+  background: #4b4b4b;
+}
+
+.image-grid-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.image-grid-drag-handle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  text-align: left;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.image-grid-drag-handle:active { cursor: grabbing; }
+.image-grid-drag-handle:focus-visible { outline: 2px solid #60a5fa; }
+.image-grid-drop-target { outline: 3px solid #3b82f6; outline-offset: -3px; }
+
+.image-grid-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.image-grid-status span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.image-grid-viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 0;
+}
+
+.image-grid-stream {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: contain;
+  transform-origin: center;
+  border-radius: 0;
+}
+
+.image-grid-select {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #9ca3af;
+  border: 1px dashed #6b7280;
+  border-radius: 0;
+}

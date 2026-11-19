@@ -114,9 +114,9 @@ export default function SavedPoseControlPanel() {
   const buttonClass = 'flex h-8 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-md text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400';
   return (
     <section aria-label="Saved Initial Pose" className="mb-2.5">
-      <div className="flex items-center">
+      <div role="group" aria-label="Initial pose controls" className="flex flex-col items-stretch gap-1 sm:flex-row sm:items-center sm:gap-0">
         <span className="w-28 flex-shrink-0 text-sm font-medium text-gray-600">Initial Pose</span>
-        <div className="saved-pose-actions grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_3rem_minmax(0,1.3fr)_2rem] gap-1">
+        <div className="saved-pose-actions grid min-w-0 w-full sm:w-auto flex-1 grid-cols-[minmax(0,1fr)_3rem_minmax(0,1.3fr)_2rem] gap-1">
           <button type="button" aria-label="Save Initial Pose" disabled={unavailable || !inactive}
             onClick={() => send(1)} className={`${buttonClass} bg-emerald-600 hover:bg-emerald-700`}><MdSave size={16} className="saved-pose-action-icon shrink-0" /><span>Save</span></button>
           <label title="Return duration (seconds)" className="flex h-8 min-w-0 items-center gap-0.5 text-xs text-gray-500">
@@ -150,7 +150,7 @@ export default function SavedPoseControlPanel() {
         </div>
       </div>
       {displayError && (
-        <div aria-live="polite" className="ml-28 mt-1 text-[11px] leading-snug text-gray-500">
+        <div aria-live="polite" className="sm:ml-28 mt-1 text-[11px] leading-snug text-gray-500">
           {displayError}
         </div>
       )}

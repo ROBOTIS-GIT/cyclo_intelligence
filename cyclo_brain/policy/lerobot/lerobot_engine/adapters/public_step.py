@@ -1,6 +1,9 @@
 """Shared public select_action execution, with model-owned queues."""
 
 import numpy as np
+import time
+
+from inference_context.observation import ExecutionObservationBarrier
 
 class PublicStepAdapter:
     """Require a publisher receipt before advancing a model's implicit step.
@@ -28,6 +31,7 @@ class PublicStepAdapter:
         self._failed = False
         self._last_prediction = -1
         self._observation_after_s = None
+        self._observation_barrier = ExecutionObservationBarrier()
         self.result_observer = None
         self._action_mapping = lambda chunk: chunk
 
@@ -51,9 +55,7 @@ class PublicStepAdapter:
                 raise ValueError("step adapter requires an empty ready LOAD context")
         elif context.session_id != previous.session_id or context.generation < previous.generation:
             raise ValueError("step context session/generation mismatch")
-        reset = previous is None or context.generation != previous.generation
-        if previous and context.phase != previous.phase and context.phase in {"paused", "stopped", "error"}:
-            reset = True
+        reset = self._observation_barrier.update(context)
         if reset:
             # Never reset weights; also clear stateful processor steps via public APIs.
             self._failed = True
@@ -65,9 +67,7 @@ class PublicStepAdapter:
             self._pending_id = None
             self._expected = None
             self._published = False
-            self._observation_after_s = max(
-                (event.recorded_s for event in context.resets), default=None,
-            )
+            self._observation_after_s = self._observation_barrier.after_s
             self._failed = False
         else:
             for action in context.actions:
@@ -88,9 +88,7 @@ class PublicStepAdapter:
                 # Repeated ZOH publications must not move the barrier forward on
                 # every tick and starve a camera that updates at a slower rate.
                 if not self._published:
-                    self._observation_after_s = action.recorded_s
-                else:
-                    self._observation_after_s = min(self._observation_after_s, action.recorded_s)
+                    self._observation_after_s = time.monotonic()
                 self._published = True
         self._context = context
 

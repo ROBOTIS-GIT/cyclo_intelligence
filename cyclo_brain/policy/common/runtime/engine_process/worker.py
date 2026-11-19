@@ -179,12 +179,13 @@ class EngineWorker:
             raise ValueError("engine returned an invalid context requirement")
         if requires_context and "execution_contract" not in result:
             raise ValueError("contextual LOAD requires an explicit execution contract")
-        if result.get("success") and (requires_context or contract.requires_context) and context is None:
+        negotiate_reset = context is None and callable(getattr(self._engine, "update_execution_context", None))
+        if result.get("success") and (requires_context or contract.requires_context or negotiate_reset) and context is None:
             context = ExecutionContext(uuid.uuid4().hex, 0, 0, "ready", feedback_schema=contract.feedback_schema)
         # Explicit caller-supplied contexts predate LOAD negotiation. Preserve
         # that path unless the adapter opts into a resolved execution contract.
         loaded = (LoadedExecution(contract, context)
-                  if result.get("success") and "execution_contract" in result else LoadedExecution())
+                  if result.get("success") and ("execution_contract" in result or negotiate_reset) else LoadedExecution())
         if result.get("success") and context is not None:
             self._accept_parsed_context(context, new_session=True)
         self._engine_state = "loaded" if result.get("success") else "error"

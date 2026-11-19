@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 import yaml
+from inference_context.observation import ExecutionObservationBarrier
 
 from .bundle import CheckpointBundle
 from .mapping import RobotMapping
@@ -20,6 +21,7 @@ class LingBotVLAEngine:
     def __init__(self):
         self.policy = self.robot = self.mapping = self.bundle = None
         self.context_key = self.instruction = None
+        self._observation_barrier = ExecutionObservationBarrier()
 
     @property
     def is_ready(self):
@@ -67,7 +69,7 @@ class LingBotVLAEngine:
 
     def update_execution_context(self, context):
         key = (context.session_id, context.generation)
-        if key != self.context_key:
+        if self._observation_barrier.update(context):
             if self.policy is not None:
                 reset_native(self.policy)
             self.context_key = key
@@ -80,7 +82,7 @@ class LingBotVLAEngine:
             instruction = str(request.task_instruction or "")
             if instruction != self.instruction:
                 reset_native(self.policy)
-            snapshot = self.robot.get_required_input_snapshot(self.mapping.sources, max_age_s=self.max_age_s)
+            snapshot = self._observation_barrier.read(self.robot, self.mapping.sources, max_age_s=self.max_age_s)
             # RobotClient returns private RGB arrays, separate from callback storage.
             observation = self.mapping.observation(snapshot, instruction, copy_images=False)
             actions = self.policy.infer(observation)
@@ -96,6 +98,7 @@ class LingBotVLAEngine:
         robot, self.robot = self.robot, None
         self.policy = self.mapping = self.bundle = None
         self.context_key = self.instruction = None
+        self._observation_barrier = ExecutionObservationBarrier()
         try:
             if robot is not None:
                 robot.close()

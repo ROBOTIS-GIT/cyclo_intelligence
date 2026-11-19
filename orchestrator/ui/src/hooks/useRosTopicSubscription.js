@@ -493,11 +493,20 @@ export function useRosTopicSubscription() {
         // we still need to dispatch setInferenceStatus below so the phase
         // update (e.g. backend resetting LOADING → READY after a failed
         // setup) is reflected in the UI.
-        if (msg.error && msg.error !== previousInferenceErrorRef.current) {
-          console.log('error:', msg.error);
-          toast.error(msg.error);
+        // Paused STATUS shares the error field with handoff guidance. Keep
+        // unknown/legacy failures and actual runtime errors eligible for toasts.
+        const isHandoffGuidance = msg.status_known && msg.runtime_state === 'paused' &&
+          msg.inference_phase === InferencePhase.PAUSED && typeof msg.error === 'string' && (
+            msg.error.startsWith('Waiting for model control: ') ||
+            msg.error === 'Waiting for the previous prediction to finish.' ||
+            (msg.error.startsWith('Control unavailable: ') && msg.error.endsWith('; START required.'))
+          );
+        const toastError = isHandoffGuidance ? '' : (msg.error || '');
+        if (toastError && toastError !== previousInferenceErrorRef.current) {
+          console.log('error:', toastError);
+          toast.error(toastError);
         }
-        previousInferenceErrorRef.current = msg.error || '';
+        previousInferenceErrorRef.current = toastError;
 
         if (msg.robot_type && msg.robot_type.trim() !== '') {
           const tasksState = store.getState().tasks;
@@ -522,7 +531,6 @@ export function useRosTopicSubscription() {
             loadedModelPath: msg.model_path || '',
             loadedPolicyId: msg.policy_id || '',
             observedChunkSize: Number(msg.observed_chunk_size || 0),
-            recordingSessionId: msg.task_info?.task_num || '',
             publishToRobot: Boolean(msg.publish_to_robot),
             sourceId: msg.source_id || '',
             sequence: Number(msg.sequence || 0),

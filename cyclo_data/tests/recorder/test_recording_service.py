@@ -71,6 +71,7 @@ class _RecordingCommand:
         DISCARD_EPISODE = 14
         SET_TASK_INFO = 15
         CANCEL_SEGMENT = 16
+        GET_RESULT = 17
 
 
 class _Dummy:
@@ -169,9 +170,114 @@ def _service_with_logger():
     logger = _Logger()
     service = RecordingService.__new__(RecordingService)
     service._command_lock = RLock()
+    from cyclo_data.services.command_receipts import CommandReceipts
+    service._receipts = CommandReceipts()
     service._shutting_down = False
     service._node = SimpleNamespace(get_logger=lambda: logger)
     return service, logger
+
+
+@pytest.mark.parametrize('iteration', range(20))
+def test_receipt_query_and_duplicate_are_nonblocking_during_save(iteration):
+    from uuid import uuid4
+    service, _ = _service_with_logger()
+    entered, release = Event(), Event()
+    req = _request(command=_RecordingCommand.Request.STOP_SEGMENT)
+    req.request_id = str(uuid4())
+
+    def slow(request, response):
+        entered.set()
+        assert release.wait(2)
+        response.success, response.message = True, 'saved once'
+        return response
+
+    service._dispatch = Mock(side_effect=slow)
+    query = SimpleNamespace(command=_RecordingCommand.Request.GET_RESULT, request_id=req.request_id)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(service._callback, req, SimpleNamespace())
+        try:
+            assert entered.wait(1)
+            assert pool.submit(service._callback, query, SimpleNamespace()).result(.5).command_state == 'running'
+            assert pool.submit(service._callback, req, SimpleNamespace()).result(.5).command_state == 'running'
+        finally:
+            release.set()
+        assert pending.result(1).success
+    assert service._callback(query, SimpleNamespace()).message == 'saved once'
+    assert service._callback(req, SimpleNamespace()).success
+    service._dispatch.assert_called_once()
+
+
+@pytest.mark.parametrize('robot_type,topics', [
+    ('ffw_sg2_rev2', ['/joint_states', '/action']),
+    ('ffw_sg2_rev1', ['/joint_states', '/new_action']),
+    ('', ['/joint_states']),
+])
+def test_active_recording_rejects_refresh_changes_before_any_io(robot_type, topics):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = SimpleNamespace(is_recording=lambda: True)
+    service._robot_type = 'ffw_sg2_rev1'
+    service._last_prepared_topics = ('/action', '/joint_states')
+    service._rosbag = Mock()
+    service._ensure_video_pipeline = Mock()
+    request = _request(command=_RecordingCommand.Request.REFRESH_TOPICS,
+                       robot_type=robot_type, topics=topics)
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=True, message=''))
+
+    assert not result.success
+    assert 'recording' in result.message.lower()
+    assert service._robot_type == 'ffw_sg2_rev1'
+    assert service._last_prepared_topics == ('/action', '/joint_states')
+    assert service._rosbag.mock_calls == []
+    service._ensure_video_pipeline.assert_not_called()
+
+
+@pytest.mark.parametrize('robot_type', ['ffw_sg2_rev1', ''])
+def test_active_recording_identical_refresh_is_noop_even_without_video(robot_type):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = SimpleNamespace(is_recording=lambda: True)
+    service._robot_type = 'ffw_sg2_rev1'
+    service._last_prepared_topics = ('/action', '/joint_states')
+    service._rosbag = Mock()
+    service._rosbag.is_available.return_value = False
+    service._ensure_video_pipeline = Mock()
+    request = _request(command=_RecordingCommand.Request.REFRESH_TOPICS,
+                       robot_type=robot_type, topics=['/joint_states', '/action'])
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=False, message=''))
+
+    assert result.success, result.message
+    assert service._robot_type == 'ffw_sg2_rev1'
+    assert service._rosbag.mock_calls == []
+    service._ensure_video_pipeline.assert_not_called()
+
+
+@pytest.mark.parametrize('command', [
+    _RecordingCommand.Request.SET_TASK_INFO, _RecordingCommand.Request.START,
+])
+def test_active_recording_rejects_robot_change_without_relabeling(command):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    manager = SimpleNamespace(is_recording=lambda: True)
+    service._data_manager = manager
+    service._robot_type = 'ffw_sg2_rev1'
+    service._rosbag = Mock()
+    service._finish_episode_in_progress = lambda: False
+    service._publish_umbrella_status = Mock()
+    request = _request(command=command, robot_type='ffw_sg2_rev2')
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=True, message=''))
+
+    assert not result.success
+    assert 'robot' in result.message.lower()
+    assert service._data_manager is manager
+    assert service._robot_type == 'ffw_sg2_rev1'
+    service._rosbag.start_rosbag.assert_not_called()
 
 
 def test_shutdown_stops_native_writer_before_closing_local_writers_without_saving():

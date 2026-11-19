@@ -14,6 +14,7 @@ uint8 CANCEL = 8
 uint8 CONVERT_MP4 = 9
 uint8 STOP_INFERENCE = 10
 uint8 RESUME_INFERENCE = 11
+# Legacy recording aliases use the prepared Record task and its storage.
 uint8 START_INFERENCE_RECORD = 12
 uint8 STOP_INFERENCE_RECORD = 13
 uint8 CANCEL_INFERENCE_RECORD = 14
@@ -41,8 +42,8 @@ uint8 CANCEL_SEGMENT = 24
 # orchestrator uses task_info to select the runtime only when it has no active
 # inference client (for example after an orchestrator restart).
 uint8 GET_INFERENCE_STATUS = 25
-# Explicit recording destination selection. Empty task_num means a new folder
-# at the next Record; otherwise task_num identifies an existing folder.
+# Retired: the server rejects this command and directs clients to Record task
+# settings. Keep the number reserved for existing generated clients.
 uint8 SET_INFERENCE_RECORD_FOLDER = 26
 
 uint8 command

@@ -21,6 +21,7 @@ class SavedPoseManager:
         self._robot = None
         self.robot_type = ""
         self._target = None
+        self._handoff_revision = None
         self._started = 0.0
         self.error = ""
 
@@ -126,6 +127,15 @@ class SavedPoseManager:
         positions = self._load(robot_type)
         self._connect(robot_type)
         self._snapshot()
+        request_start = getattr(self._robot, "request_model_start", None)
+        if request_start is not None:
+            request_start()
+        status = self._handoff_status()
+        if status is not None and status.state != "ready":
+            raise RuntimeError(f"Model control is required for pose return: {status.reason}")
+        if status is not None:
+            self._robot.arm_handoff(status.revision)
+        self._handoff_revision = status.revision if status is not None else None
         self.error = ""
         self._target = positions
         self._active_duration_s = self.duration(robot_type)
@@ -142,9 +152,13 @@ class SavedPoseManager:
 
     def stop(self):
         if self.returning:
+            if self._cancel_on_handoff():
+                return
             try:
                 self._robot.publish_current_pose_hold()
             except Exception as exc:
+                if self._cancel_on_handoff():
+                    return
                 # Failed Stop must not expire with the normal trajectory timer.
                 self.error = f"Pose stop failed; current-pose hold failed: {exc}"
                 raise
@@ -153,6 +167,8 @@ class SavedPoseManager:
 
     def poll(self):
         if not self.returning:
+            return
+        if self._cancel_on_handoff():
             return
         try:
             if self.error:
@@ -169,6 +185,19 @@ class SavedPoseManager:
             except Exception as hold_error:
                 reason = f"{reason}; current-pose hold failed: {hold_error}"
             self.error = reason
+
+    def _handoff_status(self):
+        read = getattr(self._robot, "handoff_status", None)
+        status = read() if read is not None else None
+        return status if status is not None and status.enabled else None
+
+    def _cancel_on_handoff(self):
+        status = self._handoff_status()
+        if status is None or (status.state == "ready" and status.revision == self._handoff_revision):
+            return False
+        self._target = None
+        self.error = f"Pose return cancelled by control handoff: {status.reason or 'source changed'}"
+        return True
 
     def status(self, robot_type, *, connect=True):
         profile = self.profile(robot_type)

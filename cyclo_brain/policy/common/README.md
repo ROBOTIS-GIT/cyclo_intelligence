@@ -86,11 +86,86 @@ Worker heartbeats are published at `/<runtime>/worker_heartbeat`. During an
 active session, a stale heartbeat, Worker instance change, Orchestrator
 heartbeat loss, or GET_ACTION failure causes the Runtime to clear buffered
 actions and enter `error`. In robot mode it also attempts zero Twist and a
-fresh-current-joint hold.
+fresh-current-joint hold, provided Cyclo still owns physical output authority.
 
 The Supervisor uses `/run/cyclo/policy-runtime.sock` to reserve Worker
 start/stop/recreate operations. A Worker used by a loaded session, or one with
 a pending hold, cannot be changed through the Supervisor API.
+
+### Teleoperation Handoff
+
+SG2, BG2, W1 and W2 profiles opt in through `inference_handoff` in the robot YAML.
+Profiles declare the source/status topics and allowed control modes; timing
+parameters use the common defaults unless explicitly overridden.
+An explicit physical Start/Resume can select Cyclo's internal `local_model`
+state when no external control publisher or state has been observed by the
+loaded RobotClient. This does not send a controller mode service request or
+publish synthetic `/source` or `/control/status` messages. Fresh, valid configured
+JointState feedback is still required; loading or polling never selects local mode.
+
+Once any source/status publisher or state is observed, the client uses external
+handoff for the remainder of its lifetime. Discovery revokes local publication
+before waiting for a state event. Publisher loss, errors, and a known teleop mode
+cannot be overridden by Start or silently fall back to local mode. The controller's
+actual mode is not changed by Cyclo's internal execution state.
+
+External handoff requires `/source` and configured JointState feedback within
+0.5 seconds and allows absolute-joint model mode 1. `/control/status` is event-driven: Cyclo
+rechecks its latest transient-local cached state without issuing controller
+commands. A confirmation must belong to the current source epoch and controller
+publisher. Old replies must not overwrite a newer error or source transition.
+Other robots and preview-only execution do not participate in automatic handoff.
+
+`status_confirmation_interval_s` defaults to 0.1 seconds and
+`status_confirmation_timeout_s` to 0.5 seconds. The latter limits time since a
+successful cache confirmation, not time since a controller status event. The
+interval must be less than one third of the confirmation timeout to accommodate
+both bounded queries and the next poll. Source/status publishers must be unique
+and belong to the same discovered node/session.
+
+Physical LOAD waits up to `initial_confirmation_timeout_s` (default 2 seconds) for the new client's
+first validated control snapshot. This avoids an immediate START racing initial
+publisher discovery after Clear. Timeout does not fail LOAD or grant authority:
+START still checks the current source, feedback and confirmation before arming.
+Preview LOAD does not wait, and confirmed teleop still rejects START.
+This discovery budget is independent of the 0.5-second ongoing confirmation
+freshness limit; extending startup discovery does not extend output authority.
+
+Isolated native ROS/Zenoh tests cover single-event stable status, late joining,
+activation-before-source ordering, publisher restart and command gating for
+SG2/BG2 profiles. SDK profile tests also cover W1/W2 subscriptions, teleop output
+blocking and rejection of old publication leases. Actual leader-button simulation and physical robot validation remain
+separate deployment checks.
+
+While a previously started physical session is active, `teleop` or `switching`
+revokes its publication lease, clears buffered actions and pauses inference
+without publishing hold/zero commands. A ready `model_action` source can resume
+that same loaded session, including AI Worker's intentional leader-loss fallback.
+This does not distinguish a button press from that fallback. UI draft paths and
+instructions are not used for automatic resume; merely loading a model never
+starts it. UI Pause/Stop, Unload, faults and shutdown cancel automatic resume.
+Missing/stale feedback, lost status confirmation, publisher replacement or an
+unsupported control mode requires explicit Start after recovery. Paused status
+messages explain the reason.
+
+Resume waits for any old prediction to finish. Updated Workers reset their
+execution queues/history and require new observations received on the Worker
+after accepting the reset. Old-generation results are discarded. Completed slow
+start is retained; an interrupted slow start is restarted. These transitions do
+not start or stop recording.
+
+Deploy the Runtime, RobotClient and selected Worker adapters together and restart
+their processes after stopping/clearing inference. An older Worker without reset
+context support is rejected at physical Start. Handoff itself requires no new
+ROS message fields; recording receipt recovery requires rebuilding the
+`RecordingCommand` interface as described in the recording documentation.
+This change does not implement intervention labeling or DAgger training.
+
+Publication gating cannot recall commands already sent or follower trajectories
+already scheduled. Bounded cache reconciliation cannot reconstruct every missed
+intermediate controller event or provide controller-side atomic arbitration.
+Validate each robot's source switching in simulation, including switching during slow
+start, before physical use.
 
 ### Worker Status Snapshots
 

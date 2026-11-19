@@ -12,8 +12,7 @@ orchestrator:
       observation:
         images:
           # Initial live camera grid placement follows YAML insertion order.
-          # UI cell indexes: 0=left, 1=center, 2=right.
-          # The first three image entries map to UI cells [1, 0, 2].
+          # All cameras wrap into rows according to the available panel width.
           # rotation_deg, when set, must be one of: 0, 90, 180, 270.
           camera1:
             topic: /camera1/image_raw/compressed

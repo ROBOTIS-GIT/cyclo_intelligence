@@ -121,6 +121,8 @@ class ControlLoop:
         self._action_steps = 0
         self._observed_chunk_size = 0
         self._fault_callback = fault_callback
+        self._fault_context = threading.local()
+        self._fault_pending = False
 
         self._lock = threading.RLock()
         self._robot: Optional[RobotClient] = None
@@ -145,6 +147,12 @@ class ControlLoop:
         self._initial_pose_sync_deadline: Optional[float] = None
         self._initial_pose_sync_hold_pending = False
         self._generation = 0
+        # Lifecycle identity fences fault delivery independently of plan edits.
+        self._run_id = 0
+        self._handoff_revision = None
+        self._handoff_start_status = None
+        self._handoff_context_supported = False
+        self._handoff_interrupted = False
         self._shutdown = threading.Event()
         self._request_thread: Optional[threading.Thread] = None
         self._request_reserved = False
@@ -232,6 +240,7 @@ class ControlLoop:
                 ExecutionFeedback(execution_context, pending_command_count=contract.pending_command_count, **processing)
                 if execution_context is not None else None
             )
+            self._handoff_context_supported = execution_context is not None
             self._processor = self._feedback.buffer if self._feedback else ActionChunkProcessor(**processing)
             self._task_instruction = task_instruction or ""
             self._action_keys = list(action_keys or self._robot.action_keys)
@@ -244,6 +253,13 @@ class ControlLoop:
             self._initial_pose_sync_hold_pending = False
             self._reset_request_latency_locked()
             self._generation += 1
+            # LOAD creates fresh subscribers. Give their first validated control
+            # snapshot time to arrive before an immediate START checks authority.
+            # The SDK bounds this wait; START still fails closed after a timeout.
+            if self._publish_to_robot:
+                wait_for_handoff = getattr(self._robot, "wait_for_initial_handoff", None)
+                if wait_for_handoff is not None:
+                    wait_for_handoff()
             config_message = (
                 "configured RobotClient command path for %s "
                 "(publish_to_robot=%s action_request_mode=%s "
@@ -265,6 +281,12 @@ class ControlLoop:
 
     def deconfigure(self) -> None:
         with self._lock:
+            self._run_id += 1
+            self._fault_pending = False
+            self._handoff_revision = None
+            self._handoff_start_status = None
+            self._handoff_context_supported = False
+            self._handoff_interrupted = False
             self._running = False
             self._task_instruction = ""
             self._action_keys = []
@@ -304,7 +326,7 @@ class ControlLoop:
             raise ValueError("Action Steps cannot be combined with fixed-length command resampling")
 
     def start(self, publish_to_robot: Optional[bool] = None, *, action_steps=None,
-              task_instruction: Optional[str] = None) -> bool:
+              task_instruction: Optional[str] = None, expected_handoff=None) -> bool:
         with self._lock:
             if action_steps is not None:
                 self._validate_action_steps(action_steps, self._input_execution_contract)
@@ -312,7 +334,7 @@ class ControlLoop:
                     self._running or self._initial_pose_sync_in_progress or self._preparation_active
                 ):
                     raise ValueError("Pause or Stop before changing Action Steps")
-            if self._initial_action_timeout_s is not None and self.prediction_pending():
+            if self.prediction_pending():
                 raise RuntimeError("previous prediction is still finishing; retry START after it completes")
             if self._initial_pose_sync_hold_pending:
                 raise RuntimeError(
@@ -322,6 +344,32 @@ class ControlLoop:
                 self._validate_task_instruction_locked(task_instruction)
             if publish_to_robot is not None:
                 self._set_publish_to_robot_locked(bool(publish_to_robot))
+            status = self.handoff_status()
+            if status is not None and not self._handoff_context_supported:
+                raise RuntimeError("Worker execution context is required for control handoff; update the Worker before START")
+            if status is not None and expected_handoff is None:
+                local_start = getattr(self._robot, "request_model_start", None)
+                if local_start is not None:
+                    local_start()
+                    status = self.handoff_status()
+            if expected_handoff is not None and (
+                self._fault_pending or status is None
+                or (status.revision, status.fault_revision) != expected_handoff
+            ):
+                raise RuntimeError("Control handoff changed or faulted; START required")
+            if status is not None and status.state != "ready":
+                raise RuntimeError(f"Switch to a ready model mode before START: {status.reason}")
+            if status is not None:
+                if self._handoff_revision is not None and status.revision != self._handoff_revision:
+                    self._pause("paused", "control source handoff", hold=False)
+                status = self._robot.arm_handoff(status.revision)
+            if self._fault_pending:
+                self._generation += 1
+                self._run_id += 1
+                self._fault_pending = False
+            self._handoff_revision = status.revision if status is not None else None
+            self._handoff_start_status = status
+            self._handoff_interrupted = False
             if task_instruction is not None:
                 self.set_task_instruction(task_instruction)
             if action_steps is not None and action_steps != self._action_steps:
@@ -346,7 +394,7 @@ class ControlLoop:
             self._initial_pose_sync_deadline = None
             if self._feedback:
                 self._feedback.phase = "syncing"
-            if self._initial_action_timeout_s is not None:
+            if self._initial_action_timeout_s is not None or status is not None:
                 self._request_reserved = True
                 self._preparation_active = True
                 self._request_thread = threading.Thread(
@@ -372,6 +420,33 @@ class ControlLoop:
             return self._request_reserved or (
                 self._request_thread is not None and self._request_thread.is_alive()
             )
+
+    def handoff_status(self, *, started=False):
+        with self._lock:
+            if started:
+                return self._handoff_start_status
+            if not self._publish_to_robot or self._robot is None:
+                return None
+            read = getattr(self._robot, "handoff_status", None)
+            status = read() if read is not None else None
+            return status if status is not None and status.enabled else None
+
+    def _interrupt_handoff_locked(self):
+        status = self.handoff_status()
+        if status is None:
+            return False
+        if status.state == "ready" and status.revision == self._handoff_revision:
+            return self._handoff_interrupted
+        if not self._handoff_interrupted:
+            self._handoff_interrupted = True
+            self._pause("paused", "control source handoff", hold=False)
+        return True
+
+    def _may_hold_locked(self):
+        status = self.handoff_status()
+        return status is None or (status.state == "ready" and (
+            self._handoff_revision is None or status.revision == self._handoff_revision
+        ))
 
     def _prepare_pose_sync(self, generation):
         try:
@@ -418,6 +493,7 @@ class ControlLoop:
                 generation != self._generation
                 or robot is not self._robot
                 or processor is not self._processor
+                or self._interrupt_handoff_locked()
             ):
                 raise RuntimeError("initial pose sync cancelled")
             if not self._input_execution_contract.is_step:
@@ -451,13 +527,14 @@ class ControlLoop:
     def pause(self) -> bool:
         return self._pause("paused", "pause")
 
-    def _pause(self, phase, reason) -> bool:
+    def _pause(self, phase, reason, *, hold=True) -> bool:
         robot = None
         action_keys: list[str] = []
         with self._lock:
             should_hold = (
-                self._publish_to_robot
+                hold and self._publish_to_robot
                 and self._robot is not None
+                and self._may_hold_locked()
             )
             if should_hold:
                 robot = self._robot
@@ -467,6 +544,7 @@ class ControlLoop:
             self._clear_plan_locked(reason, "error" if should_hold else phase)
             self._initial_pose_sync_deadline = None
             self._generation += 1
+            self._run_id += 1
             if should_hold:
                 self._initial_pose_sync_hold_pending = True
             else:
@@ -479,6 +557,10 @@ class ControlLoop:
             except Exception as e:
                 with self._lock:
                     if robot is self._robot:
+                        if not self._may_hold_locked():
+                            self._initial_pose_sync_in_progress = False
+                            self._initial_pose_sync_hold_pending = False
+                            return True
                         self._initial_pose_sync_in_progress = True
                         self._initial_pose_sync_hold_pending = True
                 logger.error("failed to hold current pose during %s: %s", reason, e)
@@ -494,8 +576,8 @@ class ControlLoop:
         self._schedule_feedback_update()
         return True
 
-    def stop(self) -> bool:
-        return self._pause("stopped", "stop")
+    def stop(self, *, hold=True) -> bool:
+        return self._pause("stopped", "stop", hold=hold)
 
     def set_requester(self, requester) -> None:
         with self._lock:
@@ -539,10 +621,13 @@ class ControlLoop:
             self._preparation_active = False
             self._clear_plan_locked(reason[:1024], "error")
             self._generation += 1
+            self._run_id += 1
+            self._fault_pending = True
             self._initial_pose_sync_deadline = None
             should_hold = (
                 self._publish_to_robot
                 and self._robot is not None
+                and self._may_hold_locked()
             )
             if should_hold:
                 robot = self._robot
@@ -559,6 +644,11 @@ class ControlLoop:
             robot.publish_current_pose_hold(action_keys, duration_s=0.1)
         except Exception as e:
             logger.error("policy runtime current-pose hold failed: %s", e)
+            with self._lock:
+                if robot is self._robot and not self._may_hold_locked():
+                    self._initial_pose_sync_in_progress = False
+                    self._initial_pose_sync_hold_pending = False
+                    return True
             return False
         with self._lock:
             if robot is not self._robot:
@@ -647,6 +737,8 @@ class ControlLoop:
         request_thread = None
         with self._lock:
             if not self._running or self._robot is None or self._processor is None:
+                return
+            if self._interrupt_handoff_locked():
                 return
             robot = self._robot
             processor = self._processor
@@ -775,7 +867,7 @@ class ControlLoop:
             return
         latency_s = time.monotonic() - started_at
         with self._lock:
-            if generation != self._generation:
+            if generation != self._generation or self._interrupt_handoff_locked():
                 return
         if self._observation_warmup_timeout_s is None:
             self._record_request_latency(latency_s)
@@ -793,6 +885,7 @@ class ControlLoop:
                 generation == self._generation
                 and self._running
                 and self._processor is not None
+                and not self._interrupt_handoff_locked()
             ):
                 if not self._input_execution_contract.is_step:
                     self._observed_chunk_size = len(chunk)
@@ -861,14 +954,33 @@ class ControlLoop:
             self._report_fault(f"action buffering failed: {fault}", generation=generation)
 
     def _report_fault(self, reason: str, *, generation=None) -> None:
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                return
+            if self._interrupt_handoff_locked():
+                return
+            generation = self._generation
+            run_id = self._run_id
+            callback = self._fault_callback
         hold_ok = self.emergency_stop(reason, expected_generation=generation)
         if hold_ok is None:
             return
-        if self._fault_callback is not None:
+        if callback is not None:
+            # Preserve the two-argument callback API while fencing delivery after
+            # a wait for the lifecycle lock. Never hold the loop lock in callbacks.
+            previous = getattr(self._fault_context, "run_id", None)
+            self._fault_context.run_id = run_id + 1
             try:
-                self._fault_callback(reason, hold_ok)
+                callback(reason, hold_ok)
             except Exception as e:
                 logger.error("policy runtime fault callback failed: %s", e)
+            finally:
+                self._fault_context.run_id = previous
+
+    def control_fault_is_current(self) -> bool:
+        with self._lock:
+            run_id = getattr(self._fault_context, "run_id", None)
+            return run_id is None or run_id == self._run_id
 
     def _clear_plan_locked(self, reason, phase):
         self._preparation_needed = self._initial_action_timeout_s is not None
@@ -883,7 +995,7 @@ class ControlLoop:
         # All feedback projection/serialization and Worker waits run outside tick.
         with self._feedback_io_lock:
             with self._lock:
-                if generation != self._generation:
+                if generation != self._generation or self._interrupt_handoff_locked():
                     raise RuntimeError("inference generation cancelled")
                 feedback, requester = self._feedback, self._requester
                 capture = feedback.capture() if feedback else None

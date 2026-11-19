@@ -29,10 +29,8 @@ import {
 } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
-import InferenceTryResults from './InferenceTryResults';
 import PolicyParameterFields from './PolicyParameterFields';
 import SavedPoseControlPanel from './SavedPoseControlPanel';
-import InferenceRecordingControls from './InferenceRecordingControls';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -58,7 +56,7 @@ import {
 
 const AUTO_SYNC_DELAY_MS = 700;
 
-const InferencePanel = () => {
+const InferencePanel = ({ embedded = false, isActive = true }) => {
   const dispatch = useDispatch();
 
   const info = useSelector(selectInferenceTaskInfo, shallowEqual);
@@ -76,8 +74,6 @@ const InferencePanel = () => {
   const selectedRuntime = selectedPolicy?.runtime;
   const showInstruction = Boolean(selectedPolicy?.requires_instruction);
 
-  const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
-  const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
   const [showPolicyBrowser, setShowPolicyBrowser] = useState(false);
 
   // InferencePage's lock — only the inference-side phase matters here.
@@ -128,7 +124,7 @@ const InferencePanel = () => {
   const syncGenerationRef = useRef(0);
   const syncTimerRef = useRef(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand } = useRosServiceCaller('inference');
 
   const handleChange = useCallback(
     (field, value) => {
@@ -297,31 +293,9 @@ const InferencePanel = () => {
     setIsEditable(!disabled);
   }, [disabled]);
 
-  // track task status update
-  useEffect(() => {
-    if (inferenceStatus) {
-      setLastTaskStatusUpdate(Date.now());
-      setIsTaskStatusPaused(false);
-    }
-  }, [inferenceStatus]);
+  const classLabel = clsx('text-sm', 'text-gray-600', embedded ? 'w-24 sm:w-28' : 'w-28', 'flex-shrink-0', 'font-medium');
 
-  // Check if task status updates are paused (considered paused if no updates for 1 second)
-  useEffect(() => {
-    const UPDATE_PAUSE_THRESHOLD = 1000;
-    const timer = setInterval(() => {
-      const timeSinceLastUpdate = Date.now() - lastTaskStatusUpdate;
-      const isPaused = timeSinceLastUpdate >= UPDATE_PAUSE_THRESHOLD;
-      if (isPaused !== isTaskStatusPaused) {
-        setIsTaskStatusPaused(isPaused);
-      }
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [lastTaskStatusUpdate, isTaskStatusPaused]);
-
-  const classLabel = clsx('text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium');
-
-  const classInfoPanel = clsx(
+  const classInfoPanel = embedded ? 'p-4 w-full min-w-0 relative' : clsx(
     'bg-white',
     'border',
     'border-gray-200',
@@ -338,6 +312,7 @@ const InferencePanel = () => {
   // taskInstruction stays always-editable so multi-task LLM-conditioned
   // policies can be re-conditioned mid-run. No isEditable gate here.
   const classTaskInstructionTextarea = clsx(
+    'min-w-0',
     'text-sm',
     'resize-y',
     'min-h-10',
@@ -355,6 +330,7 @@ const InferencePanel = () => {
   );
 
   const classPolicyPathTextarea = clsx(
+    'min-w-0',
     'text-sm',
     'resize-y',
     'min-h-16',
@@ -375,6 +351,7 @@ const InferencePanel = () => {
   );
 
   const classTextInput = clsx(
+    'min-w-0',
     'text-sm',
     'w-full',
     'h-8',
@@ -393,7 +370,8 @@ const InferencePanel = () => {
   );
 
   const deployButtonClass = (active, danger = false) => clsx(
-    'h-9',
+    'min-h-[44px] sm:min-h-[36px]',
+    'py-1',
     'min-w-0',
     'px-2',
     'rounded-md',
@@ -403,7 +381,7 @@ const InferencePanel = () => {
     'gap-1.5',
     'text-xs',
     'font-semibold',
-    'whitespace-nowrap',
+    'whitespace-normal',
     'transition-colors',
     'focus:outline-none',
     'focus:ring-2',
@@ -464,6 +442,7 @@ const InferencePanel = () => {
       <InferenceModelSelector readonly={!isEditable} />
 
       <PolicyBackendControl
+        isActive={isActive}
         serviceType={info.serviceType}
         runtime={selectedRuntime}
       />
@@ -491,7 +470,7 @@ const InferencePanel = () => {
             title="3D Sim Deploy"
           >
             <MdViewInAr size={17} className="shrink-0" />
-            <span className="truncate">3D Sim Deploy</span>
+            <span className="min-w-0 whitespace-normal break-words leading-tight">3D Sim Deploy</span>
           </button>
           <button
             type="button"
@@ -502,7 +481,7 @@ const InferencePanel = () => {
             title="Real Robot Deploy"
           >
             <MdPrecisionManufacturing size={17} className="shrink-0" />
-            <span className="truncate">Real Robot Deploy</span>
+            <span className="min-w-0 whitespace-normal break-words leading-tight">Real Robot Deploy</span>
           </button>
         </div>
       </div>
@@ -608,14 +587,14 @@ const InferencePanel = () => {
 
       <hr className="my-2 border-gray-300" />
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
+      <div role="group" aria-label="Action requests" className="flex flex-col items-stretch gap-1 sm:flex-row sm:items-center sm:gap-0 mb-2.5">
+        <div className={clsx(classLabel, 'max-sm:w-full', 'flex', 'items-center', 'gap-1')}>
           <Tooltip content="Choose when the next action chunk is requested." position="bottom">
             <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
           </Tooltip>
           <span>Action Request</span>
         </div>
-        <div className="grid grid-cols-2 gap-1 flex-1 min-w-0">
+        <div className="grid grid-cols-2 gap-1 flex-1 min-w-0 w-full sm:w-auto">
           {actionRequestModes.includes('async') && <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'async')}
@@ -625,7 +604,7 @@ const InferencePanel = () => {
             title="Async"
           >
             <MdSync size={16} className="shrink-0" />
-            <span className="truncate">Async</span>
+            <span>Async</span>
           </button>}
           {actionRequestModes.includes('sync') && <button
             type="button"
@@ -636,7 +615,7 @@ const InferencePanel = () => {
             title="Sync"
           >
             <MdHourglassEmpty size={16} className="shrink-0" />
-            <span className="truncate">Sync</span>
+            <span>Sync</span>
           </button>}
         </div>
       </div>
@@ -801,14 +780,6 @@ const InferencePanel = () => {
 
       {(isRobotMode || poseReturning) && <hr className="my-2 border-gray-300" />}
       <SavedPoseControlPanel />
-
-      {isRobotMode && (
-        <>
-          <hr className="my-2 border-gray-300" />
-          <InferenceRecordingControls />
-          <InferenceTryResults />
-        </>
-      )}
 
       <FileBrowserModal
         isOpen={showPolicyBrowser}

@@ -7,6 +7,7 @@ import threading
 import time
 import types
 import unittest
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -37,7 +38,6 @@ _install_module_stub(
 from interfaces.msg import InferenceStatus, TaskInfo  # noqa: E402
 from interfaces.srv import SendCommand, RecordingCommand  # noqa: E402
 from orchestrator.orchestrator_node import OrchestratorNode  # noqa: E402
-from orchestrator.internal.inference_recording import InferenceRecordingSession
 from orchestrator.internal.communication.container_service_client import ContainerServiceClient  # noqa: E402
 
 for _module_name, _previous_module in _MODULE_BACKUPS.items():
@@ -68,6 +68,9 @@ class FakeCommunicator:
 
 
 class FakeLogger:
+    def debug(self, *_args, **_kwargs) -> None:
+        pass
+
     def info(self, *_args, **_kwargs) -> None:
         pass
 
@@ -115,8 +118,10 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node = OrchestratorNode.__new__(OrchestratorNode)
         self.node._state_lock = threading.RLock()
         self.node._recording_command_lock = threading.RLock()
-        self.node._inference_recording = InferenceRecordingSession()
-        self.node._inference_record_clear_pending = False
+        self.node._recording_command_depth = 0
+        self.node._recording_status_events = Queue(maxsize=32)
+        self.node._inference_command_lock = threading.RLock()
+        self.node._conversion_command_lock = threading.RLock()
         self.node._loaded_inference_instruction = 'pick'
         self.node._inference_lifecycle_lock = threading.Lock()
         self.node.container_service_client = self.client
@@ -142,6 +147,7 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._loaded_inference_initial_pose_sync_duration_s = 5.0
         self.node.on_recording = False
         self.node.on_inference = True
+        self.node.timer_manager = None
 
     def tearDown(self) -> None:
         self.node._stop_inference_status_monitor()
@@ -222,54 +228,36 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.assertEqual(self.node._inference_settings_task_info.action_steps, 10)
 
     def test_recording_snapshot_reuse_and_failed_save(self):
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as root:
-            node = self.node
-            node._inference_recording = InferenceRecordingSession(Path(root))
-            task = TaskInfo(task_type='inference', policy_id='lerobot:act',
-                            policy_path='/models/policy', task_instruction=['unsent edit'])
-            node._cache_ui_task_info(task, 'SET_TASK_INFO')
-            node._inference_status_snapshot.update(
-                status_known=True, runtime_state='running', publish_to_robot=True)
-            ok = SimpleNamespace(success=True, response=SimpleNamespace(success=True))
-            bad = SimpleNamespace(success=True, response=SimpleNamespace(success=False))
-            node._forward_recording = Mock(return_value=ok)
+        node = self.node
+        task = TaskInfo(task_type='record', task_num='42', task_name='demo',
+                        task_instruction=['record instruction'])
+        node._cache_ui_task_info(task, 'SET_TASK_INFO')
+        ok = SimpleNamespace(success=True, response=SimpleNamespace(success=True))
+        bad = SimpleNamespace(success=True, response=SimpleNamespace(success=False))
+        node._forward_recording = Mock(return_value=ok)
+        node._command_inference_recording(RecordingCommand.Request.START)
+        recorded = node._forward_recording.call_args.kwargs['task_info']
+        self.assertEqual(recorded, task)
+        with self.assertRaisesRegex(ValueError, 'no active recording'):
             node._command_inference_recording(RecordingCommand.Request.START)
-            session_id = node._inference_recording.session_id
-            recorded = node._forward_recording.call_args.kwargs['task_info']
-            self.assertEqual(recorded.task_instruction, ['pick'])
-            self.assertEqual(recorded.task_num, session_id)
-            self.assertEqual(task.task_num, '')
-            with self.assertRaisesRegex(ValueError, 'no active recording'):
-                node._command_inference_recording(RecordingCommand.Request.START)
-            with self.assertRaises(ValueError):
-                node._select_inference_record_folder('')
-            node._forward_recording.return_value = bad
-            node._command_inference_recording(RecordingCommand.Request.STOP)
-            self.assertTrue(node.on_recording)
-            with self.assertRaisesRegex(ValueError, 'Save or Discard'):
-                node._select_inference_record_folder('')
-            self.assertEqual(node._inference_recording.session_id, session_id)
-            node._forward_recording.return_value = ok
-            node._command_inference_recording(RecordingCommand.Request.STOP)
-            self.assertFalse(node.on_recording)
-            # Old UI task_num values cannot replace the destination.
-            task.task_num = 'stale-ui-value'
-            node._cache_ui_task_info(task, 'SET_TASK_INFO')
-            self.assertEqual(node._inference_recording.session_id, session_id)
-            node._command_inference_recording(RecordingCommand.Request.START)
-            self.assertEqual(node._forward_recording.call_args.kwargs['task_info'].task_num, session_id)
-            node._command_inference_recording(RecordingCommand.Request.CANCEL)
-            node._select_inference_record_folder('')
-            self.assertEqual(node.communicator.messages[-1].task_info.task_num, '')
-            self.assertEqual(node._inference_settings_task_info.task_num, 'stale-ui-value')
-            self.assertEqual(len(list(Path(root).iterdir())), 1)
-            node._command_inference_recording(RecordingCommand.Request.START)
-            self.assertNotEqual(node._inference_recording.session_id, session_id)
-            self.assertEqual(len(list(Path(root).iterdir())), 2)
+        node._forward_recording.return_value = bad
+        node._command_inference_recording(RecordingCommand.Request.STOP)
+        self.assertTrue(node.on_recording)
+        self.assertEqual(node._recording_task_info, task)
+        node._forward_recording.return_value = ok
+        node._command_inference_recording(RecordingCommand.Request.STOP)
+        self.assertFalse(node.on_recording)
+        from interfaces.msg import DataOperationStatus
+        node._data_operation_status_callback(DataOperationStatus(
+            operation_type=DataOperationStatus.OP_RECORDING,
+            status=DataOperationStatus.COMPLETED, stage='FINISH_EPISODE'))
+        node._cache_ui_task_info(TaskInfo(task_type='inference', task_num='stale',
+            policy_path='/models/new'), 'SET_TASK_INFO')
+        node._command_inference_recording(RecordingCommand.Request.START)
+        self.assertEqual(node._forward_recording.call_args.kwargs['task_info'], task)
+        node._command_inference_recording(RecordingCommand.Request.CANCEL)
 
-    def test_recording_blocks_clear_but_not_pause(self):
+    def test_recording_survives_clear_and_pause(self):
         self.node.on_recording = True
         self.node._forward_recording = Mock()
         self.node._teardown_inference_client = Mock()
@@ -277,10 +265,10 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
             SendCommand.Request(command=SendCommand.Request.FINISH,
                                 task_info=TaskInfo(task_type='inference')),
             SendCommand.Response())
-        self.assertFalse(response.success)
-        self.assertIn('Save or Discard', response.message)
+        self.assertTrue(response.success, response.message)
+        self.assertTrue(self.node.on_recording)
         self.node._forward_recording.assert_not_called()
-        self.node._teardown_inference_client.assert_not_called()
+        self.node._teardown_inference_client.assert_called_once()
         response = self.node.user_interaction_callback(
             SendCommand.Request(command=SendCommand.Request.STOP_INFERENCE,
                                 task_info=TaskInfo(task_type='inference')),
@@ -288,67 +276,337 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.assertTrue(response.success, response.message)
         self.assertTrue(self.node.on_recording)
 
-    def test_folder_command_allows_running_without_changing_inference(self):
-        self.node._inference_status_snapshot.update(status_known=True, runtime_state='running')
-        self.node._inference_recording.session_id = 'previous'
-        self.node._forward_recording = Mock()
-        self.node._teardown_inference_client = Mock()
-        request = SendCommand.Request(command=SendCommand.Request.SET_INFERENCE_RECORD_FOLDER,
-                                      task_info=TaskInfo(task_num=''))
-        result = self.node.user_interaction_callback(request, SendCommand.Response())
+    def test_legacy_inference_record_uses_prepared_record_task(self):
+        node = self.node
+        record = TaskInfo(task_type='record', task_num='42', task_name='capture',
+                          task_instruction=['record instruction'],
+                          subtask_instruction=['first', 'second'])
+        node._cache_ui_task_info(record, 'SET_TASK_INFO')
+        node._cache_ui_task_info(TaskInfo(task_type='inference',
+            task_num='stale', task_name='inference', policy_path='/models/new',
+            task_instruction=['model instruction']), 'PREPARE_SESSION')
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        result = node.user_interaction_callback(SendCommand.Request(
+            command=SendCommand.Request.START_INFERENCE_RECORD), SendCommand.Response())
         self.assertTrue(result.success, result.message)
-        self.assertEqual(self.node._inference_recording.session_id, '')
-        self.assertEqual(self.node.communicator.messages[-1].task_info.task_num, '')
-        self.assertEqual(self.node._inference_status_snapshot['runtime_state'], 'running')
-        self.assertTrue(self.node.on_inference)
-        self.node._forward_recording.assert_not_called()
-        self.node._teardown_inference_client.assert_not_called()
+        sent = node._forward_recording.call_args
+        self.assertEqual(sent.args[0], RecordingCommand.Request.START_SEGMENT)
+        self.assertEqual(sent.kwargs['task_info'], record)
+        self.assertEqual(node._prepared_record_task_info, record)
 
-    def test_folder_command_rejects_active_recording_without_changing_selection(self):
-        self.node._inference_status_snapshot.update(status_known=True, runtime_state='running')
-        self.node._inference_recording.session_id = 'previous'
-        self.node.on_recording = True
-        request = SendCommand.Request(command=SendCommand.Request.SET_INFERENCE_RECORD_FOLDER,
-                                      task_info=TaskInfo(task_num=''))
-        result = self.node.user_interaction_callback(request, SendCommand.Response())
+    def test_leader_never_uses_inference_settings_as_record_configuration(self):
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='inference',
+            policy_path='/models/new'), 'SET_TASK_INFO')
+        node._forward_recording = Mock()
+        node.handle_joystick_trigger('right')
+        self.assertFalse(node.on_recording)
+        node._forward_recording.assert_not_called()
+
+    def test_inference_initialization_preserves_recording_joystick_pump(self):
+        node = self.node
+        node.on_recording = True
+        node.timer_manager = Mock()
+        timer = node.timer_manager
+        node.timer_callback_dict = {'collection': Mock()}
+        with patch('orchestrator.orchestrator_node.TimerManager') as factory:
+            node.init_robot_control_parameters_from_user_task(TaskInfo(
+                task_type='inference', control_hz=100, inference_hz=15))
+        self.assertIs(node.timer_manager, timer)
+        timer.stop_all.assert_not_called()
+        factory.assert_not_called()
+
+    def test_stale_indexed_discard_cannot_target_new_record_task(self):
+        node = self.node
+        node.on_recording = True
+        node._recording_task_info = TaskInfo(task_type='record', task_num='2', task_name='new')
+        node._forward_recording = Mock()
+        response = node.user_interaction_callback(SendCommand.Request(
+            command=SendCommand.Request.DISCARD_EPISODE,
+            task_info=TaskInfo(task_type='record', task_num='1', task_name='old',
+                               tags=['recording_full_episode_index:0'])), SendCommand.Response())
+        self.assertFalse(response.success)
+        node._forward_recording.assert_not_called()
+        self.assertTrue(node.on_recording)
+        self.assertEqual(node._recording_task_info.task_num, '2')
+
+    def test_move_to_next_retains_pending_recording_owner(self):
+        node = self.node
+        node.on_recording = True
+        task = TaskInfo(task_type='record', task_num='42', task_name='demo',
+                        subtask_instruction=['first', 'second'])
+        node._recording_task_info = task
+        node._recording_start_command = RecordingCommand.Request.START_SEGMENT
+        node._trigger_record_active_segment_index = 0
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        result = node._command_recording(RecordingCommand.Request.MOVE_TO_NEXT)
+        self.assertTrue(result.response.success)
+        self.assertFalse(node.on_recording)
+        self.assertEqual(node._recording_task_info, task)
+        self.assertEqual(node._trigger_record_next_segment_index, 1)
+
+    def test_archive_acknowledgement_keeps_owner_until_completion_and_failure_is_retryable(self):
+        from interfaces.msg import DataOperationStatus
+        node = self.node
+        task = TaskInfo(task_type='record', task_num='42', task_name='demo')
+        node._recording_task_info = task
+        node._recording_start_command = RecordingCommand.Request.START_SEGMENT
+        node._trigger_record_next_segment_index = 1
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='Episode finish started')))
+        node._command_recording(RecordingCommand.Request.FINISH_EPISODE)
+        self.assertEqual(node._recording_task_info, task)
+        with self.assertRaisesRegex(ValueError, 'archive'):
+            node._command_recording(RecordingCommand.Request.START_SEGMENT, task)
+        node._data_operation_status_callback(DataOperationStatus(
+            operation_type=DataOperationStatus.OP_RECORDING,
+            status=DataOperationStatus.FAILED, stage='FINISH_EPISODE'))
+        self.assertEqual(node._recording_task_info, task)
+        node._command_recording(RecordingCommand.Request.FINISH_EPISODE)
+        node._data_operation_status_callback(DataOperationStatus(
+            operation_type=DataOperationStatus.OP_RECORDING,
+            status=DataOperationStatus.COMPLETED, stage='FINISH_EPISODE'))
+        self.assertIsNone(node._recording_task_info)
+        self.assertEqual(node._trigger_record_next_segment_index, 0)
+
+    def test_recording_start_does_not_require_inference_running_or_loaded(self):
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='record', task_num='42', task_name='demo',
+            task_instruction=['configured instruction']), 'SET_TASK_INFO')
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        for state in ('running', 'paused', 'ready', 'unloaded', 'error', 'unknown'):
+            with self.subTest(state=state):
+                node._inference_status_snapshot.update(
+                    status_known=False, runtime_state=state, publish_to_robot=False)
+                node._loaded_inference_instruction = None
+                node._loaded_inference_policy_path = ''
+                node._loaded_inference_policy_id = ''
+                node._command_inference_recording(RecordingCommand.Request.START)
+                self.assertTrue(node.on_recording)
+                recorded = node._forward_recording.call_args.kwargs['task_info']
+                self.assertEqual(recorded.task_instruction, ['configured instruction'])
+                node._command_inference_recording(RecordingCommand.Request.CANCEL)
+
+    def test_leader_record_context_is_independent_of_retained_inference(self):
+        node = self.node
+        node._prepared_record_task_info = None
+        node._prepared_inference_task_info = TaskInfo(task_type='inference')
+        node._current_task_name = None
+        node.init_robot_control_parameters_from_user_task = Mock()
+        node.timer_manager = Mock()
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        task = TaskInfo(task_type='record', task_num='1', task_name='demo',
+                        task_instruction=['record'], subtask_instruction=['record'])
+        node._cache_ui_task_info(task, 'SET_TASK_INFO')
+        node._inference_status_snapshot.update(runtime_state='paused')
+        node.handle_joystick_trigger('right')
+        self.assertTrue(node.on_recording)
+        self.assertEqual(node._forward_recording.call_args.args[0],
+                         RecordingCommand.Request.START_SEGMENT)
+        self.assertEqual(node._forward_recording.call_args.kwargs['task_info'].task_type, 'record')
+        node.handle_joystick_trigger('left')
+        self.assertFalse(node.on_recording)
+        self.assertTrue(node.on_inference)
+
+    def test_inference_model_edits_do_not_change_active_recording_metadata(self):
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='record',
+            task_num='42', task_name='demo'), 'SET_TASK_INFO')
+        node._inference_status_snapshot.update(status_known=True,
+            runtime_state='running', publish_to_robot=True)
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        node._command_inference_recording(RecordingCommand.Request.START)
+        original = node._forward_recording.call_args.kwargs['task_info']
+        node._cache_ui_task_info(TaskInfo(task_type='inference',
+            policy_id='lerobot:act', policy_path='/models/other'), 'START_INFERENCE')
+        node._loaded_inference_policy_path = '/models/other'
+        node._loaded_inference_instruction = 'new instruction'
+        node._command_inference_recording(RecordingCommand.Request.STOP)
+        saved = node._forward_recording.call_args.kwargs['task_info']
+        self.assertEqual(saved, original)
+
+    def test_record_discard_and_retry_never_teardown_inference(self):
+        node = self.node
+        node._teardown_inference_client = Mock()
+        node._prepare_active_initial_pose_sync_teardown = Mock()
+        node.timer_manager = Mock()
+        for command in (SendCommand.Request.CANCEL, SendCommand.Request.RERECORD,
+                        SendCommand.Request.SKIP_TASK):
+            for success in (False, True):
+                with self.subTest(command=command, success=success):
+                    node.on_recording = True
+                    node._forward_recording = Mock(return_value=SimpleNamespace(
+                        success=True, response=SimpleNamespace(success=success, message='test')))
+                    response = node.user_interaction_callback(SendCommand.Request(
+                        command=command, task_info=TaskInfo(task_type='record')),
+                        SendCommand.Response())
+                    self.assertEqual(response.success, success, response.message)
+                    self.assertEqual(node.on_recording, not success)
+                    self.assertTrue(node.on_inference)
+                    node._teardown_inference_client.assert_not_called()
+                    node._prepare_active_initial_pose_sync_teardown.assert_not_called()
+
+    def test_clear_is_available_while_record_save_is_waiting(self):
+        from concurrent.futures import ThreadPoolExecutor
+        node = self.node
+        node.on_recording = True
+        node._recording_task_info = TaskInfo(task_type='record', task_num='1', task_name='demo')
+        node._teardown_inference_client = Mock()
+        entered, release = threading.Event(), threading.Event()
+        def save(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return SimpleNamespace(success=True, response=SimpleNamespace(success=True, message='saved'))
+        node._forward_recording = Mock(side_effect=save)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            saving = pool.submit(node._command_recording, RecordingCommand.Request.STOP)
+            self.assertTrue(entered.wait(2))
+            try:
+                cleared = pool.submit(node.user_interaction_callback,
+                    SendCommand.Request(command=SendCommand.Request.FINISH,
+                        task_info=TaskInfo(task_type='inference')), SendCommand.Response())
+                response = cleared.result(timeout=1)
+                self.assertTrue(response.success, response.message)
+                self.assertTrue(node.on_recording)
+            finally:
+                release.set()
+            self.assertTrue(saving.result().response.success)
+
+    def test_task_service_uses_reentrant_dispatch_for_independent_commands(self):
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+        node = self.node
+        node._service_cb_group = MutuallyExclusiveCallbackGroup()
+        node._task_cb_group = ReentrantCallbackGroup()
+        node.create_service = Mock()
+        node._init_ros_service()
+        groups = {call.args[1]: call.kwargs['callback_group']
+                  for call in node.create_service.call_args_list}
+        self.assertIs(groups['/task/command'], node._task_cb_group)
+        self.assertIs(groups['/set_robot_type'], node._service_cb_group)
+
+    def test_record_page_discard_preserves_explicit_episode_target(self):
+        node = self.node
+        node.on_recording = True
+        node._recording_task_info = TaskInfo(task_type='record', task_num='1', task_name='demo', tags=['original'])
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=False, message='retry')))
+        request = SendCommand.Request(command=SendCommand.Request.DISCARD_EPISODE,
+            task_info=TaskInfo(task_type='record', task_num='1', task_name='demo',
+                               tags=['recording_full_episode_index:17']))
+        result = node.user_interaction_callback(request, SendCommand.Response())
         self.assertFalse(result.success)
-        self.assertIn('Save or Discard', result.message)
-        self.assertEqual(self.node._inference_recording.session_id, 'previous')
+        sent = node._forward_recording.call_args.kwargs['task_info']
+        self.assertEqual(sent.tags, ['original', 'recording_full_episode_index:17'])
+        self.assertEqual(sent.task_num, '1')
+        self.assertEqual(node._recording_task_info.tags, ['original'])
+
+    def test_explicit_saved_episode_commands_remain_available_when_idle(self):
+        node = self.node
+        node.on_inference = False
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True, message='ok')))
+        for command in (SendCommand.Request.DISCARD_EPISODE,
+                        SendCommand.Request.DISCARD_SEGMENT, SendCommand.Request.FINISH_EPISODE):
+            result = node.user_interaction_callback(SendCommand.Request(command=command,
+                task_info=TaskInfo(task_type='record', task_num='1', task_name='demo')),
+                SendCommand.Response())
+            self.assertTrue(result.success, result.message)
+
+    def test_stale_segment_index_is_not_retargeted_to_current_segment(self):
+        node = self.node
+        node.on_recording = True
+        node._recording_task_info = TaskInfo(task_type='record', task_num='1', task_name='demo')
+        node._recording_start_command = RecordingCommand.Request.START_SEGMENT
+        node._trigger_record_active_segment_index = 1
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=False, message='wrong segment')))
+        result = node.user_interaction_callback(SendCommand.Request(
+            command=SendCommand.Request.CANCEL_SEGMENT, segment_index=0,
+            task_info=TaskInfo(task_type='record')), SendCommand.Response())
+        self.assertFalse(result.success)
+        self.assertEqual(node._forward_recording.call_args.kwargs['segment_index'], 0)
+        self.assertTrue(node.on_recording)
+
+    def test_same_robot_selection_does_not_rebuild_active_recording(self):
+        node = self.node
+        node.on_recording = True
+        node.clear_parameters = Mock()
+        node.init_ros_params = Mock()
+        node.communicator.get_mcap_topics = Mock(return_value=['/camera'])
+        node._cyclo_data = Mock()
+        node._cyclo_data.send_recording_command.return_value = SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True))
+        response = node.set_robot_type_callback(
+            SimpleNamespace(robot_type=node.robot_type), SimpleNamespace(success=False, message=''))
+        self.assertTrue(response.success, response.message)
+        node.clear_parameters.assert_not_called()
+        node.init_ros_params.assert_not_called()
+
+    def test_robot_change_is_rejected_for_pending_segmented_episode(self):
+        node = self.node
+        node.on_inference = False
+        node._recording_task_info = TaskInfo(task_type='record', task_name='pending')
+        node.clear_parameters = Mock()
+        node.init_ros_params = Mock()
+        response = node.set_robot_type_callback(
+            SimpleNamespace(robot_type='ffw_bg2_rev4'), SimpleNamespace(success=False, message=''))
+        self.assertFalse(response.success)
+        self.assertEqual(node.robot_type, 'ffw_sg2_rev1')
+        node.clear_parameters.assert_not_called()
+
+    def test_removed_inference_folder_command_redirects_to_record_settings(self):
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='record', task_num='42',
+            task_name='demo'), 'SET_TASK_INFO')
+        original = node._prepared_record_task_info
+        node._forward_recording = Mock()
+        node._teardown_inference_client = Mock()
+        result = node.user_interaction_callback(SendCommand.Request(
+            command=SendCommand.Request.SET_INFERENCE_RECORD_FOLDER,
+            task_info=TaskInfo(task_num='legacy-folder')), SendCommand.Response())
+        self.assertFalse(result.success)
+        self.assertIn('Record panel', result.message)
+        self.assertIs(node._prepared_record_task_info, original)
+        node._forward_recording.assert_not_called()
+        node._teardown_inference_client.assert_not_called()
 
     def test_trigger_uses_same_recording_command_path(self):
-        result = SimpleNamespace(success=True, response=SimpleNamespace(success=True))
-        self.node._command_inference_recording = Mock(return_value=result)
-        self.node._toggle_inference_trigger_recording(False)
-        self.node._toggle_inference_trigger_recording(True)
-        self.node._cancel_inference_trigger_recording()
-        self.assertEqual([call.args[0] for call in self.node._command_inference_recording.call_args_list],
-                         [RecordingCommand.Request.START, RecordingCommand.Request.STOP,
-                          RecordingCommand.Request.CANCEL])
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='record', task_num='42',
+            task_name='demo'), 'SET_TASK_INFO')
+        node._trigger_record_next_segment_index = 0
+        node._command_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True)))
+        node.handle_joystick_trigger('right')
+        self.assertEqual(node._command_recording.call_args.args[0],
+                         RecordingCommand.Request.START_SEGMENT)
 
     def test_simultaneous_record_requests_start_only_one_episode(self):
         from concurrent.futures import ThreadPoolExecutor
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as root:
-            node = self.node
-            node._inference_recording = InferenceRecordingSession(Path(root))
-            node._cache_ui_task_info(TaskInfo(task_type='inference', policy_id='lerobot:act',
-                                            policy_path='/models/policy'), 'SET_TASK_INFO')
-            node._inference_status_snapshot.update(status_known=True, runtime_state='running', publish_to_robot=True)
-            node._forward_recording = Mock(return_value=SimpleNamespace(
-                success=True, response=SimpleNamespace(success=True)))
-            barrier = threading.Barrier(2)
-            def record():
-                barrier.wait()
-                try:
-                    node._command_inference_recording(RecordingCommand.Request.START)
-                    return True
-                except ValueError:
-                    return False
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                attempts = [pool.submit(record) for _ in range(2)]
-                self.assertEqual(sorted(result.result() for result in attempts), [False, True])
-            node._forward_recording.assert_called_once()
+        node = self.node
+        node._cache_ui_task_info(TaskInfo(task_type='record', task_num='42',
+                                        task_name='demo'), 'SET_TASK_INFO')
+        node._inference_status_snapshot.update(status_known=True, runtime_state='running', publish_to_robot=True)
+        node._forward_recording = Mock(return_value=SimpleNamespace(
+            success=True, response=SimpleNamespace(success=True)))
+        barrier = threading.Barrier(2)
+
+        def record():
+            barrier.wait()
+            try:
+                node._command_inference_recording(RecordingCommand.Request.START)
+                return True
+            except ValueError:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            attempts = [pool.submit(record) for _ in range(2)]
+            self.assertEqual(sorted(result.result() for result in attempts), [False, True])
+        node._forward_recording.assert_called_once()
 
     def prepare_async_load(self, client):
         self.node.container_service_client = None
@@ -975,6 +1233,80 @@ class InitialPoseSyncOrchestratorTest(unittest.TestCase):
         self.node._poll_inference_status_once()
         self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.INFERENCING)
         self.assertEqual(self.client.calls, [self.client.CMD_STATUS, self.client.CMD_STATUS])
+
+    def test_paused_status_relays_handoff_reason_and_running_clears_it(self):
+        for reason in (
+            'Waiting for model control: teleop owns control',
+            'Control unavailable: backend unavailable; START required.',
+        ):
+            with self.subTest(reason=reason):
+                self.client.status_results = [
+                    SimpleNamespace(success=True, message=reason,
+                                    data={'runtime_state': 'paused', 'runtime_error': ''}),
+                    SimpleNamespace(success=True, message='running',
+                                    data={'runtime_state': 'running', 'runtime_error': ''}),
+                ]
+                self.node._poll_inference_status_once()
+                snapshot = self.node.communicator.snapshots[-1]
+                self.assertTrue(snapshot['status_known'])
+                self.assertEqual(snapshot['phase'], InferenceStatus.PAUSED)
+                self.assertEqual(snapshot['runtime_state'], 'paused')
+                self.assertEqual(snapshot['error'], reason)
+                self.node._poll_inference_status_once()
+                self.assertEqual(self.node.communicator.snapshots[-1]['error'], '')
+                self.assertEqual(self.node.communicator.snapshots[-1]['phase'], InferenceStatus.INFERENCING)
+
+    def test_status_reason_does_not_replace_runtime_error_or_generic_state(self):
+        for state, message, runtime_error, expected in (
+            ('paused', 'paused', '', ''),
+            ('paused', '  Paused  ', '', ''),
+            ('paused', 'loaded', '', ''),
+            ('paused', '  ', '', ''),
+            ('paused', 'Waiting for model control: teleop', 'actual error', 'actual error'),
+            ('loaded', 'Waiting for model control: stale', '', ''),
+            ('running', 'Waiting for model control: stale', '', ''),
+            ('error', 'Waiting for model control: stale', 'worker crashed', 'worker crashed'),
+        ):
+            with self.subTest(state=state, message=message, runtime_error=runtime_error):
+                self.client.status_results = [SimpleNamespace(
+                    success=True, message=message,
+                    data={'runtime_state': state, 'runtime_error': runtime_error},
+                )]
+                self.node._poll_inference_status_once()
+                self.assertEqual(self.node.communicator.snapshots[-1]['error'], expected)
+
+    def test_handoff_poll_and_stop_preserve_recording_and_ignore_draft_model(self):
+        self.node.on_recording = True
+        self.node.start_recording_time = 123.0
+        self.node._recording_task_info = TaskInfo(task_type='record', task_num='42', task_name='demo')
+        identity = self.node._recording_task_info
+        self.node.timer_manager = Mock()
+        self.node._forward_recording = Mock()
+        for state in ('paused', 'running', 'paused'):
+            self.client.status_results = [SimpleNamespace(
+                success=True, message='Waiting for model control: teleop' if state == 'paused' else 'running',
+                data={'runtime_state': state, 'loaded_model_path': '/models/policy',
+                      'loaded_policy_id': 'lerobot:act'},
+            )]
+            self.node._poll_inference_status_once()
+            self.assertTrue(self.node.on_recording)
+            self.assertTrue(self.node.on_inference)
+            self.assertEqual(self.node._recording_task_info, identity)
+        response = self.node.user_interaction_callback(
+            SendCommand.Request(command=SendCommand.Request.STOP_INFERENCE,
+                                task_info=TaskInfo(task_type='inference', policy_id='groot:n17',
+                                                   policy_path='/models/changed-draft',
+                                                   task_instruction=['changed draft instruction'])),
+            SendCommand.Response())
+        self.assertTrue(response.success, response.message)
+        self.assertEqual(self.client.calls, [self.client.CMD_STATUS] * 3 + [self.client.CMD_PAUSE])
+        self.assertTrue(self.node.on_recording)
+        self.assertEqual(self.node.start_recording_time, 123.0)
+        self.assertEqual(self.node._recording_task_info, identity)
+        self.assertEqual(self.node._loaded_inference_policy_path, '/models/policy')
+        self.assertEqual(self.node._loaded_inference_instruction, 'pick')
+        self.node._forward_recording.assert_not_called()
+        self.assertEqual(self.node.timer_manager.mock_calls, [])
 
     def test_pending_cleanup_does_not_rediscover_old_policy(self) -> None:
         self.node._observe_inference_command(True)

@@ -20,19 +20,43 @@ Initial setup page (robot type selection, HuggingFace login).
 
 ---
 
-### RecordPage
-**File**: `pages/RecordPage.js`
+### Operate: Record Tab
+**File**: `pages/OperationWorkspace.js`
 
-Data recording page.
+Record and Inference share camera, robot, and topic monitoring views. The tabs
+select settings without stopping either operation. Record, Save, and Discard
+belong to the Record tab and use its task configuration. Recording and inference
+status remain visible in the shared header. Each settings/monitoring panel has
+its own collapse control; hiding a panel preserves its session and inputs.
+Collapsed Robot Viewer and Topic Monitor panels take no layout space. Their
+restore icons appear in the camera toolbar; one expanded monitor fills the row.
+
+Camera tiles follow the configured camera list without a fixed count. Columns
+adapt to available width, height, and rotated image aspect ratios; extra rows scroll.
+Closing a camera removes its tile and reallocates the space. The camera header's
+add control restores hidden feeds. Drag a tile header or use its arrow keys to
+reorder feeds without reconnecting them. Visibility, order, and rotation are saved
+per robot in this browser's local storage and survive page changes and reloads.
+Each rotation click advances clockwise by 90 degrees, relative to the current view.
+This changes only the viewer, not recorded images or model inputs.
+Camera titles and the hidden-feed menu use observation config keys, with full topics
+in tooltips. Drag the bottom-right handle to resize a tile, or use its arrow keys.
+Manual sizes wrap without overlap; oversized tiles scroll horizontally and vertically
+inside the camera area without widening the page. Reset layout,
+closing a tile, or restoring a hidden feed returns to automatic space-filling layout.
+Entire frames fit within square-edged viewports at their native aspect ratio,
+including rotation. Camera controls sit outside the frame. Topic Monitor shows robot-config keys
+with an Observation/Action type column. Shared topics show each role's keys separately;
+unconfigured topics use Unknown. Full topic names remain in tooltips and as a fallback
+when key metadata is unavailable.
 
 | Component | Description |
 |-----------|-------------|
 | ImageGrid | Real-time camera image display |
-| ControlPanel | Recording control buttons (Start/Stop/Finish) |
-| TaskStatus | Current recording status display |
-| EpisodeStatus | Episode progress status |
-| SystemStatus | CPU/RAM/Storage monitoring |
-| InfoPanel | Task settings panel |
+| SegmentPanel | Recording controls, subtasks, save and discard |
+| RecordControlPanel | Recording status and episode progress |
+| InlineSystemStatus | CPU/RAM/Storage monitoring |
+| InfoPanel | Record task settings |
 
 | Feature | Description |
 |---------|-------------|
@@ -60,15 +84,18 @@ Model training page.
 
 ---
 
-### InferencePage
-**File**: `pages/InferencePage.js`
+### Operate: Inference Tab
+**File**: `pages/OperationWorkspace.js`
 
-Real-time inference page.
+Inference settings in the shared workspace. Start, Stop, and Clear belong to
+the Inference tab and do not alter the recording session. Keyboard shortcuts
+are active only while the corresponding tab is visible.
 
 | Component | Description |
 |-----------|-------------|
 | ImageGrid | Camera image display |
-| InferencePanel | Inference control panel |
+| InferencePanel | Model, deployment, timing, initial pose, and evaluation settings |
+| InferenceControlPanel | Independent Start/Stop/Clear and inference status |
 | PolicyDownloadModal | Policy download modal |
 | ModelWeightSelector | Model weight selection |
 

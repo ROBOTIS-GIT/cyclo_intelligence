@@ -14,11 +14,12 @@
 //
 // Author: Kiwoong Park
 
-import React, { useCallback, useEffect, useRef } from 'react';
-import clsx from 'clsx';
-import { MdClose, MdScreenRotation } from 'react-icons/md';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import useDocumentVisible from '../hooks/useDocumentVisible';
+import { MdAdd, MdClose, MdDragIndicator, MdRotate90DegreesCw, MdOpenInFull } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import { CYCLO_WEB_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
+import './ImageGrid.css';
 
 const normalizeRotationDegrees = (value) => {
   const numeric = Number(value);
@@ -26,57 +27,9 @@ const normalizeRotationDegrees = (value) => {
   return ((Math.round(numeric) % 360) + 360) % 360;
 };
 
-const parseAspectRatio = (value) => {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return value;
-  }
-  const [width, height] = String(value || '').split('/').map(Number);
-  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-    return width / height;
-  }
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : 1;
-};
-
-const formatPercent = (value) => `${Number(value.toFixed(4))}%`;
-
-const classCell = (topic) =>
-  clsx(
-    'relative',
-    'bg-gray-100',
-    'rounded-3xl',
-    'overflow-hidden',
-    'flex',
-    'items-center',
-    'justify-center',
-    'transition-all',
-    'duration-300',
-    'w-full',
-    {
-      'border-2 border-dashed border-gray-300 hover:border-gray-400': !topic,
-      'bg-white': topic,
-    }
-  );
-
-const classCloseBtn = clsx(
-  'absolute', 'top-2', 'right-2',
-  'w-8', 'h-8',
-  'bg-black', 'bg-opacity-50', 'text-white',
-  'rounded-full', 'flex', 'items-center', 'justify-center',
-  'hover:bg-opacity-70', 'z-20'
-);
-
-const classRotateBtn = clsx(
-  'absolute', 'top-2', 'left-2',
-  'w-8', 'h-8',
-  'bg-black', 'bg-opacity-50', 'text-white',
-  'rounded-full', 'flex', 'items-center', 'justify-center',
-  'hover:bg-opacity-70', 'z-20'
-);
-
 export default function ImageGridCell({
   topic,
-  aspect,
+  label,
   rotationDegrees = 0,
   onRotateClick,
   idx,
@@ -84,189 +37,171 @@ export default function ImageGridCell({
   onPlusClick,
   isActive = true,
   style = {},
+  onImageSize,
+  dragHandleProps,
+  resizeHandleProps,
+  dropTarget = false,
 }) {
-  const normalizedRotationDegrees = normalizeRotationDegrees(rotationDegrees);
-  const rotate = normalizedRotationDegrees !== 0;
-  const swapsDimensions = normalizedRotationDegrees === 90 || normalizedRotationDegrees === 270;
-  const aspectRatio = parseAspectRatio(aspect);
+  const rotation = normalizeRotationDegrees(rotationDegrees);
   const rosHost = useSelector((state) => state.ros.rosHost);
   const containerRef = useRef(null);
-  const currentImgRef = useRef(null);
-  const isCreatingRef = useRef(false);
-  const cancelRef = useRef(false);
-  const retryTimerRef = useRef(null);
-  const retryCountRef = useRef(0);
-  const MAX_RETRIES = 5;
+  const documentVisible = useDocumentVisible();
+  const [inViewport, setInViewport] = useState(() => typeof IntersectionObserver === 'undefined');
+  const streamActive = isActive && documentVisible && inViewport;
+  const imageRef = useRef(null);
+  const fitImageRef = useRef(() => {});
+  const stopStreamRef = useRef(() => {});
+  const hasTopic = Boolean(topic && topic.trim());
+  const imageSizeCallback = useRef(onImageSize);
+  imageSizeCallback.current = onImageSize;
 
-  const destroyImage = useCallback(() => {
-    // Signal any in-flight createImage waiting on the staggered delay to bail.
-    cancelRef.current = true;
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    if (currentImgRef.current) {
-      const el = currentImgRef.current;
-      const img = el.tagName === 'IMG' ? el : el.querySelector('img');
-      if (img) {
-        // Detach handlers BEFORE clearing src so the late-fired onerror that
-        // src='' triggers can't schedule a retry that revives the stream.
-        img.onerror = null;
-        img.onload = null;
-        img.src = '';
-      }
-      if (el.parentNode) el.parentNode.removeChild(el);
-      currentImgRef.current = null;
-    }
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver(([entry]) => {
+      setInViewport(entry.isIntersecting);
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
   }, []);
 
-  const createImage = useCallback(async () => {
-    if (!topic || !topic.trim() || !isActive || !containerRef.current) return;
-    if (isCreatingRef.current) return;
+  // Geometry only: neither rotation nor ResizeObserver can restart the stream.
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const fitImage = () => {
+      const img = imageRef.current;
+      if (!img) return;
+      const { width, height } = container.getBoundingClientRect();
+      const naturalWidth = img.naturalWidth;
+      const naturalHeight = img.naturalHeight;
+      img.style.transform = `translate(-50%, -50%) rotate(${rotation}deg)`;
+      if (!naturalWidth || !naturalHeight || !width || !height) return;
+      // Fit the rotated natural bounds, not an assumed camera aspect ratio.
+      const radians = rotation * Math.PI / 180;
+      const cos = Math.abs(Math.cos(radians));
+      const sin = Math.abs(Math.sin(radians));
+      const scale = Math.min(
+        width / (naturalWidth * cos + naturalHeight * sin),
+        height / (naturalWidth * sin + naturalHeight * cos)
+      );
+      img.style.width = `${naturalWidth * scale}px`;
+      img.style.height = `${naturalHeight * scale}px`;
+    };
+    fitImageRef.current = fitImage;
+    fitImage();
+    const observer = new ResizeObserver(fitImage);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [rotation]);
 
-    isCreatingRef.current = true;
-    destroyImage();
-    // Clear cancel flag raised by destroyImage; later destroys will set it again.
-    cancelRef.current = false;
+  useEffect(() => {
+    if (!hasTopic || !streamActive) return;
+    const container = containerRef.current;
+    let cancelled = false;
+    let retryTimer;
+    let retries = 0;
 
-    try {
-      const staggeredDelay = (idx === 0 || idx === 2) ? 300 : 0;
-      if (staggeredDelay > 0) {
-        await new Promise((resolve) => setTimeout(resolve, staggeredDelay));
-      }
+    const removeImage = () => {
+      const img = imageRef.current;
+      if (!img) return;
+      img.onerror = null;
+      img.onload = null;
+      img.src = '';
+      img.remove();
+      imageRef.current = null;
+    };
+    const stopStream = () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      removeImage();
+    };
+    stopStreamRef.current = stopStream;
 
-      if (cancelRef.current || !topic || !topic.trim() || !isActive || !containerRef.current) return;
-
+    const createImage = () => {
+      if (cancelled) return;
+      removeImage();
       const img = document.createElement('img');
-      const timestamp = Date.now();
-      // web_video_server expects base topic (e.g. .../image_raw); use default_transport=compressed to subscribe to CompressedImage
-      // Do not encode slashes: server rejects %2F and expects literal /
-      const streamTopic = topic.endsWith('/compressed') ? topic.slice(0, -11) : topic;
-      img.src = `http://${rosHost}:${CYCLO_WEB_VIDEO_SERVER_PORT}/stream?quality=50&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
       img.alt = topic;
-
-      img.onclick = (e) => e.stopPropagation();
+      img.className = 'image-grid-stream';
+      img.style.objectFit = 'contain';
+      img.onload = () => {
+        if (cancelled || imageRef.current !== img) return;
+        retries = 0;
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+        imageSizeCallback.current?.(topic, img.naturalWidth, img.naturalHeight);
+        fitImageRef.current();
+      };
       img.onerror = () => {
-        // Late-fired error after destroyImage (src='' triggers onerror) must
-        // not schedule a retry — cancelRef tells us we're already torn down.
-        if (cancelRef.current) return;
-        if (retryCountRef.current >= MAX_RETRIES) {
-          console.error(`Image stream failed after ${MAX_RETRIES} retries for idx ${idx}, topic: ${topic}`);
-          return;
-        }
-        retryCountRef.current += 1;
-        const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 8000);
-        console.warn(`Image stream error for idx ${idx}, retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
-        retryTimerRef.current = setTimeout(() => {
-          if (cancelRef.current) return;
-          if (isActive && topic && containerRef.current) {
-            destroyImage();
-            isCreatingRef.current = false;
-            createImage();
-          }
+        if (cancelled || imageRef.current !== img || retryTimer !== undefined || retries >= 5) return;
+        const delay = Math.min(1000 * (2 ** retries), 8000);
+        retries += 1;
+        retryTimer = setTimeout(() => {
+          retryTimer = undefined;
+          createImage();
         }, delay);
       };
-      img.onload = () => {
-        retryCountRef.current = 0;
-      };
-
-      if (rotate) {
-        const wrapper = document.createElement('div');
-        wrapper.style.position = 'absolute';
-        wrapper.style.width = swapsDimensions ? formatPercent(100 / aspectRatio) : '100%';
-        wrapper.style.height = swapsDimensions ? formatPercent(100 * aspectRatio) : '100%';
-        wrapper.style.top = '50%';
-        wrapper.style.left = '50%';
-        wrapper.style.transform = `translate(-50%, -50%) rotate(${normalizedRotationDegrees}deg)`;
-        wrapper.style.transformOrigin = 'center center';
-        wrapper.style.overflow = 'hidden';
-
-        img.style.width = '100%';
-        img.style.height = '100%';
-        img.style.objectFit = 'cover';
-        img.style.display = 'block';
-
-        wrapper.appendChild(img);
-
-        if (containerRef.current && !cancelRef.current) {
-          containerRef.current.appendChild(wrapper);
-          currentImgRef.current = wrapper;
-        }
-      } else {
-        img.className = 'w-full h-full object-cover bg-gray-100';
-
-        if (containerRef.current && !cancelRef.current) {
-          containerRef.current.appendChild(img);
-          currentImgRef.current = img;
-        }
-      }
-    } finally {
-      isCreatingRef.current = false;
-    }
-  }, [
-    topic,
-    isActive,
-    rosHost,
-    idx,
-    rotate,
-    swapsDimensions,
-    aspectRatio,
-    normalizedRotationDegrees,
-    destroyImage,
-  ]);
-
-  useEffect(() => {
-    retryCountRef.current = 0;
-    if (topic && topic.trim() !== '' && isActive) {
-      createImage().catch((error) => {
-        console.error(`Error creating image stream for idx ${idx}:`, error);
-        isCreatingRef.current = false;
-      });
-    } else {
-      destroyImage();
-    }
-
-    return () => {
-      isCreatingRef.current = false;
-      retryCountRef.current = 0;
-      destroyImage();
+      imageRef.current = img;
+      container.appendChild(img);
+      fitImageRef.current();
+      // web_video_server requires literal slashes and the base image topic.
+      const streamTopic = topic.endsWith('/compressed') ? topic.slice(0, -11) : topic;
+      img.src = `http://${rosHost}:${CYCLO_WEB_VIDEO_SERVER_PORT}/stream?quality=50&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${Date.now()}`;
     };
-  }, [topic, isActive, rosHost, idx, createImage, destroyImage]);
-
-  useEffect(() => {
-    return () => { destroyImage(); };
-  }, [idx, destroyImage]);
-
-  const handleClose = (e) => {
-    e.stopPropagation();
-    destroyImage();
-    onClose(idx);
-  };
+    createImage();
+    return stopStream;
+  }, [topic, hasTopic, streamActive, rosHost]);
 
   return (
-    <div
-      className={classCell(topic)}
-      onClick={!topic ? () => onPlusClick(idx) : undefined}
-      style={{ cursor: !topic ? 'pointer' : 'default', aspectRatio: aspect, ...style }}
-    >
-      {topic && topic.trim() !== '' && (
-        <>
+    <div className={`image-grid-cell${dropTarget ? ' image-grid-drop-target' : ''}${resizeHandleProps ? ' image-grid-resizable' : ''}`} data-cell-idx={idx} data-camera-topic={topic} style={style}>
+      <div className="image-grid-toolbar">
+        {dragHandleProps ? (
+          <button type="button" className="image-grid-drag-handle" aria-label={`Move camera ${idx + 1}`}
+            title={`${topic}\nDrag to reorder; arrow keys move the camera`} {...dragHandleProps}>
+            <MdDragIndicator size={18} className="shrink-0" />
+            <span className="image-grid-topic">{label || topic}</span>
+          </button>
+        ) : <span className="image-grid-topic" title={topic || ''}>{label || topic || ''}</span>}
+        {hasTopic && (
+          <>
+            <button
+              type="button"
+              className="image-grid-tool"
+              aria-label={`Rotate camera ${idx + 1}`}
+              title={`Rotate 90 degrees clockwise (current: ${rotation} degrees)`}
+              onClick={() => onRotateClick?.(idx)}
+            >
+              <MdRotate90DegreesCw size={20} />
+            </button>
+            <button
+              type="button"
+              className="image-grid-tool"
+              aria-label={`Close camera ${idx + 1}`}
+              title="Close camera"
+              onClick={() => { stopStreamRef.current(); onClose(idx); }}
+            >
+              <MdClose size={20} />
+            </button>
+          </>
+        )}
+      </div>
+      <div ref={containerRef} className="image-grid-viewport">
+        {!hasTopic && (
           <button
             type="button"
-            className={classRotateBtn}
-            onClick={(e) => { e.stopPropagation(); onRotateClick?.(idx); }}
-            title={rotate ? 'View horizontally' : 'View vertically'}
+            className="image-grid-select"
+            aria-label={`Select camera ${idx + 1}`}
+            title="Select camera"
+            onClick={() => onPlusClick(idx)}
           >
-            <MdScreenRotation size={20} />
+            <MdAdd size={36} />
           </button>
-          <button type="button" className={classCloseBtn} onClick={handleClose}>
-            <MdClose size={20} />
-          </button>
-        </>
-      )}
-      <div ref={containerRef} className="w-full h-full relative overflow-hidden rounded-3xl flex items-center justify-center">
-        {(!topic || !isActive) && <div className="text-6xl text-gray-400 font-light">+</div>}
+        )}
       </div>
+      {hasTopic && resizeHandleProps && (
+        <button type="button" className="image-grid-resize-handle"
+          aria-label={`Resize camera ${idx + 1}`} title="Resize camera; arrow keys adjust size"
+          {...resizeHandleProps}><MdOpenInFull size={17} /></button>
+      )}
     </div>
   );
 }

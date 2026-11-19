@@ -25,7 +25,7 @@ jest.mock('./InfoPanel', () => function MockInfoPanel() {
   return <div data-testid="info-panel" />;
 });
 
-const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
+const renderPanel = ({ taskOverrides = {}, sendRecordCommand, panelProps = {} } = {}) => {
   const sendCommand = sendRecordCommand || jest.fn().mockResolvedValue({
     success: true,
     message: 'ok',
@@ -70,7 +70,7 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
 
   render(
     <Provider store={store}>
-      <SegmentPanel />
+      <SegmentPanel {...panelProps} />
     </Provider>
   );
 
@@ -78,8 +78,48 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
 };
 
 describe('SegmentPanel discard episode target', () => {
+  test('inactive record shortcuts do not discard an active segment', () => {
+    const { sendRecordCommand } = renderPanel({
+      panelProps: { shortcutsEnabled: false },
+      taskOverrides: { recordStatus: { recordPhase: RecordPhase.RECORDING, running: true, topicReceived: true } },
+    });
+    fireEvent.keyUp(window, { key: 'Escape' });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('shared toolbar saves using the existing final-segment sequence with inactive shortcuts', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const { sendRecordCommand } = renderPanel({
+      panelProps: { shortcutsEnabled: false, actionsTarget: target },
+      taskOverrides: { recordStatus: {
+        recordPhase: RecordPhase.RECORDING, running: true, topicReceived: true,
+        currentEpisodeNumber: 7, currentSubtaskIndex: 1, subtaskCount: 2,
+      } },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save recording' }));
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('finish_episode', expect.any(Object)));
+    expect(sendRecordCommand.mock.calls.map(([command]) => command)).toEqual(['stop_segment', 'finish_episode']);
+    expect(screen.getByRole('button', { name: 'Discard recording episode' })).toBeDisabled();
+    target.remove();
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test.each([false, true])('remount during saving keeps all recording mutations blocked (running=%s)', (running) => {
+    const { sendRecordCommand } = renderPanel({ taskOverrides: {
+      recordStatus: {
+        taskType: 'record', recordPhase: RecordPhase.SAVING, running,
+        currentEpisodeNumber: 7, subtaskCount: 2, currentSubtaskIndex: 1, topicReceived: true,
+      },
+    } });
+    expect(screen.getByRole('button', { name: /discard episode/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /record start/i })).toBeDisabled();
+    for (const button of screen.getAllByTitle(/Save subtask|Cancel current recording|Discard saved subtask/)) {
+      expect(button).toBeDisabled();
+    }
+    expect(sendRecordCommand).not.toHaveBeenCalled();
   });
 
   test('sends the captured full episode index when discarding an episode', async () => {

@@ -1,0 +1,19 @@
+/* Keep mounted controllers hidden despite flex/grid display utilities. */
+.operation-workspace [hidden] { display: none !important; }
+
+.recording-actions { container-type: inline-size; }
+.recording-action svg { flex-shrink: 0; }
+
+@container (max-width: 300px) {
+  .recording-action {
+    flex-direction: column;
+    height: 60px;
+    padding: 4px 2px;
+    gap: 2px;
+    font-size: 12px;
+  }
+}
+
+/* Match the existing dark status colors for lighter notification surfaces. */
+.dark .operation-workspace .bg-green-50 { background-color: rgba(22, 163, 74, 0.22); }
+.dark .operation-workspace .bg-red-50 { background-color: rgba(220, 38, 38, 0.22); }

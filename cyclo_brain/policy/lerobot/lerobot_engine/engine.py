@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional
 from dataclasses import replace
 
 import numpy as np
+from inference_context.observation import ExecutionObservationBarrier
 
 
 # -- robot_client import shim --------------------------------------------------
@@ -129,6 +130,7 @@ class LeRobotEngine(
         self._adapter_definition = None
         self._observation_sessions = {}
         self._input_context = None
+        self._observation_barrier = ExecutionObservationBarrier()
 
     # ------------------------------------------------------------------ #
     # InferenceEngine API
@@ -195,6 +197,7 @@ class LeRobotEngine(
                 self._policy, PipelineProcessor(self), self._postprocessor, self._to_numpy_chunk,
             )
             self._init_robot(robot_type)
+            self._observation_barrier = ExecutionObservationBarrier()
             self._loaded_robot_type = robot_type
             if self._robot is not None:
                 self._observation_plan(contract.is_step)
@@ -312,13 +315,7 @@ class LeRobotEngine(
         sessions = self._observation_sessions
         pipeline_config = getattr(self, "_input_pipeline_config", None)
         contextual_inputs = getattr(pipeline_config, "requires_feedback", False)
-        if self._step_adapter is None and not contextual_inputs and not any(s.requires_execution_context for s in sessions.values()):
-            raise ValueError("this LeRobot policy has no reviewed contextual execution contract")
-        previous = self._input_context
-        reset_inputs = previous is None or (
-            (previous.session_id, previous.generation) != (context.session_id, context.generation)
-            or (previous.phase != context.phase and context.phase in {"paused", "stopped", "error"})
-        )
+        reset_inputs = self._observation_barrier.update(context)
         if reset_inputs:
             self._input_evaluation = None
             for plan in self._input_plans.values():
@@ -376,6 +373,7 @@ class LeRobotEngine(
         self._input_plans = {}
         self._adapter_definition = None
         self._input_context = None
+        self._observation_barrier = ExecutionObservationBarrier()
 
         self._cameras = {}
         self._state_modalities = []

@@ -1,9 +1,9 @@
 import React from 'react';
 import { EventEmitter } from 'events';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
-import taskReducer from '../features/tasks/taskSlice';
+import taskReducer, { setInferenceTaskInfo, setRecordTaskInfo } from '../features/tasks/taskSlice';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import {
   buildInitialPoseSyncTaskInfo,
@@ -16,6 +16,7 @@ import {
 describe('pose command connection lifetime', () => {
   let ros;
   let current;
+  let store;
 
   beforeEach(() => {
     ros = Object.assign(new EventEmitter(), {
@@ -27,15 +28,48 @@ describe('pose command connection lifetime', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  function setup() {
-    const store = configureStore({ reducer: {
+  function setup(taskContext) {
+    store = configureStore({ reducer: {
       tasks: taskReducer,
       training: () => ({}), editDataset: () => ({}), ui: () => ({}),
       ros: () => ({ rosbridgeUrl: 'ws://test' }),
     } });
     const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;
-    return renderHook(() => useRosServiceCaller(), { wrapper }).result;
+    return renderHook(() => useRosServiceCaller(taskContext), { wrapper }).result;
   }
+
+  test.each(['record', 'inference'])('explicit %s context binds autosync, but Prepare always uses Record', async (taskContext) => {
+    const hook = setup(taskContext);
+    for (const command of ['set_task_info', 'prepare_session']) {
+      ros.callOnConnection.mockClear();
+      const request = hook.current.sendRecordCommand(command);
+      await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+      const payload = ros.callOnConnection.mock.calls[0][0];
+      expect(payload.args.task_info.task_type).toBe(command === 'prepare_session' ? 'record' : taskContext);
+      ros.emit(payload.id, { values: { success: true } });
+      await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+    }
+  });
+
+  test('Prepare uses current Record fields even when called from inference', async () => {
+    const hook = setup('inference');
+    act(() => {
+      store.dispatch(setRecordTaskInfo({ taskNum: 'other-record', taskName: 'other' }));
+      store.dispatch(setInferenceTaskInfo({
+        taskInstruction: ['current instruction'],
+        policyPath: '/models/current', inferenceHz: 23, controlHz: 60,
+      }));
+    });
+    const request = hook.current.sendRecordCommand('prepare_session');
+    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+    const payload = ros.callOnConnection.mock.calls[0][0];
+    expect(payload.args.task_info).toMatchObject({
+      task_type: 'record', task_num: 'other-record', task_name: 'other', policy_path: '',
+    });
+    expect(ros.callOnConnection).toHaveBeenCalledTimes(1);
+    ros.emit(payload.id, { values: { success: true } });
+    await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+  });
 
   test('accepts a response from the original live connection', async () => {
     const hook = setup();
@@ -47,15 +81,40 @@ describe('pose command connection lifetime', () => {
     expect(ros.listenerCount('close')).toBe(0);
   });
 
-  test('folder command uses the existing TaskInfo field with command 26', async () => {
+  test.each(['set_task_info', 'prepare_session', 'start_record', 'start_segment'])(
+    '%s disables the removed license option even with legacy settings', async (command) => {
+      const hook = setup('record');
+      act(() => store.dispatch(setRecordTaskInfo({ includeRobotisLicense: true })));
+      const request = hook.current.sendRecordCommand(command);
+      await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+      const payload = ros.callOnConnection.mock.calls[0][0];
+      expect(payload.args.task_info.include_robotis_license).toBe(false);
+      ros.emit(payload.id, { values: { success: true } });
+      await request;
+    },
+  );
+
+  test.each(['start_record', 'start_segment', 'stop_segment', 'cancel_segment', 'finish_episode', 'discard_episode', 'start_inference_record', 'stop_inference_record', 'cancel_inference_record'])(
+    '%s always sends Record configuration from an inference controller', async (command) => {
+      const hook = setup('inference');
+      act(() => {
+        store.dispatch(setRecordTaskInfo({ taskNum: '42', taskName: 'record-task' }));
+        store.dispatch(setInferenceTaskInfo({ policyPath: '/models/other' }));
+      });
+      const request = hook.current.sendRecordCommand(command);
+      await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
+      const payload = ros.callOnConnection.mock.calls[0][0];
+      expect(payload.args.task_info).toMatchObject({ task_type: 'record', task_num: '42', task_name: 'record-task', policy_path: '' });
+      ros.emit(payload.id, { values: { success: true } });
+      await request;
+    },
+  );
+
+  test('obsolete inference folder selection is not a UI command', async () => {
     const hook = setup();
-    const request = hook.current.sendRecordCommand('set_inference_record_folder', { recordingSessionId: 'existing' });
-    await waitFor(() => expect(ros.callOnConnection).toHaveBeenCalled());
-    const payload = ros.callOnConnection.mock.calls[0][0];
-    expect(payload.args.command).toBe(26);
-    expect(payload.args.task_info.task_num).toBe('existing');
-    ros.emit(payload.id, { values: { success: true } });
-    await expect(request).resolves.toEqual(expect.objectContaining({ success: true }));
+    await expect(hook.current.sendRecordCommand('set_inference_record_folder'))
+      .rejects.toThrow('Unknown command');
+    expect(ros.callOnConnection).not.toHaveBeenCalled();
   });
 
   test.each([2, 4])('sends duration for pose command %i', async (command) => {

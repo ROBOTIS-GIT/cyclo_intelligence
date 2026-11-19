@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from inference_context.execution import ActionRecord, ExecutionContext
+from inference_context.execution import ActionRecord, ExecutionContext, ResetRecord
 
 
 _spec = importlib.util.spec_from_file_location(
@@ -156,18 +156,22 @@ def test_context_and_prediction_identity_guards():
         step.update_execution_context(replace(step._context, session_id="other"))
 
 
-def test_observation_barrier_uses_first_publication_not_latest_hold():
+def test_observation_barrier_uses_first_publication_not_latest_hold(monkeypatch):
     step = adapter()
     assert step.observation_after_s is None
     step.predict({}, 1)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 10.)
     step.update_execution_context(receipt(step, recorded_s=10.))
+    monkeypatch.setattr(module.time, "monotonic", lambda: 10.5)
     step.update_execution_context(receipt(step, recorded_s=10.5))
     assert step.observation_after_s == 10.
     step.predict({}, 2)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 11.)
     step.update_execution_context(receipt(step, prediction_id="2", recorded_s=11.))
     assert step.observation_after_s == 11.
+    monkeypatch.setattr(module.time, "monotonic", lambda: 12.)
     step.update_execution_context(replace(step._context, generation=1))
-    assert step.observation_after_s is None
+    assert step.observation_after_s == 12.
 
 
 def test_publication_without_timestamp_cannot_advance_step():
@@ -177,6 +181,36 @@ def test_publication_without_timestamp_cannot_advance_step():
         step.update_execution_context(receipt(step, recorded_s=None))
     with pytest.raises(RuntimeError, match="reset"):
         step.predict({}, 2)
+
+
+@pytest.mark.parametrize("remote_time", [1., 9000000.])
+def test_resume_barrier_uses_worker_clock_and_clears_model_owned_queue(monkeypatch, remote_time):
+    from inference_context import observation
+
+    step = adapter()
+    queue = [99., 100.]
+    step.policy.reset.side_effect = queue.clear
+    step.predict({}, 1)
+    monkeypatch.setattr(observation.time, "monotonic", lambda: 20.)
+    resumed = replace(step._context, generation=1, revision=2, latest_event_id=1,
+                      resets=(ResetRecord(1, "control source resumed", remote_time),))
+    step.update_execution_context(resumed)
+    assert queue == []
+    assert step.observation_after_s == 20.
+    step.predict({}, 2)
+
+
+def test_publication_reception_barrier_does_not_compare_remote_clock(monkeypatch):
+    from inference_context import observation
+
+    step = adapter()
+    step.predict({}, 1)
+    monkeypatch.setattr(observation.time, "monotonic", lambda: 20.)
+    step.update_execution_context(receipt(step, recorded_s=9000000.))
+    assert step.observation_after_s == 20.
+    monkeypatch.setattr(observation.time, "monotonic", lambda: 30.)
+    step.update_execution_context(receipt(step, recorded_s=9000001.))
+    assert step.observation_after_s == 20.
 
 
 @pytest.mark.parametrize("name,expected", [("act", "chunk"), ("groot", "chunk"),

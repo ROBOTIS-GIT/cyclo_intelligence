@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { readBackendStatus, subscribeBackendStatus } from '../utils/backendStatusPolling';
+import useDocumentVisible from './useDocumentVisible';
 
-const API_BASE = '/api';
 const DEFAULT_POLL_MS = 2000;
 
 export const POLICY_BACKEND_SERVICE_LABELS = {
@@ -61,16 +62,6 @@ export function getPolicyBackendStaleReason(status) {
     return 'stale_image';
   }
   return null;
-}
-
-async function readJsonResponse(response) {
-  const text = await response.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { detail: text };
-  }
 }
 
 export function getPolicyBackendReadiness(status) {
@@ -141,39 +132,41 @@ export default function usePolicyBackendStatus(
   const [status, setStatus] = useState(null);
   const [error, setError] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const visible = useDocumentVisible();
+  const generation = useRef(0);
+
+  const accept = useCallback((data, err) => {
+    setError(err?.message || '');
+    setStatus(err ? {
+      container_state: 'unknown', image_pulled: false, raw_state: err.message,
+    } : data);
+  }, []);
 
   const refreshStatus = useCallback(async ({ quiet = true } = {}) => {
     if (!enabled || !backend) return null;
+    const current = generation.current;
     if (!quiet) setIsRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE}/backends/${backend}/status`);
-      const data = await readJsonResponse(response);
-      if (!response.ok) {
-        throw new Error(data.detail || `status failed (${response.status})`);
-      }
-      setStatus(data);
-      setError('');
+      const data = await readBackendStatus(backend);
+      if (current === generation.current) accept(data);
       return data;
     } catch (err) {
-      const message = err?.message || 'status failed';
-      setError(message);
-      setStatus({
-        container_state: 'unknown',
-        image_pulled: false,
-        raw_state: message,
-      });
+      if (current === generation.current) accept(null, err);
       return null;
     } finally {
-      if (!quiet) setIsRefreshing(false);
+      if (!quiet && current === generation.current) setIsRefreshing(false);
     }
-  }, [backend, enabled]);
+  }, [backend, enabled, accept]);
 
   useEffect(() => {
-    if (!enabled) return undefined;
-    refreshStatus({ quiet: true });
-    const id = setInterval(() => refreshStatus({ quiet: true }), intervalMs);
-    return () => clearInterval(id);
-  }, [enabled, intervalMs, refreshStatus]);
+    generation.current += 1;
+    setStatus(null);
+    setError('');
+    setIsRefreshing(false);
+    const unsubscribe = enabled && visible && backend
+      ? subscribeBackendStatus(backend, accept, intervalMs) : () => {};
+    return () => { generation.current += 1; unsubscribe(); };
+  }, [backend, enabled, visible, intervalMs, accept]);
 
   return {
     backend,

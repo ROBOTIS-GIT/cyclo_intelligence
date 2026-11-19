@@ -93,6 +93,54 @@ describe('central inference status subscription', () => {
     });
   });
 
+  test.each([
+    'Waiting for model control: teleop',
+    'Waiting for model control: controller_transition',
+    'Waiting for the previous prediction to finish.',
+    'Control unavailable: source_stale; START required.',
+  ])('keeps paused guidance without an error toast: %s', async (error) => {
+    const { store } = await subscribe();
+    const message = {
+      inference_phase: InferencePhase.PAUSED, status_known: true,
+      runtime_state: 'paused', error,
+    };
+    act(() => callback(message));
+    act(() => callback(message));
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(store.getState().tasks.inferenceStatus).toMatchObject({
+      inferencePhase: InferencePhase.PAUSED, runtimeState: 'paused',
+      topicReceived: true, error,
+    });
+    // Guidance must not consume the dedup slot for a subsequent actual error.
+    act(() => callback({ ...message, runtime_state: 'error' }));
+    act(() => callback({ ...message, runtime_state: 'error' }));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenLastCalledWith(error);
+  });
+
+  test.each([
+    { runtime_state: 'error', error: 'Worker heartbeat lost' },
+    { runtime_state: 'paused', error: 'Current-pose hold failed' },
+    { runtime_state: 'paused', error: 'Automatic resume failed: stale observations; START required.' },
+    { runtime_state: 'paused', status_known: false, error: 'Waiting for model control: teleop' },
+    { runtime_state: 'paused', inference_phase: InferencePhase.SYNCING, error: 'Waiting for model control: teleop' },
+    { runtime_state: undefined, error: 'Legacy inference failure' },
+  ])('preserves and deduplicates failure toasts: %j', async (overrides) => {
+    const { store } = await subscribe();
+    const message = {
+      inference_phase: InferencePhase.PAUSED, status_known: true, ...overrides,
+    };
+    act(() => callback(message));
+    act(() => callback(message));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenLastCalledWith(message.error);
+    expect(store.getState().tasks.inferenceStatus.error).toBe(message.error);
+    act(() => callback({ ...message, runtime_state: 'running', error: '' }));
+    expect(store.getState().tasks.inferenceStatus.error).toBe('');
+    act(() => callback(message));
+    expect(toast.error).toHaveBeenCalledTimes(2);
+  });
+
   test('recording status identifies its owner and disconnect invalidates it without clearing recording', async () => {
     const { store, result } = await subscribe();
     await act(async () => { await result.current.subscribeToRecordingStatus(); });
@@ -109,6 +157,20 @@ describe('central inference status subscription', () => {
       taskType: 'inference', running: true, topicReceived: false,
     });
   });
+
+  test.each([PageType.RECORD, PageType.INFERENCE])(
+    'Record server settings hydrate while %s is selected', async (page) => {
+      const { store, result } = await subscribe();
+      appStore.getState.mockReturnValue({ tasks: { inferenceStatus: {} }, ui: { currentPage: page } });
+      await act(async () => { await result.current.subscribeToRecordingStatus(); });
+      act(() => callback({ record_phase: RecordPhase.READY, task_info: {
+        task_type: 'record', task_num: '42', task_name: 'demo', task_instruction: ['record instruction'],
+        subtask_instruction: ['pick', 'place'],
+      } }));
+      expect(store.getState().tasks.recordTaskInfo).toMatchObject({ taskNum: '42', taskName: 'demo' });
+      expect(store.getState().tasks.plannedSubTasks).toEqual(['pick', 'place']);
+    },
+  );
 
   test.each([PageType.RECORD, PageType.INFERENCE])(
     'camera warnings resume on %s after Autonomy Studio without losing recording state', async (page) => {
@@ -182,17 +244,27 @@ describe('central inference status subscription', () => {
     expect(store.getState().tasks.inferenceTaskInfoSync.dirty).toBe(false);
   });
 
-  test('folder changes do not require an editable settings revision', async () => {
+  test('inference status does not retain obsolete recording-folder ownership', async () => {
+    const { store } = await subscribe();
+    expect(store.getState().tasks.inferenceStatus).not.toHaveProperty('recordingSessionId');
+    const recording = store.getState().tasks.recordStatus;
+    act(() => callback({
+      inference_phase: InferencePhase.PAUSED, status_known: true, runtime_state: 'paused',
+      source_id: 'backend', sequence: 1, task_info: { task_type: 'inference', task_num: 'old-folder' },
+    }));
+    expect(store.getState().tasks.inferenceStatus).not.toHaveProperty('recordingSessionId');
+    expect(store.getState().tasks.recordStatus).toEqual(recording);
+  });
+
+  test('ignores stale inference snapshots and accepts a restarted source', async () => {
     const { store } = await subscribe();
     const status = { inference_phase: InferencePhase.PAUSED, status_known: true,
-      runtime_state: 'paused', source_id: 'backend', has_task_info: true, task_info_revision: 1 };
-    act(() => callback({ ...status, sequence: 1, task_info: { task_type: 'inference', task_num: 'first' } }));
-    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('first');
-    act(() => callback({ ...status, sequence: 2, task_info: { task_type: 'inference', task_num: 'second' } }));
-    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('second');
-    act(() => callback({ ...status, sequence: 1, task_info: { task_type: 'inference', task_num: 'stale' } }));
-    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('second');
-    act(() => callback({ ...status, source_id: 'restarted', sequence: 1, task_info: { task_type: 'inference', task_num: '' } }));
-    expect(store.getState().tasks.inferenceStatus.recordingSessionId).toBe('');
+      runtime_state: 'paused', source_id: 'backend' };
+    act(() => callback({ ...status, sequence: 2, model_path: '/current' }));
+    expect(store.getState().tasks.inferenceStatus.loadedModelPath).toBe('/current');
+    act(() => callback({ ...status, sequence: 1, model_path: '/stale' }));
+    expect(store.getState().tasks.inferenceStatus.loadedModelPath).toBe('/current');
+    act(() => callback({ ...status, source_id: 'restarted', sequence: 1, model_path: '' }));
+    expect(store.getState().tasks.inferenceStatus.loadedModelPath).toBe('');
   });
 });

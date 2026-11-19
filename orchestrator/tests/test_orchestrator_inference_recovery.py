@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import threading
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -57,6 +58,9 @@ def session(monkeypatch):
     node = object.__new__(OrchestratorNode)
     node._state_lock = threading.RLock()
     node._recording_command_lock = threading.RLock()
+    node._recording_command_depth = 0
+    node._recording_status_events = Queue(maxsize=32)
+    node._inference_command_lock = threading.RLock()
     node._inference_lifecycle_lock = threading.Lock()
     node._client_cb_group = object()
     node._init_inference_status_monitor()
@@ -202,14 +206,8 @@ def test_operator_can_stop_then_explicitly_clear_after_lost_resume(session):
     assert node._inference_status_snapshot['phase'] == InferenceStatus.PAUSED
     assert node.on_recording
 
-    # Clear still refuses to discard an active recording.
-    blocked = command(SendCommand.Request.FINISH)
-    assert not blocked.success
-    assert 'Save or Discard recording' in blocked.message
-    assert node.commands == [_Client.CMD_RESUME, _Client.CMD_PAUSE]
-
-    node.on_recording = False
-    node._forward_recording = Mock(return_value=SimpleNamespace(success=True))
+    # Clear unloads inference without saving or discarding the recording.
+    node._forward_recording = Mock()
     cleared = command(SendCommand.Request.FINISH)
     assert cleared.success, cleared.message
     assert len(pending) == 1
@@ -219,4 +217,6 @@ def test_operator_can_stop_then_explicitly_clear_after_lost_resume(session):
     assert node.runtime == dict(loaded=False, running=False)
     assert node.container_service_client is None
     assert node._inference_status_snapshot['phase'] == InferenceStatus.READY
+    assert node.on_recording
+    node._forward_recording.assert_not_called()
     client.disconnect.assert_called_once()

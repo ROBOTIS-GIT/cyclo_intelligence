@@ -79,6 +79,111 @@ class GR00TEngineFactoryTests(unittest.TestCase):
 
         self.assertIsInstance(engine, module.GR00TInference)
 
+    def test_resume_uses_fresh_selected_snapshot_and_resets_without_reloading(self):
+        from dataclasses import replace
+        from inference_context.execution import ExecutionContext, ResetRecord
+        from inference_context.inputs import ReceivedValues, SampleQuery
+        from inference_context import observation
+
+        engine = self.load_module().create_engine()
+        clock = [20.]
+        stamps = {"camera:eye": 19., "joint:follower_arm": 19.}
+        values = {"camera:eye": np.zeros((2, 2, 3), np.uint8), "joint:follower_arm": np.array([3.])}
+
+        class Robot:
+            def get_required_input_snapshot(self, sources, **options):
+                self_sources = set(sources)
+                assert self_sources == set(values)
+                received = ReceivedValues(values, stamps, after_s=options.get("after_s"))
+                for source in sources:
+                    received.resolve(SampleQuery(source), clock[0])
+                return {"images": {"eye": values["camera:eye"]},
+                        "joint_positions": {"follower_arm": values["joint:follower_arm"]}, "sensors": {}}
+
+        policy = types.SimpleNamespace(reset=Mock(), get_action=Mock(return_value=({"arm": np.ones((1, 1, 1))}, {})))
+        engine.policy, engine.robot = policy, Robot()
+        engine.policy_info.update(video=["eye"], state=["arm"], language=["task"], action=["arm"])
+        engine.robot_info.update(cameras=["eye"], camera_sources={"eye": "eye"}, joints={"arm": "follower_arm"},
+                                 camera_rotations={}, sensor_states={})
+        initial = ExecutionContext("session", 0, 0, "ready")
+        with patch.object(observation.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(observation.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            engine.update_execution_context(initial)
+            resumed = replace(initial, generation=1, revision=1, phase="running", latest_event_id=1,
+                              resets=(ResetRecord(1, "control source resumed", 9000000.),))
+            engine.update_execution_context(resumed)
+            self.assertIs(engine.policy, policy)
+            self.assertEqual(policy.reset.call_count, 2)
+            clock[0] = 20.1
+            stamps["joint:follower_arm"] = 20.1
+            stale = engine.get_action_chunk(types.SimpleNamespace(task_instruction="task"))
+            self.assertFalse(stale["success"])
+            self.assertIn("camera:eye", stale["message"])
+            policy.get_action.assert_not_called()
+            stamps["camera:eye"] = clock[0]
+            fresh = engine.get_action_chunk(types.SimpleNamespace(task_instruction="task"))
+            self.assertTrue(fresh["success"], fresh)
+            policy.get_action.assert_called_once()
+
+    def test_resume_accepts_only_declared_camera_and_sensor_inputs(self):
+        from dataclasses import replace
+        from inference_context.execution import ExecutionContext
+
+        image = np.zeros((2, 2, 3), np.uint8)
+        odom = {"linear_velocity": [1., 2., 0.], "angular_velocity": [0., 0., 3.]}
+        for cameras, sensor_states in ((["eye"], {"mobile": "odom"}),
+                                      (["eye"], {}), ([], {"mobile": "odom"})):
+            with self.subTest(cameras=cameras, sensor_states=sensor_states):
+                engine = self.load_module().create_engine()
+                engine.robot_info.update(cameras=cameras, camera_sources={"eye": "eye"},
+                                         camera_rotations={}, joints={}, sensor_states=sensor_states)
+                engine.policy_info.update(language=["task"], action=["mobile"])
+                snapshot = {"images": {"eye": image} if cameras else {}, "joint_positions": {},
+                            "sensors": {"odom": odom} if sensor_states else {}}
+                engine.robot = types.SimpleNamespace(
+                    get_images=lambda **kwargs: {"eye": image},
+                    get_joint_positions=lambda: {"follower_arm": np.ones(1)},
+                    get_odom=Mock(return_value=odom),
+                    get_required_input_snapshot=Mock(return_value=snapshot),
+                )
+                engine.policy = types.SimpleNamespace(
+                    get_action=Mock(return_value=({"mobile": np.ones((1, 1, 3))}, {})))
+                ready = ExecutionContext("session", 0, 0, "ready")
+                engine.update_execution_context(ready)
+                request = types.SimpleNamespace(task_instruction="go")
+                self.assertTrue(engine.get_action_chunk(request)["success"])
+                engine.update_execution_context(replace(ready, generation=1, revision=1, phase="running"))
+                engine.robot.get_odom.reset_mock()
+                result = engine.get_action_chunk(request)
+                self.assertTrue(result["success"], result)
+                expected_sources = ({"camera:eye"} if cameras else set()) | (
+                    {"sensor:odom"} if sensor_states else set())
+                engine.robot.get_required_input_snapshot.assert_called_once_with(
+                    expected_sources, max_age_s=None, after_s=engine._observation_barrier.after_s)
+                engine.robot.get_odom.assert_not_called()
+                observation = engine.policy.get_action.call_args.args[0]
+                self.assertEqual(set(observation["video"]), set(cameras))
+                self.assertEqual(set(observation["state"]), set(sensor_states))
+                if sensor_states:
+                    np.testing.assert_array_equal(observation["state"]["mobile"], [[[1., 2., 3.]]])
+
+    def test_preprocess_still_rejects_missing_declared_joints(self):
+        engine = self.load_module().create_engine()
+        engine.robot_info.update(cameras=[], camera_rotations={}, joints={"arm": "follower_arm"})
+        for joints in ({}, {"unrelated": np.ones(1)}, {"follower_arm": np.array([])}):
+            with self.subTest(joints=joints):
+                result = engine.preprocess({}, joints, "go", sensors={})
+                self.assertFalse(result["success"])
+
+    def test_preprocess_still_rejects_missing_declared_camera_and_sensor(self):
+        engine = self.load_module().create_engine()
+        engine.robot_info.update(cameras=["eye"], camera_sources={"eye": "eye"},
+                                 camera_rotations={}, joints={}, sensor_states={"mobile": "odom"})
+        for images in ({}, {"eye": np.zeros((2, 2, 3), np.uint8)}):
+            with self.subTest(images=bool(images)):
+                result = engine.preprocess(images, {}, "go", sensors={})
+                self.assertFalse(result["success"])
+
     def load_module(self):
         spec = importlib.util.spec_from_file_location("groot_lifecycle_under_test", INFERENCE_ENGINE)
         module = importlib.util.module_from_spec(spec)

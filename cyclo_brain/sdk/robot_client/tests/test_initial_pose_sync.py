@@ -44,8 +44,11 @@ MODULE_PATH = (
 )
 ROBOT_CONFIG_PATH = MODULE_PATH.parents[4] / "shared" / "shared" / "robot_configs"
 sys.path.insert(0, str(ROBOT_CONFIG_PATH))
-spec = importlib.util.spec_from_file_location("robot_client_impl", MODULE_PATH)
+spec = importlib.util.spec_from_file_location(
+    "robot_client_impl", MODULE_PATH, submodule_search_locations=[str(MODULE_PATH.parent)],
+)
 robot_client_impl = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = robot_client_impl
 spec.loader.exec_module(robot_client_impl)
 RobotClient = robot_client_impl.RobotClient
 

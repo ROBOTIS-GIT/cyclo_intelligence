@@ -114,8 +114,9 @@ def test_temporal_model_registration_load_capture_predict_reset_and_cached_reloa
             assert history.bytes_used == 16
 
             paused = replace(running, generation=pause_generation, phase="paused", revision=2)
-            assert worker.handle(EngineCommandRequest(command=CMD_UPDATE_CONTEXT, seq_id=3,
-                                 execution_context_json=paused.to_json())).success
+            with mock.patch.object(robot_client_impl.time, "monotonic", return_value=19.):
+                assert worker.handle(EngineCommandRequest(command=CMD_UPDATE_CONTEXT, seq_id=3,
+                                     execution_context_json=paused.to_json())).success
             assert history.bytes_used == 0 and len(resets) == 2
             robot._input_received_monotonic["camera:eye"] = 20.
             with mock.patch.object(robot_client_impl.time, "monotonic", side_effect=[20., 20., 22.]), \
@@ -123,6 +124,18 @@ def test_temporal_model_registration_load_capture_predict_reset_and_cached_reloa
                 missing = engine._build_observation("")
             assert not missing["success"] and "joint:follower_arm" in missing["message"]
             assert len(calls) == 1  # Empty history never repeats a cached state.
+
+            resumed = replace(paused, generation=pause_generation + 1, phase="running", revision=3)
+            with mock.patch.object(robot_client_impl.time, "monotonic", return_value=30.):
+                assert worker.handle(EngineCommandRequest(command=CMD_UPDATE_CONTEXT, seq_id=4,
+                                     execution_context_json=resumed.to_json())).success
+            assert history.bytes_used == 0
+            feed(30.1)
+            with mock.patch.object(robot_client_impl.time, "monotonic", return_value=30.25):
+                fresh = worker.handle(EngineCommandRequest(command=CMD_GET_ACTION, seq_id=5,
+                                      execution_context_json=resumed.to_json()))
+            assert fresh.success, fresh.message
+            assert len(calls) == 2 and len(resets) == 3
 
             cached = worker.handle(replace(load, seq_id=4))
             assert cached.success, cached.message
@@ -232,7 +245,13 @@ def test_contextual_chunk_uses_emitted_feedback_and_pending_prefix_without_robot
                                     execution_context_json=paused.to_json()))
             assert stopped.success, stopped.message
             assert session.execution.retained_record_count == 0
-            request(replace(paused, phase="running", revision=5, after_event_id=4, resets=()), 6)
+            resumed = replace(paused, phase="running", revision=5, after_event_id=4, resets=())
+            assert worker.handle(EngineCommandRequest(command=CMD_UPDATE_CONTEXT, seq_id=6,
+                                 execution_context_json=resumed.to_json())).success
+            robots[-1]._update_joint("follower_arm", SimpleNamespace(name=["a", "b"], position=[5., 6.],
+                                                                    velocity=[], effort=[]))
+            request(resumed, 6)
+            np.testing.assert_array_equal(batches[-1]["state"], [5., 6.])
             assert batches[-1]["published"] == () and batches[-1]["pending"] == ()
 
             cached = worker.handle(replace(load, seq_id=7))
