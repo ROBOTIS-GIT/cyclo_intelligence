@@ -39,7 +39,7 @@ function setup({ recording = true, withTheme = false, command = jest.fn().mockRe
     ...initial, robotType: 'ffw_sg2_rev1',
     recordTaskInfo: { ...initial.recordTaskInfo, taskNum: '42', taskName: 'demo' },
     inferenceTaskInfo: { ...initial.inferenceTaskInfo, policyId: 'groot:n17', serviceType: 'groot', policyPath: '/model', inferenceMode: 'simulation' },
-    recordStatus: { ...initial.recordStatus, topicReceived: true, running: recording,
+    recordStatus: { ...initial.recordStatus, taskNum: '42', taskName: 'demo', topicReceived: true, running: recording,
       recordPhase: recording ? RecordPhase.RECORDING : RecordPhase.READY, currentEpisodeNumber: 7 },
     inferenceStatus: { ...initial.inferenceStatus, topicReceived: true, runtimeState: 'running',
       inferencePhase: InferencePhase.INFERENCING, loadedModelPath: '/model', loadedPolicyId: 'lerobot:act' },

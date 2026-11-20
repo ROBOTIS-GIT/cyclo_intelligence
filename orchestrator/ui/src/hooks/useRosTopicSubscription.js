@@ -319,6 +319,7 @@ export function useRosTopicSubscription() {
         if (!monitorOnlyMessage) {
           dispatch(
             setRecordStatus({
+              taskNum: msg.task_info?.task_num || '',
               taskName: msg.task_info?.task_name || 'idle',
               taskType: msg.task_info?.task_type || '',
               running: isRunning,

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import SegmentPanel from './SegmentPanel';
-import taskReducer, { setRecordStatus } from '../features/tasks/taskSlice';
+import taskReducer, { setRecordStatus, setRecordTaskInfo } from '../features/tasks/taskSlice';
 import { RecordPhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
@@ -45,19 +45,22 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand, panelProps = {} } 
       taskNum: '1',
       taskName: 'discard-target-test',
     },
-    recordStatus: {
-      ...initialTasks.recordStatus,
-      recordPhase: RecordPhase.READY,
-      currentEpisodeNumber: 7,
-      currentSubtaskIndex: 1,
-      subtaskCount: 2,
-      topicReceived: true,
-    },
     plannedCount: 2,
     plannedSubTasks: ['pick', 'place'],
     slotToServerIdx: [0, -1],
     activeSlotIndex: 1,
     ...taskOverrides,
+    recordStatus: {
+      ...initialTasks.recordStatus,
+      taskNum: '1',
+      taskName: 'discard-target-test',
+      recordPhase: RecordPhase.READY,
+      currentEpisodeNumber: 7,
+      currentSubtaskIndex: 1,
+      subtaskCount: 2,
+      topicReceived: true,
+      ...taskOverrides.recordStatus,
+    },
   };
   const store = configureStore({
     reducer: {
@@ -142,6 +145,31 @@ describe('SegmentPanel discard episode target', () => {
       );
     });
     expect(toast.success).toHaveBeenCalledWith('Discard episode: ok');
+  });
+
+  test('discard after a task switch and segment cancel targets the new episode and allows recording again', async () => {
+    const { store, sendRecordCommand } = renderPanel();
+    const discard = screen.getByRole('button', { name: /discard episode/i });
+    act(() => store.dispatch(setRecordTaskInfo({ taskNum: '12', taskName: 'discard-target-test' })));
+    expect(discard).toBeDisabled(); // The latest status still belongs to task 1.
+    act(() => store.dispatch(setRecordStatus({
+      taskNum: '12', currentEpisodeNumber: 0, currentSubtaskIndex: 1, savedSubtaskIndices: [0],
+      running: true, recordPhase: RecordPhase.RECORDING,
+    })));
+    act(() => store.dispatch(setRecordStatus({ running: false, recordPhase: RecordPhase.READY })));
+    fireEvent.click(discard);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith(
+      'discard_episode', expect.objectContaining({ segmentIndex: 1 })
+    ));
+    const record = screen.getByRole('button', { name: /record start/i });
+    expect(record).toBeDisabled(); // Wait for the empty server status, not just the service ack.
+    act(() => store.dispatch(setRecordStatus({ currentSubtaskIndex: 0, savedSubtaskIndices: [] })));
+    await waitFor(() => expect(record).toBeEnabled());
+    expect(discard).toBeDisabled();
+    fireEvent.click(record);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith(
+      'start_segment', expect.objectContaining({ segmentIndex: 0 })
+    ));
   });
 
   test('drops duplicate save clicks while a save sequence is in flight', async () => {

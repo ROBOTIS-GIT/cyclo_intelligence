@@ -53,11 +53,9 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
   const recordingMonitor = useSelector((state) => state.tasks.recordingMonitor);
 
   const [optimisticRecording, setOptimisticRecording] = useState(false);
-  const [episodeAcquisitionStarted, setEpisodeAcquisitionStarted] = useState(false);
   const [localSavingInProgress, setSavingInProgress] = useState(false);
   const savingInProgress = localSavingInProgress || recordStatus.recordPhase === RecordPhase.SAVING;
   const [serverResetInProgress, setServerResetInProgress] = useState(false);
-  const episodeFullIndexRef = useRef(null);
   const lastServerEpisodeRef = useRef(null);
   const commandSequenceInProgressRef = useRef(false);
   const pendingEpisodeResetRef = useRef(null);
@@ -83,10 +81,18 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
     Array.isArray(serverSavedSubtaskIndices)
       ? serverSavedSubtaskIndices.length > 0
       : serverSubtaskCount > 0 && serverSubtaskIndex > 0 && !isRecording;
-  const hasLocalSavedSubtasks = savedCount > 0;
   const isPlanMode = plannedCountNumber > 0;
   const isSingleMode = plannedCountNumber === 0;
   const currentFullEpisodeIndex = Number(recordStatus.currentEpisodeNumber || 0);
+  // Take both the task identity and the discard target from the same status.
+  // A new task may restart numbering at zero without remounting this panel.
+  const canDiscardEpisode = Boolean(
+    recordStatus.topicReceived && recordStatus.taskNum &&
+    recordStatus.taskNum === taskInfo.taskNum &&
+    recordStatus.taskName === (taskInfo.taskName || 'idle') &&
+    (serverRecording || hasServerSavedSubtasks) &&
+    !savingInProgress && !serverResetInProgress
+  );
   const firstPendingSlot = useMemo(
     () => slotToServerIdx.findIndex((v) => v === -1),
     [slotToServerIdx]
@@ -107,15 +113,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
   useEffect(() => {
     setOptimisticRecording(serverRecording);
   }, [serverRecording]);
-
-  useEffect(() => {
-    if (serverRecording || hasLocalSavedSubtasks || hasServerSavedSubtasks) {
-      setEpisodeAcquisitionStarted(true);
-      if (episodeFullIndexRef.current === null) {
-        episodeFullIndexRef.current = currentFullEpisodeIndex;
-      }
-    }
-  }, [currentFullEpisodeIndex, hasLocalSavedSubtasks, hasServerSavedSubtasks, serverRecording]);
 
   useEffect(() => {
     if (!recordStatus.topicReceived) return;
@@ -146,7 +143,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
       if (operationFailed) {
         pendingEpisodeResetRef.current = null;
         setServerResetInProgress(false);
-        setEpisodeAcquisitionStarted(true);
         toast.error(
           recordStatus.recordingOperationMessage ||
           'Finish episode failed; saved subtasks are still available.'
@@ -172,8 +168,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
       lastServerEpisodeRef.current = currentEpisode;
       setOptimisticRecording(false);
       setSavingInProgress(false);
-      setEpisodeAcquisitionStarted(false);
-      episodeFullIndexRef.current = null;
       dispatch(resetSegmentProgress());
       return;
     } else {
@@ -218,7 +212,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
 
     if (serverRecording) {
       setSavingInProgress(false);
-      setEpisodeAcquisitionStarted(true);
     }
   }, [
     activeSlotIndex,
@@ -324,26 +317,16 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
       if (!isSingleMode && !subTask) return null;
       dispatch(setActiveSlotIndex(slotIdx));
       setOptimisticRecording(true);
-      setEpisodeAcquisitionStarted(true);
-      if (episodeFullIndexRef.current === null) {
-        episodeFullIndexRef.current = currentFullEpisodeIndex;
-      }
       const result = await runCommand('Record', 'start_segment', {
         segmentIndex: slotIdx,
       });
       if (!result || result.success === false) {
         setOptimisticRecording(false);
-        if (!hasLocalSavedSubtasks && !hasServerSavedSubtasks) {
-          setEpisodeAcquisitionStarted(false);
-        }
       }
       return result;
     },
     [
-      currentFullEpisodeIndex,
       dispatch,
-      hasLocalSavedSubtasks,
-      hasServerSavedSubtasks,
       isSingleMode,
       plannedSubTasks,
       runCommand,
@@ -392,20 +375,13 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
 
         const nextPending = updatedSlotMap.findIndex((v) => v === -1);
         if (isLastSlot || nextPending < 0) {
-          const targetFullEpisodeIndex = (
-            episodeFullIndexRef.current === null
-              ? currentFullEpisodeIndex
-              : episodeFullIndexRef.current
-          );
           const finishResult = await runCommand('Finish episode', 'finish_episode');
           if (finishResult && finishResult.success) {
             pendingEpisodeResetRef.current = {
               type: 'finish',
-              fullEpisodeIndex: targetFullEpisodeIndex,
+              fullEpisodeIndex: currentFullEpisodeIndex,
             };
             setServerResetInProgress(true);
-            setEpisodeAcquisitionStarted(false);
-            episodeFullIndexRef.current = null;
             dispatch(resetSegmentProgress());
           }
           return;
@@ -472,33 +448,20 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
   );
 
   const handleDiscardEpisode = useCallback(async () => {
-    if (
-      savingInProgress ||
-      serverResetInProgress ||
-      !episodeAcquisitionStarted
-    ) {
-      return;
-    }
+    if (!canDiscardEpisode) return;
     if (commandSequenceInProgressRef.current) return;
     commandSequenceInProgressRef.current = true;
-    const targetFullEpisodeIndex = episodeFullIndexRef.current;
-    if (targetFullEpisodeIndex === null) {
-      commandSequenceInProgressRef.current = false;
-      return;
-    }
     try {
       const result = await runCommand('Discard episode', 'discard_episode', {
-        segmentIndex: targetFullEpisodeIndex + 1,
+        segmentIndex: currentFullEpisodeIndex + 1,
       });
       if (result && result.success) {
         pendingEpisodeResetRef.current = {
           type: 'discard',
-          fullEpisodeIndex: targetFullEpisodeIndex,
+          fullEpisodeIndex: currentFullEpisodeIndex,
         };
         setServerResetInProgress(true);
         setOptimisticRecording(false);
-        setEpisodeAcquisitionStarted(false);
-        episodeFullIndexRef.current = null;
         dispatch(resetSegmentProgress());
       }
     } finally {
@@ -506,10 +469,9 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
     }
   }, [
     dispatch,
-    episodeAcquisitionStarted,
+    canDiscardEpisode,
+    currentFullEpisodeIndex,
     runCommand,
-    savingInProgress,
-    serverResetInProgress,
   ]);
 
   const canSaveSingle =
@@ -526,8 +488,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
   }, [canSaveSingle, canStartRecord, handleRecordStart, handleSlotSave]);
 
   const handleResetPlan = useCallback(() => {
-    setEpisodeAcquisitionStarted(false);
-    episodeFullIndexRef.current = null;
     dispatch(resetSegmentPlan());
     dispatch(markLocalTaskInfoEdited());
   }, [dispatch]);
@@ -578,8 +538,6 @@ export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = 
     !serverResetInProgress &&
     savedCount === 0
   );
-  const canDiscardEpisode =
-    !savingInProgress && !serverResetInProgress && episodeAcquisitionStarted;
 
   const secondaryBtn = (enabled, color) =>
     clsx(

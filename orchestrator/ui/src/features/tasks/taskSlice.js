@@ -355,6 +355,7 @@ const initialState = {
   // through editDatasetSlice.conversionStatus — distinct from this
   // record-session state.
   recordStatus: {
+    taskNum: '',
     taskName: 'idle',
     taskType: '',
     running: false,
