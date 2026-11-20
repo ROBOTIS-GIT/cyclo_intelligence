@@ -403,7 +403,8 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
         discard_recording=Mock(),
     )
     service._rosbag = SimpleNamespace(stop_and_delete_rosbag=Mock(), publish_action_event=Mock())
-    service._stop_episode_writers = Mock()
+    service._video_recorder = Mock()
+    service._camera_info = Mock()
     service._publish_umbrella_status = Mock()
     original = shutil.rmtree
     monkeypatch.setattr(shutil, 'rmtree', Mock(side_effect=PermissionError('denied')))
@@ -411,12 +412,69 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
     with pytest.raises(PermissionError):
         service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
     service._data_manager.discard_recording.assert_not_called()
+    service._camera_info.discard_episode.assert_called_once()
     monkeypatch.setattr(shutil, 'rmtree', original)
     service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
     assert response.success
     assert not episode.exists()
     service._rosbag.stop_and_delete_rosbag.assert_called_once()
-    service._stop_episode_writers.assert_called_once()
+    service._video_recorder.stop_episode.assert_called_once()
+    service._camera_info.stop_episode.assert_not_called()
+    service._camera_info.discard_episode.assert_called_once()
+
+
+def test_inference_discard_rosbag_error_leaves_snapshot_attached(tmp_path):
+    service, _ = _service_with_logger()
+    segment = tmp_path / "0/segments/0"
+    segment.mkdir(parents=True)
+    service._data_manager = Mock()
+    service._data_manager._task_info.task_type = 'inference'
+    service._data_manager.active_discard_path.return_value = segment
+    service._video_recorder = Mock()
+    service._rosbag = Mock()
+    service._rosbag.stop_and_delete_rosbag.side_effect = RuntimeError("delete rejected")
+    service._camera_info = Mock()
+    with pytest.raises(RuntimeError, match="delete rejected"):
+        service._do_discard(SimpleNamespace(), SimpleNamespace(), event='cancel')
+    assert segment.exists()
+    service._camera_info.discard_episode.assert_not_called()
+    service._camera_info.stop_episode.assert_not_called()
+    service._data_manager.discard_recording.assert_not_called()
+
+
+@pytest.mark.parametrize("whole_episode", [False, True])
+def test_active_discard_drains_writers_but_does_not_persist_calibration(tmp_path, whole_episode):
+    service, _ = _service_with_logger()
+    events = []
+    segment = tmp_path / "0/segments/0"
+    segment.mkdir(parents=True)
+    service._data_manager = Mock()
+    service._data_manager._task_info.task_type = 'record'
+    service._data_manager.active_discard_path.return_value = segment
+    service._data_manager.get_current_full_episode_index.return_value = 0
+    service._data_manager.discard_full_episode.return_value = 1
+    service._data_manager._segmented_storage_mode = True
+    service._data_manager.get_current_subtask_index.return_value = 0
+    service._finish_episode_in_progress = lambda: False
+    service._publish_umbrella_status = Mock()
+    service._video_recorder = Mock()
+    service._video_recorder.stop_episode.side_effect = lambda: events.append('drain')
+    service._rosbag = Mock()
+    service._rosbag.stop_and_delete_rosbag.side_effect = lambda: events.append('bag delete')
+    service._camera_info = Mock()
+    service._camera_info.discard_episode.side_effect = lambda: events.append('detach')
+    service._last_camera_info_files = {'head': 'previous.yaml'}
+    response = SimpleNamespace(success=False)
+    if whole_episode:
+        service._do_discard_episode(_request(1), response)
+        service._data_manager.discard_full_episode.assert_called_once_with(0)
+    else:
+        service._do_cancel(_request(0, command=_RecordingCommand.Request.CANCEL_SEGMENT), response)
+        service._data_manager.discard_full_episode.assert_not_called()
+    assert response.success and not segment.exists()
+    assert events == ['drain', 'bag delete', 'detach']
+    assert service._last_camera_info_files == {}
+    service._camera_info.stop_episode.assert_not_called()
 
 
 def test_discard_missing_active_path_touches_neither_writers_nor_bag(tmp_path, monkeypatch):
@@ -429,12 +487,14 @@ def test_discard_missing_active_path_touches_neither_writers_nor_bag(tmp_path, m
     manager = DataManager.__new__(DataManager)
     manager.get_save_rosbag_path = lambda: None
     service._data_manager = manager
-    service._stop_episode_writers = Mock()
+    service._stop_video_writer = Mock()
+    service._discard_camera_snapshot = Mock()
     service._rosbag = Mock()
     response = SimpleNamespace(success=True, message='')
     service._do_discard(SimpleNamespace(), response, event='cancel')
     assert not response.success and 'No active recording directory' in response.message
-    service._stop_episode_writers.assert_not_called()
+    service._stop_video_writer.assert_not_called()
+    service._discard_camera_snapshot.assert_not_called()
     assert not service._rosbag.mock_calls
     assert sentinel.read_bytes() == b'keep'
 
@@ -743,7 +803,7 @@ def test_start_segment_rolls_back_rosbag_when_writer_start_fails(tmp_path):
     service._ensure_video_pipeline = lambda robot_type: None
     service._last_prepared_topics = ()
     service._video_recorder = FailingVideoRecorder()
-    service._camera_info = None
+    service._camera_info = Mock()
     service._publish_umbrella_status = lambda *args, **kwargs: None
 
     def start_rosbag(rosbag_uri):
@@ -774,6 +834,8 @@ def test_start_segment_rolls_back_rosbag_when_writer_start_fails(tmp_path):
         ("stop_delete", None),
     ]
     assert stopped_writers == [True]
+    service._camera_info.discard_episode.assert_called_once()
+    service._camera_info.stop_episode.assert_not_called()
     assert started == []
     assert not episode_dir.exists()
     assert logger.errors == [response.message]

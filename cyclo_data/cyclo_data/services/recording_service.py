@@ -808,7 +808,8 @@ class RecordingService:
         touched and let the caller return a failed START response.
         """
         try:
-            self._stop_episode_writers()
+            self._stop_video_writer()
+            self._discard_camera_snapshot()
         except Exception as exc:  # pragma: no cover - defensive
             self._node.get_logger().warning(
                 f'Failed-start writer cleanup raised: {exc!r}')
@@ -903,23 +904,24 @@ class RecordingService:
                 f"Transcoder resume scan failed: {exc!r}"
             )
 
-    def _stop_episode_writers(self):
-        """End the current episode, keeping subscribers alive.
-
-        Stats / produced-file lists are stashed on the instance so the
-        next ``save_robotis_metadata`` call can include them in
-        ``episode_info.json``. The recorder/snapshot instances remain
-        for the next episode — only ``close()`` (on shutdown) or
-        ``reconfigure()`` (on robot_type change) tears their subs down.
-        """
+    def _stop_video_writer(self):
         self._last_video_stats = {}
-        self._last_camera_info_files = {}
         if self._video_recorder is not None:
             try:
                 self._last_video_stats = self._video_recorder.stop_episode() or {}
             except Exception as exc:  # pragma: no cover - defensive
                 self._node.get_logger().error(
                     f'VideoRecorder.stop_episode raised: {exc!r}')
+
+    def _discard_camera_snapshot(self):
+        self._last_camera_info_files = {}
+        if self._camera_info is not None:
+            self._camera_info.discard_episode()
+
+    def _stop_episode_writers(self):
+        """Drain video and save available calibration; keep subscriptions alive."""
+        self._stop_video_writer()
+        self._last_camera_info_files = {}
         if self._camera_info is not None:
             try:
                 produced = self._camera_info.stop_episode() or {}
@@ -1276,7 +1278,7 @@ class RecordingService:
     ):
         """Active-recording CANCEL — drop the episode without saving.
 
-        Order matters: drain VideoRecorder/CameraInfoSnapshot writers
+        Order matters: drain VideoRecorder writers
         first so no ffmpeg subprocess is still holding files open in
         ``episode_dir``, then tell rosbag_recorder to stop and delete
         the bag (which removes ``episode_dir`` outright), then defensively
@@ -1302,7 +1304,7 @@ class RecordingService:
             getattr(self._data_manager, '_task_info', None), 'task_type', '') == 'inference'
         already_stopped = inference_recording and getattr(self, '_inference_writers_stopped', False)
         if not already_stopped:
-            self._stop_episode_writers()
+            self._stop_video_writer()
 
         # 2. rosbag_recorder stops + removes its bag directory
         #    (= episode_dir). Synchronous so we don't race with step 3.
@@ -1316,6 +1318,11 @@ class RecordingService:
                 raise
             self._node.get_logger().warning(
                 f'stop_and_delete_rosbag failed: {exc!r}')
+
+        # Once bag deletion is accepted the path can already be gone.
+        # Do not let shutdown write calibration there if the final sweep fails.
+        if not already_stopped:
+            self._discard_camera_snapshot()
 
         # 3. Belt-and-braces: if anything (videos/, camera_info/, stray
         #    .mcap.tmp from a crash) survived, sweep it.

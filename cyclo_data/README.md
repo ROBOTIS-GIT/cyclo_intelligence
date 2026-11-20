@@ -63,6 +63,21 @@ Progress on long-running tasks (conversion, HF upload) is published
 on `/data/status` as `DataOperationStatus`; orchestrator relays it
 into `/task/status` so the UI doesn't see two topics.
 
+## Recording camera calibration
+
+The recorder keeps the first calibrated `CameraInfo` per camera and releases
+that camera's calibration subscription. This does not stop its image stream.
+Save copies available calibration (including its original timestamp) to
+`camera_info/<camera>.yaml` without waiting for missing cameras. Discard
+does not write calibration or clear the cache.
+
+Calibration must remain fixed while using the same robot profile. If replacing
+a camera or changing its resolution, ROI, or calibration on the same topic,
+finish recording and let any pending archive or transcode complete. Restart
+the `cyclo_data` node after the driver publishes the new calibration and
+before recording again. Starting another episode does not refresh the cache;
+switching to a different robot profile does.
+
 ## Console scripts
 
 `setup.py` registers two entry points:
