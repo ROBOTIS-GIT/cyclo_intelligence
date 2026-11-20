@@ -55,6 +55,7 @@ import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { announceRecording } from '../utils/recordingAudio';
 import { useRosServiceCaller } from './useRosServiceCaller';
 import {
   hasRosTaskInfoPayload,
@@ -96,55 +97,6 @@ export function useRosTopicSubscription() {
   const robotType = useSelector((state) => state.tasks.robotType);
   const { getRobotInfo } = useRosServiceCaller();
   const [connected, setConnected] = useState(false);
-
-  const preferredVoiceRef = useRef(null);
-
-  useEffect(() => {
-    if (!('speechSynthesis' in window)) return;
-    const pickVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length === 0) return;
-      preferredVoiceRef.current = voices.find(v =>
-        v.lang.startsWith('en') && v.name.toLowerCase().includes('female')
-      ) || voices.find(v =>
-        v.lang.startsWith('en') && /samantha|karen|victoria|fiona|moira|tessa/i.test(v.name)
-      ) || voices.find(v =>
-        v.lang.startsWith('en-US') && !v.name.toLowerCase().includes('male')
-      ) || null;
-      if (preferredVoiceRef.current) {
-        console.log('TTS voice selected:', preferredVoiceRef.current.name);
-      }
-    };
-    pickVoice();
-    window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', pickVoice);
-  }, []);
-
-  const speakText = useCallback(
-    (text, lang = 'en-US') => {
-      try {
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.resume();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = lang;
-          utterance.rate = 1.1;
-          utterance.pitch = 1.1;
-          utterance.volume = 1.0;
-          if (lang === 'en-US' && preferredVoiceRef.current) {
-            utterance.voice = preferredVoiceRef.current;
-          }
-          window.speechSynthesis.speak(utterance);
-          console.log(`Speech: "${text}"`);
-        } else {
-          console.warn('Speech synthesis not available');
-        }
-      } catch (error) {
-        console.warn('Speech failed:', error);
-      }
-    },
-    []
-  );
 
   const notifyCameraMonitorIssues = useCallback(
     (cameraTopics) => {
@@ -193,11 +145,11 @@ export function useRosTopicSubscription() {
       toast.error(`Camera monitor warning\n${summary}${moreText}`, {
         duration: 9000,
       });
-      speakText('camera warning');
+      announceRecording('cameraWarning');
       previousCameraMonitorIssueKeyRef.current = issueKey;
       lastCameraMonitorAlertAtRef.current = now;
     },
-    [speakText]
+    []
   );
 
   // Helper function to unsubscribe from a topic
@@ -244,7 +196,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToRecordingStatus = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
 
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
@@ -276,10 +227,6 @@ export function useRosTopicSubscription() {
             proceedTime: msg.proceed_time,
           })
         ) {
-          console.log('Recording started - speaking notification');
-          setTimeout(() => {
-            speakText('Recording started');
-          }, VOICE_DELAY);
           toast.success('Recording started!');
         }
         if (!monitorOnlyMessage) {
@@ -375,7 +322,6 @@ export function useRosTopicSubscription() {
   }, [
     dispatch,
     rosbridgeUrl,
-    speakText,
     notifyCameraMonitorIssues,
   ]);
 
@@ -545,15 +491,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToActionEvent = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
-      const ACTION_VOICE_MAP = {
-        start: 'Recording started',
-        finish: 'Recording finished',
-        cancel: 'Cancelled',
-        review_on: 'Previous data needs review',
-        review_off: 'Previous data review cleared',
-      };
-
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
 
@@ -572,19 +509,14 @@ export function useRosTopicSubscription() {
         const action = msg.data;
         console.log('Received action event:', action);
 
-        const voiceText = ACTION_VOICE_MAP[action];
-        if (voiceText) {
-          setTimeout(() => {
-            speakText(voiceText);
-          }, VOICE_DELAY);
-        }
+        announceRecording(action);
       });
 
       console.log('Action event subscription established');
     } catch (error) {
       console.error('Failed to subscribe to action event topic:', error);
     }
-  }, [rosbridgeUrl, speakText]);
+  }, [rosbridgeUrl]);
 
   const subscribeToHeartbeat = useCallback(async () => {
     try {

@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useSyncExternalStore } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { MdClose, MdViewInAr, MdMonitorHeart, MdKeyboardDoubleArrowLeft, MdKeyboardDoubleArrowRight } from 'react-icons/md';
+import { MdClose, MdViewInAr, MdMonitorHeart, MdKeyboardDoubleArrowLeft, MdKeyboardDoubleArrowRight, MdVolumeOff, MdVolumeUp } from 'react-icons/md';
 import toast, { useToasterStore } from 'react-hot-toast';
 import PageType from '../constants/pageType';
 import { RecordPhase } from '../constants/taskPhases';
@@ -16,6 +16,9 @@ import RecordControlPanel from '../components/RecordControlPanel';
 import InferenceControlPanel from '../components/InferenceControlPanel';
 import SegmentPanel from '../components/SegmentPanel';
 import InferencePanel from '../components/InferencePanel';
+import {
+  disableRecordingAudio, enableRecordingAudio, preloadRecordingAudio, recordingSoundState, subscribeRecordingSound,
+} from '../utils/recordingAudio';
 import './OperationWorkspace.css';
 
 const MONITORS_STORAGE_KEY = 'cyclo_intelligence.operate.monitors';
@@ -47,6 +50,12 @@ export default function OperationWorkspace() {
   const [actionsTarget, setActionsTarget] = useState(null);
   const [showSettings, setShowSettings] = useState(true);
   const [monitors, setMonitors] = useState(readMonitorVisibility);
+  const sound = useSyncExternalStore(subscribeRecordingSound, recordingSoundState);
+  const soundLabel = sound === 'on' ? 'Mute recording announcements' : 'Enable recording announcements';
+  useEffect(() => {
+    // A failed preload can be retried when the operator enables sound.
+    preloadRecordingAudio().catch(() => {});
+  }, []);
   const show3D = monitors.viewer;
   const showTopics = monitors.topics;
   const inferenceSelected = page === PageType.INFERENCE;
@@ -80,6 +89,13 @@ export default function OperationWorkspace() {
           <span aria-label="Robot type" className="max-w-full min-w-0 rounded border border-gray-300 bg-gray-50 px-3 py-1.5 text-sm font-medium text-gray-800 break-all">{robotType}</span>
           {joystickMode && <span className="text-xs text-gray-500">{joystickMode}</span>}
           <HeartbeatStatus autoHideConnectedMs={3000} size="small" className="operation-connection" />
+          <button type="button" className={collapseButtonClass} title={soundLabel} aria-label={soundLabel}
+            aria-pressed={sound === 'on'} disabled={sound === 'loading'} onClick={() => {
+              if (sound === 'on') disableRecordingAudio();
+              else enableRecordingAudio().catch(() => toast.error('Could not enable recording sounds. Try again.'));
+            }}>
+            {sound === 'on' ? <MdVolumeUp size={20} /> : <MdVolumeOff size={20} />}
+          </button>
           <div aria-label="System metrics" className="hidden lg:block"><InlineSystemStatus /></div>
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">

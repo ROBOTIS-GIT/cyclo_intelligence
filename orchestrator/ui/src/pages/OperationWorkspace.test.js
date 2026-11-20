@@ -14,6 +14,10 @@ import { ThemeProvider } from '../contexts/ThemeContext';
 import ThemeToggle from '../components/ThemeToggle';
 
 jest.mock('../hooks/useRosServiceCaller', () => ({ useRosServiceCaller: jest.fn() }));
+jest.mock('../utils/recordingAudio', () => ({
+  ...jest.requireActual('../utils/recordingAudio'),
+  preloadRecordingAudio: async () => [],
+}));
 jest.mock('../hooks/usePolicyBackendStatus', () => ({
   ...jest.requireActual('../hooks/usePolicyBackendStatus'),
   __esModule: true,
