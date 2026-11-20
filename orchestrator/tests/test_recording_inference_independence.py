@@ -40,7 +40,6 @@ def recording_stack(tmp_path, monkeypatch):
     raw_root = tmp_path / 'recordings'
     monkeypatch.setattr(manager_module, 'RECORDING_ROOT', raw_root)
     monkeypatch.setattr(manager_module, 'CPUChecker', object)
-    monkeypatch.setattr(manager_module, 'DataConverter', object)
     monkeypatch.setattr(service_module, 'CPUChecker', object)
     monkeypatch.setattr(service_module.RecordingService, 'DEFAULT_SAVE_ROOT_PATH',
                         tmp_path / 'datasets')

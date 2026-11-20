@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
@@ -38,7 +39,6 @@ class _Dummy:
 
 _stub_module("huggingface_hub", HfApi=_Dummy)
 _stub_module("interfaces.msg", RecordingStatus=_Dummy)
-_stub_module("cyclo_data.converter.orchestrator", DataConverter=_Dummy)
 _stub_module(
     "cyclo_data.hub.progress_tracker",
     HuggingFaceLogCapture=_Dummy,
@@ -129,8 +129,7 @@ def test_only_record_sessions_search_for_resumable_subtasks(monkeypatch, tmp_pat
 
     monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
     monkeypatch.setattr('cyclo_data.recorder.session_manager.CPUChecker', _Dummy)
-    monkeypatch.setattr('cyclo_data.recorder.session_manager.DataConverter', _Dummy)
-    monkeypatch.setattr(DataManager, '_find_next_episode_number', lambda self: 9)
+    monkeypatch.setattr(DataManager, '_find_next_episode_number', lambda self, entries: 9)
     resume = Mock(return_value=(3, 0))
     monkeypatch.setattr(DataManager, '_find_next_subtask_position', resume)
     manager = DataManager(tmp_path, 'test_robot', SimpleNamespace(
@@ -142,9 +141,42 @@ def test_only_record_sessions_search_for_resumable_subtasks(monkeypatch, tmp_pat
         resume.assert_not_called()
         assert manager._current_full_episode_index == 9
     else:
-        resume.assert_called_once_with()
+        resume.assert_called_once_with([])
         assert manager._current_full_episode_index == 3
     assert manager._current_subtask_index == 0
+
+
+def test_converter_is_optional_and_initialized_once_per_session(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import Mock
+
+    module = 'cyclo_data.converter.orchestrator'
+    monkeypatch.setitem(sys.modules, module, None)
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.RECORDING_ROOT', tmp_path)
+    monkeypatch.setattr('cyclo_data.recorder.session_manager.CPUChecker', _Dummy)
+    info = SimpleNamespace(task_type='record', task_num='1', task_name='test',
+                           task_instruction=['pick'], subtask_instruction=[])
+    manager = DataManager(tmp_path, 'test_robot', info)
+    with pytest.raises(ModuleNotFoundError):
+        _ = manager.data_converter
+
+    factory = Mock(side_effect=object)
+    monkeypatch.setitem(sys.modules, module, SimpleNamespace(DataConverter=factory))
+    start = threading.Barrier(4)
+
+    def first_access(_):
+        start.wait(timeout=5)
+        return manager.data_converter
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        instances = list(pool.map(first_access, range(4)))
+    assert all(instance is manager.data_converter for instance in instances)
+    factory.assert_called_once_with()
+    other = DataManager(tmp_path, 'test_robot', info)
+    assert other.data_converter is not manager.data_converter
+    manager.data_converter = None
+    assert manager.data_converter is None
+    assert factory.call_count == 2
 
 
 def test_inference_skips_empty_and_incomplete_episode_slots(tmp_path):
@@ -154,6 +186,69 @@ def test_inference_skips_empty_and_incomplete_episode_slots(tmp_path):
     (tmp_path / '8').mkdir()
     (tmp_path / '8/incomplete.mcap.tmp').write_bytes(b'partial')
     assert manager._find_next_episode_number() == 9
+
+
+def test_task_scan_prunes_only_excluded_subtrees(tmp_path, monkeypatch):
+    root = tmp_path / "task_converted"  # The task's own name is not an exclusion.
+    manager = _make_manager(root)
+    keep = root / "2" / "segments" / "0"
+    keep.mkdir(parents=True)
+    (keep / "episode_info.json").write_text('{"episode_index":2}')
+    excluded = set()
+    for name in ("old_converted", "_stitched_subtasks", ".legacy_subtask_migration_tmp",
+                 ".subtasks_archive"):
+        folder = root / "2" / name
+        excluded.add(folder)
+        (folder / "nested").mkdir(parents=True)
+        (folder / "nested" / "episode_info.json").write_text('{"episode_index":999}')
+    (root / "cycle").symlink_to(root, target_is_directory=True)
+    linked = root / "3"
+    linked.mkdir()
+    (linked / "episode_info.json").symlink_to(keep / "episode_info.json")
+    visited = []
+    scan = os.scandir
+
+    def tracked_scan(path):
+        visited.append(Path(path))
+        return scan(path)
+
+    monkeypatch.setattr(os, "scandir", tracked_scan)
+    entries = manager._collect_episode_info_entries()
+    assert dict(entries) == {keep: {"episode_index": 2}, linked: {"episode_index": 2}}
+    assert not excluded.intersection(visited)
+    assert root / "cycle" not in visited
+    assert manager._find_next_episode_number(entries) == 4
+    assert visited.count(keep) == 1
+
+
+def test_mcap_in_excluded_tree_reserves_slot_but_excluded_manifest_does_not(tmp_path):
+    manager = _make_manager(tmp_path)
+    hidden = tmp_path / "6" / ".subtasks_archive"
+    hidden.mkdir(parents=True)
+    (hidden / "episode_info.json").write_text('{"episode_index":10}')
+    assert manager._find_next_episode_number() == 0
+    (hidden / "partial.mcap").touch()
+    assert manager._find_next_episode_number() == 7
+
+
+@pytest.mark.parametrize("task_type", ["record", "inference"])
+def test_failed_cursor_scan_never_selects_episode_zero(tmp_path, monkeypatch, task_type):
+    manager = _make_manager(tmp_path)
+    manager._task_info.task_type = task_type
+    occupied = tmp_path / "0"
+    occupied.mkdir()
+    segment = occupied / "existing.mcap"
+    segment.write_bytes(b"captured")
+
+    def denied(path):
+        raise PermissionError("task cannot be listed")
+
+    monkeypatch.setattr(os, "scandir", denied)
+    with pytest.raises(PermissionError):
+        manager._find_next_episode_number([])
+    with pytest.raises(PermissionError):
+        manager._collect_episode_info_entries()
+    assert segment.read_bytes() == b"captured"
 
 
 def test_failed_inference_archive_does_not_advance_episode_cursor(tmp_path):
@@ -207,8 +302,13 @@ def test_inference_archive_retries_partial_split_mcap_move(tmp_path, monkeypatch
     monkeypatch.setattr(manager, '_move_file', fail_second)
     with pytest.raises(OSError, match='disk full'):
         manager._archive_full_episode(0)
+    info_path = segment / "episode_info.json"
+    info = json.loads(info_path.read_text())
+    info["inference"] = {"policy_id": "retry-metadata"}
+    info_path.write_text(json.dumps(info))
     monkeypatch.setattr(manager, '_move_file', original)
     out = manager._archive_full_episode(0)
+    assert json.loads((out / "episode_info.json").read_text())["inference"] == info["inference"]
     assert (out / '0_0_0.mcap').read_bytes() == b'mcap-0'
     assert (out / '0_0_1.mcap').read_bytes() == b'second'
 
@@ -286,6 +386,33 @@ def _write_segment(
 
 def test_file_size_if_present_ignores_concurrent_removal():
     assert DataManager._file_size_if_present(_VanishingPath()) == 0
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_archive_orders_segments_by_metadata_and_preserves_payloads(tmp_path, monkeypatch, legacy):
+    manager = _make_manager(tmp_path, subtask_total=8)
+    for i in reversed(range(8)):
+        segment = _write_segment(tmp_path, full_idx=0, subtask_idx=i, subtask_total=8)
+        if legacy:
+            segment.rename(tmp_path / str(100 - i))
+    if legacy:
+        (tmp_path / "0" / "segments").rmdir()
+    reads = []
+    read_info = DataManager._read_episode_info
+
+    def counted_read(path):
+        reads.append(path)
+        return read_info(path)
+
+    monkeypatch.setattr(DataManager, "_read_episode_info", staticmethod(counted_read))
+    out = manager._archive_full_episode(0)
+    if not legacy:
+        assert len(set(reads)) == len(reads) == 8
+    summary = json.loads((out / "episode_info.json").read_text())
+    assert [s["sub_task_instruction"] for s in summary["segments"]] == [
+        f"subtask {i}" for i in range(8)]
+    for i in range(8):
+        assert (out / f"0_{i}.mcap").read_bytes() == f"mcap-{i}".encode()
 
 
 def test_archive_moves_segmented_files_and_marks_pending(tmp_path):
@@ -408,6 +535,82 @@ def test_discard_full_episode_deletes_requested_episode_without_cursor_drift(tmp
     assert manager._current_scenario_number == 1
 
 
+@pytest.mark.parametrize('sibling', ['incomplete', 'invalid_manifest', 'valid', 'none'])
+def test_discard_one_subtask_never_sweeps_other_data(tmp_path, sibling):
+    manager = _make_manager(tmp_path)
+    manager._current_full_episode_index = 0
+    selected = _write_segment(tmp_path, full_idx=0, subtask_idx=0, subtask_total=2)
+    if sibling != 'none':
+        other = _write_segment(tmp_path, full_idx=0, subtask_idx=1, subtask_total=2)
+        manifest = other / 'episode_info.json'
+        if sibling == 'incomplete':
+            manifest.unlink()
+        elif sibling == 'invalid_manifest':
+            manifest.write_text('{')
+        before = {p: p.read_bytes() for p in other.rglob('*') if p.is_file()}
+    assert manager.discard_saved_subtask(0) == 1
+    assert not selected.exists()
+    if sibling == 'none':
+        assert not (tmp_path / '0').exists()
+    else:
+        assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize('full', [True, False])
+def test_discard_rejects_symlinked_segments_without_touching_target(tmp_path, full):
+    root = tmp_path / 'task'
+    manager = _make_manager(root)
+    manager._current_full_episode_index = 0
+    other = _write_segment(tmp_path / 'outside', full_idx=0, subtask_idx=0, subtask_total=1)
+    (root / '0').mkdir(parents=True)
+    (root / '0/segments').symlink_to(other.parent, target_is_directory=True)
+    with pytest.raises(ValueError, match='Symlink'):
+        (manager.discard_full_episode if full else manager.discard_saved_subtask)(0)
+    assert (other / 'segment_0.mcap').read_bytes() == b'mcap-0'
+
+
+def test_discard_flat_episode_uses_metadata_not_numeric_name(tmp_path):
+    root = tmp_path / 'task'
+    root.mkdir()
+    for raw, full in [(0, 2), (1, 0)]:
+        segment = _write_segment(tmp_path / 'source', full_idx=full, subtask_idx=0, subtask_total=2)
+        segment.rename(root / str(raw))
+    manager = _make_manager(root)
+    manager._current_full_episode_index = 0
+    assert manager.discard_full_episode(0) == 1
+    assert not (root / '1').exists()
+    assert (root / '0/segment_0.mcap').read_bytes() == b'mcap-0'
+
+
+@pytest.mark.parametrize('name', ['.', '..', '../elsewhere/0'])
+def test_active_discard_rejects_task_root_and_traversal(tmp_path, name):
+    manager = _make_manager(tmp_path)
+    manager.get_save_rosbag_path = lambda: str(tmp_path / name)
+    with pytest.raises(ValueError, match='Unsafe'):
+        manager.active_discard_path()
+
+
+@pytest.mark.parametrize('full', [True, False])
+def test_discard_failure_does_not_advance_cursor_and_can_retry(tmp_path, monkeypatch, full):
+    manager = _make_manager(tmp_path)
+    manager._current_full_episode_index = 0
+    manager._current_subtask_index = 1
+    segment = _write_segment(tmp_path, full_idx=0, subtask_idx=0, subtask_total=2)
+    discard = manager.discard_full_episode if full else manager.discard_saved_subtask
+
+    def deny(*args, **kwargs):
+        raise PermissionError('denied')
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr('shutil.rmtree', deny)
+        with pytest.raises(PermissionError):
+            discard(0)
+    assert manager._current_subtask_index == 1
+    assert (segment / 'segment_0.mcap').is_file()
+    assert discard(0) == 1
+    assert not (tmp_path / '0').exists()
+
+
 def test_discard_recording_can_reset_active_episode_subtask_cursor(tmp_path):
     root = tmp_path / "Task_1234_archive_MCAP"
     manager = _make_manager(root, subtask_total=3)
@@ -477,7 +680,7 @@ def test_episode_dirs_for_full_subtask_uses_nested_segments_without_root_scan(
     second = _write_segment(root, full_idx=0, subtask_idx=1, subtask_total=2)
     monkeypatch.setattr(
         manager,
-        "_iter_subtask_episode_dirs",
+        "_collect_episode_info_entries",
         lambda: (_ for _ in ()).throw(
             AssertionError("nested layout should not fall back to root scan")
         ),
@@ -523,6 +726,57 @@ def test_update_task_info_license_toggle_does_not_rescan(monkeypatch, tmp_path):
     assert manager._current_full_episode_index == 3
     assert manager._current_subtask_index == 1
     assert manager.current_instruction == "updated instruction"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_refresh_reads_each_manifest_once_and_observes_new_segments(tmp_path, monkeypatch, legacy):
+    manager = _make_manager(tmp_path, subtask_total=3)
+    manager._status = "idle"
+    manager._single_task = False
+
+    def add(index):
+        segment = _write_segment(tmp_path, full_idx=0, subtask_idx=index, subtask_total=3)
+        if legacy:
+            segment.rename(tmp_path / str(20 - index))
+
+    add(2)
+    add(0)
+    reads = []
+    original = manager._read_episode_info
+
+    def read(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(manager, "_read_episode_info", read)
+    for count, expected in [(2, (0, 1)), (3, (1, 0))]:
+        if count == 3:
+            add(1)
+        reads.clear()
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        manager.refresh_episode_position()
+        assert len(reads) == len(set(reads)) == count
+        assert (manager._current_full_episode_index, manager._current_subtask_index) == expected
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_repeated_incompatible_layout_never_changes_session(tmp_path):
+    manager = _make_manager(tmp_path, subtask_total=2)
+    manager._status = "idle"
+    manager._current_full_episode_index, manager._current_subtask_index = 0, 1
+    original_task_info = manager._task_info
+    _write_segment(tmp_path, full_idx=0, subtask_idx=0, subtask_total=2)
+    bad = SimpleNamespace(task_instruction=["wrong task"], subtask_instruction=["a", "b", "c"])
+    for _ in range(3):
+        with pytest.raises(ValueError, match="Cannot mix subtask counts"):
+            manager.update_task_info(bad)
+        assert manager._task_info is original_task_info
+        assert manager._physical_segment_total == 2
+        assert manager._current_subtask_index == 1
+    manager.update_task_info(SimpleNamespace(task_instruction=["original"],
+                                            subtask_instruction=["a", "b"]))
+    assert manager.current_instruction == "original"
+    assert manager._current_subtask_index == 1
 
 
 def test_full_episode_archive_errors_report_corrupt_saved_segment(tmp_path):

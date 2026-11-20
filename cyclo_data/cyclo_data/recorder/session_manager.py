@@ -27,13 +27,12 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Optional
+from typing import Iterator, Optional
 
 from huggingface_hub import HfApi
 import yaml
 from interfaces.msg import RecordingStatus
 from shared.inference_recording import RECORDING_ROOT, allocate_folder, folder_name
-from cyclo_data.converter.orchestrator import DataConverter
 from cyclo_data.hub.progress_tracker import (
     HuggingFaceLogCapture,
     HuggingFaceProgressTqdm,
@@ -170,6 +169,7 @@ class DataManager:
 
     # Progress queue for multiprocessing communication
     _progress_queue = None
+    _CONVERTER_UNSET = object()
 
     def __init__(
             self,
@@ -192,36 +192,18 @@ class DataManager:
         self._segmented_storage_mode = True
         self._single_task = not self._subtask_mode
         self._saved_subtasks_cache: dict[int, set[int]] = {}
-        self._episode_info_scan_cache = self._collect_episode_info_entries()
-        try:
-            self._validate_existing_segment_count()
-
-            # Per-recording opt-in flag from the UI checkbox; getattr guards
-            # against TaskInfo messages built before the field was added.
-            self._include_robotis_license = bool(
-                getattr(task_info, 'include_robotis_license', False)
-            )
-
-            # Find next available raw recording number from existing folders.
-            # In subtask mode this is a raw subtask counter used only for
-            # metadata continuity; the on-disk path is full_episode/subtasks/N.
-            self._record_episode_count = self._find_next_episode_number()
-            if getattr(task_info, 'task_type', '') == 'inference':
-                # Never resume a partial episode after a process restart.
-                self._current_full_episode_index = self._record_episode_count
-                self._current_subtask_index = 0
-            else:
-                (
-                    self._current_full_episode_index,
-                    self._current_subtask_index,
-                ) = self._find_next_subtask_position()
-        finally:
-            self._episode_info_scan_cache = None
+        entries = self._collect_episode_info_entries()
+        self._validate_existing_segment_count(entries, self._physical_segment_total)
+        self._include_robotis_license = bool(
+            getattr(task_info, 'include_robotis_license', False)
+        )
+        self._restore_episode_position(entries)
         self._start_time_s = 0
         self._proceed_time = 0
         self._status = 'idle'  # Start in idle state (simplified mode)
         self._cpu_checker = CPUChecker()
-        self.data_converter = DataConverter()
+        self._data_converter = self._CONVERTER_UNSET
+        self._converter_lock = threading.Lock()
         self.current_instruction = self._main_task_instruction
         self._init_task_limits()
         self._current_scenario_number = self._current_subtask_index
@@ -237,6 +219,21 @@ class DataManager:
         # can fire concurrently; the lock guarantees the snapshot read
         # in ``get_current_record_status`` is consistent.
         self._state_lock = threading.Lock()
+
+    @property
+    def data_converter(self):
+        """Keep Torch and CvBridge off the recording path unless requested."""
+        with self._converter_lock:
+            if self._data_converter is self._CONVERTER_UNSET:
+                from cyclo_data.converter.orchestrator import DataConverter
+
+                self._data_converter = DataConverter()
+            return self._data_converter
+
+    @data_converter.setter
+    def data_converter(self, value):
+        with self._converter_lock:
+            self._data_converter = value
 
     @classmethod
     def _make_save_repo_name(cls, save_root_path, task_info) -> str:
@@ -275,15 +272,18 @@ class DataManager:
         )
 
     @staticmethod
-    def _skip_scan_path(path: Path) -> bool:
-        return any(
-            part.endswith('_converted') or part in {
-                '_stitched_subtasks',
-                '.legacy_subtask_migration_tmp',
-                '.subtasks_archive',
-            }
-            for part in path.parts
-        )
+    def _episode_info_dirs(root: Path) -> Iterator[Path]:
+        def raise_scan_error(exc):
+            raise exc
+
+        for directory, children, files in os.walk(root, onerror=raise_scan_error):
+            children[:] = [
+                name for name in children if not name.endswith('_converted') and name not in {
+                    '_stitched_subtasks', '.legacy_subtask_migration_tmp', '.subtasks_archive',
+                }
+            ]
+            if 'episode_info.json' in files or 'episode_info.json' in children:
+                yield Path(directory)
 
     def _collect_episode_info_entries(self) -> list[tuple[Path, dict]]:
         """Return saved episode_info entries under the task root."""
@@ -291,34 +291,16 @@ class DataManager:
         if not root.exists():
             return []
 
-        entries: list[tuple[Path, dict]] = []
-        for info_path in root.rglob('episode_info.json'):
-            try:
-                rel_parent = info_path.parent.relative_to(root)
-            except ValueError:
-                rel_parent = info_path.parent
-            if self._skip_scan_path(rel_parent):
-                continue
-            entries.append((
-                info_path.parent,
-                self._read_episode_info(info_path.parent),
-            ))
-        return entries
+        return [(path, self._read_episode_info(path)) for path in self._episode_info_dirs(root)]
 
-    def _episode_info_entries(self) -> list[tuple[Path, dict]]:
-        cached = getattr(self, '_episode_info_scan_cache', None)
-        if cached is not None:
-            return list(cached)
-        return self._collect_episode_info_entries()
-
-    def _existing_episode_segment_counts(self) -> set[int]:
+    def _existing_episode_segment_counts(self, entries) -> set[int]:
         """Return semantic subtask counts already present in this task folder."""
         root = Path(self._save_rosbag_path)
         counts: set[int] = set()
         if not root.exists():
             return counts
 
-        for episode_dir, info in self._episode_info_entries():
+        for episode_dir, info in entries:
             mode = info.get('recording_mode')
             if mode == 'single_segment':
                 counts.add(1)
@@ -337,11 +319,10 @@ class DataManager:
                 counts.add(0)
         return counts
 
-    def _validate_existing_segment_count(self) -> None:
-        existing_counts = self._existing_episode_segment_counts()
+    def _validate_existing_segment_count(self, entries, requested: int) -> None:
+        existing_counts = self._existing_episode_segment_counts(entries)
         if not existing_counts:
             return
-        requested = self._physical_segment_total
         if existing_counts == {requested}:
             return
         raise ValueError(
@@ -350,20 +331,11 @@ class DataManager:
             'Use a new task folder for a different Number of Subtasks.'
         )
 
-    def _iter_subtask_episode_dirs(self) -> list[Path]:
-        """Return all saved raw segment rosbag dirs, old flat + new nested."""
-        root = Path(self._save_rosbag_path)
-        if not root.exists():
-            return []
-
-        matches: list[Path] = []
-        for episode_dir, info in self._episode_info_entries():
-            if info.get('recording_mode') not in {'subtask', 'single_segment'}:
-                continue
-            matches.append(episode_dir)
-
-        def sort_key(path: Path):
-            info = self._read_episode_info(path)
+    @staticmethod
+    def _sorted_raw_segments(entries):
+        """Keep the legacy cursor tie-break order without reopening metadata."""
+        def sort_key(entry):
+            path, info = entry
             try:
                 full_idx = int(info.get('full_episode_index', 0))
             except (TypeError, ValueError):
@@ -378,9 +350,10 @@ class DataManager:
                 raw_idx = 0
             return (full_idx, subtask_idx, raw_idx, str(path))
 
-        return sorted(matches, key=sort_key)
+        return sorted((entry for entry in entries if entry[1].get('recording_mode')
+                       in {'subtask', 'single_segment'}), key=sort_key)
 
-    def _find_next_episode_number(self) -> int:
+    def _find_next_episode_number(self, entries=None) -> int:
         """
         Find the next available episode number by scanning existing directories.
 
@@ -399,34 +372,40 @@ class DataManager:
         # Find all numeric folder names and any recursively stored raw
         # subtask metadata. This preserves legacy flat recordings and the
         # nested full_episode/subtasks layout used for new subtask data.
-        existing_episodes = []
-        try:
-            for item in os.listdir(rosbag_dir):
-                item_path = os.path.join(rosbag_dir, item)
-                if not (os.path.isdir(item_path) and item.isdigit()):
+        if entries is None:
+            entries = self._collect_episode_info_entries()
+        segmented_record = (
+            self._segmented_storage_mode and getattr(self._task_info, 'task_type', '') != 'inference'
+        )
+        existing_episodes = set()
+        root = Path(rosbag_dir)
+        known_numeric_dirs = set()
+        for path, info in entries:
+            if segmented_record:
+                parts = path.relative_to(root).parts
+                if parts and parts[0].isdigit():
+                    known_numeric_dirs.add(parts[0])
+            try:
+                existing_episodes.add(int(info.get('episode_index')))
+            except (TypeError, ValueError):
+                pass
+
+        # A failed enumeration is not an empty task: never fall back to
+        # episode zero when the set of occupied slots is unknown.
+        with os.scandir(root) as children:
+            for child in children:
+                if not child.name.isdigit() or not child.is_dir():
                     continue
-                if (getattr(self._task_info, 'task_type', '') != 'inference'
-                        and self._segmented_storage_mode and not self._episode_dir_has_data(
-                    Path(item_path)
-                )):
+                if (segmented_record and child.name not in known_numeric_dirs
+                        and not self._episode_dir_has_data(Path(child.path))):
                     continue
-                existing_episodes.append(int(item))
-            for _episode_dir, info in self._episode_info_entries():
-                try:
-                    existing_episodes.append(int(info.get('episode_index')))
-                except (TypeError, ValueError):
-                    pass
-        except OSError as e:
-            if getattr(self._task_info, 'task_type', '') == 'inference':
-                raise
-            print(f'[DataManager] Error scanning directory: {e}, starting from episode 0')
-            return 0
+                existing_episodes.add(int(child.name))
 
         if not existing_episodes:
             print(f'[DataManager] No existing episodes in {rosbag_dir}, starting from episode 0')
             return 0
 
-        existing_unique = sorted(set(existing_episodes))
+        existing_unique = sorted(existing_episodes)
         next_episode = existing_unique[-1] + 1
         if len(existing_unique) <= 20:
             existing_text = str(existing_unique)
@@ -444,10 +423,8 @@ class DataManager:
         episode_dir = Path(episode_dir)
         if self._is_rosbag_leaf(episode_dir):
             return True
-        for info_path in episode_dir.rglob('episode_info.json'):
-            rel_parent = info_path.parent.relative_to(episode_dir)
-            if not self._skip_scan_path(rel_parent):
-                return True
+        if next(self._episode_info_dirs(episode_dir), None) is not None:
+            return True
         return any(episode_dir.rglob('*.mcap'))
 
     @staticmethod
@@ -464,15 +441,14 @@ class DataManager:
         raw = getattr(task_info, 'subtask_instruction', []) or []
         return [str(item or '').strip() for item in raw if str(item or '').strip()]
 
-    def _find_next_subtask_position(self) -> tuple[int, int]:
+    def _find_next_subtask_position(self, entries) -> tuple[int, int]:
         """Find the next full-episode/subtask cursor from saved metadata."""
         if not self._segmented_storage_mode:
             return self._record_episode_count, 0
 
         groups: dict[int, set[int]] = {}
         totals: dict[int, int] = {}
-        for episode_dir in self._iter_subtask_episode_dirs():
-            info = self._read_episode_info(episode_dir)
+        for _, info in self._sorted_raw_segments(entries):
             try:
                 full_idx = int(info.get('full_episode_index', 0))
                 subtask_idx = int(info.get('subtask_index', 0))
@@ -484,7 +460,7 @@ class DataManager:
 
         root = Path(self._save_rosbag_path)
         if root.exists():
-            for _episode_dir, info in self._episode_info_entries():
+            for _episode_dir, info in entries:
                 # New archived full-episode summaries intentionally keep
                 # episode_info.json minimal: episode_index + segments, no
                 # recording_mode/full_episode_index/subtask_total. Treat
@@ -665,13 +641,12 @@ class DataManager:
                 full_idx = self._current_full_episode_index
         full_idx = int(full_idx)
 
-        subtask_dirs = self._episode_dirs_for_full_subtask(full_idx)
-        if not subtask_dirs:
+        segments = self._segment_entries(full_idx)
+        if not segments:
             return [f'no saved subtasks for episode {full_idx}']
 
         by_subtask: dict[int, Path] = {}
-        for episode_dir in subtask_dirs:
-            info = self._read_episode_info(episode_dir)
+        for episode_dir, info in segments:
             try:
                 subtask_idx = int(info.get('subtask_index', -1))
             except (TypeError, ValueError):
@@ -717,6 +692,10 @@ class DataManager:
         return archived_dir
 
     def _episode_dirs_for_full_subtask(self, full_idx: int, subtask_idx: int | None = None):
+        return [path for path, _ in self._segment_entries(full_idx, subtask_idx)]
+
+    def _segment_entries(self, full_idx: int, subtask_idx: int | None = None) -> list[tuple[Path, dict]]:
+        """Read segment metadata for one operation; a retry scans the current files."""
         matches = []
         saved_indices: set[int] = set()
         segments_root = self._full_episode_dir(int(full_idx)) / 'segments'
@@ -736,22 +715,17 @@ class DataManager:
                     continue
                 if subtask_idx is not None and candidate_subtask != subtask_idx:
                     continue
-                matches.append(episode_dir)
+                matches.append((episode_dir, info))
                 if 0 <= candidate_subtask < self._physical_segment_total:
                     saved_indices.add(candidate_subtask)
-            matches.sort(
-                key=lambda path: int(
-                    self._read_episode_info(path).get('subtask_index', 0) or 0
-                )
-            )
+            matches.sort(key=lambda entry: int(entry[1].get('subtask_index', 0) or 0))
             if subtask_idx is None:
                 cache = getattr(self, '_saved_subtasks_cache', {})
                 cache[int(full_idx)] = saved_indices
                 self._saved_subtasks_cache = cache
             return matches
 
-        for episode_dir in self._iter_subtask_episode_dirs():
-            info = self._read_episode_info(episode_dir)
+        for episode_dir, info in self._sorted_raw_segments(self._collect_episode_info_entries()):
             try:
                 candidate_full = int(info.get('full_episode_index', -1))
                 candidate_subtask = int(info.get('subtask_index', -1))
@@ -761,7 +735,7 @@ class DataManager:
                 continue
             if subtask_idx is not None and candidate_subtask != subtask_idx:
                 continue
-            matches.append(episode_dir)
+            matches.append((episode_dir, info))
         return matches
 
     def discard_saved_subtask(self, subtask_idx: int) -> int:
@@ -770,12 +744,25 @@ class DataManager:
             return 0
         with self._state_lock:
             full_idx = self._current_full_episode_index
-        deleted = 0
-        for episode_dir in self._episode_dirs_for_full_subtask(full_idx, int(subtask_idx)):
-            shutil.rmtree(episode_dir, ignore_errors=True)
-            deleted += 1
-        if not self._episode_dirs_for_full_subtask(full_idx):
-            shutil.rmtree(self._full_episode_dir(full_idx), ignore_errors=True)
+        full_dir = self._full_episode_dir(full_idx)
+        segments = full_dir / 'segments'
+        self._validate_discard_path(segments)
+        targets = [path for path, info in self._segment_entries(full_idx)
+                   if int(info.get('subtask_index', -1)) == int(subtask_idx)]
+        for episode_dir in targets:
+            self._validate_discard_path(episode_dir)
+        for episode_dir in targets:
+            shutil.rmtree(episode_dir)
+        # A partial sibling may have data but no readable manifest. Only
+        # prune empty containers; absence from the metadata scan isn't proof.
+        for container in (segments, full_dir):
+            try:
+                container.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
         cache = getattr(self, '_saved_subtasks_cache', {})
         saved = set(cache.get(full_idx, set()))
         saved.discard(int(subtask_idx))
@@ -788,18 +775,32 @@ class DataManager:
             self._record_episode_count = self._find_next_episode_number()
             self._current_subtask_index = int(subtask_idx)
             self._current_scenario_number = self._current_subtask_index
-        return deleted
+        return len(targets)
 
     def discard_full_episode(self, full_idx: int) -> int:
         """Delete all saved raw subtask dirs for a specific full episode."""
         if not self._segmented_storage_mode:
             return 0
         full_idx = int(full_idx)
-        deleted = 0
-        for episode_dir in self._episode_dirs_for_full_subtask(full_idx):
-            shutil.rmtree(episode_dir, ignore_errors=True)
-            deleted += 1
-        shutil.rmtree(self._full_episode_dir(full_idx), ignore_errors=True)
+        full_dir = self._full_episode_dir(full_idx)
+        self._validate_discard_path(full_dir / 'segments')
+        entries = self._episode_dirs_for_full_subtask(full_idx)
+        for episode_dir in entries:
+            self._validate_discard_path(episode_dir)
+        remove_full = full_dir.exists()
+        if remove_full and not (full_dir / 'segments').exists() and full_dir not in entries:
+            # In the flat layout the numeric name is a raw recording index,
+            # not its full episode. Never sweep an unmatched raw recording.
+            info = self._read_episode_info(full_dir)
+            if info.get('recording_mode') in {'subtask', 'single_segment'}:
+                remove_full = False
+        # Nested segments are removed with their parent. Legacy flat
+        # recordings may live outside the numbered full-episode directory.
+        for episode_dir in entries:
+            if not remove_full or (episode_dir != full_dir and full_dir not in episode_dir.parents):
+                shutil.rmtree(episode_dir)
+        if remove_full:
+            shutil.rmtree(full_dir)
         cache = getattr(self, '_saved_subtasks_cache', {})
         cache.pop(full_idx, None)
         self._saved_subtasks_cache = cache
@@ -808,7 +809,29 @@ class DataManager:
             if self._current_full_episode_index == full_idx:
                 self._current_subtask_index = 0
                 self._current_scenario_number = 0
-        return deleted
+        return len(entries)
+
+    def _validate_discard_path(self, path: Path) -> None:
+        root = Path(self._save_rosbag_path)
+        if (not root.is_absolute() or not path.is_relative_to(root)
+                or path == root or '..' in path.parts):
+            raise ValueError(f'Unsafe recording discard path: {path}')
+        for parent in (path, *path.parents):
+            if parent.is_symlink():
+                raise ValueError(f'Symlink in recording discard path: {parent}')
+            if parent == root:
+                break
+
+    def active_discard_path(self) -> Path:
+        raw_path = self.get_save_rosbag_path()
+        if not raw_path:
+            raise ValueError('No active recording directory to discard')
+        path = Path(raw_path)
+        self._validate_discard_path(path)
+        if getattr(self._task_info, 'task_type', '') == 'inference':
+            path = self._full_episode_dir(self.get_current_full_episode_index())
+            self._validate_discard_path(path)
+        return path
 
     def discard_current_full_episode(self) -> int:
         """Delete all saved raw subtask dirs for the active full episode."""
@@ -900,18 +923,12 @@ class DataManager:
                 shutil.rmtree(segments_root)
             return out_dir
 
-        subtask_dirs = self._episode_dirs_for_full_subtask(full_idx)
-        if not subtask_dirs:
+        segments = self._segment_entries(full_idx)
+        if not segments:
             return None
-        subtask_dirs = sorted(
-            subtask_dirs,
-            key=lambda path: int(
-                self._read_episode_info(path).get('subtask_index', 0) or 0
-            ),
-        )
         by_subtask = {
-            int(self._read_episode_info(path).get('subtask_index', 0) or 0): path
-            for path in subtask_dirs
+            int(info.get('subtask_index', 0) or 0): (path, info)
+            for path, info in segments
         }
         missing = [
             idx for idx in range(self._physical_segment_total)
@@ -938,8 +955,7 @@ class DataManager:
         segments_meta = []
         segment_start_s = 0.0
 
-        for subtask_idx, seg_dir in enumerate(ordered):
-            seg_info = self._read_episode_info(seg_dir)
+        for subtask_idx, (seg_dir, seg_info) in enumerate(ordered):
             src_mcaps = sorted(seg_dir.glob('*.mcap'))
             dst_prefix = f'{full_idx}_{subtask_idx}'
             archived_mcaps = (
@@ -1086,7 +1102,7 @@ class DataManager:
         with open(out_dir / 'metadata.yaml', 'w', encoding='utf-8') as f:
             yaml.safe_dump(unified, f, default_flow_style=False, sort_keys=False)
 
-        self._copy_episode_sidecars(ordered, out_dir)
+        self._copy_episode_sidecars([path for path, _ in ordered], out_dir)
         video_segments, video_warnings = self._archive_episode_videos(
             ordered, out_dir, full_idx, strict=inference_recording,
         )
@@ -1118,7 +1134,7 @@ class DataManager:
         if video_warnings:
             summary['video_warnings'] = video_warnings
         if inference_recording:
-            summary['inference'] = self._read_episode_info(ordered[0]).get('inference', {})
+            summary['inference'] = ordered[0][1].get('inference', {})
         try:
             _atomic_write_json(out_dir / 'episode_info.json', summary)
         except Exception as e:
@@ -1259,7 +1275,7 @@ class DataManager:
 
     @staticmethod
     def _archive_episode_videos(
-        subtask_dirs: list[Path],
+        segments: list[tuple[Path, dict]],
         out_dir: Path,
         full_idx: int,
         *, strict: bool = False,
@@ -1269,9 +1285,8 @@ class DataManager:
 
         video_segments = []
         warnings: dict[str, dict[str, str]] = {}
-        for subtask_idx, seg_dir in enumerate(subtask_dirs):
+        for subtask_idx, (seg_dir, seg_info) in enumerate(segments):
             prefix = f'{full_idx}_{subtask_idx}'
-            seg_info = DataManager._read_episode_info(seg_dir)
             seg_videos = seg_dir / 'videos'
             expected_cameras = set()
             if seg_videos.exists():
@@ -1367,29 +1382,28 @@ class DataManager:
 
         return video_segments, warnings
 
+    def _restore_episode_position(self, entries):
+        self._record_episode_count = self._find_next_episode_number(entries)
+        if getattr(self._task_info, 'task_type', '') == 'inference':
+            # Interrupted inference episodes must not be resumed or overwritten.
+            self._current_full_episode_index = self._record_episode_count
+            self._current_subtask_index = 0
+            self._saved_subtasks_cache = {}
+        else:
+            (
+                self._current_full_episode_index,
+                self._current_subtask_index,
+            ) = self._find_next_subtask_position(entries)
+
     def refresh_episode_position(self):
         """Reconcile an idle session with episode folders after dataset edits."""
         with self._state_lock:
             if self._status != 'idle':
                 raise RuntimeError('Stop recording before editing this task')
-            self._episode_info_scan_cache = self._collect_episode_info_entries()
-            try:
-                self._record_episode_count = self._find_next_episode_number()
-                if getattr(self._task_info, 'task_type', '') == 'inference':
-                    # Match session startup: interrupted inference stays untouched.
-                    self._current_full_episode_index = self._record_episode_count
-                    self._current_subtask_index = 0
-                    self._saved_subtasks_cache = {}
-                else:
-                    (
-                        self._current_full_episode_index,
-                        self._current_subtask_index,
-                    ) = self._find_next_subtask_position()
-                if self._single_task:
-                    self._record_episode_count = self._current_full_episode_index
-                self._current_scenario_number = self._current_subtask_index
-            finally:
-                self._episode_info_scan_cache = None
+            self._restore_episode_position(self._collect_episode_info_entries())
+            if self._single_task:
+                self._record_episode_count = self._current_full_episode_index
+            self._current_scenario_number = self._current_subtask_index
 
     def update_task_info(self, task_info):
         """Refresh per-session config from a new task_info.
@@ -1400,40 +1414,33 @@ class DataManager:
         this refresh the existing manager would keep its first-START
         snapshot and the README would never reflect later choices.
         """
-        previous_subtask_mode = getattr(self, '_subtask_mode', False)
-        previous_segment_total = getattr(self, '_physical_segment_total', 1)
-        self._task_info = deepcopy(task_info)
-        self._main_task_instruction = self._get_main_task_instruction(task_info)
-        self._subtask_instructions = self._get_subtask_instructions(task_info)
-        self._subtask_mode = bool(self._subtask_instructions)
-        self._subtask_total = len(self._subtask_instructions)
-        self._physical_segment_total = max(1, self._subtask_total)
-        self._segmented_storage_mode = True
-        self._single_task = not self._subtask_mode
-        layout_changed = (
-            previous_subtask_mode != self._subtask_mode
-            or previous_segment_total != self._physical_segment_total
-        )
-        if layout_changed:
-            self._episode_info_scan_cache = self._collect_episode_info_entries()
-            try:
-                self._validate_existing_segment_count()
-            finally:
-                self._episode_info_scan_cache = None
-        self._include_robotis_license = bool(
-            getattr(task_info, 'include_robotis_license', False)
-        )
+        instructions = self._get_subtask_instructions(task_info)
+        segment_total = max(1, len(instructions))
         with self._state_lock:
+            layout_changed = (
+                self._subtask_mode != bool(instructions)
+                or self._physical_segment_total != segment_total
+            )
+            entries = self._collect_episode_info_entries() if layout_changed else None
+            if entries is not None:
+                self._validate_existing_segment_count(entries, segment_total)
+            self._task_info = deepcopy(task_info)
+            self._main_task_instruction = self._get_main_task_instruction(task_info)
+            self._subtask_instructions = instructions
+            self._subtask_mode = bool(instructions)
+            self._subtask_total = len(instructions)
+            self._physical_segment_total = segment_total
+            self._segmented_storage_mode = True
+            self._single_task = not self._subtask_mode
+            self._include_robotis_license = bool(
+                getattr(task_info, 'include_robotis_license', False)
+            )
             if self._status == 'idle':
-                if layout_changed:
-                    self._episode_info_scan_cache = self._collect_episode_info_entries()
-                    try:
-                        (
-                            self._current_full_episode_index,
-                            self._current_subtask_index,
-                        ) = self._find_next_subtask_position()
-                    finally:
-                        self._episode_info_scan_cache = None
+                if entries is not None:
+                    (
+                        self._current_full_episode_index,
+                        self._current_subtask_index,
+                    ) = self._find_next_subtask_position(entries)
                 self._current_scenario_number = self._current_subtask_index
                 self.current_instruction = self._main_task_instruction
 

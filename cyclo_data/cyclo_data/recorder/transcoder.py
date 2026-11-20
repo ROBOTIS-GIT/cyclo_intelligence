@@ -711,7 +711,7 @@ class TranscodeWorker:
             sidecar.unlink(missing_ok=True)
             raise _SkipCamera("sidecar has 0 rows; removed camera files")
 
-        width, height = _mp4_dimensions(raw_mp4)
+        width, height, codec = _mp4_stream_info(raw_mp4)
         if width < 2 or height < 2:
             raw_mp4.unlink(missing_ok=True)
             sidecar.unlink(missing_ok=True)
@@ -720,7 +720,6 @@ class TranscodeWorker:
                 "removed camera files for this episode"
             )
 
-        codec = _mp4_codec_name(raw_mp4)
         if codec == "h264":
             encoded_frames = _mp4_frame_count(raw_mp4)
             if abs(encoded_frames - sidecar_rows) <= _VERIFY_FRAME_TOLERANCE:
@@ -844,12 +843,12 @@ def _estimate_raw_framerate(sidecar: Path, stats_path: Path) -> float:
 
     try:
         table = pq.read_table(str(sidecar), columns=["header_stamp_ns"])
-        values = table.column(0).to_pylist()
-        if len(values) > 1 and values[-1] is not None and values[0] is not None:
-            first_ns = int(values[0])
-            last_ns = int(values[-1])
-            if last_ns > first_ns:
-                fps = (len(values) - 1) / ((last_ns - first_ns) / 1e9)
+        values = table.column(0)
+        if len(values) > 1:
+            first_ns = values[0].as_py()
+            last_ns = values[-1].as_py()
+            if first_ns is not None and last_ns is not None and int(last_ns) > int(first_ns):
+                fps = (len(values) - 1) / ((int(last_ns) - int(first_ns)) / 1e9)
                 if 1.0 <= fps <= 120.0:
                     return float(fps)
     except Exception:
@@ -864,66 +863,36 @@ def _sidecar_row_count(sidecar: Path) -> int:
 _FFPROBE_FRAME_COUNT_TIMEOUT = 30  # seconds
 
 
-def _mp4_dimensions(mp4: Path) -> tuple[int, int]:
+def _mp4_stream_info(mp4: Path) -> tuple[int, int, str]:
     try:
         out = subprocess.run(
             [
                 _FFPROBE, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=p=0:s=x", str(mp4),
+                "-show_entries", "stream=width,height,codec_name",
+                "-of", "json", str(mp4),
             ],
             capture_output=True, text=True,
             timeout=_FFPROBE_FRAME_COUNT_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"ffprobe dimensions timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
+            f"ffprobe stream probe timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
             f"for {mp4.name}"
         ) from exc
-    lines = [
-        line.strip()
-        for line in (out.stdout or "").splitlines()
-        if line.strip()
-    ]
-    text = lines[0] if lines else ""
+    if out.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {mp4.name} (rc={out.returncode}): {out.stderr}")
     try:
-        width, height = text.split("x", 1)
-        return int(width), int(height)
-    except Exception as exc:
-        raise RuntimeError(
-            f"ffprobe could not determine dimensions for {mp4.name}: "
-            f"stdout={out.stdout!r} stderr={out.stderr!r}"
-        ) from exc
-
-
-def _mp4_codec_name(mp4: Path) -> str:
-    try:
-        out = subprocess.run(
-            [
-                _FFPROBE, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name",
-                "-of", "default=nw=1:nk=1", str(mp4),
-            ],
-            capture_output=True, text=True,
-            timeout=_FFPROBE_FRAME_COUNT_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"ffprobe codec probe timed out after {_FFPROBE_FRAME_COUNT_TIMEOUT}s "
-            f"for {mp4.name}"
-        ) from exc
-    lines = [
-        line.strip()
-        for line in (out.stdout or "").splitlines()
-        if line.strip()
-    ]
-    codec = lines[0] if lines else ""
-    if codec:
-        return codec.lower()
-    raise RuntimeError(
-        f"ffprobe could not determine codec for {mp4.name}: "
-        f"stderr={out.stderr!r}"
-    )
+        stream = json.loads(out.stdout)["streams"][0]
+        width, height, codec = stream["width"], stream["height"], stream["codec_name"]
+        # Dimensions below two trigger file cleanup. Never coerce missing or
+        # malformed values to zero.
+        if type(width) is not int or type(height) is not int or min(width, height) < 0:
+            raise ValueError("invalid video dimensions")
+        if not isinstance(codec, str) or not codec.strip():
+            raise ValueError("missing video codec")
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"Invalid ffprobe stream metadata for {mp4.name}: {exc}") from exc
+    return width, height, codec.strip().lower()
 
 
 def _mp4_frame_count(mp4: Path) -> int:

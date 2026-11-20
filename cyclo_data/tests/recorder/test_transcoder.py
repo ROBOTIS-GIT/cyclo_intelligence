@@ -55,9 +55,8 @@ from cyclo_data.recorder.transcoder import (  # noqa: E402
     STATUS_PENDING,
     TranscodeWorker,
     _detect_encoder,
-    _mp4_codec_name,
-    _mp4_dimensions,
     _mp4_frame_count,
+    _mp4_stream_info,
     _patch_status,
 )
 import cyclo_data.recorder.transcoder as transcoder_module  # noqa: E402
@@ -307,20 +306,52 @@ def test_patch_status_preserves_korean_instruction_as_utf8(tmp_path):
     assert "\\ud654" not in raw
 
 
-def test_ffprobe_helpers_handle_blank_stdout_without_index_error(monkeypatch, tmp_path):
-    blank = subprocess.CompletedProcess(
-        args=["ffprobe"], returncode=0, stdout="\n  \n",
-    )
-    monkeypatch.setattr(
-        transcoder_module.subprocess,
-        "run",
-        lambda *args, **kwargs: blank,
-    )
+@pytest.mark.parametrize(("stamps", "expected"), [
+    ([], 30.), ([0], 30.), ([0, 0], 30.), ([1, 0], 30.),
+    ([None, 1], 30.), ([0, None], 30.), ([0, 1], 30.),
+    ([0, None, 100_000_000], 20.),
+])
+def test_raw_framerate_without_stats_uses_sidecar_endpoints(tmp_path, stamps, expected):
+    sidecar = tmp_path / "stamps.parquet"
+    pq.write_table(pa.table({"header_stamp_ns": pa.array(stamps, type=pa.int64())}),
+                   sidecar, row_group_size=1)
+    assert transcoder_module._estimate_raw_framerate(sidecar, tmp_path / "missing") == expected
 
-    with pytest.raises(RuntimeError, match="could not determine codec"):
-        _mp4_codec_name(tmp_path / "blank.mp4")
-    with pytest.raises(RuntimeError, match="could not determine dimensions"):
-        _mp4_dimensions(tmp_path / "blank.mp4")
+
+def test_stream_info_uses_one_probe(monkeypatch, tmp_path):
+    calls = []
+
+    def probe(cmd, **kwargs):
+        calls.append(cmd)
+        assert cmd[cmd.index("-select_streams") + 1] == "v:0"
+        assert set(cmd[cmd.index("-show_entries") + 1].removeprefix("stream=").split(",")) == {
+            "width", "height", "codec_name",
+        }
+        return subprocess.CompletedProcess(cmd, 0, '{"streams":[{"codec_name":"mjpeg","height":48,"width":64}]}')
+
+    monkeypatch.setattr(transcoder_module.subprocess, "run", probe)
+    assert _mp4_stream_info(tmp_path / "cam0.mp4") == (64, 48, "mjpeg")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("rc", "stdout"), [
+    (0, "\n "), (0, '{"streams":[]}'),
+    (0, '{"streams":[{"width":0,"height":48}]}'),
+    (0, '{"streams":[{"width":false,"height":48,"codec_name":"mjpeg"}]}'),
+    (1, '{"streams":[{"width":0,"height":48,"codec_name":"mjpeg"}]}'),
+])
+def test_invalid_probe_result_preserves_camera_files(monkeypatch, tmp_path, rc, stdout):
+    video = tmp_path / "cam0.mp4"
+    video.write_bytes(b"input")
+    sidecar = tmp_path / "cam0_timestamps.parquet"
+    _make_sidecar(sidecar, 2)
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(transcoder_module.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, rc, stdout, ""))
+    with pytest.raises(RuntimeError, match="ffprobe"):
+        TranscodeWorker()._transcode_camera("cam0", tmp_path, "libx264", [])
+    assert video.read_bytes() == b"input"
+    assert sidecar.read_bytes() == before
 
 
 def _ffprobe_codec(mp4: Path) -> str:
@@ -755,11 +786,32 @@ class TestEdgeCases:
         ep = _make_episode(tmp_path, {"cam0": (10, 10)})
         # Truncate the MP4 to garbage so ffmpeg can't read it.
         (ep / "videos" / "cam0.mp4").write_bytes(b"not a valid mp4")
+        sidecar = ep / "videos" / "cam0_timestamps.parquet"
+        timestamps = sidecar.read_bytes()
         res = worker.submit(ep).result(timeout=60)
         assert not res.success
         assert "cam0" in res.cameras_failed
         info = _read_status(ep)
         assert info["transcoding_status"] == STATUS_FAILED
+        assert (ep / "videos" / "cam0.mp4").read_bytes() == b"not a valid mp4"
+        assert sidecar.read_bytes() == timestamps
+
+    def test_metadata_probe_timeout_preserves_files(self, tmp_path, monkeypatch):
+        video = tmp_path / "cam0.mp4"
+        video.write_bytes(b"input video")
+        sidecar = tmp_path / "cam0_timestamps.parquet"
+        _make_sidecar(sidecar, 2)
+        timestamps = sidecar.read_bytes()
+
+        def timeout(cmd, **kwargs):
+            assert cmd[0] == transcoder_module._FFPROBE
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        monkeypatch.setattr(transcoder_module.subprocess, "run", timeout)
+        with pytest.raises(RuntimeError, match="timed out"):
+            TranscodeWorker()._transcode_camera("cam0", tmp_path, "libx264", [])
+        assert video.read_bytes() == b"input video"
+        assert sidecar.read_bytes() == timestamps
 
     def test_b6_nested_camera_failure_preserves_raw(self, tmp_path, worker):
         ep = _make_nested_episode(tmp_path, {"0_0": {"cam0": (5, 30)}})
@@ -837,14 +889,13 @@ class TestRecovery:
         ep = _make_episode(tmp_path, {"cam0": (10, 10)})
         first = worker.submit(ep).result(timeout=60)
         assert first.success
-        # A second submit of an already-done episode should re-run cleanly
-        # (the raw MJPEG is gone, but the H.264 file is now the "raw" the
-        # next pass reads — it should detect codec mismatch via verify).
-        # We expect it to either re-encode successfully or detect a
-        # consistent state; never to corrupt files.
-        second = worker.submit(ep).result(timeout=60)
-        # In either case, the MP4 stays H.264 and parseable.
         mp4 = ep / "videos" / "cam0.mp4"
+        before = mp4.read_bytes()
+        inode = mp4.stat().st_ino
+        second = worker.submit(ep).result(timeout=60)
+        assert second.success
+        assert mp4.read_bytes() == before
+        assert mp4.stat().st_ino == inode
         assert _ffprobe_codec(mp4) == "h264"
         assert _mp4_frame_count(mp4) == 10
 

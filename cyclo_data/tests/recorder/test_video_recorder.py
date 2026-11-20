@@ -322,8 +322,7 @@ def test_stop_episode_returns_before_raw_remux(tmp_path, monkeypatch):
 
 def test_no_drop_callback_enqueues_valid_frame_under_soft_pressure():
     events = []
-    recorder = VideoRecorder.__new__(VideoRecorder)
-    recorder._node = _Node(events)
+    recorder = _bare_recorder(events)
     recorder._recording_active = threading.Event()
     recorder._recording_active.set()
     recorder._callback_cond = threading.Condition()
@@ -438,8 +437,7 @@ def test_timestamp_skew_warnings_are_reported_in_status_and_stats():
 
 def test_invalid_jpeg_is_the_only_callback_drop_path():
     events = []
-    recorder = VideoRecorder.__new__(VideoRecorder)
-    recorder._node = _Node(events)
+    recorder = _bare_recorder(events)
     recorder._recording_active = threading.Event()
     recorder._recording_active.set()
     recorder._callback_cond = threading.Condition()
@@ -491,9 +489,58 @@ def test_video_worker_dispatches_to_raw_queue():
     assert metadata["video_dequeue_ns"] >= metadata["enqueue_done_ns"]
 
 
+@pytest.mark.parametrize("mode", ["off", "summary", "detailed"])
+def test_episode_preserves_frames_and_sidecars_across_diagnostics_modes(tmp_path, mode):
+    stream = _CameraStream(name="cam0", topic="/cam0")
+    recorder, _ = _recorder_with_stream(stream)
+    recorder._recording_active.clear()
+    recorder._diagnostics_mode = mode
+    recorder._diagnostics_enabled = mode == "detailed"
+    clock = threading.local()
+    recorder._now_ns = lambda: getattr(clock, "now", 1_000_000_000)
+    frames = []
+    stamps = []
+    recorder.start_episode(tmp_path)
+    try:
+        for i in range(259):
+            clock.now = 1_000_000_000 + i + 10
+            data = bytearray(_JPEG_SOI + i.to_bytes(2, "big"))
+            if i == 128:
+                data[0] = 0
+            else:
+                frames.append(bytes(data))
+                stamps.append(clock.now - 10)
+            msg = types.SimpleNamespace(data=data, header=types.SimpleNamespace(
+                stamp=types.SimpleNamespace(sec=1, nanosec=i)))
+            recorder._on_frame(stream, msg)
+            data.clear()  # Input ownership ends after the callback.
+    finally:
+        stats = recorder.stop_episode()["cam0"]
+    videos = tmp_path / "videos"
+    assert stats["frames_written"] == stats["frames_metadata_written"] == len(frames)
+    assert stats["frames_received"] == len(frames) + 1
+    assert stats["frames_dropped_invalid"] == 1
+    assert stats["frames_dropped_queue"] == 0
+    assert (videos / "cam0.mjpeg.tmp").read_bytes() == b"".join(frames) + _JPEG_SENTINEL
+    table = pyarrow.parquet.read_table(videos / "cam0_timestamps.parquet")
+    assert table.to_pydict() == {
+        "frame_index": list(range(len(frames))),
+        "header_stamp_ns": stamps,
+        "recv_ns": [t + 10 for t in stamps],
+    }
+    assert (videos / "cam0_recorder_stats.json").exists() == (mode != "off")
+    diagnostics = videos / "cam0_diagnostics.parquet"
+    assert diagnostics.exists() == (mode == "detailed")
+    if mode == "detailed":
+        detail = pyarrow.parquet.read_table(diagnostics)
+        assert detail.schema == video_recorder_module._DIAGNOSTICS_SCHEMA
+        assert detail.select(table.column_names).equals(table)
+
+
 def test_raw_worker_writes_spool_and_enqueues_metadata(tmp_path):
     events = []
     recorder = _bare_recorder(events)
+    recorder._diagnostics_enabled = True
 
     raw_path = tmp_path / "cam0.mjpeg.tmp"
     stream = _CameraStream(name="cam0", topic="/cam0")

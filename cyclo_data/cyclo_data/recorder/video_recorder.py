@@ -895,7 +895,8 @@ class VideoRecorder:
         self._streams.clear()
 
     def _on_frame(self, stream: _CameraStream, msg: CompressedImage) -> None:
-        callback_enter_ns = self._now_ns()
+        detailed = self._diagnostics_enabled
+        callback_enter_ns = self._now_ns() if detailed else None
         recv_monotonic_ns = time.monotonic_ns()
         header_ns = (
             int(msg.header.stamp.sec) * 1_000_000_000
@@ -917,9 +918,9 @@ class VideoRecorder:
         try:
             with stream.state_lock:
                 stream.frames_received += 1
-            bytes_copy_start_ns = self._now_ns()
+            bytes_copy_start_ns = self._now_ns() if detailed else None
             data = bytes(msg.data)
-            bytes_copy_done_ns = self._now_ns()
+            bytes_copy_done_ns = self._now_ns() if detailed else None
             if len(data) < 2 or data[:2] != _JPEG_SOI:
                 with stream.state_lock:
                     stream.frames_dropped_invalid += 1
@@ -937,21 +938,20 @@ class VideoRecorder:
                 "queue_size_before": queue_size_before,
                 "queue_size_after": queue_size_before,
                 "frame_size_bytes": len(data),
-            }
+            } if detailed else None
             queue_items_after = (
                 -1 if queue_size_before < 0 else queue_size_before + 1
             )
             self._note_callback_enqueue(
                 stream,
                 frame_size=len(data),
-                enqueue_wait_ns=(
-                    self._now_ns() - diagnostics["enqueue_start_ns"]
-                ),
+                enqueue_wait_ns=self._now_ns() - enqueue_start_ns,
                 queue_items_after=queue_items_after,
             )
             stream.queue.put((data, header_ns, recv_ns, diagnostics))
-            diagnostics["enqueue_done_ns"] = self._now_ns()
-            diagnostics["queue_size_after"] = queue_items_after
+            if diagnostics is not None:
+                diagnostics["enqueue_done_ns"] = self._now_ns()
+                diagnostics["queue_size_after"] = queue_items_after
         finally:
             with self._callback_cond:
                 self._active_callbacks -= 1
@@ -965,8 +965,8 @@ class VideoRecorder:
             if item is None:
                 return
 
-            video_dequeue_ns = self._now_ns()
             data, header_ns, recv_ns, diagnostics = item
+            video_dequeue_ns = self._now_ns() if diagnostics is not None else None
             self._note_callback_dequeue(stream, len(data))
             with stream.state_lock:
                 if stream.first_recv_ns is None:
@@ -977,21 +977,10 @@ class VideoRecorder:
                 "frame_index": next_index,
                 "header_stamp_ns": header_ns,
                 "recv_ns": recv_ns,
-                "callback_enter_ns": diagnostics["callback_enter_ns"],
-                "header_read_ns": diagnostics["header_read_ns"],
-                "bytes_copy_start_ns": diagnostics["bytes_copy_start_ns"],
-                "bytes_copy_done_ns": diagnostics["bytes_copy_done_ns"],
-                "enqueue_start_ns": diagnostics["enqueue_start_ns"],
-                "enqueue_done_ns": diagnostics.get(
-                    "enqueue_done_ns", diagnostics["enqueue_start_ns"]
-                ),
-                "video_dequeue_ns": video_dequeue_ns,
-                "queue_size_before": diagnostics["queue_size_before"],
-                "queue_size_after": diagnostics.get(
-                    "queue_size_after", diagnostics["queue_size_before"]
-                ),
-                "frame_size_bytes": diagnostics["frame_size_bytes"],
             }
+            if diagnostics is not None:
+                metadata.update(diagnostics)
+                metadata["video_dequeue_ns"] = video_dequeue_ns
             raw_queue_size_before = self._queue_size(stream.raw_queue)
             raw_queue_items_after = (
                 -1 if raw_queue_size_before < 0 else raw_queue_size_before + 1
@@ -1009,7 +998,7 @@ class VideoRecorder:
                 if item is None:
                     self._write_raw_sentinel(stream)
                     return
-                raw_dequeue_ns = self._now_ns()
+                raw_dequeue_ns = self._now_ns() if self._diagnostics_enabled else None
                 data, metadata = item
                 self._note_raw_dequeue(stream, len(data))
                 fd = stream.raw_fd
@@ -1038,23 +1027,21 @@ class VideoRecorder:
                     )
 
                 metadata_queue_size_before = self._queue_size(stream.metadata_queue)
-                metadata_enqueue_start_ns = self._now_ns()
-                metadata.update({
-                    "raw_dequeue_ns": raw_dequeue_ns,
-                    "raw_write_start_ns": raw_write_start_ns,
-                    "raw_write_done_ns": raw_write_done_ns,
-                    "metadata_enqueue_start_ns": metadata_enqueue_start_ns,
-                    "metadata_enqueue_done_ns": metadata_enqueue_start_ns,
-                    "metadata_queue_size_before": metadata_queue_size_before,
-                    "metadata_queue_size_after": (
-                        -1 if metadata_queue_size_before < 0
-                        else metadata_queue_size_before + 1
-                    ),
-                })
                 metadata_queue_items_after = (
                     -1 if metadata_queue_size_before < 0
                     else metadata_queue_size_before + 1
                 )
+                if self._diagnostics_enabled:
+                    metadata_enqueue_start_ns = self._now_ns()
+                    metadata.update({
+                        "raw_dequeue_ns": raw_dequeue_ns,
+                        "raw_write_start_ns": raw_write_start_ns,
+                        "raw_write_done_ns": raw_write_done_ns,
+                        "metadata_enqueue_start_ns": metadata_enqueue_start_ns,
+                        "metadata_enqueue_done_ns": metadata_enqueue_start_ns,
+                        "metadata_queue_size_before": metadata_queue_size_before,
+                        "metadata_queue_size_after": metadata_queue_items_after,
+                    })
                 self._note_metadata_enqueue(
                     stream, queue_items_after=metadata_queue_items_after,
                 )
@@ -1150,7 +1137,8 @@ class VideoRecorder:
                 if item is None:
                     flush()
                     return
-                item["metadata_dequeue_ns"] = self._now_ns()
+                if stream.diagnostics_writer is not None:
+                    item["metadata_dequeue_ns"] = self._now_ns()
                 rows.append(item)
                 if len(rows) >= BATCH:
                     flush()

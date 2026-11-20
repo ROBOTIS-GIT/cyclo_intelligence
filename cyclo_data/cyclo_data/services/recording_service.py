@@ -1121,6 +1121,14 @@ class RecordingService:
             return self._data_manager.discard_current_full_episode()
 
         if self._data_manager.is_recording():
+            if target_full_idx is not None:
+                active_idx = self._data_manager.get_current_full_episode_index()
+                if target_full_idx != active_idx:
+                    response.success = False
+                    response.message = (
+                        f'DISCARD_EPISODE: active episode is {active_idx}, '
+                        f'but request targeted {target_full_idx}')
+                    return response
             self._node.get_logger().info(
                 f'DISCARD_EPISODE: target_full_idx={target_full_idx} active=True')
             response = self._do_discard(
@@ -1281,7 +1289,12 @@ class RecordingService:
             response.message = 'CANCEL: no active recording session'
             return response
 
-        episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
+        try:
+            episode_dir = self._data_manager.active_discard_path()
+        except ValueError as exc:
+            response.success = False
+            response.message = f'CANCEL: {exc}'
+            return response
 
         # 1. Close mp4/parquet writers + ffmpeg before the bag dir is
         #    deleted underneath them.
@@ -1306,9 +1319,6 @@ class RecordingService:
 
         # 3. Belt-and-braces: if anything (videos/, camera_info/, stray
         #    .mcap.tmp from a crash) survived, sweep it.
-        if inference_recording:
-            episode_dir = self._data_manager._full_episode_dir(
-                self._data_manager.get_current_full_episode_index())
         if episode_dir.exists():
             try:
                 shutil.rmtree(episode_dir)

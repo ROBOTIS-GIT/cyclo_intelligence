@@ -96,7 +96,6 @@ _stub_module("cyclo_data.recorder.rosbag_control", RosbagControl=_Dummy)
 _stub_module("cyclo_data.recorder.transcoder", TranscodeWorker=_Dummy)
 _stub_module("cyclo_data.recorder.video_recorder", VideoRecorder=_Dummy)
 _stub_module("huggingface_hub", HfApi=_Dummy)
-_stub_module("cyclo_data.converter.orchestrator", DataConverter=_Dummy)
 _stub_module(
     "cyclo_data.hub.progress_tracker",
     HuggingFaceLogCapture=_Dummy,
@@ -136,6 +135,20 @@ def test_discard_episode_segment_index_zero_keeps_legacy_cursor_behavior():
 def test_discard_episode_segment_index_encodes_full_episode_index_plus_one():
     assert RecordingService._extract_full_episode_index(_request(1)) == 0
     assert RecordingService._extract_full_episode_index(_request(8)) == 7
+
+
+def test_stale_discard_for_another_episode_cannot_cancel_active_recording():
+    service, _ = _service_with_logger()
+    service._finish_episode_in_progress = lambda: False
+    manager = service._data_manager = Mock()
+    manager.is_recording.return_value = True
+    manager.get_current_full_episode_index.return_value = 3
+    service._do_discard = Mock()
+    result = service._do_discard_episode(_request(3), SimpleNamespace())
+    assert not result.success and 'request targeted 2' in result.message
+    service._do_discard.assert_not_called()
+    manager.discard_full_episode.assert_not_called()
+    manager.discard_current_full_episode.assert_not_called()
 
 
 def test_discard_episode_accepts_transitional_explicit_target_fields():
@@ -386,9 +399,7 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
     (segment / 'partial.mcap').write_bytes(b'data')
     service._data_manager = SimpleNamespace(
         _task_info=SimpleNamespace(task_type='inference'),
-        get_save_rosbag_path=lambda: str(segment),
-        get_current_full_episode_index=lambda: 4,
-        _full_episode_dir=lambda index: tmp_path / str(index),
+        active_discard_path=lambda: episode,
         discard_recording=Mock(),
     )
     service._rosbag = SimpleNamespace(stop_and_delete_rosbag=Mock(), publish_action_event=Mock())
@@ -406,6 +417,26 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
     assert not episode.exists()
     service._rosbag.stop_and_delete_rosbag.assert_called_once()
     service._stop_episode_writers.assert_called_once()
+
+
+def test_discard_missing_active_path_touches_neither_writers_nor_bag(tmp_path, monkeypatch):
+    from cyclo_data.recorder.session_manager import DataManager
+
+    monkeypatch.chdir(tmp_path)
+    sentinel = tmp_path / 'unrelated.mcap'
+    sentinel.write_bytes(b'keep')
+    service, _ = _service_with_logger()
+    manager = DataManager.__new__(DataManager)
+    manager.get_save_rosbag_path = lambda: None
+    service._data_manager = manager
+    service._stop_episode_writers = Mock()
+    service._rosbag = Mock()
+    response = SimpleNamespace(success=True, message='')
+    service._do_discard(SimpleNamespace(), response, event='cancel')
+    assert not response.success and 'No active recording directory' in response.message
+    service._stop_episode_writers.assert_not_called()
+    assert not service._rosbag.mock_calls
+    assert sentinel.read_bytes() == b'keep'
 
 
 def test_inference_metadata_failure_keeps_original_video_statistics(tmp_path):
