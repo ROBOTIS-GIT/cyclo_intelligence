@@ -35,7 +35,7 @@ export const getGridColumnCount = (count, width, height = 0, ratios = []) => {
     for (let columns = 1; columns <= maxColumns; columns += 1) {
       const rows = Math.ceil(count / columns);
       const tileHeight = Math.max(200, (height - 8 * (rows - 1)) / rows);
-      const imageHeight = tileHeight - 56;
+      const imageHeight = tileHeight - 36; // Only the camera toolbar takes up a row.
       const tileWidth = (width - 8 * (columns - 1)) / columns;
       const area = Array.from({ length: count }, (_, i) => {
         const ratio = ratios[i] || 4 / 3;

@@ -101,8 +101,6 @@
   user-select: none;
 }
 
-.image-grid-resizable { grid-template-rows: 36px minmax(0, 1fr) 20px; }
-
 .image-grid-resize-handle:hover { background: #404040; }
 .image-grid-resize-handle:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
 

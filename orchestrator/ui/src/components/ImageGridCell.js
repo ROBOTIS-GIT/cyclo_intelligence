@@ -152,7 +152,7 @@ export default function ImageGridCell({
   }, [topic, hasTopic, streamActive, rosHost]);
 
   return (
-    <div className={`image-grid-cell${dropTarget ? ' image-grid-drop-target' : ''}${resizeHandleProps ? ' image-grid-resizable' : ''}`} data-cell-idx={idx} data-camera-topic={topic} style={style}>
+    <div className={`image-grid-cell${dropTarget ? ' image-grid-drop-target' : ''}`} data-cell-idx={idx} data-camera-topic={topic} style={style}>
       <div className="image-grid-toolbar">
         {dragHandleProps ? (
           <button type="button" className="image-grid-drag-handle" aria-label={`Move camera ${idx + 1}`}

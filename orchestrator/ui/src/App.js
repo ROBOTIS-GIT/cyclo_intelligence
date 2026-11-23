@@ -16,7 +16,8 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdWidgets, MdAccountTree } from 'react-icons/md';
+import { MdHome, MdWidgets, MdAccountTree } from 'react-icons/md';
+import { BsJoystick } from 'react-icons/bs';
 import { TbMapRoute } from 'react-icons/tb';
 import { GoGraph } from 'react-icons/go';
 import { Toaster } from 'react-hot-toast';
@@ -417,7 +418,7 @@ function App() {
             })}
             onClick={handleRecordPageNavigation}
           >
-            <MdVideocam size={32} className="mb-1.5" />
+            <BsJoystick size={32} className="mb-1.5" aria-hidden="true" />
             <span className="mt-1 text-sm">Operate</span>
           </button>
           {/* Edit dataset page button */}
