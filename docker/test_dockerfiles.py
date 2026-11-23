@@ -484,7 +484,6 @@ def test_policy_compose_keeps_image_defaults_in_images():
     )
     for dockerfile in policy_dockerfiles:
         contents = dockerfile.read_text()
-        assert "ENV ZENOH_SDK_PATH=/zenoh_sdk" in contents
         assert "ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk" in contents
         assert "ACTION_CHUNK_PROCESSING_SDK_PATH" not in contents
 
@@ -503,22 +502,26 @@ def test_policy_images_override_inherited_huggingface_cache_paths():
                 )
 
 
-def test_worker_dependency_constraints_reach_the_package_manager():
-    for runtime in ("lerobot", "groot"):
-        path = REPO_ROOT / f"cyclo_brain/policy/{runtime}/Dockerfile.amd64"
-        install = next(line for line in path.read_text().splitlines()
-                       if line.startswith("RUN ") and "pip install" in line
-                       and "eclipse-zenoh" in line)
-        install = install.removeprefix("RUN ").removesuffix("\\").strip()
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                ["bash", "-c", 'uv() { printf "%s\\n" "$@"; }; '
-                 'pip() { printf "%s\\n" "$@"; }; ' + install],
-                cwd=directory, capture_output=True, text=True, check=True,
-            )
-            for requirement in ("rosbags>=0.11.0", "GitPython>=3.1.18", "json5>=0.9.14"):
-                assert requirement in result.stdout.splitlines(), runtime
-            assert not list(Path(directory).iterdir()), "Version constraints became shell output files"
+def test_core_and_inference_workers_install_the_same_zenoh_wheel():
+    requirements = "cyclo_brain/sdk/requirements-zenoh.txt"
+    lines = (REPO_ROOT / requirements).read_text().splitlines()
+    wheel, = (line for line in lines if line.startswith("zenoh-ros2-sdk @ "))
+    url, digest = wheel.split("#sha256=")
+    assert url.endswith("-py3-none-any.whl")
+    assert len(bytes.fromhex(digest)) == 32
+    assert "eclipse-zenoh>=1.6.0,<1.7.0" in lines
+    assert "rosbags>=0.11.0" in lines
+
+    images = [*REPO_ROOT.glob("docker/Dockerfile.*64"),
+              *REPO_ROOT.glob("cyclo_brain/policy/*/Dockerfile.*64")]
+    for image in images:
+        contents = image.read_text()
+        assert f"COPY {requirements} /opt/requirements-zenoh.txt" in contents, image
+        assert "-r /opt/requirements-zenoh.txt" in contents, image
+        assert "/zenoh_sdk" not in contents and "sdk/zenoh_ros2_sdk" not in contents, image
+    compose = (REPO_ROOT / "docker/docker-compose.yml").read_text()
+    assert ":/zenoh_sdk:" not in compose
+    assert "sdk/zenoh_ros2_sdk" not in (REPO_ROOT / ".gitmodules").read_text()
 
 
 def test_lerobot_images_use_the_shared_inference_dependency_profile():
@@ -571,7 +574,7 @@ def test_policy_build_contexts_use_runtime_specific_ignore_files():
             "!interfaces/**",
             "!shared/**",
             "!cyclo_brain/policy/common/**",
-            "!cyclo_brain/sdk/zenoh_ros2_sdk/**",
+            "!cyclo_brain/sdk/requirements-zenoh.txt",
             "!cyclo_brain/sdk/robot_client/**",
             "!cyclo_brain/sdk/action_chunk_processing/**",
             "!docker/s6-services/**",

@@ -101,8 +101,9 @@ COPY cyclo_brain/policy/lerobot/lerobot/ ./
 # IMPORTANT: eclipse-zenoh version MUST match rmw_zenoh_cpp's bundled
 # zenoh-c version (1.6.x). Mismatched versions cause service call
 # failures despite discovery working.
-RUN uv pip install "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" "GitPython>=3.1.18" "json5>=0.9.14" pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /orchestrator_config /policy_runtime /app
+COPY cyclo_brain/sdk/requirements-zenoh.txt /opt/requirements-zenoh.txt
+RUN uv pip install -r /opt/requirements-zenoh.txt pyyaml \
+    && mkdir -p /robot_client_sdk /orchestrator_config /policy_runtime /app
 
 # Bake every source dependency required by the Engine worker. Production must
 # not depend on a source checkout being bind-mounted into the container.
@@ -117,7 +118,6 @@ COPY cyclo_brain/policy/lerobot/extensions/ /app/extensions/
 RUN uv pip install --no-deps --no-build-isolation -e /app/extensions
 COPY cyclo_brain/policy/lerobot/configs/ /app/configs/
 COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
-COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
 RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
@@ -134,7 +134,6 @@ ENV HF_LEROBOT_HOME=/root/.cache/huggingface/lerobot
 ENV TORCH_HOME=/root/.cache/torch
 
 # Zenoh SDK path
-ENV ZENOH_SDK_PATH=/zenoh_sdk
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config

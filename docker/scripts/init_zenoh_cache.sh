@@ -9,9 +9,8 @@
 # One-shot setup. Idempotent — re-runs git fetch on existing clones
 # and exits clean.
 #
-# Pinned commits mirror cyclo_brain/sdk/zenoh_ros2_sdk/zenoh_ros2_sdk/
-# _repositories.py. Bump there and re-run this script if upstream pins
-# move.
+# Pinned commits mirror the installed zenoh_ros2_sdk package's
+# _repositories.py. Update the pins below when upgrading the SDK.
 
 set -euo pipefail
 

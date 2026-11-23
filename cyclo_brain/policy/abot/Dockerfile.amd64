@@ -17,7 +17,8 @@ RUN uv venv --python 3.10 /opt/abot-env \
     --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0 torchvision==0.23.0
 ENV PATH=/opt/abot-env/bin:$PATH
 COPY cyclo_brain/policy/abot/requirements-inference.txt /opt/requirements-inference.txt
-RUN uv pip install --python /opt/abot-env/bin/python -r /opt/requirements-inference.txt \
+COPY cyclo_brain/sdk/requirements-zenoh.txt /opt/requirements-zenoh.txt
+RUN uv pip install --python /opt/abot-env/bin/python -r /opt/requirements-inference.txt -r /opt/requirements-zenoh.txt \
     setuptools==80.9.0 wheel ninja packaging \
     && FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
     uv pip install --python /opt/abot-env/bin/python flash-attn==2.8.3 --no-build-isolation --no-deps
@@ -30,16 +31,15 @@ COPY cyclo_brain/policy/abot/configs/ /app/configs/
 COPY cyclo_brain/policy/abot/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/policy/common/runtime/ /policy_runtime/
 COPY cyclo_brain/policy/common/catalog/ /catalog/
-COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/ /orchestrator_config/
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
 ENV POLICY_BACKEND=abot POLICY_ENGINE_MODULE=abot_engine
-ENV ZENOH_SDK_PATH=/zenoh_sdk ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/abot
+ENV PYTHONPATH=/app:/policy_runtime:/robot_client_sdk:/abot
 RUN python -c 'from ABot.model.framework.ABot_M0 import ABot_M0; from abot_engine import create_engine'
 RUN { \
     echo ""; \

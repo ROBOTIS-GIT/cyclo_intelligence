@@ -284,7 +284,7 @@ cyclo_brain/
 └── sdk/
     ├── action_chunk_processing/
     ├── robot_client/
-    └── zenoh_ros2_sdk/
+    └── requirements-zenoh.txt
 
 docker/
 ├── s6-services/policy-runtime/    # central longrun

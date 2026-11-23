@@ -24,10 +24,6 @@ from typing import Any
 import numpy as np
 
 
-_ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/opt/cyclo/sdk/zenoh_ros2_sdk")
-if os.path.exists(_ZENOH_SDK_PATH) and _ZENOH_SDK_PATH not in sys.path:
-    sys.path.insert(0, _ZENOH_SDK_PATH)
-
 _parents = Path(__file__).resolve().parents
 _default_sdk_root = _parents[4] / "sdk" if len(_parents) > 4 else Path("/opt/cyclo/sdk")
 for path in (

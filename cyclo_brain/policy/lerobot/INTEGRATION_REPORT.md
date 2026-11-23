@@ -81,7 +81,7 @@ cyclo_intelligence/
 │   │   ├── test_executor.py         # Unit tests
 │   │   ├── README.md                # Integration guide
 │   │   └── INTEGRATION_REPORT.md    # This file
-│   └── zenoh_ros2_sdk/              # Zenoh ROS2 SDK (shared)
+├── cyclo_brain/sdk/requirements-zenoh.txt  # Shared Zenoh SDK dependency
 └── docker/
     └── docker-compose.yml           # Compose configuration
 ```
@@ -110,7 +110,6 @@ docker compose -f docker/docker-compose.yml up
 | Host Path | Container Path | Purpose |
 |-----------|----------------|---------|
 | cyclo_brain/policy/lerobot/workspace | /workspace | Dataset/Model storage |
-| cyclo_brain/sdk/zenoh_ros2_sdk | /zenoh_sdk | Zenoh SDK |
 
 ## Usage Examples
 

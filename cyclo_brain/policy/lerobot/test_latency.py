@@ -26,15 +26,9 @@ Measures:
 4. SHM status verification via Zenoh session info
 """
 import os
-import sys
 import time
 import threading
 import statistics
-
-# Add zenoh_ros2_sdk to path
-ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk")
-if os.path.exists(ZENOH_SDK_PATH):
-    sys.path.insert(0, ZENOH_SDK_PATH)
 
 from zenoh_ros2_sdk import ROS2Subscriber, get_logger
 

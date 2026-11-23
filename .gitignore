@@ -99,3 +99,6 @@ Thumbs.db
 *.pth
 *.onnx
 *.engine
+
+# Leftover source checkout from images predating the packaged Zenoh SDK.
+/cyclo_brain/sdk/zenoh_ros2_sdk/

@@ -33,8 +33,7 @@ cyclo_brain/policy/abot/*
 !cyclo_brain/policy/abot/manifest.yaml
 !cyclo_brain/sdk/
 cyclo_brain/sdk/*
-!cyclo_brain/sdk/zenoh_ros2_sdk/
-!cyclo_brain/sdk/zenoh_ros2_sdk/**
+!cyclo_brain/sdk/requirements-zenoh.txt
 !cyclo_brain/sdk/robot_client/
 !cyclo_brain/sdk/robot_client/**
 !cyclo_brain/sdk/action_chunk_processing/

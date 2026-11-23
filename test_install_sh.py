@@ -20,6 +20,7 @@ def _write_stub_commands(tmp_path, hostname_value="dev-pc", ssd_mounted=True):
         "if [ \"$1\" = -C ]; then exit \"${INSTALL_TEST_SDK_EXIT:-0}\"; fi\n"
         "for dest do :; done\n"
         "mkdir -p \"$dest/docker\"\n"
+        'if [ -n "$INSTALL_TEST_SDK_EXIT" ]; then mkdir -p "$dest/cyclo_brain/sdk/zenoh_ros2_sdk"; fi\n'
         "cat > \"$dest/docker/container.sh\" <<'EOS'\n"
         "#!/bin/sh\n"
         "printf '%s\\n' \"container.sh $*\" >> \"$INSTALL_TEST_LOG\"\n"
@@ -113,7 +114,7 @@ def test_local_mode_installs_under_home_and_prints_start_command(tmp_path):
     assert (home / "cyclo_intelligence").is_dir()
     log = log_path.read_text()
     assert "clone --no-recurse-submodules --branch main" in log
-    assert f"-C {home / 'cyclo_intelligence'} submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" in log
+    assert "submodule update" not in log
     assert "cyclo_brain/policy/" not in log
     assert "docker/README.md" in result.stdout
     assert "mountpoint " not in log_path.read_text()
@@ -229,7 +230,7 @@ def test_robot_mode_uses_sudo_when_ssd_parent_is_not_writable(tmp_path):
     assert "sudo chown" in log
     assert "sudo mount " in log
     assert "clone --no-recurse-submodules --branch main" in log
-    assert f"-C {install_dir} submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" in log
+    assert "submodule update" not in log
 
 
 def test_robot_mode_does_not_duplicate_existing_fstab_bind_mount(tmp_path):
@@ -495,7 +496,8 @@ def test_sdk_failure_removes_incomplete_install_without_mounting_or_starting(tmp
     assert not any(line.startswith(("mount ", "sudo mount ")) for line in log_path.read_text().splitlines())
 
 
-def test_real_git_install_initializes_only_pinned_sdk(tmp_path):
+@pytest.mark.parametrize("legacy_sdk", [False, True])
+def test_real_git_install_initializes_sdk_only_for_legacy_checkouts(tmp_path, legacy_sdk):
     def git(root, *args):
         return subprocess.run(
             ["git", "-C", str(root), "-c", "user.name=Test", "-c",
@@ -518,11 +520,11 @@ def test_real_git_install_initializes_only_pinned_sdk(tmp_path):
     sdk_path = "cyclo_brain/sdk/zenoh_ros2_sdk"
     model_path = "cyclo_brain/policy/unused/upstream"
     (repo / ".gitmodules").write_text(
-        f'[submodule "sdk"]\n\tpath = {sdk_path}\n\turl = {sdk}\n'
-        f'[submodule "model"]\n\tpath = {model_path}\n\turl = {tmp_path / "unavailable-model"}\n'
+        (f'[submodule "sdk"]\n\tpath = {sdk_path}\n\turl = {sdk}\n' if legacy_sdk else "")
+        + f'[submodule "model"]\n\tpath = {model_path}\n\turl = {tmp_path / "unavailable-model"}\n'
     )
     git(repo, "add", ".gitmodules")
-    for path in (sdk_path, model_path):
+    for path in ([sdk_path, model_path] if legacy_sdk else [model_path]):
         git(repo, "update-index", "--add", "--cacheinfo", "160000", pinned, path)
     git(repo, "commit", "-qm", "Selective installation fixture")
     home = tmp_path / "home"
@@ -535,7 +537,10 @@ def test_real_git_install_initializes_only_pinned_sdk(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     installed = home / "cyclo_intelligence"
-    assert git(installed / sdk_path, "rev-parse", "HEAD") == pinned
+    if legacy_sdk:
+        assert git(installed / sdk_path, "rev-parse", "HEAD") == pinned
+    else:
+        assert not (installed / sdk_path).exists()
     assert not (installed / model_path / ".git").exists()
     assert any(line.startswith("-") and model_path in line
                for line in git(installed, "submodule", "status").splitlines())

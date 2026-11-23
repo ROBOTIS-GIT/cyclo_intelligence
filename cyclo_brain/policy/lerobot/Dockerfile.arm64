@@ -59,8 +59,9 @@ RUN python3 /opt/cyclo-lerobot-profile/install.py --profile inference --project 
 COPY cyclo_brain/policy/lerobot/lerobot/ ./
 
 # Zenoh + Engine dependencies.
-RUN pip install --no-cache-dir "eclipse-zenoh>=1.6.0,<1.7.0" "rosbags>=0.11.0" "GitPython>=3.1.18" "json5>=0.9.14" pyyaml \
-    && mkdir -p /zenoh_sdk /robot_client_sdk /orchestrator_config /policy_runtime /app
+COPY cyclo_brain/sdk/requirements-zenoh.txt /opt/requirements-zenoh.txt
+RUN pip install --no-cache-dir -r /opt/requirements-zenoh.txt pyyaml \
+    && mkdir -p /robot_client_sdk /orchestrator_config /policy_runtime /app
 
 # Production contains the Engine protocol, adapter, SDKs, and robot config.
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
@@ -74,7 +75,6 @@ COPY cyclo_brain/policy/lerobot/extensions/ /app/extensions/
 RUN pip install --no-deps --no-build-isolation -e /app/extensions
 COPY cyclo_brain/policy/lerobot/configs/ /app/configs/
 COPY cyclo_brain/policy/lerobot/manifest.yaml /app/policy_manifest.yaml
-COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/*.yaml shared/shared/robot_configs/schema.py /orchestrator_config/
 RUN rm -rf /etc/s6-overlay/s6-rc.d/main-runtime \
@@ -91,7 +91,6 @@ ENV HF_LEROBOT_HOME=/root/.cache/huggingface/lerobot
 ENV TORCH_HOME=/root/.cache/torch
 
 # Zenoh SDK path
-ENV ZENOH_SDK_PATH=/zenoh_sdk
 
 ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config

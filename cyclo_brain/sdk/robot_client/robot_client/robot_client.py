@@ -35,11 +35,6 @@ from typing import Optional, Union
 import numpy as np
 import cv2
 
-# Add zenoh_ros2_sdk to path if not already available
-_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "")
-if _SDK_PATH and _SDK_PATH not in sys.path:
-    sys.path.insert(0, _SDK_PATH)
-
 from zenoh_ros2_sdk import ROS2Publisher, ROS2Subscriber, get_message_class  # noqa: E402
 
 from .handoff import (

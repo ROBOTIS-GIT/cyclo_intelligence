@@ -3323,7 +3323,6 @@ def test_backend_config_mount_is_read_from_compose():
             "/app/policy_manifest.yaml": f"../cyclo_brain/policy/{backend}/manifest.yaml",
             "/policy_runtime": "../cyclo_brain/policy/common/runtime",
             "/catalog": "../cyclo_brain/policy/common/catalog",
-            "/zenoh_sdk": "../cyclo_brain/sdk/zenoh_ros2_sdk",
             "/robot_client_sdk": "../cyclo_brain/sdk/robot_client",
             "/orchestrator_config": "../shared/shared/robot_configs",
         }

@@ -27,10 +27,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
-_ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk")
-if os.path.exists(_ZENOH_SDK_PATH) and _ZENOH_SDK_PATH not in sys.path:
-    sys.path.insert(0, _ZENOH_SDK_PATH)
-
 from .protocol import (
     CMD_DESCRIBE,
     CMD_GET_ACTION,
