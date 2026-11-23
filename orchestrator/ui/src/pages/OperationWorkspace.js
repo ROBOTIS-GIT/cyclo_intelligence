@@ -10,6 +10,7 @@ import useDocumentVisible from '../hooks/useDocumentVisible';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import InlineSystemStatus from '../components/InlineSystemStatus';
 import ImageGrid from '../components/ImageGrid';
+import OperateSplitter from '../components/layout/OperateSplitter';
 import RobotViewer3D from '../components/RobotViewer3D';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
 import RecordControlPanel from '../components/RecordControlPanel';
@@ -105,8 +106,8 @@ export default function OperationWorkspace() {
         </div>
       </header>
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
-        <section aria-label="Live monitoring" className="operation-monitoring min-w-0 flex-1 flex flex-col gap-3 p-3 shrink-0 lg:shrink">
-          <div className="min-h-[240px] h-[360px] lg:h-auto lg:flex-[3] overflow-hidden"><ImageGrid isActive responsive isRecording={isRecording} headerActions={<>
+        <section aria-label="Live monitoring" data-split={monitorsExpanded} className="operation-monitoring min-w-0 flex-1 flex flex-col gap-3 p-3 shrink-0 lg:shrink">
+          <div id="operate-cameras" className="h-[360px] lg:h-auto min-h-0 overflow-hidden"><ImageGrid isActive responsive isRecording={isRecording} headerActions={<>
             {!show3D && <button type="button" title="Expand Robot Viewer" aria-label="Expand Robot Viewer"
               aria-expanded={false} aria-controls="operate-robot-viewer" className="image-grid-tool"
               onClick={() => setMonitors((value) => ({ ...value, viewer: true }))}><MdViewInAr size={20} /></button>}
@@ -114,8 +115,10 @@ export default function OperationWorkspace() {
               aria-expanded={false} aria-controls="operate-topic-monitor" className="image-grid-tool"
               onClick={() => setMonitors((value) => ({ ...value, topics: true }))}><MdMonitorHeart size={20} /></button>}
           </>} /></div>
-          <div aria-label="Observation monitors" hidden={!monitorsExpanded}
-            className={`operation-observations grid gap-3 lg:flex-[2] min-h-[280px] ${show3D && showTopics ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
+          {monitorsExpanded && <OperateSplitter orientation="horizontal" initialPercent={60}
+            controls="operate-cameras" label="Resize cameras and observation monitors" />}
+          <div aria-label="Observation monitors" hidden={!monitorsExpanded} data-split={show3D && showTopics}
+            className="operation-observations grid grid-cols-1 gap-3 min-h-[280px] lg:min-h-0">
             <section aria-label="Robot Viewer" hidden={!show3D} className="operation-monitor flex flex-col bg-white border border-gray-300 min-w-0 min-h-0 overflow-hidden">
               <div className="flex items-center justify-between gap-2 px-3 py-1 bg-gray-50 border-b border-gray-300">
                 <h2 className="text-sm font-semibold text-gray-800">Robot Viewer</h2>
@@ -125,10 +128,12 @@ export default function OperationWorkspace() {
                   <MdClose size={20} />
                 </button>
               </div>
-              <div id="operate-robot-viewer" hidden={!show3D} className="min-h-[220px] h-[260px] lg:h-auto lg:flex-1">
+              <div id="operate-robot-viewer" hidden={!show3D} className="min-h-[220px] h-[260px] lg:min-h-0 lg:h-auto lg:flex-1">
                 <RobotViewer3D mode="live" isActive={show3D && documentVisible} showSourceSelector defaultVisualizationSource="state" />
               </div>
             </section>
+            {show3D && showTopics && <OperateSplitter orientation="vertical" initialPercent={50}
+              controls="operate-robot-viewer" label="Resize Robot Viewer and Topic Monitor" />}
             <div id="operate-topic-monitor" hidden={!showTopics} className="operation-topic-monitor bg-white border border-gray-300 min-w-0 min-h-0 overflow-hidden">
               <RecordTopicMonitor embedded collapsed={!showTopics || !documentVisible} actions={
                 <button type="button" title="Close Topic Monitor" aria-label="Close Topic Monitor"

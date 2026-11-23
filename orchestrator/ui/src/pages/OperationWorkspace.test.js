@@ -204,6 +204,32 @@ test('monitor visibility survives remount, but never hides the toggle controls',
   expect(screen.getByRole('button', { name: 'Expand Robot Viewer' })).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('split ratios persist independently without remounting monitors or sending robot commands', () => {
+  const { command, unmount } = setup();
+  const rows = () => screen.getByRole('separator', { name: 'Resize cameras and observation monitors' });
+  const columns = () => screen.getByRole('separator', { name: 'Resize Robot Viewer and Topic Monitor' });
+  const viewer = screen.getByTestId('viewer-content');
+  command.mockClear();
+  fireEvent.keyDown(rows(), { key: 'ArrowDown' });
+  fireEvent.keyDown(columns(), { key: 'Home' });
+  expect(rows()).toHaveAttribute('aria-valuenow', '65');
+  expect(columns()).toHaveAttribute('aria-valuenow', '25');
+  fireEvent.click(screen.getByRole('button', { name: 'Close Topic Monitor' }));
+  expect(screen.queryByRole('separator', { name: 'Resize Robot Viewer and Topic Monitor' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Topic Monitor' }));
+  expect(screen.getByTestId('viewer-content')).toBe(viewer);
+  expect(columns()).toHaveAttribute('aria-valuenow', '25');
+  expect(command).not.toHaveBeenCalled();
+  unmount();
+  setup();
+  expect(rows()).toHaveAttribute('aria-valuenow', '65');
+  expect(columns()).toHaveAttribute('aria-valuenow', '25');
+  fireEvent.doubleClick(rows());
+  fireEvent.doubleClick(columns());
+  expect(rows()).toHaveAttribute('aria-valuenow', '60');
+  expect(columns()).toHaveAttribute('aria-valuenow', '50');
+});
+
 test('hidden Record settings cannot receive recording shortcuts', () => {
   const { command } = setup();
   fireEvent.click(screen.getByRole('button', { name: 'Collapse operation settings' }));

@@ -1,6 +1,38 @@
 /* Keep mounted controllers hidden despite flex/grid display utilities. */
 .operation-workspace [hidden] { display: none !important; }
 
+.operate-splitter {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  user-select: none;
+}
+.operate-splitter::after {
+  content: '';
+  background: #94a3b8;
+  border-radius: 2px;
+}
+.operate-splitter:hover::after, .operate-splitter:focus-visible::after, .operate-splitter:active::after {
+  background: #2563eb;
+}
+@media (min-width: 768px) {
+  .operation-observations[data-split="true"] {
+    grid-template-columns: minmax(0, var(--operate-first, 1fr)) 12px minmax(0, var(--operate-second, 1fr));
+    gap: 0;
+  }
+  .operate-splitter[aria-orientation="vertical"] { display: flex; cursor: col-resize; }
+  .operate-splitter[aria-orientation="vertical"]::after { width: 4px; height: 36px; }
+}
+@media (min-width: 1024px) {
+  .operation-monitoring { display: grid; grid-template-rows: minmax(0, 1fr); gap: 0; }
+  .operation-monitoring[data-split="true"] {
+    grid-template-rows: minmax(0, var(--operate-first, 3fr)) 12px minmax(0, var(--operate-second, 2fr));
+  }
+  .operate-splitter[aria-orientation="horizontal"] { display: flex; cursor: row-resize; }
+  .operate-splitter[aria-orientation="horizontal"]::after { height: 4px; width: 36px; }
+}
+
 .recording-actions { container-type: inline-size; }
 .recording-action svg { flex-shrink: 0; }
 
