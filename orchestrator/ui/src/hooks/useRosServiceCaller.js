@@ -843,8 +843,7 @@ export function useRosServiceCaller(taskContext) {
   );
 
   const sendEditDatasetCommand = useCallback(
-    async (command) => {
-      const editDatasetInfo = editDatasetInfoRef.current;
+    async (command, editDatasetInfo = editDatasetInfoRef.current) => {
       try {
         console.log('Calling service /data/edit with request:', {
           command: command,
