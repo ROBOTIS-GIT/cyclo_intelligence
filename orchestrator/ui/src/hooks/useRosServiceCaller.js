@@ -434,6 +434,10 @@ export function useRosServiceCaller(taskContext) {
             acceleration_engine_path: accelerationEnginePath,
             ...buildPolicySelectionTaskInfo(taskInfo),
             ...buildInitialPoseSyncTaskInfo(taskInfo),
+            ...(command === 'convert_mp4' && options.conversionSource && {
+              task_name: options.conversionSource,
+              task_instruction: [options.conversionSource],
+            }),
           },
           command: Number(command_enum),
           segment_index: Number(options.segmentIndex || 0),
@@ -441,6 +445,9 @@ export function useRosServiceCaller(taskContext) {
           // command == CONVERT_MP4). Default to 0 / false so the wire
           // representation is stable for non-conversion commands.
           conversion_fps: Number(options.conversionFps || 0),
+          ...(command === 'convert_mp4' && {
+            conversion_output_name: options.conversionOutputName || '',
+          }),
           convert_v21: Boolean(options.convertV21),
           convert_v30: Boolean(options.convertV30),
           selected_cameras: [],

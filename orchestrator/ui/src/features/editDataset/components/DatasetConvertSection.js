@@ -14,13 +14,9 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { shallowEqual, useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import { MdFolderOpen, MdMovie } from 'react-icons/md';
 import FileBrowserModal from '../../../components/FileBrowserModal';
-import {
-  selectRecordTaskInfo,
-  setRecordTaskInfo,
-} from '../../../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DEFAULT_PATHS } from '../../../constants/paths';
 
@@ -41,21 +37,24 @@ const normalizeRosbagTaskPath = (item) => {
 };
 
 export default function DatasetConvertSection({ isEditable = true }) {
-  const dispatch = useDispatch();
   const { sendRecordCommand } = useRosServiceCaller();
-  const info = useSelector(selectRecordTaskInfo, shallowEqual);
   const conversionStatus = useSelector(
     (state) => state.editDataset.conversionStatus
   );
 
   // ----- local state ------------------------------------------------------
   const [singleTaskName, setSingleTaskName] = useState('');
+  const [outputOverride, setOutputOverride] = useState(null);
+  const folder = singleTaskName.split('/').filter(Boolean).pop();
+  const outputName = outputOverride ?? (folder ? `${folder}_lerobot` : '');
+  const nameValid = Boolean(outputName.trim()) && outputName === outputName.trim()
+    && !['.', '..'].includes(outputName) && !/[/\\]/.test(outputName)
+    && !Array.from(outputName).some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127);
   const [showSingleBrowser, setShowSingleBrowser] = useState(false);
 
   const [isConverting, setIsConverting] = useState(false);
   const [hasSeenConverting, setHasSeenConverting] = useState(false);
   const [convertError, setConvertError] = useState('');
-  const [pendingSingleConvert, setPendingSingleConvert] = useState(false);
 
   // Conversion-only knobs. Defaults match cyclo_data's defaults: fps=15
   // (DEFAULT_CONVERSION_FPS in pipeline_worker.py) and both LeRobot
@@ -89,10 +88,7 @@ export default function DatasetConvertSection({ isEditable = true }) {
   }, [conversionStatus.status, conversionStatus.message, isConverting, hasSeenConverting]);
 
   // ----- single convert ---------------------------------------------------
-  // Two-step: dispatch taskInfo first, then fire sendRecordCommand from a
-  // useEffect once Redux has propagated the update (sendRecordCommand reads
-  // taskInfo via closure, so it must see the new value before being invoked).
-  const handleConvertMp4 = useCallback(() => {
+  const handleConvertMp4 = async () => {
     if (!singleTaskName) {
       setConvertError('Please pick a task folder to convert');
       return;
@@ -108,52 +104,25 @@ export default function DatasetConvertSection({ isEditable = true }) {
     setConvertError('');
     setIsConverting(true);
 
-    dispatch(
-      setRecordTaskInfo({
-        taskName: singleTaskName,
-        taskInstruction: [singleTaskName],
-      })
-    );
-    setPendingSingleConvert(true);
-  }, [singleTaskName, dispatch, convertV21, convertV30, conversionFps]);
-
-  useEffect(() => {
-    if (!pendingSingleConvert) return;
-    if (info.taskName !== singleTaskName) return;
-    setPendingSingleConvert(false);
-
-    const fire = async () => {
-      try {
-        const result = await sendRecordCommand('convert_mp4', {
-          conversionFps,
-          convertV21,
-          convertV30,
-          cameraRotations: {},
-          imageResize: null,
-        });
-        if (!result?.success) {
-          setConvertError(result?.message || 'Conversion failed');
-          setIsConverting(false);
-        }
-      } catch (error) {
-        setConvertError(error.message || 'Failed to start conversion');
+    try {
+      const result = await sendRecordCommand('convert_mp4', {
+        conversionSource: singleTaskName, conversionOutputName: outputName,
+        conversionFps, convertV21, convertV30,
+      });
+      if (!result?.success) {
+        setConvertError(result?.message || 'Conversion failed');
         setIsConverting(false);
       }
-    };
-    fire();
-  }, [
-    pendingSingleConvert,
-    info.taskName,
-    singleTaskName,
-    sendRecordCommand,
-    conversionFps,
-    convertV21,
-    convertV30,
-  ]);
+    } catch (error) {
+      setConvertError(error.message || 'Failed to start conversion');
+      setIsConverting(false);
+    }
+  };
 
   // ----- file browser callbacks ------------------------------------------
   const handleSingleFolderSelect = useCallback((item) => {
     setSingleTaskName(normalizeRosbagTaskPath(item));
+    setOutputOverride(null);
     setShowSingleBrowser(false);
   }, []);
 
@@ -163,7 +132,7 @@ export default function DatasetConvertSection({ isEditable = true }) {
     Number.isFinite(conversionFps) &&
     conversionFps > 0;
   const canConvertSingle =
-    !isConverting && Boolean(singleTaskName) && isEditable && optionsValid;
+    !isConverting && Boolean(singleTaskName) && isEditable && optionsValid && nameValid;
 
   // Match cyclo_data's progress-band layout so the label tracks the
   // actual stage. Stage 1 (MP4) always runs; v21 / v30 are conditional.
@@ -197,7 +166,7 @@ export default function DatasetConvertSection({ isEditable = true }) {
             <input
               type="text"
               value={singleTaskName}
-              onChange={(e) => setSingleTaskName(e.target.value)}
+              onChange={(e) => { setSingleTaskName(e.target.value); setOutputOverride(null); }}
               placeholder="e.g. Task_1_1_MCAP or Temp/Task_1_1_MCAP"
               disabled={isConverting || !isEditable}
               className={clsx(
@@ -285,10 +254,21 @@ export default function DatasetConvertSection({ isEditable = true }) {
             )}
           </div>
 
-          <div className="text-xs text-gray-500">
-            Converted datasets are saved under <code>/workspace/lerobot/</code>
-            {' '}(folder is created automatically if missing).
-          </div>
+          <label className="flex flex-col gap-1 text-sm font-medium">
+            Output dataset name
+            <input type="text" value={outputName} onChange={e => setOutputOverride(e.target.value)}
+              disabled={!singleTaskName || isConverting || !isEditable}
+              className="w-full p-2 border border-gray-300 rounded-md disabled:bg-gray-100" />
+          </label>
+          {singleTaskName && !nameValid && (
+            <span className="text-xs text-red-500">Enter a single folder name without leading or trailing spaces.</span>
+          )}
+          {nameValid && (
+            <div className="text-xs text-gray-500 break-all">
+              {convertV21 && <div>/workspace/lerobot/{outputName}_v21</div>}
+              {convertV30 && <div>/workspace/lerobot/{outputName}_v30</div>}
+            </div>
+          )}
         </div>
 
         {/* Convert button -------------------------------------------------- */}

@@ -66,6 +66,8 @@ uint16 segment_index
 uint16 conversion_fps
 bool convert_v21
 bool convert_v30
+# CONVERT_MP4 only: optional output folder stem, without the version suffix.
+string conversion_output_name
 
 # CONVERT_MP4 selection knobs — forwarded to StartConversion.srv when
 # the orchestrator dispatches conversion. All optional; empty / 0 means

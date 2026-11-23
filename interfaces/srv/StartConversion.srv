@@ -41,6 +41,8 @@ uint16 fps
 # the older flow (run all stages) keeps working without UI changes.
 bool convert_v21
 bool convert_v30
+# Output folder stem. Empty uses <source folder>_lerobot; version suffixes are automatic.
+string conversion_output_name
 
 # ---- Selection knobs (all optional) ----
 # Empty / 0 means "use everything discoverable from robot_config",

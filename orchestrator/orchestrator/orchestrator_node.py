@@ -2450,6 +2450,7 @@ class OrchestratorNode(Node):
                     robot_config_path=robot_config_path,
                     source_folders=source_paths,
                     fps=conversion_fps,
+                    conversion_output_name=request.conversion_output_name,
                     convert_v21=convert_v21,
                     convert_v30=convert_v30,
                     selected_cameras=list(

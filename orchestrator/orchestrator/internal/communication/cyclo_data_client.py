@@ -174,6 +174,7 @@ class CycloDataClient:
         selected_action_topics=None,
         selected_joints=None,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        conversion_output_name: str = '',
     ) -> CallResult:
         req = StartConversion.Request()
         req.dataset_path = dataset_path
@@ -189,6 +190,7 @@ class CycloDataClient:
         # side also interprets it as 'run both' (legacy UI safety).
         req.convert_v21 = bool(convert_v21)
         req.convert_v30 = bool(convert_v30)
+        req.conversion_output_name = conversion_output_name
 
         # Selection knobs — flatten dicts into the parallel-array shape
         # ROS2 srv requires.
