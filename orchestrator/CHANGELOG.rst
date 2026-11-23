@@ -2,6 +2,12 @@
 Changelog for package orchestrator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Route UI and leader recording commands to the prepared Record task independently of inference state.
+* Reconcile recording acknowledgements by request ID and target discards to the current task and episode.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * Robot selection discovers W1/W2 through the renamed shared configurations instead of F1/F2.

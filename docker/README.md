@@ -90,6 +90,15 @@ Follow upstream's separate evaluation setup and review the benchmark code and
 asset licenses. An inference worker image is not a simulator evaluation image.
 Source selection does not change model-weight or third-party license terms.
 
+### Upgrading from 1.5.1 to 1.6.0
+
+Finish or discard the current episode and stop inference before updating.
+Rebuild the core and selected Workers as described above. Rebuild external
+clients of `RecordingCommand`, `SendCommand`, and `StartConversion` against
+the new service definitions; do not mix generated interfaces across releases.
+Recording now uses the task prepared in the Record tab, including during
+inference. Existing datasets and evaluation manifests do not need migration.
+
 ### Upgrading from 1.4.x
 
 1. Stop/Clear inference and finish or discard recording. Stop pose return and

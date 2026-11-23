@@ -190,7 +190,7 @@ services:
   # ============================================================
   cyclo_intelligence:
     container_name: cyclo_intelligence
-    image: robotis/cyclo-intelligence:1.5.1
+    image: robotis/cyclo-intelligence:1.6.0
     build:
       context: ..
       dockerfile: docker/Dockerfile.${ARCH:-arm64}

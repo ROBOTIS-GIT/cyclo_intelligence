@@ -2,6 +2,12 @@
 Changelog for package interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Added request IDs, result lookup and archive state to RecordingCommand.
+* Added an optional conversion output name to SendCommand and StartConversion. Rebuild clients and servers together.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * None

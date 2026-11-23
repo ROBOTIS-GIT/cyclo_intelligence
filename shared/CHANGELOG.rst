@@ -2,6 +2,11 @@
 Changelog for package shared
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Configured inference handoff source, control status and allowed model modes for SG2, BG2, W1 and W2.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * Renamed F1/F2 robot configuration files and keys to ``w1_config.yaml``/``w2_config.yaml`` and ``w1``/``w2``, with W1/W2 display names.
