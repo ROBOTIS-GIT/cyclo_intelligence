@@ -14,10 +14,6 @@ import { ThemeProvider } from '../contexts/ThemeContext';
 import ThemeToggle from '../components/ThemeToggle';
 
 jest.mock('../hooks/useRosServiceCaller', () => ({ useRosServiceCaller: jest.fn() }));
-jest.mock('../utils/recordingAudio', () => ({
-  ...jest.requireActual('../utils/recordingAudio'),
-  preloadRecordingAudio: async () => [],
-}));
 jest.mock('../hooks/usePolicyBackendStatus', () => ({
   ...jest.requireActual('../hooks/usePolicyBackendStatus'),
   __esModule: true,
@@ -61,6 +57,7 @@ test('header identifies the robot and inference state with bordered non-interact
   setup();
   expect(screen.queryByRole('heading', { name: 'Operate' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Robot type')).toHaveTextContent('ffw_sg2_rev1');
+  expect(screen.getByRole('button', { name: 'Mute recording announcements' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByLabelText('Robot type')).toHaveClass('border', 'border-gray-300');
   expect(screen.getByLabelText('Inference status')).toHaveClass('border', 'border-gray-300');
   expect(screen.getByLabelText('Inference status')).toHaveTextContent('Inference');

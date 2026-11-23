@@ -29,6 +29,7 @@ import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
+import { initializeRecordingAudio } from './utils/recordingAudio';
 import { useDispatch, useSelector } from 'react-redux';
 import { moveToPage, persistCurrentPage } from './features/ui/uiSlice';
 import { persistRobotType } from './features/tasks/taskSlice';
@@ -118,6 +119,7 @@ function App() {
 
   // Subscribe to task status from ROS topic (always active)
   const rosSubscriptionControls = useRosTopicSubscription();
+  useEffect(initializeRecordingAudio, []);
 
   // rosHost is now seeded by rosSlice initialState (window.location.hostname),
   // so we no longer need to dispatch it here.

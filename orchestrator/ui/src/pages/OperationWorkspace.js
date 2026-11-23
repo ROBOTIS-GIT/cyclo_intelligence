@@ -17,7 +17,7 @@ import InferenceControlPanel from '../components/InferenceControlPanel';
 import SegmentPanel from '../components/SegmentPanel';
 import InferencePanel from '../components/InferencePanel';
 import {
-  disableRecordingAudio, enableRecordingAudio, preloadRecordingAudio, recordingSoundState, subscribeRecordingSound,
+  disableRecordingAudio, enableRecordingAudio, recordingSoundState, subscribeRecordingSound,
 } from '../utils/recordingAudio';
 import './OperationWorkspace.css';
 
@@ -52,10 +52,6 @@ export default function OperationWorkspace() {
   const [monitors, setMonitors] = useState(readMonitorVisibility);
   const sound = useSyncExternalStore(subscribeRecordingSound, recordingSoundState);
   const soundLabel = sound === 'on' ? 'Mute recording announcements' : 'Enable recording announcements';
-  useEffect(() => {
-    // A failed preload can be retried when the operator enables sound.
-    preloadRecordingAudio().catch(() => {});
-  }, []);
   const show3D = monitors.viewer;
   const showTopics = monitors.topics;
   const inferenceSelected = page === PageType.INFERENCE;
@@ -90,7 +86,7 @@ export default function OperationWorkspace() {
           {joystickMode && <span className="text-xs text-gray-500">{joystickMode}</span>}
           <HeartbeatStatus autoHideConnectedMs={3000} size="small" className="operation-connection" />
           <button type="button" className={collapseButtonClass} title={soundLabel} aria-label={soundLabel}
-            aria-pressed={sound === 'on'} disabled={sound === 'loading'} onClick={() => {
+            aria-pressed={sound === 'on'} onClick={() => {
               if (sound === 'on') disableRecordingAudio();
               else enableRecordingAudio().catch(() => toast.error('Could not enable recording sounds. Try again.'));
             }}>

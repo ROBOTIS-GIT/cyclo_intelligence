@@ -8,7 +8,7 @@ import cameraWarning from '../assets/recording-audio/camera-warning.mp3';
 
 const clips = { enabled, start, finish, cancel, review_on: reviewOn, review_off: reviewOff, cameraWarning };
 let preload;
-export function preloadRecordingAudio() {
+function preloadRecordingAudio() {
   if (!preload) {
     preload = Promise.all(Object.entries(clips).map(async ([key, url]) => {
       const response = await fetch(url);
@@ -22,10 +22,20 @@ export function preloadRecordingAudio() {
 let context;
 let buffers;
 let playing;
+let cancelUnlock;
 let changingOutput = false;
 const queue = [];
 const listeners = new Set();
-let state = 'off';
+const muteKey = 'cyclo_intelligence.recordingAudio.muted';
+function initialState() {
+  try { return window.localStorage.getItem(muteKey) === 'true' ? 'off' : 'on'; }
+  catch { return 'on'; }
+}
+function rememberMute(muted) {
+  try { window.localStorage.setItem(muteKey, String(muted)); }
+  catch { /* The preference still works in memory. */ }
+}
+let state = initialState();
 export const recordingSoundState = () => state;
 export function subscribeRecordingSound(listener) {
   listeners.add(listener);
@@ -37,7 +47,7 @@ function setState(value) {
 }
 
 function playNext() {
-  if (state !== 'on' || playing || changingOutput) return;
+  if (state !== 'on' || !buffers || playing || changingOutput) return;
   const ctx = context;
   const suspend = !queue.length && ctx.state === 'running';
   if (suspend || (queue.length && ctx.state === 'suspended')) {
@@ -47,9 +57,9 @@ function playNext() {
     (suspend ? ctx.suspend() : ctx.resume()).then(() => {
       if (context !== ctx) return;
       changingOutput = false;
-      if (!suspend && ctx.state !== 'running') disableRecordingAudio();
+      if (!suspend && ctx.state !== 'running') stopOutput();
       else if (queue.length) playNext();
-    }).catch(() => { if (context === ctx) disableRecordingAudio(); });
+    }).catch(() => { if (context === ctx) stopOutput(); });
     return;
   }
   if (!queue.length || ctx.state !== 'running') return;
@@ -68,7 +78,9 @@ function playNext() {
 }
 
 export function announceRecording(key) {
-  if (state !== 'on' || !buffers.has(key)) return;
+  if (state !== 'on' || !Object.hasOwn(clips, key)) return;
+  // Keep cues while decoding, but never replay events from before autoplay was allowed.
+  if (!buffers && context?.state !== 'running') return;
   if (key === 'cameraWarning' && (playing?.key === key || queue.includes(key))) return;
   // Don't narrate a long backlog after rapid changes.
   if (queue.length === 3) queue.shift();
@@ -77,6 +89,17 @@ export function announceRecording(key) {
 }
 
 export function disableRecordingAudio() {
+  rememberMute(true);
+  stopOutput();
+}
+
+function stopOutput() {
+  releaseOutput();
+  setState('off');
+}
+
+function releaseOutput() {
+  cancelUnlock?.();
   queue.length = 0;
   changingOutput = false;
   playing = null;
@@ -87,30 +110,63 @@ export function disableRecordingAudio() {
     old.onstatechange = null;
     if (old.state !== 'closed') old.close().catch(() => {});
   }
-  setState('off');
 }
 
-export async function enableRecordingAudio() {
-  if (state !== 'off') return;
-  // Resume directly in the button's click handler, before any async loading.
+function resumeOnStartup(ctx) {
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      window.removeEventListener('click', resume, true);
+      window.removeEventListener('keydown', resume, true);
+      if (cancelUnlock === cancel) cancelUnlock = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const cancel = () => finish();
+    // Autoplay policies may reject immediately or leave resume() pending.
+    // Retry inside a gesture handler, before any asynchronous work.
+    const resume = () => {
+      ctx.resume().then(() => {
+        if (ctx.state === 'running') finish();
+      }).catch(error => { if (error.name !== 'NotAllowedError') finish(error); });
+    };
+    cancelUnlock = cancel;
+    window.addEventListener('click', resume, true);
+    window.addEventListener('keydown', resume, true);
+    resume();
+  });
+}
+
+async function openOutput(confirm) {
+  if (context) return;
   const AudioContext = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AudioContext();
-  context = ctx;
-  setState('loading');
+  let ctx;
   try {
-    const [, decoded] = await Promise.all([ctx.resume(), preloadRecordingAudio().then(entries =>
+    ctx = new AudioContext();
+    context = ctx;
+    const [, decoded] = await Promise.all([confirm ? ctx.resume() : resumeOnStartup(ctx), preloadRecordingAudio().then(entries =>
       Promise.all(entries.map(async ([key, bytes]) => [key, await ctx.decodeAudioData(bytes.slice(0))])))]);
     if (context !== ctx) return;
     if (ctx.state !== 'running') throw new Error('Audio playback is blocked');
     buffers = new Map(decoded);
     ctx.onstatechange = () => {
       if (context === ctx && (ctx.state === 'closed' || ctx.state === 'interrupted'
-        || (ctx.state === 'suspended' && playing))) disableRecordingAudio();
+        || (ctx.state === 'suspended' && playing))) stopOutput();
     };
-    setState('on');
-    announceRecording('enabled');
+    if (confirm) announceRecording('enabled');
+    else playNext();
   } catch (error) {
-    if (context === ctx) disableRecordingAudio();
+    if (!ctx || context === ctx) stopOutput();
     throw error;
   }
+}
+
+export function enableRecordingAudio() {
+  rememberMute(false);
+  setState('on');
+  return openOutput(true);
+}
+
+export function initializeRecordingAudio() {
+  if (state === 'on') openOutput(false).catch(() => {});
+  return releaseOutput;
 }
