@@ -17,6 +17,7 @@ from main_runtime.saved_pose import SavedPoseManager
 @pytest.fixture
 def manager():
     robot = Mock()
+    robot.handoff_status.return_value = None
     robot.get_named_joint_positions.return_value = {"arm": 0.25, "lift": 0.1}
     manager = SavedPoseManager(Mock(return_value=robot))
     manager._profiles["test"] = {
@@ -58,6 +59,27 @@ def test_missing_state_blocks_return_before_publication(manager):
         manager.restore("test")
     manager._robot.publish_named_pose.assert_not_called()
     assert not manager.returning
+
+
+def test_return_arms_one_ownership_lease_for_target_and_later_hold(manager):
+    robot = manager._robot
+    robot.handoff_status.return_value = SimpleNamespace(enabled=True, state="ready", revision=7)
+    manager.restore("test")
+    robot.arm_handoff.assert_called_once_with(7)
+    manager.stop()
+    robot.arm_handoff.assert_called_once_with(7)
+    robot.publish_current_pose_hold.assert_called_once()
+
+
+def test_return_rejects_ownership_change_between_snapshot_and_arm(manager):
+    robot = manager._robot
+    robot.handoff_status.return_value = SimpleNamespace(enabled=True, state="ready", revision=7)
+    robot.arm_handoff.side_effect = RuntimeError("ownership_changed")
+    with pytest.raises(RuntimeError, match="ownership_changed"):
+        manager.restore("test")
+    assert not manager.returning
+    robot.publish_named_pose.assert_not_called()
+    robot.publish_current_pose_hold.assert_not_called()
 
 
 def test_partial_publish_and_failed_hold_remain_pending(manager):
@@ -131,6 +153,66 @@ def test_return_stale_state_still_attempts_hold(manager):
     assert not manager.returning
     assert "stale state" in manager.error
     manager._robot.publish_current_pose_hold.assert_called_once()
+
+
+def test_teleop_cancels_pose_return_without_hold(manager):
+    manager._robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="ready", revision=1, reason="",
+    )
+    manager.restore("test")
+    manager._robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="yielded", revision=2, reason="teleop",
+    )
+    manager.poll()
+    assert not manager.returning
+    manager._robot.publish_current_pose_hold.assert_not_called()
+    assert "teleop" in manager.error
+
+
+def test_explicit_return_requests_local_intent_but_status_and_save_do_not(manager):
+    robot = manager._robot
+    robot.request_model_start.assert_not_called()
+    manager.status("test")
+    manager.save("test")
+    robot.request_model_start.assert_not_called()
+    robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="blocked", revision=0, reason="source_missing")
+
+    def request():
+        robot.handoff_status.return_value = SimpleNamespace(
+            enabled=True, state="ready", revision=1, reason="local_model")
+
+    robot.request_model_start.side_effect = request
+    manager.restore("test")
+    robot.request_model_start.assert_called_once()
+    robot.arm_handoff.assert_called_once_with(1)
+    robot.publish_named_pose.assert_called_once()
+
+
+@pytest.mark.parametrize("reason", ["teleop", "publisher_changed", "source_stale", "model_mode_unsupported"])
+def test_explicit_pose_return_never_overrides_external_authority(manager, reason):
+    robot = manager._robot
+    robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="blocked", revision=2, reason=reason)
+    with pytest.raises(RuntimeError, match=reason):
+        manager.restore("test")
+    robot.request_model_start.assert_called_once()
+    robot.arm_handoff.assert_not_called()
+    robot.publish_named_pose.assert_not_called()
+    robot.publish_current_pose_hold.assert_not_called()
+
+
+def test_fast_handoff_cancels_return_without_reasserting_old_pose(manager):
+    manager._robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="ready", revision=1, reason="",
+    )
+    manager.restore("test")
+    manager._robot.handoff_status.return_value = SimpleNamespace(
+        enabled=True, state="ready", revision=3, reason="",
+    )
+    manager.stop()
+    assert not manager.returning
+    manager._robot.publish_current_pose_hold.assert_not_called()
 
 
 @pytest.fixture
@@ -328,6 +410,7 @@ def test_pose_joint_names_and_units_come_from_robot_configuration(robot_type):
                  for name in profile["names"]}
     robot = Mock()
     robot.get_named_joint_positions.return_value = positions
+    robot.handoff_status.return_value = None
     manager._factory = Mock(return_value=robot)
     manager.save(robot_type)
     assert manager._load(robot_type) == positions

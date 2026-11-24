@@ -64,6 +64,11 @@ class ServiceHandler:
         self._worker_mutations: dict[str, str] = {}
         self._lock = threading.RLock()
         self._shutdown_requested = threading.Event()
+        self._handoff_pending = False
+        self._handoff_eligible = False
+        self._handoff_reason = ""
+        self._handoff_revision = None
+        self._handoff_fault_revision = None
 
     def begin_shutdown(self) -> None:
         self._shutdown_requested.set()
@@ -73,6 +78,8 @@ class ServiceHandler:
             if self._shutdown_requested.is_set():
                 return self._make_response(False, "Policy Runtime is shutting down")
             cmd = int(request.command)
+            if cmd in {CMD_LOAD, CMD_PAUSE, CMD_STOP, CMD_UNLOAD}:
+                self._cancel_handoff()
             try:
                 if self._pose_manager is not None:
                     self._pose_manager.poll()
@@ -130,6 +137,7 @@ class ServiceHandler:
                     manager.save(robot_type)
                     message = "Initial pose saved."
                 elif command == 2:
+                    self._cancel_handoff()
                     manager.check_duration(robot_type, float(getattr(request, "duration_s", 0)))
                     if self._runtime_state() not in {"unloaded", "loaded", "paused"}:
                         raise RuntimeError("Stop inference before returning to the saved pose.")
@@ -382,7 +390,7 @@ class ServiceHandler:
     def _start(self, request):
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
-        syncing = self._control_loop.start(
+        syncing = self._start_loop(
             publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             **self._action_steps_options(request),
         )
@@ -417,7 +425,7 @@ class ServiceHandler:
         if not self._session.running:
             raise RuntimeError("not running")
         task_instruction = request.task_instruction or self._session.task_instruction
-        syncing = self._control_loop.start(
+        syncing = self._start_loop(
             publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
             task_instruction=task_instruction,
             **self._action_steps_options(request),
@@ -483,7 +491,74 @@ class ServiceHandler:
         return self._make_response(True, f'instruction updated: "{new_instruction}"')
 
     def _status(self):
-        return self._make_response(True, self._runtime_state())
+        return self._make_response(True, self._handoff_reason or self._runtime_state())
+
+    def _cancel_handoff(self):
+        self._handoff_pending = False
+        self._handoff_eligible = False
+        self._handoff_reason = ""
+
+    def _handoff_status(self, *, started=False):
+        read = getattr(self._control_loop, "handoff_status", None)
+        return read(started=started) if read is not None else None
+
+    def _start_loop(self, **options):
+        syncing = self._control_loop.start(**options)
+        status = self._handoff_status(started=True)
+        self._handoff_revision = status.revision if status is not None else None
+        self._handoff_fault_revision = status.fault_revision if status is not None else None
+        self._cancel_handoff()
+        self._handoff_eligible = True
+        return syncing
+
+    def poll_handoff(self):
+        """Lifecycle coordination only; RobotClient independently gates every send."""
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            if self._shutdown_requested.is_set():
+                self._cancel_handoff()
+                return
+            session = self._session
+            if not session.loaded or not session.publish_to_robot or session.error:
+                self._cancel_handoff()
+                return
+            if self._pose_manager is not None and self._pose_manager.returning:
+                self._cancel_handoff()
+                return
+            status = self._handoff_status()
+            if status is None:
+                return
+            fault = status.state == "blocked" or (
+                self._handoff_fault_revision is not None
+                and status.fault_revision != self._handoff_fault_revision
+            )
+            changed = status.revision != self._handoff_revision or status.state != "ready"
+            if session.running and not session.paused and changed:
+                self._control_loop.stop(hold=False)
+                session.mark_paused()
+                self._handoff_pending = self._handoff_eligible and not fault
+            if fault and session.paused:
+                self._cancel_handoff()
+                self._handoff_reason = f"Control unavailable: {status.reason or 'control continuity lost'}; START required."
+            if not self._handoff_pending:
+                return
+            self._handoff_reason = f"Waiting for model control: {status.reason or status.state}"
+            if status.state != "ready":
+                return
+            if self._control_loop.prediction_pending():
+                self._handoff_reason = "Waiting for the previous prediction to finish."
+                return
+            try:
+                self._start_loop(publish_to_robot=session.publish_to_robot,
+                                 task_instruction=session.task_instruction,
+                                 expected_handoff=(status.revision, self._handoff_fault_revision))
+                session.mark_resumed()
+            except Exception as exc:
+                self._cancel_handoff()
+                self._handoff_reason = f"Automatic resume failed: {exc}; START required."
+        finally:
+            self._lock.release()
 
     def _runtime_state(self) -> str:
         if self._session.error:
@@ -503,6 +578,7 @@ class ServiceHandler:
     def fail_safe(self, reason: str) -> bool:
         """Stop command publication after a worker/orchestrator failure."""
         with self._lock:
+            self._cancel_handoff()
             pose_was_returning = bool(self._pose_manager and self._pose_manager.returning)
             try:
                 self._stop_pose_return()
@@ -521,6 +597,9 @@ class ServiceHandler:
 
     def on_control_fault(self, reason: str, _hold_ok: bool) -> None:
         with self._lock:
+            if not self._control_loop.control_fault_is_current():
+                return
+            self._cancel_handoff()
             if self._session.loaded:
                 self._session.mark_error(reason)
 
@@ -543,6 +622,8 @@ class ServiceHandler:
                 "loading_runtime_id": self._loading_runtime_id,
                 "mutating_runtime_ids": sorted(self._worker_mutations),
                 "error": self._session.error,
+                "handoff_pending": self._handoff_pending,
+                "handoff_reason": self._handoff_reason,
             }
             if self._pose_manager is not None:
                 snapshot["pose_returning"] = self._pose_manager.returning

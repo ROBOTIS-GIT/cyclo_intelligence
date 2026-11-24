@@ -45,13 +45,14 @@ def test_heartbeat_subscriptions_supply_offline_message_definitions(runtime_modu
     assert definitions["std_msgs/msg/String"].strip() == "string data"
 
 
-@pytest.mark.parametrize("phase", ["preparing", "running", "syncing"])
+@pytest.mark.parametrize("phase", ["preparing", "running", "syncing", "paused"])
 def test_heartbeat_loss_is_not_ignored_during_preparation(runtime_module, phase):
     runtime = runtime_module.PolicyRuntime.__new__(runtime_module.PolicyRuntime)
     runtime._shutdown = mock.Mock()
     runtime._shutdown.wait.side_effect = [False, True]
     runtime._handler = mock.Mock()
-    runtime._handler.runtime_snapshot.return_value = {"runtime_state": phase, "runtime_id": "lerobot"}
+    runtime._handler.runtime_snapshot.return_value = {"runtime_state": phase, "runtime_id": "lerobot",
+                                                     "handoff_pending": phase == "paused"}
     runtime._handler.pose_snapshot.return_value = {}
     runtime._pose_status_publisher = mock.Mock()
     runtime._active_since = 0.
@@ -62,6 +63,28 @@ def test_heartbeat_loss_is_not_ignored_during_preparation(runtime_module, phase)
     with mock.patch.object(runtime_module.time, "monotonic", return_value=10.):
         runtime._monitor_health()
     runtime._handler.fail_safe.assert_called_once()
+    runtime._handler.poll_handoff.assert_not_called()
+
+
+def test_healthy_monitor_coordinates_handoff(runtime_module):
+    runtime = runtime_module.PolicyRuntime.__new__(runtime_module.PolicyRuntime)
+    runtime._shutdown = mock.Mock()
+    runtime._shutdown.wait.side_effect = [False, True]
+    runtime._handler = mock.Mock()
+    runtime._handler.runtime_snapshot.return_value = {
+        "runtime_state": "paused", "runtime_id": "lerobot", "handoff_pending": True,
+    }
+    runtime._handler.pose_snapshot.return_value = {}
+    runtime._pose_status_publisher = mock.Mock()
+    runtime._active_since = 0.
+    runtime._orchestrator_last_seen = 10.
+    runtime._workers = mock.Mock()
+    runtime._workers.heartbeat_age.return_value = 0.
+    runtime._workers.worker_instance_changed.return_value = False
+    with mock.patch.object(runtime_module.time, "monotonic", return_value=10.):
+        runtime._monitor_health()
+    runtime._handler.fail_safe.assert_not_called()
+    runtime._handler.poll_handoff.assert_called_once()
 
 
 def test_shutdown_stops_preparation_before_closing_the_control_loop(runtime_module):

@@ -15,10 +15,12 @@
 // Author: Kiwoong Park
 
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import clsx from 'clsx';
 
 const ImageTopicSelectModal = ({
   topicList,
+  topicLabels = {},
   onSelect,
   onClose,
   isLoading,
@@ -42,11 +44,11 @@ const ImageTopicSelectModal = ({
     'z-50'
   );
 
-  return (
+  return createPortal(
     <div className={classImageTopicSelectModal}>
-      <div className="bg-white rounded-xl p-8 min-w-[420px] max-h-[80vh] overflow-hidden flex flex-col">
+      <div role="dialog" aria-modal="true" aria-label="Select Image Topic" className="bg-white rounded-lg p-4 w-full max-w-lg mx-4 max-h-[80vh] overflow-hidden flex flex-col">
         <div className="flex justify-between gap-4 items-center mb-6">
-          <h3 className="text-4xl">Select Image Topic</h3>
+          <h3 className="text-base font-semibold">Select Image Topic</h3>
           <button
             onClick={onRefresh}
             disabled={isLoading}
@@ -85,21 +87,22 @@ const ImageTopicSelectModal = ({
                 <li
                   key={topic}
                   className={clsx(
-                    'my-2 cursor-pointer p-3 rounded-md text-xl transition-colors duration-200',
+                    'my-2 p-0',
                     {
                       'bg-blue-700 text-white': selected === topic,
                       'bg-blue-200': hovered === topic && selected !== topic,
                       'bg-gray-200': hovered !== topic && selected !== topic,
                     }
                   )}
-                  onMouseEnter={() => setHovered(topic)}
-                  onMouseLeave={() => setHovered(null)}
-                  onClick={() => {
+                >
+                  <button type="button" title={topic} className="w-full text-left p-3 rounded border border-gray-300 text-sm break-all"
+                    onMouseEnter={() => setHovered(topic)} onMouseLeave={() => setHovered(null)}
+                    onClick={() => {
                     setSelected(topic);
                     onSelect(topic);
-                  }}
-                >
-                  {topic}
+                  }}>
+                  {topicLabels[topic] || topic}
+                  </button>
                 </li>
               ))}
             </ul>
@@ -107,13 +110,13 @@ const ImageTopicSelectModal = ({
         </div>
 
         <button
-          className="mt-5 w-1/3 min-h-[50px] text-3xl font-medium rounded-lg border-0 shadow-md"
+          className="mt-4 self-end px-4 h-9 text-sm font-medium rounded border border-gray-300"
           onClick={onClose}
         >
           Close
         </button>
       </div>
-    </div>
+    </div>, document.body
   );
 };
 

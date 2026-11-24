@@ -2,6 +2,14 @@
 Changelog for package cyclo_intelligence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Unified recording and inference in Operate. Record tasks can run independently of inference, including during teleoperation.
+* Added inference handoff on configured robots and removed the separate Try Results evaluation workflow.
+* Added episode deletion with renumbering in Review Episodes and custom output names for LeRobot conversion.
+* Moved the Zenoh ROS 2 SDK from a host submodule to a pinned wheel in the core and inference Worker images. Rebuild matching images and generated interfaces together.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * Renamed F1 and F2 to W1 and W2 in robot configuration keys, filenames, display names, and bundled URDF identifiers.

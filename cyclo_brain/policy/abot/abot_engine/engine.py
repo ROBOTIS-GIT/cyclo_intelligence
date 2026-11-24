@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 import yaml
+from inference_context.observation import ExecutionObservationBarrier
 
 from .bundle import Bundle
 from .mapping import RobotMapping
@@ -19,6 +20,7 @@ logger = logging.getLogger("abot_engine")
 class ABotEngine:
     def __init__(self):
         self.policy = self.robot = self.mapping = None
+        self._observation_barrier = ExecutionObservationBarrier()
 
     @property
     def is_ready(self):
@@ -59,11 +61,15 @@ class ABotEngine:
             self.cleanup()
             return {"success": False, "message": str(exc)}
 
+    def update_execution_context(self, context):
+        # Supported ABot full-chunk prediction has no model-owned action queue.
+        self._observation_barrier.update(context)
+
     def get_action_chunk(self, request):
         if not self.is_ready:
             return {"success": False, "message": "ABot-M0 is not loaded"}
         try:
-            snapshot = self.robot.get_required_input_snapshot(self.mapping.sources, max_age_s=self.max_age_s)
+            snapshot = self._observation_barrier.read(self.robot, self.mapping.sources, max_age_s=self.max_age_s)
             example = self.mapping.observation(snapshot, str(request.task_instruction or ""))
             action = self.mapping.action(self.policy.predict_action([example]))
             return {"success": True, "action_chunk": action.ravel(),
@@ -75,6 +81,7 @@ class ABotEngine:
     def cleanup(self):
         robot, self.robot = self.robot, None
         self.policy = self.mapping = None
+        self._observation_barrier = ExecutionObservationBarrier()
         try:
             if robot is not None:
                 robot.close()

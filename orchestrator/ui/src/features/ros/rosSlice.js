@@ -30,7 +30,7 @@ const initialState = {
   rosHost: defaultRosHost,
   rosbridgeUrl: defaultRosHost ? `ws://${defaultRosHost}:${CYCLO_ROSBRIDGE_PORT}` : '',
   imageTopicList: [],
-  /** Persisted camera topic assignment [left, center, right] so it survives ImageGrid remounts */
+  /** Persisted camera tile assignments (null = closed) for same-robot ImageGrid remounts. */
   assignedImageTopics: [],
   assignedImageTopicsRobotType: '',
   connectionError: null,

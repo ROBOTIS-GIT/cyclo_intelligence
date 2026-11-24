@@ -48,6 +48,7 @@ from shared.robot_configs import schema as robot_schema
 
 from interfaces.msg import DataOperationStatus, RecordingStatus
 from interfaces.srv import RecordingCommand
+from .command_receipts import CommandReceipts
 
 
 _COMMAND_NAMES = {
@@ -84,6 +85,8 @@ class RecordingService:
         self._node = node
         self._shutting_down = False
         self._command_lock = threading.Lock()
+        self._receipts = CommandReceipts()
+        self._active_request_id = ''
         self._status_pub = status_publisher  # umbrella /data/status
         self._rosbag = RosbagControl(node)
 
@@ -144,7 +147,7 @@ class RecordingService:
             RecordingCommand,
             self.SERVICE_NAME,
             self._callback,
-            callback_group=node.state_callback_group,
+            callback_group=node.io_callback_group,
         )
         node.get_logger().info(f'Service advertised: {self.SERVICE_NAME}')
         node.get_logger().info(
@@ -216,7 +219,7 @@ class RecordingService:
                 return False
             thread = threading.Thread(
                 target=self._finish_episode_worker,
-                args=(data_manager,),
+                args=(data_manager, getattr(self, '_active_request_id', '')),
                 name='cyclo_finish_episode',
                 daemon=True,
             )
@@ -224,11 +227,14 @@ class RecordingService:
             thread.start()
             return True
 
-    def _finish_episode_worker(self, data_manager: DataManager) -> None:
+    def _finish_episode_worker(self, data_manager: DataManager, request_id='') -> None:
+        if request_id:
+            self._receipts.archive(request_id, 'running')
         self._publish_umbrella_status(
             DataOperationStatus.RUNNING,
             'FINISH_EPISODE',
             'Episode archive started',
+            job_id=request_id,
         )
         try:
             archived_dir = data_manager.finish_full_episode()
@@ -242,18 +248,24 @@ class RecordingService:
                 ):
                     self._submit_transcode(archived_dir)
         except Exception as exc:  # noqa: BLE001
+            if request_id:
+                self._receipts.archive(request_id, 'failed')
             self._node.get_logger().error(
                 f'FINISH_EPISODE archive failed: {exc!r}')
             self._publish_umbrella_status(
                 DataOperationStatus.FAILED,
                 'FINISH_EPISODE',
                 f'Episode finish failed: {exc}',
+                job_id=request_id,
             )
         else:
+            if request_id:
+                self._receipts.archive(request_id, 'completed')
             self._publish_umbrella_status(
                 DataOperationStatus.COMPLETED,
                 'FINISH_EPISODE',
                 'Episode archived',
+                job_id=request_id,
             )
         finally:
             with self._finish_episode_lock:
@@ -295,10 +307,12 @@ class RecordingService:
 
     def _ensure_data_manager(self, task_info, robot_type: str) -> DataManager:
         with self._session_lock:
-            self._robot_type = robot_type
             existing = self._data_manager
             if existing is not None and existing.is_recording():
+                if robot_type and robot_type != self._robot_type:
+                    raise ValueError('Cannot change robot while recording')
                 return existing
+            self._robot_type = robot_type
         save_repo_name = DataManager._make_save_repo_name(
             self.DEFAULT_SAVE_ROOT_PATH,
             task_info,
@@ -396,11 +410,11 @@ class RecordingService:
                     f'VideoRecorder.camera_monitor_snapshot() raised: {exc}')
         self._recording_status_pub.publish(status)
 
-    def _publish_umbrella_status(self, status: int, stage: str, message: str) -> None:
+    def _publish_umbrella_status(self, status: int, stage: str, message: str, *, job_id='') -> None:
         msg = DataOperationStatus()
         msg.operation_type = DataOperationStatus.OP_RECORDING
         msg.status = status
-        msg.job_id = ''
+        msg.job_id = job_id
         msg.progress_percentage = 0.0
         msg.stage = stage
         msg.message = message
@@ -411,6 +425,40 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _callback(self, request, response):
+        request_id = getattr(request, 'request_id', '')
+        if request_id:
+            try:
+                if request.command == RecordingCommand.Request.GET_RESULT:
+                    return self._receipts.lookup(request_id, response)
+                self._receipts.validate(request_id)
+                known = self._receipts.lookup(request_id, response, request)
+                if known.command_state != 'unknown':
+                    return known
+                if not self._command_lock.acquire(blocking=False):
+                    response.success = False
+                    response.command_state = 'rejected'
+                    response.message = 'Recording command or dataset edit in progress; retry shortly'
+                    return response
+                try:
+                    if not self._receipts.reserve(request):
+                        return self._receipts.lookup(request_id, response, request)
+                    self._active_request_id = request_id
+                    try:
+                        result = self._dispatch(request, response)
+                    except Exception as exc:
+                        response.success = False
+                        response.message = f'Recording command failed: {exc}'
+                        result = response
+                    self._receipts.complete(request_id, result)
+                    return self._receipts.lookup(request_id, response)
+                finally:
+                    self._active_request_id = ''
+                    self._command_lock.release()
+            except (ValueError, AttributeError) as exc:
+                response.success = False
+                response.command_state = 'rejected'
+                response.message = str(exc)
+                return response
         with self._command_lock:
             return self._dispatch(request, response)
 
@@ -488,6 +536,19 @@ class RecordingService:
             response.success = False
             response.message = 'REFRESH_TOPICS requires non-empty topics[]'
             return response
+        with self._session_lock:
+            manager = self._data_manager
+            if manager is not None and manager.is_recording():
+                unchanged = (
+                    (not request.robot_type or request.robot_type == self._robot_type)
+                    and tuple(sorted(topics)) == self._last_prepared_topics
+                )
+                response.success = unchanged
+                response.message = (
+                    'Recording topics unchanged' if unchanged
+                    else 'Cannot change robot or topics while recording'
+                )
+                return response
         if not self._rosbag.is_available():
             response.success = False
             response.message = 'rosbag_recorder service unavailable'
@@ -747,7 +808,8 @@ class RecordingService:
         touched and let the caller return a failed START response.
         """
         try:
-            self._stop_episode_writers()
+            self._stop_video_writer()
+            self._discard_camera_snapshot()
         except Exception as exc:  # pragma: no cover - defensive
             self._node.get_logger().warning(
                 f'Failed-start writer cleanup raised: {exc!r}')
@@ -842,23 +904,24 @@ class RecordingService:
                 f"Transcoder resume scan failed: {exc!r}"
             )
 
-    def _stop_episode_writers(self):
-        """End the current episode, keeping subscribers alive.
-
-        Stats / produced-file lists are stashed on the instance so the
-        next ``save_robotis_metadata`` call can include them in
-        ``episode_info.json``. The recorder/snapshot instances remain
-        for the next episode — only ``close()`` (on shutdown) or
-        ``reconfigure()`` (on robot_type change) tears their subs down.
-        """
+    def _stop_video_writer(self):
         self._last_video_stats = {}
-        self._last_camera_info_files = {}
         if self._video_recorder is not None:
             try:
                 self._last_video_stats = self._video_recorder.stop_episode() or {}
             except Exception as exc:  # pragma: no cover - defensive
                 self._node.get_logger().error(
                     f'VideoRecorder.stop_episode raised: {exc!r}')
+
+    def _discard_camera_snapshot(self):
+        self._last_camera_info_files = {}
+        if self._camera_info is not None:
+            self._camera_info.discard_episode()
+
+    def _stop_episode_writers(self):
+        """Drain video and save available calibration; keep subscriptions alive."""
+        self._stop_video_writer()
+        self._last_camera_info_files = {}
         if self._camera_info is not None:
             try:
                 produced = self._camera_info.stop_episode() or {}
@@ -1060,6 +1123,14 @@ class RecordingService:
             return self._data_manager.discard_current_full_episode()
 
         if self._data_manager.is_recording():
+            if target_full_idx is not None:
+                active_idx = self._data_manager.get_current_full_episode_index()
+                if target_full_idx != active_idx:
+                    response.success = False
+                    response.message = (
+                        f'DISCARD_EPISODE: active episode is {active_idx}, '
+                        f'but request targeted {target_full_idx}')
+                    return response
             self._node.get_logger().info(
                 f'DISCARD_EPISODE: target_full_idx={target_full_idx} active=True')
             response = self._do_discard(
@@ -1207,7 +1278,7 @@ class RecordingService:
     ):
         """Active-recording CANCEL — drop the episode without saving.
 
-        Order matters: drain VideoRecorder/CameraInfoSnapshot writers
+        Order matters: drain VideoRecorder writers
         first so no ffmpeg subprocess is still holding files open in
         ``episode_dir``, then tell rosbag_recorder to stop and delete
         the bag (which removes ``episode_dir`` outright), then defensively
@@ -1220,7 +1291,12 @@ class RecordingService:
             response.message = 'CANCEL: no active recording session'
             return response
 
-        episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
+        try:
+            episode_dir = self._data_manager.active_discard_path()
+        except ValueError as exc:
+            response.success = False
+            response.message = f'CANCEL: {exc}'
+            return response
 
         # 1. Close mp4/parquet writers + ffmpeg before the bag dir is
         #    deleted underneath them.
@@ -1228,7 +1304,7 @@ class RecordingService:
             getattr(self._data_manager, '_task_info', None), 'task_type', '') == 'inference'
         already_stopped = inference_recording and getattr(self, '_inference_writers_stopped', False)
         if not already_stopped:
-            self._stop_episode_writers()
+            self._stop_video_writer()
 
         # 2. rosbag_recorder stops + removes its bag directory
         #    (= episode_dir). Synchronous so we don't race with step 3.
@@ -1243,11 +1319,13 @@ class RecordingService:
             self._node.get_logger().warning(
                 f'stop_and_delete_rosbag failed: {exc!r}')
 
+        # Once bag deletion is accepted the path can already be gone.
+        # Do not let shutdown write calibration there if the final sweep fails.
+        if not already_stopped:
+            self._discard_camera_snapshot()
+
         # 3. Belt-and-braces: if anything (videos/, camera_info/, stray
         #    .mcap.tmp from a crash) survived, sweep it.
-        if inference_recording:
-            episode_dir = self._data_manager._full_episode_dir(
-                self._data_manager.get_current_full_episode_index())
         if episode_dir.exists():
             try:
                 shutil.rmtree(episode_dir)

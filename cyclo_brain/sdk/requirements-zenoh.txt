@@ -1,0 +1,5 @@
+# Verified PyPI wheel; keep the native transport compatible with rmw_zenoh_cpp.
+zenoh-ros2-sdk @ https://files.pythonhosted.org/packages/b6/6b/f5ecaec1aca77de0d6deb2104b38093393e542bf22a8b067cb6d9f638f9e/zenoh_ros2_sdk-0.1.8-py3-none-any.whl#sha256=e48eadfbb684ba56bbd4645d0831f838f8d091651b605049900f2dc37fe8162b
+eclipse-zenoh>=1.6.0,<1.7.0
+rosbags>=0.11.0
+json5>=0.9.14

@@ -36,19 +36,16 @@ jest.mock('./pages/HomePage', () => {
   };
 });
 
-jest.mock('./pages/RecordPage', () => {
+jest.mock('./pages/OperationWorkspace', () => {
   const React = require('react');
-  return function MockRecordPage() {
-    return React.createElement('div', null, 'Record Page');
+  return function MockOperationWorkspace() {
+    return React.createElement('input', { 'aria-label': 'Workspace draft', defaultValue: 'persistent' });
   };
 });
 
-jest.mock('./pages/InferencePage', () => {
-  const React = require('react');
-  return function MockInferencePage() {
-    return React.createElement('div', null, 'Inference Page');
-  };
-});
+jest.mock('./contexts/PolicyCatalogContext', () => ({
+  PolicyCatalogProvider: ({ children }) => children,
+}));
 
 jest.mock('./pages/TrainingPage', () => {
   const React = require('react');
@@ -115,7 +112,7 @@ test('renders the Cyclo Intelligence shell navigation for regular pages', () => 
     .toBeInTheDocument();
   expect(screen.getByLabelText('Cyclo Intelligence navigation'))
     .toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Inference/i }))
+  expect(screen.getByRole('button', { name: 'Operate' }))
     .toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Autonomy Studio' }))
     .toBeInTheDocument();
@@ -124,6 +121,18 @@ test('renders the Cyclo Intelligence shell navigation for regular pages', () => 
   expect(screen.queryByRole('button', { name: 'Nav' }))
     .not.toBeInTheDocument();
   expect(screen.getByText('Home Page')).toBeInTheDocument();
+});
+
+test('legacy record and inference page IDs share one mounted workspace', () => {
+  act(() => store.dispatch(moveToPage(PageType.RECORD)));
+  const view = render(<Provider store={store}><ThemeProvider><App /></ThemeProvider></Provider>);
+  const draft = screen.getByLabelText('Workspace draft');
+  act(() => store.dispatch(moveToPage(PageType.INFERENCE)));
+  expect(screen.getByLabelText('Workspace draft')).toBe(draft);
+  expect(screen.queryByRole('button', { name: 'Record' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Inference' })).not.toBeInTheDocument();
+  view.unmount();
+  act(() => store.dispatch(moveToPage(PageType.HOME)));
 });
 
 test('orders the Cyclo Intelligence navigation into workflow sections', () => {
@@ -138,10 +147,9 @@ test('orders the Cyclo Intelligence navigation into workflow sections', () => {
   const navigation = within(screen.getByLabelText('Cyclo Intelligence navigation'));
   const pageButtons = [
     'Home',
-    'Record',
+    'Operate',
     'Data Tools',
     'Training Guide',
-    'Inference',
     'Autonomy Studio',
   ].map((name) => navigation.getByRole('button', { name }));
 
@@ -151,7 +159,7 @@ test('orders the Cyclo Intelligence navigation into workflow sections', () => {
   });
 
   const separator = navigation.getByRole('separator', { name: 'Navigation sections' });
-  expect(navigation.getByRole('button', { name: 'Inference' }).nextElementSibling)
+  expect(navigation.getByRole('button', { name: 'Training Guide' }).nextElementSibling)
     .toBe(separator);
   expect(separator.nextElementSibling)
     .toBe(navigation.getByRole('button', { name: 'Autonomy Studio' }));

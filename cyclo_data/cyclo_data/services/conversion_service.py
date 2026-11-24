@@ -30,12 +30,12 @@ Progress fan-out:
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 import threading
 import uuid
 
 from cyclo_data.converter.pipeline_worker import (
-    LEROBOT_OUTPUT_ROOT,
+    lerobot_output_dirs,
     Mp4ConversionWorker,
 )
 
@@ -218,22 +218,13 @@ class ConversionService:
             convert_v21 = True
             convert_v30 = True
 
-        # Refuse if any target LeRobot output already has a previous
-        # conversion (meta/episodes.jsonl exists). The v21/v30 writers
-        # *append* to episodes.jsonl, so a second run with the same
-        # source name silently mixes the new conversion's metadata into
-        # the old dataset. User has to delete or rename the existing
-        # output dir to retry.
-        existing = self._existing_lerobot_outputs(
-            request.dataset_path, convert_v21, convert_v30)
-        if existing:
-            paths = ', '.join(str(p) for p in existing)
+        output_name = request.conversion_output_name
+        try:
+            lerobot_output_dirs(request.dataset_path, output_name, convert_v21, convert_v30)
+        except (OSError, ValueError) as exc:
             response.success = False
             response.job_id = ''
-            response.message = (
-                f'Output already exists for this dataset. Delete or rename '
-                f'before retrying: {paths}'
-            )
+            response.message = str(exc)
             return response
 
         # Unpack the selection knobs from parallel arrays into Python
@@ -258,6 +249,7 @@ class ConversionService:
 
         request_data = {
             'dataset_path': request.dataset_path,
+            'conversion_output_name': output_name,
             'robot_type': robot_type,
             'robot_config_path': robot_config_path,
             'source_folders': list(request.source_folders),
@@ -437,27 +429,3 @@ class ConversionService:
         msg.stage = stage
         msg.message = message
         self._data_status_pub.publish(msg)
-
-    @staticmethod
-    def _existing_lerobot_outputs(
-        dataset_path: str,
-        convert_v21: bool,
-        convert_v30: bool,
-    ) -> List[Path]:
-        """Return target LeRobot output dirs that already hold a prior conversion.
-
-        Existence is signalled by a non-empty meta/episodes.jsonl —
-        empty/half-baked dirs (mid-crash leftovers) don't trigger the
-        guard so the user can re-run without manual cleanup.
-        """
-        name = Path(dataset_path).name
-        candidates: List[Path] = []
-        if convert_v21:
-            candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v21')
-        if convert_v30:
-            candidates.append(LEROBOT_OUTPUT_ROOT / f'{name}_lerobot_v30')
-        return [
-            p for p in candidates
-            if (p / 'meta' / 'episodes.jsonl').exists()
-            and (p / 'meta' / 'episodes.jsonl').stat().st_size > 0
-        ]

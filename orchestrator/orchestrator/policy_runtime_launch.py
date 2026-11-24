@@ -17,7 +17,7 @@ def managed_runtime_actions(dependents, *, startup_timeout_s=30.0):
     root = Path(os.environ.get('CYCLO_POLICY_ROOT', '/opt/cyclo/policy'))
     python_paths = [
         root / 'common/runtime', root / 'common',
-        root.parent / 'sdk/zenoh_ros2_sdk', root.parent / 'sdk/robot_client',
+        root.parent / 'sdk/robot_client',
         root.parent / 'sdk/action_chunk_processing',
     ]
     pythonpath = os.pathsep.join(map(str, python_paths))

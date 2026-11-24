@@ -132,7 +132,7 @@ export function buildPolicySelectionTaskInfo(taskInfo = {}) {
   };
 }
 
-export function useRosServiceCaller() {
+export function useRosServiceCaller(taskContext) {
   const recordTaskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const inferenceTaskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const trainingInfo = useSelector((state) => state.training.trainingInfo);
@@ -257,7 +257,16 @@ export function useRosServiceCaller() {
       // Read latest values from refs at call time so this callback's
       // identity stays stable across taskInfo / page mutations.
       const page = pageRef.current;
-      const taskInfo = page === PageType.INFERENCE
+      const context = taskContext || (page === PageType.INFERENCE ? 'inference'
+        : page === PageType.RECORD ? 'record' : '');
+      // Only settings synchronization and the legacy Clear command need caller context.
+      // Recording belongs to Record settings regardless of the selected workspace tab.
+      const taskType = ['set_task_info', 'finish', 'none'].includes(command)
+        ? context
+        : ['start_inference', 'stop_inference', 'resume_inference', 'update_instruction', 'get_inference_status'].includes(command)
+          ? 'inference'
+          : 'record';
+      const taskInfo = taskType === 'inference'
         ? inferenceTaskInfoRef.current
         : recordTaskInfoRef.current;
       try {
@@ -302,9 +311,6 @@ export function useRosServiceCaller() {
           case 'start_inference_record':
             command_enum = TaskCommand.START_INFERENCE_RECORD;
             break;
-          case 'set_inference_record_folder':
-            command_enum = TaskCommand.SET_INFERENCE_RECORD_FOLDER;
-            break;
           case 'stop_inference_record':
             command_enum = TaskCommand.STOP_INFERENCE_RECORD;
             break;
@@ -346,14 +352,6 @@ export function useRosServiceCaller() {
             break;
           default:
             throw new Error(`Unknown command: ${command}`);
-        }
-
-        let taskType = '';
-
-        if (page === PageType.RECORD) {
-          taskType = 'record';
-        } else if (page === PageType.INFERENCE) {
-          taskType = 'inference';
         }
 
         // Auto-fill taskName and taskInstruction if empty. Inference-page
@@ -411,9 +409,7 @@ export function useRosServiceCaller() {
         );
         const request = {
           task_info: {
-            task_num: command === 'set_inference_record_folder'
-              ? String(options.recordingSessionId ?? '')
-              : String(taskInfo.taskNum ?? ''),
+            task_num: String(taskInfo.taskNum ?? ''),
             task_name: String(taskName),
             task_type: String(taskType),
             task_instruction: taskInstruction,
@@ -429,7 +425,8 @@ export function useRosServiceCaller() {
                 ? taskInfo.chunkAlignWindowS
                 : 0.3
             ),
-            include_robotis_license: Boolean(taskInfo.includeRobotisLicense),
+            // Keep the ROS field for compatibility; the UI no longer adds a license stamp.
+            include_robotis_license: false,
             service_type: String(taskInfo.serviceType || ''),
             inference_mode: String(inferenceMode),
             action_request_mode: actionRequestMode,
@@ -437,6 +434,10 @@ export function useRosServiceCaller() {
             acceleration_engine_path: accelerationEnginePath,
             ...buildPolicySelectionTaskInfo(taskInfo),
             ...buildInitialPoseSyncTaskInfo(taskInfo),
+            ...(command === 'convert_mp4' && options.conversionSource && {
+              task_name: options.conversionSource,
+              task_instruction: [options.conversionSource],
+            }),
           },
           command: Number(command_enum),
           segment_index: Number(options.segmentIndex || 0),
@@ -444,6 +445,9 @@ export function useRosServiceCaller() {
           // command == CONVERT_MP4). Default to 0 / false so the wire
           // representation is stable for non-conversion commands.
           conversion_fps: Number(options.conversionFps || 0),
+          ...(command === 'convert_mp4' && {
+            conversion_output_name: options.conversionOutputName || '',
+          }),
           convert_v21: Boolean(options.convertV21),
           convert_v30: Boolean(options.convertV30),
           selected_cameras: [],
@@ -475,7 +479,7 @@ export function useRosServiceCaller() {
         throw new Error(`${error.message || error}`);
       }
     },
-    [callService]
+    [callService, taskContext]
   );
 
   const sendRobotPoseCommand = useCallback(
@@ -846,8 +850,7 @@ export function useRosServiceCaller() {
   );
 
   const sendEditDatasetCommand = useCallback(
-    async (command) => {
-      const editDatasetInfo = editDatasetInfoRef.current;
+    async (command, editDatasetInfo = editDatasetInfoRef.current) => {
       try {
         console.log('Calling service /data/edit with request:', {
           command: command,

@@ -55,6 +55,7 @@ import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { announceRecording } from '../utils/recordingAudio';
 import { useRosServiceCaller } from './useRosServiceCaller';
 import {
   hasRosTaskInfoPayload,
@@ -96,55 +97,6 @@ export function useRosTopicSubscription() {
   const robotType = useSelector((state) => state.tasks.robotType);
   const { getRobotInfo } = useRosServiceCaller();
   const [connected, setConnected] = useState(false);
-
-  const preferredVoiceRef = useRef(null);
-
-  useEffect(() => {
-    if (!('speechSynthesis' in window)) return;
-    const pickVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length === 0) return;
-      preferredVoiceRef.current = voices.find(v =>
-        v.lang.startsWith('en') && v.name.toLowerCase().includes('female')
-      ) || voices.find(v =>
-        v.lang.startsWith('en') && /samantha|karen|victoria|fiona|moira|tessa/i.test(v.name)
-      ) || voices.find(v =>
-        v.lang.startsWith('en-US') && !v.name.toLowerCase().includes('male')
-      ) || null;
-      if (preferredVoiceRef.current) {
-        console.log('TTS voice selected:', preferredVoiceRef.current.name);
-      }
-    };
-    pickVoice();
-    window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', pickVoice);
-  }, []);
-
-  const speakText = useCallback(
-    (text, lang = 'en-US') => {
-      try {
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.resume();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = lang;
-          utterance.rate = 1.1;
-          utterance.pitch = 1.1;
-          utterance.volume = 1.0;
-          if (lang === 'en-US' && preferredVoiceRef.current) {
-            utterance.voice = preferredVoiceRef.current;
-          }
-          window.speechSynthesis.speak(utterance);
-          console.log(`Speech: "${text}"`);
-        } else {
-          console.warn('Speech synthesis not available');
-        }
-      } catch (error) {
-        console.warn('Speech failed:', error);
-      }
-    },
-    []
-  );
 
   const notifyCameraMonitorIssues = useCallback(
     (cameraTopics) => {
@@ -193,11 +145,11 @@ export function useRosTopicSubscription() {
       toast.error(`Camera monitor warning\n${summary}${moreText}`, {
         duration: 9000,
       });
-      speakText('camera warning');
+      announceRecording('cameraWarning');
       previousCameraMonitorIssueKeyRef.current = issueKey;
       lastCameraMonitorAlertAtRef.current = now;
     },
-    [speakText]
+    []
   );
 
   // Helper function to unsubscribe from a topic
@@ -244,7 +196,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToRecordingStatus = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
 
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
@@ -276,10 +227,6 @@ export function useRosTopicSubscription() {
             proceedTime: msg.proceed_time,
           })
         ) {
-          console.log('Recording started - speaking notification');
-          setTimeout(() => {
-            speakText('Recording started');
-          }, VOICE_DELAY);
           toast.success('Recording started!');
         }
         if (!monitorOnlyMessage) {
@@ -319,6 +266,7 @@ export function useRosTopicSubscription() {
         if (!monitorOnlyMessage) {
           dispatch(
             setRecordStatus({
+              taskNum: msg.task_info?.task_num || '',
               taskName: msg.task_info?.task_name || 'idle',
               taskType: msg.task_info?.task_type || '',
               running: isRunning,
@@ -374,7 +322,6 @@ export function useRosTopicSubscription() {
   }, [
     dispatch,
     rosbridgeUrl,
-    speakText,
     notifyCameraMonitorIssues,
   ]);
 
@@ -493,11 +440,20 @@ export function useRosTopicSubscription() {
         // we still need to dispatch setInferenceStatus below so the phase
         // update (e.g. backend resetting LOADING → READY after a failed
         // setup) is reflected in the UI.
-        if (msg.error && msg.error !== previousInferenceErrorRef.current) {
-          console.log('error:', msg.error);
-          toast.error(msg.error);
+        // Paused STATUS shares the error field with handoff guidance. Keep
+        // unknown/legacy failures and actual runtime errors eligible for toasts.
+        const isHandoffGuidance = msg.status_known && msg.runtime_state === 'paused' &&
+          msg.inference_phase === InferencePhase.PAUSED && typeof msg.error === 'string' && (
+            msg.error.startsWith('Waiting for model control: ') ||
+            msg.error === 'Waiting for the previous prediction to finish.' ||
+            (msg.error.startsWith('Control unavailable: ') && msg.error.endsWith('; START required.'))
+          );
+        const toastError = isHandoffGuidance ? '' : (msg.error || '');
+        if (toastError && toastError !== previousInferenceErrorRef.current) {
+          console.log('error:', toastError);
+          toast.error(toastError);
         }
-        previousInferenceErrorRef.current = msg.error || '';
+        previousInferenceErrorRef.current = toastError;
 
         if (msg.robot_type && msg.robot_type.trim() !== '') {
           const tasksState = store.getState().tasks;
@@ -522,7 +478,6 @@ export function useRosTopicSubscription() {
             loadedModelPath: msg.model_path || '',
             loadedPolicyId: msg.policy_id || '',
             observedChunkSize: Number(msg.observed_chunk_size || 0),
-            recordingSessionId: msg.task_info?.task_num || '',
             publishToRobot: Boolean(msg.publish_to_robot),
             sourceId: msg.source_id || '',
             sequence: Number(msg.sequence || 0),
@@ -536,15 +491,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToActionEvent = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
-      const ACTION_VOICE_MAP = {
-        start: 'Recording started',
-        finish: 'Recording finished',
-        cancel: 'Cancelled',
-        review_on: 'Previous data needs review',
-        review_off: 'Previous data review cleared',
-      };
-
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
 
@@ -563,19 +509,14 @@ export function useRosTopicSubscription() {
         const action = msg.data;
         console.log('Received action event:', action);
 
-        const voiceText = ACTION_VOICE_MAP[action];
-        if (voiceText) {
-          setTimeout(() => {
-            speakText(voiceText);
-          }, VOICE_DELAY);
-        }
+        announceRecording(action);
       });
 
       console.log('Action event subscription established');
     } catch (error) {
       console.error('Failed to subscribe to action event topic:', error);
     }
-  }, [rosbridgeUrl, speakText]);
+  }, [rosbridgeUrl]);
 
   const subscribeToHeartbeat = useCallback(async () => {
     try {

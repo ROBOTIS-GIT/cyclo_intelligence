@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import { setHeartbeatStatus } from '../features/tasks/taskSlice';
@@ -31,12 +31,21 @@ export default function HeartbeatStatus({
   className = '',
   showLabel = true,
   size = 'medium',
+  autoHideConnectedMs = 0,
 }) {
   const dispatch = useDispatch();
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const lastHeartbeatTime = useSelector((state) => state.tasks.lastHeartbeatTime);
 
   const intervalRef = useRef(null);
+  const [connectedHidden, setConnectedHidden] = useState(false);
+
+  useEffect(() => {
+    setConnectedHidden(false);
+    if (heartbeatStatus !== 'connected' || autoHideConnectedMs <= 0) return undefined;
+    const timer = setTimeout(() => setConnectedHidden(true), autoHideConnectedMs);
+    return () => clearTimeout(timer);
+  }, [heartbeatStatus, autoHideConnectedMs]);
 
   // Heartbeat status: 'connected', 'timeout', 'disconnected'
   const getStatusInfo = () => {
@@ -170,8 +179,10 @@ export default function HeartbeatStatus({
 
   const textClasses = clsx('font-medium', 'whitespace-nowrap', currentSize.text, statusInfo.color);
 
+  if (heartbeatStatus === 'connected' && connectedHidden && autoHideConnectedMs > 0) return null;
+
   return (
-    <div className={containerClasses}>
+    <div className={containerClasses} role="status" aria-live="polite">
       <div className={dotClasses} />
       {showLabel && <span className={textClasses}>{statusInfo.label}</span>}
     </div>

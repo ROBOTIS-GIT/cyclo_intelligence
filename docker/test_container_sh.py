@@ -55,7 +55,7 @@ def test_release_workflows_only_publish_cyclo_core():
 def test_merged_compose_preserves_runtime_navigation_and_release_contracts():
     services = yaml.safe_load((REPO_ROOT / "docker/docker-compose.yml").read_text())["services"]
     main = services["cyclo_intelligence"]
-    assert main["image"] == "robotis/cyclo-intelligence:1.5.1"
+    assert main["image"] == "robotis/cyclo-intelligence:1.6.0"
     assert services["lerobot"]["image"] == "robotis/lerobot-zenoh:1.4.2-${ARCH:-arm64}"
     for name, service in services.items():
         assert service["build"]["context"] == ".."
@@ -204,12 +204,8 @@ def _init_lerobot_build_sources(tmp_path, runtime="lerobot"):
     for arch in ("amd64", "arm64"):
         (policy / f"Dockerfile.{arch}").write_text("FROM scratch\n")
     relative = source.relative_to(tmp_path).as_posix()
-    sdk = tmp_path / "cyclo_brain/sdk/zenoh_ros2_sdk"
-    sdk.mkdir(parents=True)
-    (sdk / "README.md").write_text("SDK fixture\n")
     (tmp_path / ".gitmodules").write_text(
         f'[submodule "upstream"]\n\tpath = {relative}\n\turl = https://example.invalid/upstream\n'
-        '[submodule "sdk"]\n\tpath = cyclo_brain/sdk/zenoh_ros2_sdk\n\turl = https://example.invalid/sdk\n'
     )
 
     def git(root, *args):
@@ -219,7 +215,7 @@ def _init_lerobot_build_sources(tmp_path, runtime="lerobot"):
             check=True, capture_output=True, text=True,
         ).stdout.strip()
 
-    for root in (source, sdk, tmp_path):
+    for root in (source, tmp_path):
         git(root, "init", "-q")
         git(root, "add", ".")
         git(root, "commit", "-qm", "Build fixture")
@@ -321,12 +317,10 @@ def test_build_policy_ignores_optional_nested_and_unselected_sources(tmp_path, n
     assert not any("up -d" in call or "pull " in call for call in log.read_text().splitlines())
 
 
-@pytest.mark.parametrize("target", ["model", "sdk"])
 @pytest.mark.parametrize("state", ["missing", "mismatched"])
-def test_build_policy_still_rejects_unavailable_required_pins(tmp_path, target, state):
+def test_build_policy_still_rejects_unavailable_required_pins(tmp_path, state):
     docker_dir = _copy_container_script(tmp_path)
-    source, git = _init_lerobot_build_sources(tmp_path, "groot")
-    required = source if target == "model" else tmp_path / "cyclo_brain/sdk/zenoh_ros2_sdk"
+    required, git = _init_lerobot_build_sources(tmp_path, "groot")
     if state == "missing":
         shutil.rmtree(required)
     else:

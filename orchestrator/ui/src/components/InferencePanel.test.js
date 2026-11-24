@@ -21,7 +21,6 @@ jest.mock('../hooks/useRosServiceCaller', () => ({
 }));
 
 jest.mock('./InferenceModelSelector', () => () => <div />);
-jest.mock('./InferenceTryResults', () => () => <section aria-label="Try Results" />);
 jest.mock('./PolicyBackendControl', () => () => <div />);
 jest.mock('./TrtEngineControl', () => () => <div />);
 jest.mock('./FileBrowserModal', () => () => null);
@@ -81,6 +80,14 @@ const renderPanel = ({
 };
 
 describe('InferencePanel initial pose sync settings', () => {
+  test('deploy labels wrap and action requests use a full-width mobile row', () => {
+    renderPanel({ inferenceMode: 'robot' });
+    for (const label of ['3D Sim Deploy', 'Real Robot Deploy']) {
+      expect(screen.getByText(label)).toHaveClass('whitespace-normal');
+      expect(screen.getByText(label)).not.toHaveClass('truncate');
+    }
+    expect(screen.getByRole('group', { name: 'Action requests' })).toHaveClass('flex-col', 'sm:flex-row');
+  });
   test('model-owned queues display All and reject count edits', () => {
     const { store } = renderPanel({ policyId: 'lerobot:diffusion' });
     const input = screen.getByRole('spinbutton', { name: 'Action Steps' });
@@ -199,10 +206,10 @@ describe('InferencePanel initial pose sync settings', () => {
     }
   );
 
-  test('groups model settings, execution settings, saved pose, and recording tools in order', () => {
+  test('groups model settings, execution settings, and saved pose without recording or evaluation tools', () => {
     renderPanel({ inferenceMode: 'robot', policyId: 'lerobot:groot' });
     const separators = screen.getAllByRole('separator');
-    expect(separators).toHaveLength(3);
+    expect(separators).toHaveLength(2);
     const ordered = [
       screen.getByPlaceholderText('Enter Policy Path or Repo ID'),
       screen.getByPlaceholderText('Enter Task Instruction'),
@@ -214,14 +221,13 @@ describe('InferencePanel initial pose sync settings', () => {
       screen.getByRole('spinbutton', { name: 'Slow Start duration' }),
       separators[1],
       screen.getByRole('region', { name: 'Saved Initial Pose' }),
-      separators[2],
-      screen.getByRole('group', { name: 'Inference recording' }),
-      screen.getByRole('region', { name: 'Try Results' }),
     ];
     ordered.slice(1).forEach((element, index) => {
       expect(ordered[index].compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
         .toBeTruthy();
     });
+    expect(screen.queryByRole('group', { name: 'Inference recording' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Try Results' })).not.toBeInTheDocument();
   });
 
   test('does not leave separators for hidden robot-only tools in simulation', () => {
@@ -274,12 +280,14 @@ describe('InferencePanel initial pose sync settings', () => {
   test('allows initial pose sync editing for an idle real robot session', () => {
     renderPanel({ inferenceMode: 'robot' });
 
-    expect(screen.getByRole('region', { name: 'Try Results' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Inference recording' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Try Results' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Inference recording' })).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Slow Start' }))
       .toBeEnabled();
     expect(screen.getByRole('spinbutton', { name: 'Slow Start duration' }))
       .toBeEnabled();
+    expect(screen.getByRole('spinbutton', { name: 'Dataset FPS' })).toHaveClass('min-w-0');
+    expect(screen.getByPlaceholderText('Enter Policy Path or Repo ID')).toHaveClass('min-w-0');
   });
 
   test('shows duration only after initial pose sync is enabled', () => {

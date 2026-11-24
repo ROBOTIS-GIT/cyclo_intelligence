@@ -25,6 +25,8 @@ import {
   getPolicyBackendStaleReason,
 } from '../hooks/usePolicyBackendStatus';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import useDocumentVisible from '../hooks/useDocumentVisible';
+import { readBackendStatus, subscribeBackendStatus } from '../utils/backendStatusPolling';
 
 const API_BASE = '/api';
 const HUGGINGFACE_ENDPOINT = 'https://huggingface.co';
@@ -46,11 +48,12 @@ async function readJsonResponse(response) {
   }
 }
 
-export default function PolicyBackendControl({ serviceType, runtime = null }) {
-  return <WorkerControl key={runtime?.id || serviceType} serviceType={serviceType} runtime={runtime} />;
+export default function PolicyBackendControl({ serviceType, runtime = null, isActive = true }) {
+  return <WorkerControl key={runtime?.id || serviceType} serviceType={serviceType} runtime={runtime} isActive={isActive} />;
 }
 
-function WorkerControl({ serviceType, runtime }) {
+function WorkerControl({ serviceType, runtime, isActive }) {
+  const documentVisible = useDocumentVisible();
   const backend = runtime?.id || String(serviceType || '').trim();
   const label = useMemo(
     () => `${runtime?.label || 'Policy'} Docker`,
@@ -79,11 +82,7 @@ function WorkerControl({ serviceType, runtime }) {
     const sequence = ++statusSequence.current;
     if (!quiet) setIsRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE}/backends/${backend}/status`);
-      const data = await readJsonResponse(response);
-      if (!response.ok) {
-        throw new Error(data.detail || `status failed (${response.status})`);
-      }
+      const data = await readBackendStatus(backend);
       if (!alive.current || sequence !== statusSequence.current) return;
       setStatus(data);
       setStatusError('');
@@ -97,18 +96,12 @@ function WorkerControl({ serviceType, runtime }) {
   }, [backend, label]);
 
   useEffect(() => {
-    let cancelled = false;
-    let timer;
-    const poll = async () => {
-      await refreshStatus({ quiet: true });
-      if (!cancelled) timer = setTimeout(poll, 5000);
-    };
-    poll();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [refreshStatus]);
+    if (!isActive || !documentVisible || !backend) return undefined;
+    return subscribeBackendStatus(backend, (data, error) => {
+      if (error) setStatusError(error.message);
+      else { setStatus(data); setStatusError(''); }
+    }, 5000);
+  }, [backend, isActive, documentVisible]);
 
   useEffect(() => {
     let cancelled = false;

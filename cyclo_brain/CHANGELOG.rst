@@ -2,6 +2,12 @@
 Changelog for package cyclo_brain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Pause model execution on teleop handoff and resume eligible sessions using fresh observations instead of queued actions.
+* Install the pinned Zenoh ROS 2 SDK in inference images without requiring a host SDK checkout.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * Updated saved-pose regression coverage to use W1 and W2 robot configurations.

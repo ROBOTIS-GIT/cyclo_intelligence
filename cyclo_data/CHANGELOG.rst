@@ -2,6 +2,13 @@
 Changelog for package cyclo_data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Track recording command receipts separately from archive completion and guard against discarding the wrong episode.
+* Capture camera calibration separately from the recording stop path to avoid waiting for CameraInfo on save or discard.
+* Accept an optional conversion output folder stem while preserving the existing default and version suffixes.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * None

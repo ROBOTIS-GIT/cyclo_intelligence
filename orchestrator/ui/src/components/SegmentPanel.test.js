@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Provider } from 'react-redux';
 import toast from 'react-hot-toast';
 import SegmentPanel from './SegmentPanel';
-import taskReducer, { setRecordStatus } from '../features/tasks/taskSlice';
+import taskReducer, { setRecordStatus, setRecordTaskInfo } from '../features/tasks/taskSlice';
 import { RecordPhase } from '../constants/taskPhases';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
@@ -25,7 +25,7 @@ jest.mock('./InfoPanel', () => function MockInfoPanel() {
   return <div data-testid="info-panel" />;
 });
 
-const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
+const renderPanel = ({ taskOverrides = {}, sendRecordCommand, panelProps = {} } = {}) => {
   const sendCommand = sendRecordCommand || jest.fn().mockResolvedValue({
     success: true,
     message: 'ok',
@@ -45,19 +45,22 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
       taskNum: '1',
       taskName: 'discard-target-test',
     },
-    recordStatus: {
-      ...initialTasks.recordStatus,
-      recordPhase: RecordPhase.READY,
-      currentEpisodeNumber: 7,
-      currentSubtaskIndex: 1,
-      subtaskCount: 2,
-      topicReceived: true,
-    },
     plannedCount: 2,
     plannedSubTasks: ['pick', 'place'],
     slotToServerIdx: [0, -1],
     activeSlotIndex: 1,
     ...taskOverrides,
+    recordStatus: {
+      ...initialTasks.recordStatus,
+      taskNum: '1',
+      taskName: 'discard-target-test',
+      recordPhase: RecordPhase.READY,
+      currentEpisodeNumber: 7,
+      currentSubtaskIndex: 1,
+      subtaskCount: 2,
+      topicReceived: true,
+      ...taskOverrides.recordStatus,
+    },
   };
   const store = configureStore({
     reducer: {
@@ -70,7 +73,7 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
 
   render(
     <Provider store={store}>
-      <SegmentPanel />
+      <SegmentPanel {...panelProps} />
     </Provider>
   );
 
@@ -78,8 +81,48 @@ const renderPanel = ({ taskOverrides = {}, sendRecordCommand } = {}) => {
 };
 
 describe('SegmentPanel discard episode target', () => {
+  test('inactive record shortcuts do not discard an active segment', () => {
+    const { sendRecordCommand } = renderPanel({
+      panelProps: { shortcutsEnabled: false },
+      taskOverrides: { recordStatus: { recordPhase: RecordPhase.RECORDING, running: true, topicReceived: true } },
+    });
+    fireEvent.keyUp(window, { key: 'Escape' });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+
+  test('shared toolbar saves using the existing final-segment sequence with inactive shortcuts', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const { sendRecordCommand } = renderPanel({
+      panelProps: { shortcutsEnabled: false, actionsTarget: target },
+      taskOverrides: { recordStatus: {
+        recordPhase: RecordPhase.RECORDING, running: true, topicReceived: true,
+        currentEpisodeNumber: 7, currentSubtaskIndex: 1, subtaskCount: 2,
+      } },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save recording' }));
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('finish_episode', expect.any(Object)));
+    expect(sendRecordCommand.mock.calls.map(([command]) => command)).toEqual(['stop_segment', 'finish_episode']);
+    expect(screen.getByRole('button', { name: 'Discard recording episode' })).toBeDisabled();
+    target.remove();
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test.each([false, true])('remount during saving keeps all recording mutations blocked (running=%s)', (running) => {
+    const { sendRecordCommand } = renderPanel({ taskOverrides: {
+      recordStatus: {
+        taskType: 'record', recordPhase: RecordPhase.SAVING, running,
+        currentEpisodeNumber: 7, subtaskCount: 2, currentSubtaskIndex: 1, topicReceived: true,
+      },
+    } });
+    expect(screen.getByRole('button', { name: /discard episode/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /record start/i })).toBeDisabled();
+    for (const button of screen.getAllByTitle(/Save subtask|Cancel current recording|Discard saved subtask/)) {
+      expect(button).toBeDisabled();
+    }
+    expect(sendRecordCommand).not.toHaveBeenCalled();
   });
 
   test('sends the captured full episode index when discarding an episode', async () => {
@@ -102,6 +145,31 @@ describe('SegmentPanel discard episode target', () => {
       );
     });
     expect(toast.success).toHaveBeenCalledWith('Discard episode: ok');
+  });
+
+  test('discard after a task switch and segment cancel targets the new episode and allows recording again', async () => {
+    const { store, sendRecordCommand } = renderPanel();
+    const discard = screen.getByRole('button', { name: /discard episode/i });
+    act(() => store.dispatch(setRecordTaskInfo({ taskNum: '12', taskName: 'discard-target-test' })));
+    expect(discard).toBeDisabled(); // The latest status still belongs to task 1.
+    act(() => store.dispatch(setRecordStatus({
+      taskNum: '12', currentEpisodeNumber: 0, currentSubtaskIndex: 1, savedSubtaskIndices: [0],
+      running: true, recordPhase: RecordPhase.RECORDING,
+    })));
+    act(() => store.dispatch(setRecordStatus({ running: false, recordPhase: RecordPhase.READY })));
+    fireEvent.click(discard);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith(
+      'discard_episode', expect.objectContaining({ segmentIndex: 1 })
+    ));
+    const record = screen.getByRole('button', { name: /record start/i });
+    expect(record).toBeDisabled(); // Wait for the empty server status, not just the service ack.
+    act(() => store.dispatch(setRecordStatus({ currentSubtaskIndex: 0, savedSubtaskIndices: [] })));
+    await waitFor(() => expect(record).toBeEnabled());
+    expect(discard).toBeDisabled();
+    fireEvent.click(record);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith(
+      'start_segment', expect.objectContaining({ segmentIndex: 0 })
+    ));
   });
 
   test('drops duplicate save clicks while a save sequence is in flight', async () => {

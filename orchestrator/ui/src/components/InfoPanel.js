@@ -18,7 +18,6 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdInfoOutline } from 'react-icons/md';
 import { RecordPhase } from '../constants/taskPhases';
 import {
   applyServerTaskInfo,
@@ -33,7 +32,6 @@ import {
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { getRecordTaskInfoKey } from '../utils/taskInfoSync';
-import Tooltip from './Tooltip';
 
 const AUTO_SYNC_DELAY_MS = 700;
 
@@ -50,7 +48,7 @@ const InfoPanel = ({ variant = 'card' }) => {
 
   // RecordPage's lock — only the record-side phase matters here. Inference
   // phase is the InferencePanel's concern (D18, plan record-zippy-sunrise).
-  const isTaskRunning = recordStatus.recordPhase !== RecordPhase.READY;
+  const isTaskRunning = recordStatus.running || recordStatus.recordPhase !== RecordPhase.READY;
   const disabled = isTaskRunning;
   const [isEditable, setIsEditable] = useState(!disabled);
 
@@ -58,7 +56,7 @@ const InfoPanel = ({ variant = 'card' }) => {
   const syncGenerationRef = useRef(0);
   const syncTimerRef = useRef(null);
 
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand } = useRosServiceCaller('record');
 
   const handleChange = useCallback(
     (field, value) => {
@@ -257,7 +255,7 @@ const InfoPanel = ({ variant = 'card' }) => {
     return () => clearInterval(timer);
   }, [lastTaskStatusUpdate, isTaskStatusPaused]);
 
-  const classLabel = clsx('text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium');
+  const classLabel = clsx('text-sm', 'text-gray-600', embedded ? 'w-24 sm:w-28' : 'w-28', 'flex-shrink-0', 'font-medium');
 
   const classInfoPanel = embedded
     ? clsx('rounded-lg', 'p-2', 'border', 'border-gray-200')
@@ -276,6 +274,7 @@ const InfoPanel = ({ variant = 'card' }) => {
       );
 
   const classTaskNameTextarea = clsx(
+    'min-w-0',
     'text-sm',
     'resize-y',
     'min-h-8',
@@ -297,6 +296,7 @@ const InfoPanel = ({ variant = 'card' }) => {
   );
 
   const classTaskInstructionTextarea = clsx(
+    'min-w-0',
     'text-sm',
     'resize-y',
     'min-h-16',
@@ -394,32 +394,6 @@ const InfoPanel = ({ variant = 'card' }) => {
           onChange={(e) => handleChange('taskInstruction', [e.target.value])}
           disabled={!isEditable}
           placeholder="Enter Task Instruction"
-        />
-      </div>
-
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        {/* ROBOTIS license stamp — opt-in. Default off because recording
-            outputs are the user's intellectual property, not ROBOTIS'. */}
-        <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-          <Tooltip
-            content={
-              'Off by default — recording outputs are the user’s, not ROBOTIS’. ' +
-              'Tick on for ROBOTIS-internal captures: README gets the Apache 2.0 license ' +
-              'header (Copyright ROBOTIS CO., LTD.) baked in and rides through conversion ' +
-              'and HF Hub upload.'
-            }
-            position="bottom"
-          >
-            <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
-          </Tooltip>
-          <span>Add License</span>
-        </div>
-        <input
-          type="checkbox"
-          checked={Boolean(info.includeRobotisLicense)}
-          onChange={(e) => handleChange('includeRobotisLicense', e.target.checked)}
-          disabled={!isEditable}
-          className="rounded"
         />
       </div>
 

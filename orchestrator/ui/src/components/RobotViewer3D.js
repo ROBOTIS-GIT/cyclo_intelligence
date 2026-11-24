@@ -6,6 +6,7 @@ import { MdCenterFocusStrong } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import useUrdfRobot from '../hooks/useUrdfRobot';
 import useJointStateSubscription from '../hooks/useJointStateSubscription';
+import useDocumentVisible from '../hooks/useDocumentVisible';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 
 const CAMERA_PRESETS = {
@@ -410,7 +411,7 @@ function toServedUrdfPath(path) {
 
 function CameraPresetButtons({ onPreset, activePreset }) {
   return (
-    <div className="absolute top-2 left-2 z-10 flex gap-1">
+    <div role="group" aria-label="Camera presets" className="absolute top-2 left-2 right-2 z-10 flex flex-wrap gap-1">
       {Object.entries(CAMERA_PRESETS).map(([key, preset]) => (
         <button
           key={key}
@@ -479,6 +480,7 @@ function SourceSelector({ visible, value, onChange }) {
 }
 
 export default function RobotViewer3D({
+  isActive = true,
   mode = 'live',
   robotTypeOverride = '',
   jointData = null,
@@ -494,6 +496,8 @@ export default function RobotViewer3D({
   endEffectorLinksOverride = [],
 }) {
   const globalRobotType = useSelector((state) => state.tasks.robotType);
+  const documentVisible = useDocumentVisible();
+  const active = isActive && documentVisible;
   const robotType = robotTypeOverride || globalRobotType;
   const { getRobotInfo } = useRosServiceCaller();
   const [robotInfo, setRobotInfo] = useState(EMPTY_ROBOT_INFO);
@@ -604,7 +608,7 @@ export default function RobotViewer3D({
   useJointStateSubscription(
     handleJointState,
     handleActionChunk,
-    mode === 'live' && !!robot,
+    active && mode === 'live' && !!robot,
     {
       visualizationSource,
       liveUpdateHz,
@@ -663,7 +667,7 @@ export default function RobotViewer3D({
       >
         <FrameInvalidator
           fps={mode === 'replay' ? 15 : Math.max(10, liveUpdateHz || 15)}
-          active={mode !== 'replay' || isPlaying}
+          active={active && (mode !== 'replay' || isPlaying)}
         />
         {mode === 'replay' ? (
           <ReplaySceneContent

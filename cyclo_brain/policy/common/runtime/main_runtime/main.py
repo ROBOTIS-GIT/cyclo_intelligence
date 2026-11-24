@@ -24,10 +24,6 @@ from typing import Any
 import numpy as np
 
 
-_ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/opt/cyclo/sdk/zenoh_ros2_sdk")
-if os.path.exists(_ZENOH_SDK_PATH) and _ZENOH_SDK_PATH not in sys.path:
-    sys.path.insert(0, _ZENOH_SDK_PATH)
-
 _parents = Path(__file__).resolve().parents
 _default_sdk_root = _parents[4] / "sdk" if len(_parents) > 4 else Path("/opt/cyclo/sdk")
 for path in (
@@ -323,7 +319,8 @@ class PolicyRuntime:
             if snapshot.get("pose_returning"):
                 if time.monotonic() - self._orchestrator_last_seen > orchestrator_timeout:
                     self._handler.fail_safe("orchestrator heartbeat lost during pose return")
-            active = snapshot["runtime_state"] in {"preparing", "running", "syncing"}
+            active = (snapshot["runtime_state"] in {"preparing", "running", "syncing"}
+                      or snapshot.get("handoff_pending", False))
             if not active:
                 self._active_since = None
                 continue
@@ -346,6 +343,12 @@ class PolicyRuntime:
             )
             if reason:
                 self._handler.fail_safe(reason)
+            else:
+                try:
+                    self._handler.poll_handoff()
+                except Exception as exc:
+                    logger.exception("Control handoff monitor failed")
+                    self._handler.fail_safe(f"control handoff monitor failed: {exc}")
 
     def _handle_control_request(self, request: dict) -> dict:
         operation = str(request.get("operation", "status"))

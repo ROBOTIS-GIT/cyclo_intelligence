@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -35,12 +36,13 @@ const isInputFocused = () => {
   const el = document.activeElement;
   if (!el) return false;
   const tag = el.tagName.toLowerCase();
-  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.contentEditable === 'true';
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button' ||
+    el.isContentEditable || el.closest('[contenteditable="true"], [role="dialog"]');
 };
 
-export default function SegmentPanel() {
+export default function SegmentPanel({ shortcutsEnabled = true, actionsTarget = null, embedded = false }) {
   const dispatch = useDispatch();
-  const { sendRecordCommand } = useRosServiceCaller();
+  const { sendRecordCommand } = useRosServiceCaller('record');
 
   const taskInfo = useSelector(selectRecordTaskInfo, shallowEqual);
   const recordStatus = useSelector((state) => state.tasks.recordStatus);
@@ -51,10 +53,9 @@ export default function SegmentPanel() {
   const recordingMonitor = useSelector((state) => state.tasks.recordingMonitor);
 
   const [optimisticRecording, setOptimisticRecording] = useState(false);
-  const [episodeAcquisitionStarted, setEpisodeAcquisitionStarted] = useState(false);
-  const [savingInProgress, setSavingInProgress] = useState(false);
+  const [localSavingInProgress, setSavingInProgress] = useState(false);
+  const savingInProgress = localSavingInProgress || recordStatus.recordPhase === RecordPhase.SAVING;
   const [serverResetInProgress, setServerResetInProgress] = useState(false);
-  const episodeFullIndexRef = useRef(null);
   const lastServerEpisodeRef = useRef(null);
   const commandSequenceInProgressRef = useRef(false);
   const pendingEpisodeResetRef = useRef(null);
@@ -80,10 +81,18 @@ export default function SegmentPanel() {
     Array.isArray(serverSavedSubtaskIndices)
       ? serverSavedSubtaskIndices.length > 0
       : serverSubtaskCount > 0 && serverSubtaskIndex > 0 && !isRecording;
-  const hasLocalSavedSubtasks = savedCount > 0;
   const isPlanMode = plannedCountNumber > 0;
   const isSingleMode = plannedCountNumber === 0;
   const currentFullEpisodeIndex = Number(recordStatus.currentEpisodeNumber || 0);
+  // Take both the task identity and the discard target from the same status.
+  // A new task may restart numbering at zero without remounting this panel.
+  const canDiscardEpisode = Boolean(
+    recordStatus.topicReceived && recordStatus.taskNum &&
+    recordStatus.taskNum === taskInfo.taskNum &&
+    recordStatus.taskName === (taskInfo.taskName || 'idle') &&
+    (serverRecording || hasServerSavedSubtasks) &&
+    !savingInProgress && !serverResetInProgress
+  );
   const firstPendingSlot = useMemo(
     () => slotToServerIdx.findIndex((v) => v === -1),
     [slotToServerIdx]
@@ -104,15 +113,6 @@ export default function SegmentPanel() {
   useEffect(() => {
     setOptimisticRecording(serverRecording);
   }, [serverRecording]);
-
-  useEffect(() => {
-    if (serverRecording || hasLocalSavedSubtasks || hasServerSavedSubtasks) {
-      setEpisodeAcquisitionStarted(true);
-      if (episodeFullIndexRef.current === null) {
-        episodeFullIndexRef.current = currentFullEpisodeIndex;
-      }
-    }
-  }, [currentFullEpisodeIndex, hasLocalSavedSubtasks, hasServerSavedSubtasks, serverRecording]);
 
   useEffect(() => {
     if (!recordStatus.topicReceived) return;
@@ -143,7 +143,6 @@ export default function SegmentPanel() {
       if (operationFailed) {
         pendingEpisodeResetRef.current = null;
         setServerResetInProgress(false);
-        setEpisodeAcquisitionStarted(true);
         toast.error(
           recordStatus.recordingOperationMessage ||
           'Finish episode failed; saved subtasks are still available.'
@@ -169,8 +168,6 @@ export default function SegmentPanel() {
       lastServerEpisodeRef.current = currentEpisode;
       setOptimisticRecording(false);
       setSavingInProgress(false);
-      setEpisodeAcquisitionStarted(false);
-      episodeFullIndexRef.current = null;
       dispatch(resetSegmentProgress());
       return;
     } else {
@@ -215,7 +212,6 @@ export default function SegmentPanel() {
 
     if (serverRecording) {
       setSavingInProgress(false);
-      setEpisodeAcquisitionStarted(true);
     }
   }, [
     activeSlotIndex,
@@ -321,26 +317,16 @@ export default function SegmentPanel() {
       if (!isSingleMode && !subTask) return null;
       dispatch(setActiveSlotIndex(slotIdx));
       setOptimisticRecording(true);
-      setEpisodeAcquisitionStarted(true);
-      if (episodeFullIndexRef.current === null) {
-        episodeFullIndexRef.current = currentFullEpisodeIndex;
-      }
       const result = await runCommand('Record', 'start_segment', {
         segmentIndex: slotIdx,
       });
       if (!result || result.success === false) {
         setOptimisticRecording(false);
-        if (!hasLocalSavedSubtasks && !hasServerSavedSubtasks) {
-          setEpisodeAcquisitionStarted(false);
-        }
       }
       return result;
     },
     [
-      currentFullEpisodeIndex,
       dispatch,
-      hasLocalSavedSubtasks,
-      hasServerSavedSubtasks,
       isSingleMode,
       plannedSubTasks,
       runCommand,
@@ -389,20 +375,13 @@ export default function SegmentPanel() {
 
         const nextPending = updatedSlotMap.findIndex((v) => v === -1);
         if (isLastSlot || nextPending < 0) {
-          const targetFullEpisodeIndex = (
-            episodeFullIndexRef.current === null
-              ? currentFullEpisodeIndex
-              : episodeFullIndexRef.current
-          );
           const finishResult = await runCommand('Finish episode', 'finish_episode');
           if (finishResult && finishResult.success) {
             pendingEpisodeResetRef.current = {
               type: 'finish',
-              fullEpisodeIndex: targetFullEpisodeIndex,
+              fullEpisodeIndex: currentFullEpisodeIndex,
             };
             setServerResetInProgress(true);
-            setEpisodeAcquisitionStarted(false);
-            episodeFullIndexRef.current = null;
             dispatch(resetSegmentProgress());
           }
           return;
@@ -469,33 +448,20 @@ export default function SegmentPanel() {
   );
 
   const handleDiscardEpisode = useCallback(async () => {
-    if (
-      savingInProgress ||
-      serverResetInProgress ||
-      !episodeAcquisitionStarted
-    ) {
-      return;
-    }
+    if (!canDiscardEpisode) return;
     if (commandSequenceInProgressRef.current) return;
     commandSequenceInProgressRef.current = true;
-    const targetFullEpisodeIndex = episodeFullIndexRef.current;
-    if (targetFullEpisodeIndex === null) {
-      commandSequenceInProgressRef.current = false;
-      return;
-    }
     try {
       const result = await runCommand('Discard episode', 'discard_episode', {
-        segmentIndex: targetFullEpisodeIndex + 1,
+        segmentIndex: currentFullEpisodeIndex + 1,
       });
       if (result && result.success) {
         pendingEpisodeResetRef.current = {
           type: 'discard',
-          fullEpisodeIndex: targetFullEpisodeIndex,
+          fullEpisodeIndex: currentFullEpisodeIndex,
         };
         setServerResetInProgress(true);
         setOptimisticRecording(false);
-        setEpisodeAcquisitionStarted(false);
-        episodeFullIndexRef.current = null;
         dispatch(resetSegmentProgress());
       }
     } finally {
@@ -503,10 +469,9 @@ export default function SegmentPanel() {
     }
   }, [
     dispatch,
-    episodeAcquisitionStarted,
+    canDiscardEpisode,
+    currentFullEpisodeIndex,
     runCommand,
-    savingInProgress,
-    serverResetInProgress,
   ]);
 
   const canSaveSingle =
@@ -523,8 +488,6 @@ export default function SegmentPanel() {
   }, [canSaveSingle, canStartRecord, handleRecordStart, handleSlotSave]);
 
   const handleResetPlan = useCallback(() => {
-    setEpisodeAcquisitionStarted(false);
-    episodeFullIndexRef.current = null;
     dispatch(resetSegmentPlan());
     dispatch(markLocalTaskInfoEdited());
   }, [dispatch]);
@@ -538,6 +501,7 @@ export default function SegmentPanel() {
   );
 
   useEffect(() => {
+    if (!shortcutsEnabled) return;
     const onKeyUp = (e) => {
       if (isInputFocused()) return;
       if (e.key === ' ' || e.code === 'Space') {
@@ -564,6 +528,7 @@ export default function SegmentPanel() {
     isSingleMode,
     savingInProgress,
     serverResetInProgress,
+    shortcutsEnabled,
   ]);
 
   const canResetPlan = (
@@ -573,8 +538,6 @@ export default function SegmentPanel() {
     !serverResetInProgress &&
     savedCount === 0
   );
-  const canDiscardEpisode =
-    !savingInProgress && !serverResetInProgress && episodeAcquisitionStarted;
 
   const secondaryBtn = (enabled, color) =>
     clsx(
@@ -663,7 +626,27 @@ export default function SegmentPanel() {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-md p-4 w-full max-w-[350px] mt-3">
+    <>
+    {actionsTarget && createPortal(
+      <div className="recording-actions grid grid-cols-3 gap-2 w-full" role="group" aria-label="Recording actions" aria-busy={savingInProgress || serverResetInProgress}>
+        <button type="button" title="Start recording" aria-label="Start recording" onClick={handleRecordStart} disabled={!canStartRecord}
+          className="recording-action h-10 min-w-0 px-2 text-sm flex items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white text-red-600 hover:bg-red-50 disabled:bg-gray-100 disabled:text-gray-300 disabled:cursor-not-allowed">
+          <MdFiberManualRecord size={20} />
+          <span>Record</span>
+        </button>
+        <button type="button" title={isSingleMode ? 'Save episode' : 'Save subtask and advance'} aria-label="Save recording"
+          disabled={!isRecording || savingInProgress || serverResetInProgress} onClick={() => handleSlotSave(isSingleMode ? 0 : activeSlotIndex)}
+          className="recording-action h-10 min-w-0 px-2 text-sm flex items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white text-green-700 hover:bg-green-50 disabled:bg-gray-100 disabled:text-gray-300 disabled:cursor-not-allowed">
+          <MdSave size={20} />
+          <span>Save</span>
+        </button>
+        <button type="button" title="Discard episode" aria-label="Discard recording episode" onClick={handleDiscardEpisode} disabled={!canDiscardEpisode}
+          className="recording-action h-10 min-w-0 px-2 text-sm flex items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white text-red-600 hover:bg-red-50 disabled:bg-gray-100 disabled:text-gray-300 disabled:cursor-not-allowed">
+          <MdDeleteSweep size={20} />
+          <span>Discard</span>
+        </button>
+      </div>, actionsTarget)}
+    <div className={embedded ? 'p-4 w-full min-w-0' : 'bg-white border border-gray-200 rounded-lg p-4 w-full max-w-[350px] mt-3'}>
       <div className="mb-3 text-lg font-semibold text-gray-800">Rosbag Recorder</div>
 
       <div className="mb-3">
@@ -674,7 +657,7 @@ export default function SegmentPanel() {
         <InfoPanel variant="embedded" />
       </div>
 
-      <Tooltip
+      {!actionsTarget && <Tooltip
         position="top"
         content={
           <div className="text-center">
@@ -710,7 +693,7 @@ export default function SegmentPanel() {
           {canSaveSingle ? <MdSave size={18} /> : <MdFiberManualRecord size={18} />}
           {canSaveSingle ? 'Save Episode' : 'Record Start'}
         </button>
-      </Tooltip>
+      </Tooltip>}
 
       <div className="mb-3">
         <div className="text-sm font-semibold text-gray-700 mb-2">
@@ -726,7 +709,7 @@ export default function SegmentPanel() {
               value={plannedCount}
               onChange={(e) => handlePlanCountInput(e.target.value)}
               disabled={isRecording || savingInProgress}
-              className="flex-1 text-sm p-1.5 outline-none focus:ring-2 focus:ring-blue-500 [appearance:textfield]"
+              className="flex-1 min-w-0 w-full text-sm p-1.5 outline-none focus:ring-2 focus:ring-blue-500 [appearance:textfield]"
             />
             <div className="flex flex-col border-l border-gray-300">
               <button
@@ -779,14 +762,15 @@ export default function SegmentPanel() {
         )}
       </div>
 
-      <button
+      {!actionsTarget && <button
         onClick={handleDiscardEpisode}
         disabled={!canDiscardEpisode}
         className={secondaryBtn(canDiscardEpisode, 'red')}
       >
         <MdDeleteSweep size={16} />
         Discard Episode
-      </button>
+      </button>}
     </div>
+    </>
   );
 }

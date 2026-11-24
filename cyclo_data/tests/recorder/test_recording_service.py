@@ -71,6 +71,7 @@ class _RecordingCommand:
         DISCARD_EPISODE = 14
         SET_TASK_INFO = 15
         CANCEL_SEGMENT = 16
+        GET_RESULT = 17
 
 
 class _Dummy:
@@ -95,7 +96,6 @@ _stub_module("cyclo_data.recorder.rosbag_control", RosbagControl=_Dummy)
 _stub_module("cyclo_data.recorder.transcoder", TranscodeWorker=_Dummy)
 _stub_module("cyclo_data.recorder.video_recorder", VideoRecorder=_Dummy)
 _stub_module("huggingface_hub", HfApi=_Dummy)
-_stub_module("cyclo_data.converter.orchestrator", DataConverter=_Dummy)
 _stub_module(
     "cyclo_data.hub.progress_tracker",
     HuggingFaceLogCapture=_Dummy,
@@ -137,6 +137,20 @@ def test_discard_episode_segment_index_encodes_full_episode_index_plus_one():
     assert RecordingService._extract_full_episode_index(_request(8)) == 7
 
 
+def test_stale_discard_for_another_episode_cannot_cancel_active_recording():
+    service, _ = _service_with_logger()
+    service._finish_episode_in_progress = lambda: False
+    manager = service._data_manager = Mock()
+    manager.is_recording.return_value = True
+    manager.get_current_full_episode_index.return_value = 3
+    service._do_discard = Mock()
+    result = service._do_discard_episode(_request(3), SimpleNamespace())
+    assert not result.success and 'request targeted 2' in result.message
+    service._do_discard.assert_not_called()
+    manager.discard_full_episode.assert_not_called()
+    manager.discard_current_full_episode.assert_not_called()
+
+
 def test_discard_episode_accepts_transitional_explicit_target_fields():
     req = _request(0, has_full_episode_index=True, full_episode_index=7)
     assert RecordingService._extract_full_episode_index(req) == 7
@@ -169,9 +183,114 @@ def _service_with_logger():
     logger = _Logger()
     service = RecordingService.__new__(RecordingService)
     service._command_lock = RLock()
+    from cyclo_data.services.command_receipts import CommandReceipts
+    service._receipts = CommandReceipts()
     service._shutting_down = False
     service._node = SimpleNamespace(get_logger=lambda: logger)
     return service, logger
+
+
+@pytest.mark.parametrize('iteration', range(20))
+def test_receipt_query_and_duplicate_are_nonblocking_during_save(iteration):
+    from uuid import uuid4
+    service, _ = _service_with_logger()
+    entered, release = Event(), Event()
+    req = _request(command=_RecordingCommand.Request.STOP_SEGMENT)
+    req.request_id = str(uuid4())
+
+    def slow(request, response):
+        entered.set()
+        assert release.wait(2)
+        response.success, response.message = True, 'saved once'
+        return response
+
+    service._dispatch = Mock(side_effect=slow)
+    query = SimpleNamespace(command=_RecordingCommand.Request.GET_RESULT, request_id=req.request_id)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(service._callback, req, SimpleNamespace())
+        try:
+            assert entered.wait(1)
+            assert pool.submit(service._callback, query, SimpleNamespace()).result(.5).command_state == 'running'
+            assert pool.submit(service._callback, req, SimpleNamespace()).result(.5).command_state == 'running'
+        finally:
+            release.set()
+        assert pending.result(1).success
+    assert service._callback(query, SimpleNamespace()).message == 'saved once'
+    assert service._callback(req, SimpleNamespace()).success
+    service._dispatch.assert_called_once()
+
+
+@pytest.mark.parametrize('robot_type,topics', [
+    ('ffw_sg2_rev2', ['/joint_states', '/action']),
+    ('ffw_sg2_rev1', ['/joint_states', '/new_action']),
+    ('', ['/joint_states']),
+])
+def test_active_recording_rejects_refresh_changes_before_any_io(robot_type, topics):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = SimpleNamespace(is_recording=lambda: True)
+    service._robot_type = 'ffw_sg2_rev1'
+    service._last_prepared_topics = ('/action', '/joint_states')
+    service._rosbag = Mock()
+    service._ensure_video_pipeline = Mock()
+    request = _request(command=_RecordingCommand.Request.REFRESH_TOPICS,
+                       robot_type=robot_type, topics=topics)
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=True, message=''))
+
+    assert not result.success
+    assert 'recording' in result.message.lower()
+    assert service._robot_type == 'ffw_sg2_rev1'
+    assert service._last_prepared_topics == ('/action', '/joint_states')
+    assert service._rosbag.mock_calls == []
+    service._ensure_video_pipeline.assert_not_called()
+
+
+@pytest.mark.parametrize('robot_type', ['ffw_sg2_rev1', ''])
+def test_active_recording_identical_refresh_is_noop_even_without_video(robot_type):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    service._data_manager = SimpleNamespace(is_recording=lambda: True)
+    service._robot_type = 'ffw_sg2_rev1'
+    service._last_prepared_topics = ('/action', '/joint_states')
+    service._rosbag = Mock()
+    service._rosbag.is_available.return_value = False
+    service._ensure_video_pipeline = Mock()
+    request = _request(command=_RecordingCommand.Request.REFRESH_TOPICS,
+                       robot_type=robot_type, topics=['/joint_states', '/action'])
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=False, message=''))
+
+    assert result.success, result.message
+    assert service._robot_type == 'ffw_sg2_rev1'
+    assert service._rosbag.mock_calls == []
+    service._ensure_video_pipeline.assert_not_called()
+
+
+@pytest.mark.parametrize('command', [
+    _RecordingCommand.Request.SET_TASK_INFO, _RecordingCommand.Request.START,
+])
+def test_active_recording_rejects_robot_change_without_relabeling(command):
+    service, _ = _service_with_logger()
+    service._session_lock = RLock()
+    manager = SimpleNamespace(is_recording=lambda: True)
+    service._data_manager = manager
+    service._robot_type = 'ffw_sg2_rev1'
+    service._rosbag = Mock()
+    service._finish_episode_in_progress = lambda: False
+    service._publish_umbrella_status = Mock()
+    request = _request(command=command, robot_type='ffw_sg2_rev2')
+    request.task_info.task_num = 'active'
+
+    result = service._callback(request, SimpleNamespace(success=True, message=''))
+
+    assert not result.success
+    assert 'robot' in result.message.lower()
+    assert service._data_manager is manager
+    assert service._robot_type == 'ffw_sg2_rev1'
+    service._rosbag.start_rosbag.assert_not_called()
 
 
 def test_shutdown_stops_native_writer_before_closing_local_writers_without_saving():
@@ -280,13 +399,12 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
     (segment / 'partial.mcap').write_bytes(b'data')
     service._data_manager = SimpleNamespace(
         _task_info=SimpleNamespace(task_type='inference'),
-        get_save_rosbag_path=lambda: str(segment),
-        get_current_full_episode_index=lambda: 4,
-        _full_episode_dir=lambda index: tmp_path / str(index),
+        active_discard_path=lambda: episode,
         discard_recording=Mock(),
     )
     service._rosbag = SimpleNamespace(stop_and_delete_rosbag=Mock(), publish_action_event=Mock())
-    service._stop_episode_writers = Mock()
+    service._video_recorder = Mock()
+    service._camera_info = Mock()
     service._publish_umbrella_status = Mock()
     original = shutil.rmtree
     monkeypatch.setattr(shutil, 'rmtree', Mock(side_effect=PermissionError('denied')))
@@ -294,12 +412,91 @@ def test_inference_discard_filesystem_failure_keeps_active_then_retries(tmp_path
     with pytest.raises(PermissionError):
         service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
     service._data_manager.discard_recording.assert_not_called()
+    service._camera_info.discard_episode.assert_called_once()
     monkeypatch.setattr(shutil, 'rmtree', original)
     service._do_discard(SimpleNamespace(), response, reset_subtask_index=False, event='cancel')
     assert response.success
     assert not episode.exists()
     service._rosbag.stop_and_delete_rosbag.assert_called_once()
-    service._stop_episode_writers.assert_called_once()
+    service._video_recorder.stop_episode.assert_called_once()
+    service._camera_info.stop_episode.assert_not_called()
+    service._camera_info.discard_episode.assert_called_once()
+
+
+def test_inference_discard_rosbag_error_leaves_snapshot_attached(tmp_path):
+    service, _ = _service_with_logger()
+    segment = tmp_path / "0/segments/0"
+    segment.mkdir(parents=True)
+    service._data_manager = Mock()
+    service._data_manager._task_info.task_type = 'inference'
+    service._data_manager.active_discard_path.return_value = segment
+    service._video_recorder = Mock()
+    service._rosbag = Mock()
+    service._rosbag.stop_and_delete_rosbag.side_effect = RuntimeError("delete rejected")
+    service._camera_info = Mock()
+    with pytest.raises(RuntimeError, match="delete rejected"):
+        service._do_discard(SimpleNamespace(), SimpleNamespace(), event='cancel')
+    assert segment.exists()
+    service._camera_info.discard_episode.assert_not_called()
+    service._camera_info.stop_episode.assert_not_called()
+    service._data_manager.discard_recording.assert_not_called()
+
+
+@pytest.mark.parametrize("whole_episode", [False, True])
+def test_active_discard_drains_writers_but_does_not_persist_calibration(tmp_path, whole_episode):
+    service, _ = _service_with_logger()
+    events = []
+    segment = tmp_path / "0/segments/0"
+    segment.mkdir(parents=True)
+    service._data_manager = Mock()
+    service._data_manager._task_info.task_type = 'record'
+    service._data_manager.active_discard_path.return_value = segment
+    service._data_manager.get_current_full_episode_index.return_value = 0
+    service._data_manager.discard_full_episode.return_value = 1
+    service._data_manager._segmented_storage_mode = True
+    service._data_manager.get_current_subtask_index.return_value = 0
+    service._finish_episode_in_progress = lambda: False
+    service._publish_umbrella_status = Mock()
+    service._video_recorder = Mock()
+    service._video_recorder.stop_episode.side_effect = lambda: events.append('drain')
+    service._rosbag = Mock()
+    service._rosbag.stop_and_delete_rosbag.side_effect = lambda: events.append('bag delete')
+    service._camera_info = Mock()
+    service._camera_info.discard_episode.side_effect = lambda: events.append('detach')
+    service._last_camera_info_files = {'head': 'previous.yaml'}
+    response = SimpleNamespace(success=False)
+    if whole_episode:
+        service._do_discard_episode(_request(1), response)
+        service._data_manager.discard_full_episode.assert_called_once_with(0)
+    else:
+        service._do_cancel(_request(0, command=_RecordingCommand.Request.CANCEL_SEGMENT), response)
+        service._data_manager.discard_full_episode.assert_not_called()
+    assert response.success and not segment.exists()
+    assert events == ['drain', 'bag delete', 'detach']
+    assert service._last_camera_info_files == {}
+    service._camera_info.stop_episode.assert_not_called()
+
+
+def test_discard_missing_active_path_touches_neither_writers_nor_bag(tmp_path, monkeypatch):
+    from cyclo_data.recorder.session_manager import DataManager
+
+    monkeypatch.chdir(tmp_path)
+    sentinel = tmp_path / 'unrelated.mcap'
+    sentinel.write_bytes(b'keep')
+    service, _ = _service_with_logger()
+    manager = DataManager.__new__(DataManager)
+    manager.get_save_rosbag_path = lambda: None
+    service._data_manager = manager
+    service._stop_video_writer = Mock()
+    service._discard_camera_snapshot = Mock()
+    service._rosbag = Mock()
+    response = SimpleNamespace(success=True, message='')
+    service._do_discard(SimpleNamespace(), response, event='cancel')
+    assert not response.success and 'No active recording directory' in response.message
+    service._stop_video_writer.assert_not_called()
+    service._discard_camera_snapshot.assert_not_called()
+    assert not service._rosbag.mock_calls
+    assert sentinel.read_bytes() == b'keep'
 
 
 def test_inference_metadata_failure_keeps_original_video_statistics(tmp_path):
@@ -606,7 +803,7 @@ def test_start_segment_rolls_back_rosbag_when_writer_start_fails(tmp_path):
     service._ensure_video_pipeline = lambda robot_type: None
     service._last_prepared_topics = ()
     service._video_recorder = FailingVideoRecorder()
-    service._camera_info = None
+    service._camera_info = Mock()
     service._publish_umbrella_status = lambda *args, **kwargs: None
 
     def start_rosbag(rosbag_uri):
@@ -637,6 +834,8 @@ def test_start_segment_rolls_back_rosbag_when_writer_start_fails(tmp_path):
         ("stop_delete", None),
     ]
     assert stopped_writers == [True]
+    service._camera_info.discard_episode.assert_called_once()
+    service._camera_info.stop_episode.assert_not_called()
     assert started == []
     assert not episode_dir.exists()
     assert logger.errors == [response.message]

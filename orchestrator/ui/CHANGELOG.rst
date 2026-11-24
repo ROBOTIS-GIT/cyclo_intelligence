@@ -2,6 +2,13 @@
 Changelog for package cyclo-ui
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.6.0 (2026-11-23)
+------------------
+* Combined Record and Inference in Operate with resizable camera and monitor panels, configurable camera layout, and local recording audio cues.
+* Removed Try Results and the separate inference recording controls.
+* Added deletion with episode renumbering in Review Episodes and editable dataset names in Convert Dataset.
+* Contributors: Taehyeong Kim
+
 1.5.1 (2026-11-16)
 ------------------
 * Updated evaluation UI regression coverage to use the W2 robot identifier.

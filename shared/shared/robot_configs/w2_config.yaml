@@ -5,6 +5,10 @@ orchestrator:
       urdf_path: urdf/w2_follower.urdf
       joystick:
         trigger_topic: /leader/joystick_controller/tact_trigger
+      inference_handoff:
+        source_topic: /source
+        control_status_topic: /control/status
+        allowed_model_modes: [1]
 
       # ────────────────────────────────────────────────────────────────
       # Observation — every signal the policy reads from the robot.
@@ -14,8 +18,7 @@ orchestrator:
       observation:
         images:
           # Initial live camera grid placement follows YAML insertion order.
-          # UI cell indexes: 0=left, 1=center, 2=right.
-          # The first three image entries map to UI cells [1, 0, 2].
+          # All cameras wrap into rows according to the available panel width.
           # rotation_deg, when set, must be one of: 0, 90, 180, 270.
           cam_head:
             topic: /camera_head/camera_head/color/image_raw/compressed

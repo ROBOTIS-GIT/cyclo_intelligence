@@ -38,6 +38,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+from inference_context.observation import ExecutionObservationBarrier
 
 
 # -- robot_client import shim --------------------------------------------------
@@ -233,6 +234,7 @@ class GR00TInference:
     }
 
     def __init__(self):
+        self._observation_barrier = ExecutionObservationBarrier()
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
         self._loaded_model_path: Optional[str] = None  # track cached policy path
@@ -261,6 +263,7 @@ class GR00TInference:
 
     def load_policy(self, request) -> dict:
         """Load GR00T policy and create RobotClient for sensor data."""
+        self._observation_barrier = ExecutionObservationBarrier()
         model_path = request.model_path
         robot_type = request.robot_type
 
@@ -713,17 +716,30 @@ class GR00TInference:
 
         self.logger.info("Robot info: %s", self.robot_info)
 
+    def update_execution_context(self, context):
+        if self._observation_barrier.update(context):
+            reset = getattr(self.policy, "reset", None)
+            if callable(reset):
+                reset()
+
     def get_action_chunk(self, request) -> dict:
         """Build observation from RobotClient, run inference, return action chunk."""
         if not self.is_ready:
             return self.fail("Not in inference mode")
 
         try:
-            images = self.robot.get_images(format="rgb")
-            joints = self.robot.get_joint_positions()
             task = request.task_instruction
-
-            observation = self.preprocess(images, joints, task)
+            if self._observation_barrier.after_s is not None:
+                sources = {f"camera:{self.robot_info.get('camera_sources', {}).get(name, name)}"
+                           for name in self.robot_info["cameras"]}
+                sources.update(f"joint:{name}" for name in self.robot_info["joints"].values())
+                sources.update(f"sensor:{name}" for name in self.robot_info.get("sensor_states", {}).values())
+                snapshot = self._observation_barrier.read(self.robot, sources)
+                observation = self.preprocess(snapshot["images"], snapshot["joint_positions"], task,
+                                              sensors=snapshot["sensors"])
+            else:
+                observation = self.preprocess(self.robot.get_images(format="rgb"),
+                                              self.robot.get_joint_positions(), task)
             if "success" in observation:
                 return observation
 
@@ -737,11 +753,8 @@ class GR00TInference:
             self.logger.error("Inference failed: %s", e, exc_info=True)
             return self.fail(str(e))
 
-    def preprocess(self, images: dict, joints: dict, task: str) -> dict:
+    def preprocess(self, images: dict, joints: dict, task: str, *, sensors=None) -> dict:
         """Build observation dict from raw sensor data. Returns fail dict on error."""
-        if not images or not joints:
-            return self.fail("No recent observations from sensors")
-
         video_obs = {}
         for cam_key in self.robot_info["cameras"]:
             source_key = self.robot_info.get("camera_sources", {}).get(cam_key, cam_key)
@@ -763,7 +776,7 @@ class GR00TInference:
         # Sensor-backed state modalities (e.g. mobile ← odom).
         for modality_key, sensor_name in self.robot_info.get("sensor_states", {}).items():
             if sensor_name == "odom":
-                odom = self.robot.get_odom()
+                odom = self.robot.get_odom() if sensors is None else sensors.get(sensor_name)
                 if odom is None:
                     return self.fail(f"Missing sensor: {sensor_name}")
                 vec = np.array([
@@ -809,6 +822,7 @@ class GR00TInference:
     def cleanup(self) -> None:
         """Release the model on UNLOAD; only repeated LOAD may reuse weights."""
         robot, self.robot = self.robot, None
+        self._observation_barrier = ExecutionObservationBarrier()
         self.policy = None
         self._loaded_model_path = None
         self._loaded_acceleration_mode = ACCELERATION_PYTORCH

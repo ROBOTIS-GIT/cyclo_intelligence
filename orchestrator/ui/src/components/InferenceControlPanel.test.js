@@ -49,6 +49,7 @@ const renderPanel = ({
   runtimeStateOverride = null,
   poseReturning = false,
   poseCommand = jest.fn().mockResolvedValue({ success: true }),
+  shortcutsEnabled = true,
 } = {}) => {
   const { taskInstruction, ...inferenceOverrides } = taskOverrides;
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
@@ -120,28 +121,45 @@ const renderPanel = ({
     },
   });
 
-  const { unmount } = render(
+  const { unmount, container } = render(
     <PolicyCatalogProvider initialCatalog={catalog}>
       <Provider store={store}>
-        <InferenceControlPanel />
+        <InferenceControlPanel shortcutsEnabled={shortcutsEnabled} />
       </Provider>
     </PolicyCatalogProvider>
   );
 
-  return { store, sendRecordCommand, getInferenceStatus, unmount };
+  return { store, sendRecordCommand, getInferenceStatus, unmount, container };
 };
 
 describe('manual pose Stop and Clear', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('recording disables Clear without disabling inference Stop', async () => {
+  test('recording survives inference Stop and Clear without gating either command', async () => {
     const { store, sendRecordCommand } = renderPanel({ inferencePhase: InferencePhase.INFERENCING });
     act(() => store.dispatch(setRecordStatus({ running: true })));
-    expect(screen.getByRole('button', { name: /Save or Discard recording before Clear/i })).toBeDisabled();
+    const clear = screen.getByRole('button', { name: /unload model/i });
+    expect(clear).toBeEnabled();
     const stop = screen.getByRole('button', { name: /pause inference/i });
     expect(stop).toBeEnabled();
     fireEvent.click(stop);
     await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+    fireEvent.click(clear);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('finish', {}));
+    act(() => store.dispatch(setInferenceStatus({
+      inferencePhase: InferencePhase.READY, runtimeState: 'unloaded', loadedModelPath: '',
+    })));
+    expect(store.getState().tasks.recordStatus.running).toBe(true);
+  });
+
+  test('recording does not gate inference Start', async () => {
+    const { store, sendRecordCommand } = renderPanel({ inferenceMode: 'simulation' });
+    act(() => store.dispatch(setRecordStatus({ running: true })));
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith(
+      'start_inference', { inferenceMode: 'simulation' },
+    ));
+    expect(store.getState().tasks.recordStatus.running).toBe(true);
   });
 
   test('Stop response cannot clear the authoritative returning state', async () => {
@@ -195,8 +213,72 @@ describe('manual pose Stop and Clear', () => {
 });
 
 describe('InferenceControlPanel deploy safety', () => {
+  test('deploy confirmation is outside the collapsible tab stacking context', async () => {
+    const { container, sendRecordCommand } = renderPanel({ inferenceMode: 'robot' });
+    fireEvent.click(screen.getByRole('button', { name: /start inference/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(document.body).toContainElement(dialog);
+    expect(container).not.toContainElement(dialog);
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+  });
+  test('inactive inference shortcuts cannot Stop or Clear, but direct Stop remains usable', async () => {
+    const { sendRecordCommand } = renderPanel({ shortcutsEnabled: false, inferencePhase: InferencePhase.INFERENCING });
+    fireEvent.keyUp(window, { key: 'Escape' });
+    fireEvent.keyUp(window, { key: 's', ctrlKey: true, shiftKey: true });
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Pause inference (model stays loaded)' }));
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test.each([
+    'Waiting for model control: teleop owns control',
+    'Control unavailable: backend unavailable; START required.',
+  ])('shows paused handoff reason without a runtime failure: %s', async (reason) => {
+    const { store, sendRecordCommand, getInferenceStatus } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+    });
+    act(() => store.dispatch(setInferenceStatus({ error: reason })));
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.queryByText(/Policy Runtime failed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /resume inference/i })).toBeEnabled();
+    const stop = screen.getByRole('button', { name: /pause inference/i });
+    expect(stop).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {}));
+    expect(store.getState().tasks.inferenceStatus.error).toBe(reason);
+    expect(store.getState().tasks.inferenceStatus.runtimeState).toBe('paused');
+    expect(getInferenceStatus).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    act(() => store.dispatch(setInferenceStatus({
+      inferencePhase: InferencePhase.INFERENCING, runtimeState: 'running', error: '',
+    })));
+    expect(screen.queryByText(reason)).not.toBeInTheDocument();
+    expect(screen.getByText('Inferencing')).toBeInTheDocument();
+    expect(sendRecordCommand).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['click', 'keyboard'])('paused Stop ignores model and instruction drafts via %s', async (input) => {
+    const { store, sendRecordCommand } = renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      taskOverrides: { policyPath: '/models/changed-draft', taskInstruction: ['changed instruction'] },
+    });
+    act(() => store.dispatch(setRecordStatus({ running: true })));
+    const status = store.getState().tasks.inferenceStatus;
+    expect(sendRecordCommand).not.toHaveBeenCalled();
+    if (input === 'click') {
+      fireEvent.click(screen.getByRole('button', { name: /pause inference/i }));
+    } else {
+      fireEvent.keyDown(window, { key: 'S', ctrlKey: true, shiftKey: true });
+      fireEvent.keyUp(window, { key: 'S', ctrlKey: true, shiftKey: true });
+    }
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledTimes(1));
+    expect(sendRecordCommand).toHaveBeenCalledWith('stop_inference', {});
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(store.getState().tasks.inferenceStatus).toEqual(status);
+    expect(store.getState().tasks.recordStatus.running).toBe(true);
   });
 
   test('preparation shows first-action progress and leaves Stop and Clear available', async () => {

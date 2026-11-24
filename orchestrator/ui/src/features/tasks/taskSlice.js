@@ -355,6 +355,7 @@ const initialState = {
   // through editDatasetSlice.conversionStatus — distinct from this
   // record-session state.
   recordStatus: {
+    taskNum: '',
     taskName: 'idle',
     taskType: '',
     running: false,
@@ -386,7 +387,6 @@ const initialState = {
   // Inference-side snapshot from /task/inference_status (orchestrator
   // direct, refreshed by one backend monitor).
   inferenceStatus: {
-    recordingSessionId: '',
     inferencePhase: InferencePhase.READY,
     error: '',
     topicReceived: false,

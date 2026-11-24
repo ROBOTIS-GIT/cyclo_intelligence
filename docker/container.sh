@@ -303,7 +303,7 @@ Environment:
   FLASH_ATTN_CUDA_ARCHS
                    CUDA archs for GR00T Blackwell flash-attn builds
                    (default 120)
-  VERSION          image tag version (default: 1.5.1 for cyclo)
+  VERSION          image tag version (default: 1.6.0 for cyclo)
   ROS/Zenoh        Edit /root/.bashrc inside each container, then restart that
                    container. docker restart preserves edits; recreating the
                    container resets /root/.bashrc to the image default.
@@ -415,17 +415,15 @@ build_policy() {
         return 1
     fi
     local repo="$(canonical_path "${SCRIPT_DIR}/..")"
-    local sources source_path
-    for source_path in "cyclo_brain/policy/$runtime" cyclo_brain/sdk/zenoh_ros2_sdk; do
-        # Inference uses top-level sources; nested benchmark repositories are
-        # optional and excluded from the worker's Docker build context.
-        sources="$(git -c "safe.directory=$repo" -C "$repo" submodule status -- "$source_path")"
-        if [ -z "$sources" ] || printf '%s\n' "$sources" | grep -qE '^[+U-]'; then
-            echo "Error: initialize $source_path submodules at the commits recorded by Cyclo before building." >&2
-            echo "From the repository root, run: git submodule update --init -- $source_path" >&2
-            return 1
-        fi
-    done
+    local sources source_path="cyclo_brain/policy/$runtime"
+    # Inference uses top-level sources; nested benchmark repositories are
+    # optional and excluded from the worker's Docker build context.
+    sources="$(git -c "safe.directory=$repo" -C "$repo" submodule status -- "$source_path")"
+    if [ -z "$sources" ] || printf '%s\n' "$sources" | grep -qE '^[+U-]'; then
+        echo "Error: initialize $source_path submodules at the commits recorded by Cyclo before building." >&2
+        echo "From the repository root, run: git submodule update --init -- $source_path" >&2
+        return 1
+    fi
     if ! docker buildx version >/dev/null 2>&1; then
         echo "Error: Docker Buildx is required. Update the Cyclo image or install the host Docker Buildx plugin." >&2
         return 1

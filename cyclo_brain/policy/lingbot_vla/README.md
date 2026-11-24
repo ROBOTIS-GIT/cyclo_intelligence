@@ -97,7 +97,6 @@ LOAD; there are no identity-statistics or default-robot fallbacks.
 
 ```bash
 git submodule update --init -- \
-  cyclo_brain/sdk/zenoh_ros2_sdk \
   cyclo_brain/policy/lingbot_vla/lingbot-vla-v2
 ./docker/container.sh start-lingbot-vla --build
 ```

@@ -21,6 +21,43 @@
 #
 # These definitions are embedded as strings for use with zenoh_ros2_sdk's
 # request_definition/response_definition/msg_definition parameters.
+
+# robotis_interfaces/msg/ControlModeStatus (AIWorker controller wire schema).
+CONTROL_MODE_STATUS_DEF = """
+uint8 STATE_HOLDING=1
+uint8 STATE_LOADING=2
+uint8 STATE_ACTIVATING=3
+uint8 STATE_ACTIVE=4
+uint8 STATE_ERROR=5
+uint8 PRESET_UNUSED=0
+uint8 PRESET_WAITING=1
+uint8 PRESET_MOVING=2
+uint8 PRESET_HOLDING=3
+uint8 PRESET_ERROR=4
+uint8 INITIAL_POSE_UNUSED=0
+uint8 INITIAL_POSE_WAITING=1
+uint8 INITIAL_POSE_MOVING=2
+uint8 INITIAL_POSE_HOLDING=3
+uint8 INITIAL_POSE_ERROR=4
+string ARMS_NONE=none
+string ARMS_LEFT=left
+string ARMS_RIGHT=right
+string ARMS_BOTH=both
+uint64 transition_id
+uint16 requested_control_mode
+uint16 active_control_mode
+string requested_arms
+string active_arms
+uint16 left_preset_id
+uint16 right_preset_id
+uint8 left_preset_state
+uint8 right_preset_state
+string initial_pose_available_arms
+uint8 left_initial_pose_state
+uint8 right_initial_pose_state
+uint8 state
+string message
+"""
 # This avoids dependency on interfaces ROS2 package.
 #
 # IMPORTANT: These MUST match the .srv/.msg files in interfaces/

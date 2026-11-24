@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import clsx from 'clsx';
 import {
   MdClose,
+  MdDeleteOutline,
   MdKeyboardArrowDown,
   MdKeyboardArrowUp,
   MdPlayArrow,
@@ -65,6 +66,8 @@ function SidebarPanel({
   rosbagList,
   currentBagIndex,
   isBusy,
+  deleteTarget,
+  onDeleteEpisode,
   navigateRosbag,
   handleSelectBag,
   seekToTime,
@@ -138,6 +141,16 @@ function SidebarPanel({
                 <MdKeyboardArrowDown size={16} />
               </button>
             </div>
+            {deleteTarget != null && (
+              <button
+                type="button"
+                onClick={onDeleteEpisode}
+                disabled={isBusy}
+                className="mt-2 flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                <MdDeleteOutline size={16} /> Delete Episode {deleteTarget}
+              </button>
+            )}
           </div>
           <div className="max-h-80 overflow-y-auto">
             {rosbagList.length > 0 ? (

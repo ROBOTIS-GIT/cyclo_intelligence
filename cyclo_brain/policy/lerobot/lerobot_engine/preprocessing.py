@@ -31,8 +31,11 @@ class PreprocessingMixin:
         """Pull raw sensor data from RobotClient and build a policy batch."""
         assert self._robot is not None
 
+        barrier = getattr(self, "_observation_barrier", None)
+        if barrier is not None and barrier.after_s is not None:
+            observation_after_s = max(barrier.after_s, observation_after_s or 0.)
         plan, session = self._observation_plan(require_received)
-        if require_received or session.requires_execution_context or any(session.live_ages.values()):
+        if observation_after_s is not None or require_received or session.requires_execution_context or any(session.live_ages.values()):
             try:
                 if session.execution is not None:
                     session.check_execution(time.monotonic())

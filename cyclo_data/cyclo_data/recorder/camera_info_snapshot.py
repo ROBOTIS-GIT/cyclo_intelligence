@@ -9,19 +9,18 @@
 """CameraInfo cache for recording format v2.
 
 Subscribes to every camera_info topic at construction time with
-TRANSIENT_LOCAL durability so cached driver publications are delivered
-immediately, then keeps the latest received message per camera in
-``_latest``. ``start_episode`` / ``stop_episode`` flush the cache to a
-YAML file under ``<episode>/camera_info/<cam_name>.yaml`` — the
-subscription stays alive across episodes and is only torn down by
-``reconfigure()`` (robot_type change) or ``close()`` (node shutdown).
+TRANSIENT_LOCAL durability to receive latched driver publications. Each
+subscription is released after the first calibrated message for that camera.
+Save writes available calibration under ``<episode>/camera_info/``; Discard
+writes none. Robot reconfiguration starts a new cache.
 """
 
 from __future__ import annotations
 
+from itertools import chain
+from math import isfinite
 from pathlib import Path
 import threading
-import time
 from typing import Dict, Optional
 
 import yaml
@@ -71,19 +70,10 @@ def _camera_info_to_dict(msg: CameraInfo) -> dict:
 
 
 class CameraInfoSnapshot:
-    """Cache the latest CameraInfo per camera; flush to YAML per episode.
+    """Cache calibration once per camera configuration, not once per episode."""
 
-    Subscriptions live from ``__init__`` through ``close()`` / a
-    ``reconfigure()``. Each incoming message overwrites the cached dict
-    for that camera. ``start_episode`` opens the output dir and
-    ``stop_episode`` writes one YAML per camera from the cache.
-    """
-
-    # If start/stop arrives before any TRANSIENT_LOCAL latched message
-    # has been delivered, wait up to this long for the cache to fill
-    # before giving up.
-    _STOP_WAIT_TIMEOUT_SEC = 1.0
-    _STOP_WAIT_POLL_SEC = 0.05
+    # Preserve the grace period only for an interrupted episode on shutdown.
+    _SHUTDOWN_WAIT_TIMEOUT_SEC = 1.0
 
     def __init__(
         self,
@@ -92,104 +82,120 @@ class CameraInfoSnapshot:
         callback_group: Optional[CallbackGroup] = None,
     ) -> None:
         self._node = node
-        self._spec = dict(camera_info_topics)
+        self._spec: Dict[str, str]
         self._cb_group = callback_group or ReentrantCallbackGroup()
 
-        self._lock = threading.Lock()
+        self._cache_ready = threading.Condition()
         self._subs: Dict[str, object] = {}
-        self._latest: Dict[str, dict] = {}
+        self._calibration: Dict[str, CameraInfo] = {}
         self._output_dir: Optional[Path] = None
-        self._episode_active = False
 
-        self._build_subscriptions(self._spec)
+        self.reconfigure(camera_info_topics)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start_episode(self, episode_dir: Path) -> None:
-        if self._episode_active:
+        if self._output_dir is not None:
             raise RuntimeError("CameraInfoSnapshot already running")
-        self._output_dir = Path(episode_dir) / "camera_info"
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._episode_active = True
+        output_dir = Path(episode_dir) / "camera_info"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._output_dir = output_dir
 
     def stop_episode(self) -> Dict[str, Path]:
-        """Flush cached CameraInfo dicts to YAML, one per camera.
+        """Flush cached CameraInfo messages to YAML, one per camera.
 
         Returns ``{cam_name: yaml_path}`` for cameras whose cache held a
         message. Cameras with no message are omitted with a warning;
-        subscriptions for them stay alive so a late publisher can
-        backfill before the next episode.
+        subscriptions for them stay alive for a later episode.
         """
-        if not self._episode_active:
-            return {}
-
-        self._wait_for_cache_fill()
-
         output_dir = self._output_dir
+        if output_dir is None:
+            return {}
+        with self._cache_ready:
+            snapshot = dict(self._calibration)
         written: Dict[str, Path] = {}
-        if output_dir is not None:
-            with self._lock:
-                snapshot = dict(self._latest)
-            for cam_name, topic in self._spec.items():
-                data = snapshot.get(cam_name)
-                if data is None:
-                    self._node.get_logger().warn(
-                        f"CameraInfoSnapshot: no message from {cam_name} ({topic})"
-                    )
-                    continue
-                yaml_path = output_dir / f"{cam_name}.yaml"
-                with open(yaml_path, "w") as f:
-                    yaml.safe_dump(data, f, sort_keys=False)
-                written[cam_name] = yaml_path
+        for cam_name, topic in self._spec.items():
+            msg = snapshot.get(cam_name)
+            if msg is None:
+                self._node.get_logger().warn(
+                    f"CameraInfoSnapshot: no valid calibration from {cam_name} ({topic})"
+                )
+                continue
+            yaml_path = output_dir / f"{cam_name}.yaml"
+            with open(yaml_path, "w") as f:
+                yaml.safe_dump(_camera_info_to_dict(msg), f, sort_keys=False)
+            written[cam_name] = yaml_path
 
         self._output_dir = None
-        self._episode_active = False
         return written
+
+    def discard_episode(self) -> None:
+        """Detach the episode without touching files or clearing the live cache."""
+        self._output_dir = None
 
     def reconfigure(self, camera_info_topics: Dict[str, str]) -> None:
         """Swap the topic set — destroy current subs, build new ones."""
-        if self._episode_active:
+        if self._output_dir is not None:
             raise RuntimeError("Cannot reconfigure while recording")
-        self._teardown_subscriptions()
-        self._spec = dict(camera_info_topics)
-        with self._lock:
-            self._latest.clear()
-        self._build_subscriptions(self._spec)
+        with self._cache_ready:
+            self._teardown_subscriptions()
+            self._spec = dict(camera_info_topics)
+            self._calibration.clear()
+            try:
+                self._build_subscriptions(self._spec)
+            except Exception:
+                self._teardown_subscriptions()
+                raise
 
     def close(self) -> None:
         """Tear down all subscriptions — called on node shutdown."""
-        if self._episode_active:
+        if self._output_dir is not None:
             try:
+                with self._cache_ready:
+                    self._cache_ready.wait_for(
+                        lambda: self._spec.keys() <= self._calibration.keys(),
+                        timeout=self._SHUTDOWN_WAIT_TIMEOUT_SEC,
+                    )
                 self.stop_episode()
             except Exception:  # pragma: no cover - defensive
                 pass
-        self._teardown_subscriptions()
+        with self._cache_ready:
+            self._teardown_subscriptions()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _on_msg(self, cam_name: str, msg: CameraInfo) -> None:
-        # No one-shot self-destroy — keep the subscription alive across
-        # episodes and just overwrite the cache. CameraInfo rarely
-        # changes mid-session, but if it does the freshest value wins.
-        snapshot = _camera_info_to_dict(msg)
-        with self._lock:
-            already_cached = cam_name in self._latest
-            self._latest[cam_name] = snapshot
-        if not already_cached:
-            self._node.get_logger().info(
-                f"CameraInfoSnapshot: captured {cam_name}"
-            )
+    def _on_msg(self, topics: Dict[str, str], cam_name: str, msg: CameraInfo) -> None:
+        with self._cache_ready:
+            if topics is not self._spec or cam_name not in self._subs:
+                return  # Stale callback after capture, close or reconfiguration.
+            # Drivers can publish an uncalibrated placeholder (K[0] == 0).
+            if (not msg.width or not msg.height or msg.k[0] <= 0 or msg.k[4] <= 0
+                    or not all(map(isfinite, chain(msg.k, msg.d, msg.r, msg.p)))):
+                return
+            if cam_name not in self._calibration:
+                self._calibration[cam_name] = msg
+                self._cache_ready.notify_all()
+                self._node.get_logger().info(f"CameraInfoSnapshot: captured {cam_name}")
+            try:
+                self._node.destroy_subscription(self._subs[cam_name])
+            except Exception as exc:
+                self._node.get_logger().warning(
+                    f"Could not release CameraInfo subscription for {cam_name}: {exc}",
+                    throttle_duration_sec=5.0,
+                )
+                return  # Retry on the next calibrated message or during teardown.
+            del self._subs[cam_name]
 
     def _build_subscriptions(self, topics: Dict[str, str]) -> None:
         for cam_name, topic in topics.items():
             sub = self._node.create_subscription(
                 CameraInfo,
                 topic,
-                lambda msg, n=cam_name: self._on_msg(n, msg),
+                lambda msg, n=cam_name: self._on_msg(topics, n, msg),
                 _SUB_QOS,
                 callback_group=self._cb_group,
             )
@@ -205,23 +211,3 @@ class CameraInfoSnapshot:
             except Exception:  # pragma: no cover - destroy is best-effort
                 pass
         self._subs.clear()
-
-    def _wait_for_cache_fill(self) -> None:
-        """Brief poll for any camera with no cached message yet.
-
-        TRANSIENT_LOCAL publishers normally deliver immediately when we
-        subscribe at REFRESH_TOPICS time, so by stop_episode the cache
-        is usually full. This handles the edge case of a publisher that
-        came up after init and still hasn't sent.
-        """
-        with self._lock:
-            missing = [cam for cam in self._spec if cam not in self._latest]
-        if not missing:
-            return
-        deadline = time.monotonic() + self._STOP_WAIT_TIMEOUT_SEC
-        while time.monotonic() < deadline:
-            time.sleep(self._STOP_WAIT_POLL_SEC)
-            with self._lock:
-                missing = [cam for cam in self._spec if cam not in self._latest]
-            if not missing:
-                return

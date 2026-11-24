@@ -41,7 +41,6 @@ Usage:
 import json
 import logging
 import math
-import os
 import signal
 import sys
 import threading
@@ -50,11 +49,6 @@ from dataclasses import dataclass
 from typing import Optional, Callable
 
 import numpy as np
-
-# Add zenoh_ros2_sdk to path if not already available
-_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "")
-if _SDK_PATH and _SDK_PATH not in sys.path:
-    sys.path.insert(0, _SDK_PATH)
 
 from zenoh_ros2_sdk import ROS2ServiceServer, ROS2Publisher
 

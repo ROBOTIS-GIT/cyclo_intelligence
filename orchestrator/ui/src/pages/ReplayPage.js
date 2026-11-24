@@ -68,7 +68,7 @@ const basename = (path) => {
 
 function ReplayPage({ isActive }) {
   const dispatch = useDispatch();
-  const { getReplayData, getRosbagList } = useRosServiceCaller();
+  const { getReplayData, getRosbagList, sendEditDatasetCommand } = useRosServiceCaller();
 
   // Redux state
   const {
@@ -125,6 +125,12 @@ function ReplayPage({ isActive }) {
   const [rosbagList, setRosbagList] = useState([]);
   const [currentBagIndex, setCurrentBagIndex] = useState(-1);
   const [selectedTaskPath, setSelectedTaskPath] = useState('');
+  // Compaction can replace the bytes behind an otherwise identical media URL.
+  const [mediaRevision, setMediaRevision] = useState(Date.now);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deletingRef = useRef(false);
+  const reviewRequest = useRef(0);
+  useEffect(() => () => { reviewRequest.current += 1; }, []);
   const [episodeDrawerOpen, setEpisodeDrawerOpen] = useState(true);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
@@ -140,7 +146,7 @@ function ReplayPage({ isActive }) {
   // not nginx, because only the video server has Range support + access to
   // the rosbag2 filesystem.
   const mcapUrl = isDirectMcapMode && bagPath && mcapFile && rosHost
-    ? `http://${rosHost}:${videoServerPort || CYCLO_VIDEO_SERVER_PORT}${bagPath}/${mcapFile}`
+    ? `http://${rosHost}:${videoServerPort || CYCLO_VIDEO_SERVER_PORT}${bagPath}/${mcapFile}?rev=${mediaRevision}`
     : null;
 
   const mcapPlayer = useMcapFramePlayer({
@@ -177,15 +183,9 @@ function ReplayPage({ isActive }) {
     };
   }, [currentTime, isPlaying]);
 
-  // Calculate video URL for a given index
   const getVideoUrl = useCallback(
-    (index) => {
-      if (!bagPath || !videoFiles.length) return null;
-      const videoFile = videoFiles[index];
-      if (!videoFile) return null;
-      return `/files${bagPath}/${videoFile}`;
-    },
-    [bagPath, videoFiles]
+    (file) => (bagPath && file ? `/files${bagPath}/${file}?rev=${mediaRevision}` : ''),
+    [bagPath, mediaRevision]
   );
 
   const segmentVideoMode = useMemo(
@@ -261,11 +261,6 @@ function ReplayPage({ isActive }) {
     [activeVideoSegment, segmentVideoMode, videoFps]
   );
 
-  const getSegmentVideoUrl = useCallback(
-    (file) => (bagPath && file ? `/files${bagPath}/${file}` : ''),
-    [bagPath]
-  );
-
   const getVideoSegmentKey = useCallback((segment) => {
     if (!segment) return '';
     return [
@@ -285,14 +280,12 @@ function ReplayPage({ isActive }) {
     () => {
       if (!bagPath) return [];
 
-      return currentVideoFiles.map((file) => (
-        getSegmentVideoUrl(file)
-      ));
+      return currentVideoFiles.map(getVideoUrl);
     },
     [
       bagPath,
       currentVideoFiles,
-      getSegmentVideoUrl,
+      getVideoUrl,
     ]
   );
 
@@ -313,11 +306,11 @@ function ReplayPage({ isActive }) {
           frameDuration: segment.frame_duration,
           videoFiles: files,
           videoNames: segment.video_names || [],
-          urls: files.map((file) => getSegmentVideoUrl(file)),
+          urls: files.map(getVideoUrl),
         };
       });
   }, [
-    getSegmentVideoUrl,
+    getVideoUrl,
     getVideoSegmentKey,
     segmentVideoMode,
     videoSegments,
@@ -430,7 +423,7 @@ function ReplayPage({ isActive }) {
 
     try {
       for (let i = 0; i < totalVideos; i++) {
-        const url = getVideoUrl(i);
+        const url = getVideoUrl(videoFiles[i]);
         if (!url) continue;
 
         const response = await fetch(url);
@@ -591,6 +584,7 @@ function ReplayPage({ isActive }) {
     async (bag, index, options = {}) => {
       if (!bag?.path) return;
 
+      const request = ++reviewRequest.current;
       setCurrentBagIndex(index);
       setVideoBlobUrls([]);
       setDownloadProgress(0);
@@ -601,6 +595,7 @@ function ReplayPage({ isActive }) {
 
       try {
         const result = await getReplayData(bag.path);
+        if (request !== reviewRequest.current) return;
         if (result.success) {
           dispatch(setReplayData(result));
           if (options.showToast !== false) {
@@ -611,6 +606,7 @@ function ReplayPage({ isActive }) {
           toast.error(`Failed to load episode: ${result.message}`);
         }
       } catch (err) {
+        if (request !== reviewRequest.current) return;
         dispatch(setError(err.message));
         toast.error(`Error loading episode: ${err.message}`);
       }
@@ -619,9 +615,10 @@ function ReplayPage({ isActive }) {
   );
 
   const handleSelectTaskFolder = useCallback(
-    async (path) => {
+    async (path, afterDeleteIndex = null) => {
       if (!path) return;
 
+      const request = ++reviewRequest.current;
       setShowFileBrowser(false);
       setSelectedTaskPath(path);
       setEpisodeDrawerOpen(true);
@@ -634,6 +631,7 @@ function ReplayPage({ isActive }) {
 
       try {
         const listResult = await getRosbagList(path);
+        if (request !== reviewRequest.current) return;
         if (!listResult.success) {
           dispatch(setError(listResult.message || 'Failed to load task folder'));
           toast.error(listResult.message || 'Failed to load task folder');
@@ -642,6 +640,10 @@ function ReplayPage({ isActive }) {
 
         const rosbags = sortRosbags(listResult.rosbags || []);
         if (rosbags.length === 0) {
+          if (afterDeleteIndex !== null) {
+            dispatch(setLoading(false));
+            return;
+          }
           const message = 'No episodes found. Select the task folder that directly contains numbered episode folders with metadata.yaml.';
           dispatch(setError(message));
           toast.error(message);
@@ -649,9 +651,13 @@ function ReplayPage({ isActive }) {
         }
 
         setRosbagList(rosbags);
-        await loadEpisode(rosbags[0], 0, { showToast: false });
-        toast.success(`Loaded task: ${basename(path)} (${rosbags.length} episodes)`);
+        const index = Math.min(afterDeleteIndex ?? 0, rosbags.length - 1);
+        if (afterDeleteIndex === null) {
+          toast.success(`Loaded task: ${basename(path)} (${rosbags.length} episodes)`);
+        }
+        await loadEpisode(rosbags[index], index, { showToast: false });
       } catch (err) {
+        if (request !== reviewRequest.current) return;
         dispatch(setError(err.message));
         toast.error(`Error loading task folder: ${err.message}`);
       }
@@ -659,10 +665,51 @@ function ReplayPage({ isActive }) {
     [dispatch, getRosbagList, loadEpisode]
   );
 
+  const currentBag = rosbagList[currentBagIndex];
+  const deleteTarget = useMemo(() => {
+    if (!currentBag || !isLoaded || bagPath !== currentBag.path || selectedBagPath !== bagPath
+      || bagPath !== `${selectedTaskPath.replace(/\/+$/, '')}/${currentBag.name}`
+      || !/^(0|[1-9]\d*)$/.test(currentBag.name)) return null;
+    // EditDataset addresses episodes by uint16, not by their directory path.
+    const index = Number(currentBag.name);
+    if (index > 65535 || rosbagList.some(bag => bag !== currentBag && Number(bag.name) === index)) return null;
+    return index;
+  }, [bagPath, currentBag, isLoaded, rosbagList, selectedBagPath, selectedTaskPath]);
+
+  const deleteCurrentEpisode = async () => {
+    if (deleteTarget === null || isLoading || isDownloading || deletingRef.current) return;
+    if (!window.confirm(`Permanently delete episode ${deleteTarget}?\n\n${currentBag.path}\n\nRemaining episodes will be renumbered from 0.`)) return;
+    const request = reviewRequest.current;
+    deletingRef.current = true;
+    setIsDeleting(true);
+    dispatch(setIsPlaying(false));
+    try {
+      const result = await sendEditDatasetCommand('delete', {
+        deleteTaskDir: selectedTaskPath, deleteEpisodeNums: [deleteTarget], deleteCompact: true,
+      });
+      if (!result?.success) throw new Error(result?.message || 'Delete failed');
+      toast.success(`Deleted episode ${deleteTarget}`);
+      if (request !== reviewRequest.current) return;
+      const taskPrefix = selectedTaskPath.replace(/\/+$/, '') + '/';
+      for (const [path, urls] of videoCacheRef.current) {
+        if (!path.startsWith(taskPrefix)) continue;
+        urls.forEach(url => URL.revokeObjectURL(url));
+        videoCacheRef.current.delete(path);
+      }
+      setMediaRevision(revision => revision + 1);
+      await handleSelectTaskFolder(selectedTaskPath, currentBagIndex);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      deletingRef.current = false;
+      setIsDeleting(false);
+    }
+  };
+
   const handleSelectBag = useCallback(
     async (path) => {
       const index = rosbagList.findIndex((bag) => bag.path === path);
-      if (index < 0) return;
+      if (index < 0 || deletingRef.current) return;
       await loadEpisode(rosbagList[index], index);
     },
     [loadEpisode, rosbagList]
@@ -672,7 +719,7 @@ function ReplayPage({ isActive }) {
   const navigateRosbag = useCallback(
     async (direction) => {
       if (rosbagList.length === 0 || currentBagIndex === -1) return;
-      if (isDownloading) return;
+      if (isDownloading || deletingRef.current) return;
 
       const newIndex = direction === 'prev' ? currentBagIndex - 1 : currentBagIndex + 1;
       if (newIndex < 0 || newIndex >= rosbagList.length) return;
@@ -1246,6 +1293,7 @@ function ReplayPage({ isActive }) {
           )}
           <button
             onClick={() => setShowFileBrowser(true)}
+            disabled={isDeleting}
             className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
           >
             <MdFolder size={18} />
@@ -1403,7 +1451,8 @@ function ReplayPage({ isActive }) {
           ) : (
             <div className="text-center">
               <MdFolder size={64} className="mx-auto mb-4 text-gray-400" />
-              <p>Select a task folder to start viewing episodes</p>
+              <p>{selectedTaskPath && !rosbagList.length ? 'No episodes to review in this task.'
+                : isLoaded ? 'No playable video in this episode.' : 'Select a task folder to start viewing episodes'}</p>
             </div>
           )}
         </div>
@@ -1430,7 +1479,9 @@ function ReplayPage({ isActive }) {
             actionCount={actionNames.length}
             rosbagList={rosbagList}
             currentBagIndex={currentBagIndex}
-            isBusy={isDownloading || isLoading}
+            isBusy={isDownloading || isLoading || isDeleting}
+            deleteTarget={deleteTarget}
+            onDeleteEpisode={deleteCurrentEpisode}
             navigateRosbag={navigateRosbag}
             handleSelectBag={handleSelectBag}
             seekAndPlay={seekAndPlay}

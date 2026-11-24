@@ -15,6 +15,7 @@
 // Author: Dongyun Kim
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { shallowEqual, useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
@@ -81,11 +82,10 @@ function buildTrtStatusUrl(modelPath, enginePath) {
   return `${API_BASE}/backends/groot/trt/status?${params.toString()}`;
 }
 
-export default function InferenceControlPanel() {
+export default function InferenceControlPanel({ shortcutsEnabled = true, isActive = true }) {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
-  const recordingActive = useSelector((state) => Boolean(state.tasks.recordStatus?.running));
   const poseReturning = useSelector((state) => Boolean(state.tasks.robotPoseStatus?.returning));
   const robotType = useSelector((state) => state.tasks.robotType);
   const poseDeviceId = useSelector((state) => state.tasks.robotPoseStatus?.device_id);
@@ -110,7 +110,7 @@ export default function InferenceControlPanel() {
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
-  const { sendRecordCommand, sendRobotPoseCommand } = useRosServiceCaller();
+  const { sendRecordCommand, sendRobotPoseCommand } = useRosServiceCaller('inference');
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -140,7 +140,7 @@ export default function InferenceControlPanel() {
     readiness: backendReadiness,
     refreshStatus: refreshBackendStatus,
   } = usePolicyBackendStatus(selectedRuntime?.id || taskInfo.serviceType, {
-    enabled: shouldCheckBackend,
+    enabled: isActive && shouldCheckBackend,
     intervalMs: 2000,
   });
 
@@ -166,14 +166,14 @@ export default function InferenceControlPanel() {
   // sat frozen between transitions. setInterval gives a steady visual
   // beat while either banner is on screen.
   useEffect(() => {
-    if (!isLoading && !isInferencing && !isSyncing && !isBackendWarming) {
+    if (!isActive || (!isLoading && !isInferencing && !isSyncing && !isBackendWarming)) {
       return undefined;
     }
     const id = setInterval(() => {
       setSpinnerIndex((prev) => (prev + 1) % spinnerFrames.length);
     }, 100);
     return () => clearInterval(id);
-  }, [isLoading, isInferencing, isSyncing, isBackendWarming]);
+  }, [isLoading, isInferencing, isSyncing, isBackendWarming, isActive]);
 
   const validateTaskInfo = useCallback(() => {
     const missingFields = [];
@@ -442,10 +442,9 @@ export default function InferenceControlPanel() {
   }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const handleClear = useCallback(async () => {
-    if (recordingActive) return;
     if (poseReturning && !(await stopPoseReturn())) return;
     await executeCommand('Clear', 'finish');
-  }, [executeCommand, poseReturning, stopPoseReturn, recordingActive]);
+  }, [executeCommand, poseReturning, stopPoseReturn]);
 
   const catalogReady = catalogStatus === 'ready' && Boolean(selectedPolicy);
   const catalogBlockingMessage = catalogStatus === 'ready'
@@ -453,8 +452,8 @@ export default function InferenceControlPanel() {
     : (catalogError || 'Policy catalog is unavailable');
   const startEnabled = isStatusKnown && catalogReady && shouldCheckBackend &&
     backendReadiness.ready && !hasRuntimeError && !poseReturning;
-  const stopEnabled = isInferencing || isSyncing || isPreparing || poseReturning;
-  const clearEnabled = isModelLoaded && !recordingActive;
+  const stopEnabled = isInferencing || isPaused || isSyncing || isPreparing || poseReturning;
+  const clearEnabled = isModelLoaded;
   const startDescription = !isStatusKnown
     ? 'Checking inference session status'
     : !catalogReady
@@ -469,6 +468,8 @@ export default function InferenceControlPanel() {
   const guideMessage = poseReturning ? 'Returning to saved pose...'
     : !isStatusKnown
     ? 'Checking inference session...'
+    : runtimeState === 'paused' && inferenceStatus.error
+    ? inferenceStatus.error
     : !catalogReady
     ? catalogBlockingMessage
     : hasRuntimeError
@@ -505,8 +506,8 @@ export default function InferenceControlPanel() {
       const el = document.activeElement;
       if (!el) return false;
       const tag = el.tagName.toLowerCase();
-      return tag === 'input' || tag === 'textarea' || tag === 'select' ||
-        el.contentEditable === 'true';
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button' ||
+        el.isContentEditable || el.closest('[contenteditable="true"], [role="dialog"]');
     };
 
     const handleKeyDown = (e) => {
@@ -527,34 +528,31 @@ export default function InferenceControlPanel() {
       else if (action === 'Clear') handleClear();
     };
 
+    if (!shortcutsEnabled) return;
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleKeyAction, handleStart, handleStop, handleClear]);
+  }, [handleKeyAction, handleStart, handleStop, handleClear, shortcutsEnabled]);
 
   const classBody = clsx(
-    'bg-white/90',
-    'backdrop-blur-sm',
-    'rounded-full',
-    'px-3',
-    'py-1',
+    'min-w-0',
     'flex',
     'flex-row',
+    'flex-wrap',
     'items-center',
-    'gap-1.5',
-    'shadow-md',
-    'border',
-    'border-gray-100'
+    'gap-2'
   );
 
   const classBtn = (label, isDisabled) =>
     clsx(
-      'h-full',
-      'rounded-lg',
-      'border-none',
+      'h-9',
+      'w-full',
+      'rounded',
+      'border',
+      'border-gray-300',
       'cursor-pointer',
       'px-2.5',
       'flex',
@@ -565,7 +563,7 @@ export default function InferenceControlPanel() {
       'transition-all',
       'duration-150',
       'font-semibold',
-      'text-lg',
+      'text-sm',
       'shrink-0',
       {
         'bg-gray-400': pressed === label && !isDisabled,
@@ -599,7 +597,7 @@ export default function InferenceControlPanel() {
       color: '#d32f2f',
       enabled: clearEnabled,
       handler: handleClear,
-      description: recordingActive ? 'Save or Discard recording before Clear' : 'Stop inference and unload model',
+      description: 'Stop inference and unload model',
       shortcut: 'Escape',
     },
   ];
@@ -607,8 +605,6 @@ export default function InferenceControlPanel() {
   return (
     <>
       <div className={classBody}>
-        <span className="text-lg font-semibold text-gray-500 whitespace-nowrap px-1 shrink-0">Inference</span>
-        <div className="w-px h-2/3 bg-gray-300 shrink-0"></div>
         {controlButtons.map(({ label, icon: Icon, color, enabled, handler, description, shortcut }) => {
           const isDisabled = !enabled;
           return (
@@ -618,7 +614,7 @@ export default function InferenceControlPanel() {
               content={
                 <div className="text-center">
                   <div className="font-semibold">{description}</div>
-                  {!isDisabled && (
+                  {!isDisabled && shortcutsEnabled && (
                     <div className="text-sm mt-1 text-gray-300">
                       <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
                     </div>
@@ -626,7 +622,7 @@ export default function InferenceControlPanel() {
                 </div>
               }
               disabled={false}
-              className="relative h-full shrink-0"
+              className="relative flex-1 min-w-0"
             >
               <button
                 className={classBtn(label, isDisabled)}
@@ -650,9 +646,8 @@ export default function InferenceControlPanel() {
 
         {(guideMessage || showGuideSpinner) && (
           <>
-            <div className="w-px h-2/3 bg-gray-400 shrink-0"></div>
-            <div className="flex items-center gap-1 shrink-0">
-              <span className="text-gray-600 font-semibold text-lg whitespace-nowrap">
+            <div className="flex items-center gap-1 min-w-0 w-full">
+              <span className="text-gray-600 text-sm break-words min-w-0">
                 {guideMessage}
               </span>
               {showGuideSpinner && (
@@ -665,7 +660,7 @@ export default function InferenceControlPanel() {
         )}
       </div>
 
-      {pendingRobotDeployIntent && (
+      {pendingRobotDeployIntent && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
           <div
             role="dialog"
@@ -729,7 +724,8 @@ export default function InferenceControlPanel() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

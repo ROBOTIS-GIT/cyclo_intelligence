@@ -35,12 +35,13 @@ from typing import Optional, Union
 import numpy as np
 import cv2
 
-# Add zenoh_ros2_sdk to path if not already available
-_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "")
-if _SDK_PATH and _SDK_PATH not in sys.path:
-    sys.path.insert(0, _SDK_PATH)
-
 from zenoh_ros2_sdk import ROS2Publisher, ROS2Subscriber, get_message_class  # noqa: E402
+
+from .handoff import (
+    DISABLED_STATUS, HandoffGuard, HandoffStatus, OutputAuthorityError, physical_output,
+)
+from .handoff_transport import HandoffTransport
+from .messages import CONTROL_MODE_STATUS_DEF
 
 
 # -- robot config schema helper -----------------------------------------------
@@ -160,6 +161,10 @@ def derive_robot_config(section: dict) -> dict:
     return _build_runtime_config(section)
 
 
+class ObservationNotReady(ValueError):
+    """A configured observation has not arrived or is no longer fresh."""
+
+
 class RobotClient:
     """High-level robot interface over zenoh_ros2_sdk.
 
@@ -209,6 +214,8 @@ class RobotClient:
 
         # Thread-safe data stores
         self._lock = threading.Lock()
+        self._reception_changed = threading.Condition()
+        self._reception_version = 0
         self._observation_capture = None
         self._observation_sequence = 0
         self._images: dict[str, np.ndarray] = {}
@@ -253,6 +260,8 @@ class RobotClient:
             self._initial_pose_sync_state_max_age_s = 1.0
         self._closed = False
 
+        self._handoff = None
+        self._init_handoff(section)
         self._init_subscriptions()
         if self._enable_command_publishers:
             self._init_command_publishers()
@@ -271,6 +280,55 @@ class RobotClient:
     # ------------------------------------------------------------------ #
     # Initialization
     # ------------------------------------------------------------------ #
+
+    def _init_handoff(self, section):
+        if not self._enable_command_publishers or "inference_handoff" not in section:
+            return
+        joints = {}
+        for cfg in self._config.get("joint_groups", {}).values():
+            if not cfg.get("parent") and cfg.get("msg_type") == "sensor_msgs/msg/JointState":
+                joints.setdefault(cfg["topic"], set()).update(cfg["joint_names"])
+        guard = self._handoff = HandoffGuard(section["inference_handoff"], joints)
+        common = {"router_ip": self._router_ip, "router_port": self._router_port}
+        if self._domain_id is not None:
+            common["domain_id"] = self._domain_id
+        self._subscribers.append(HandoffTransport(guard, CONTROL_MODE_STATUS_DEF, **common))
+        # Separate callbacks remain responsive when observation capture holds _lock.
+        # They also stay live when observation subscriptions are disabled/deferred.
+        for topic in joints:
+            self._subscribers.append(ROS2Subscriber(
+                topic=topic, msg_type="sensor_msgs/msg/JointState",
+                callback=lambda msg, group=topic: guard.update_joints(group, msg), **common,
+            ))
+
+    def handoff_status(self) -> HandoffStatus:
+        """Immutable current authority; counters are sticky and never reset by reads."""
+        guard = getattr(self, "_handoff", None)
+        return guard.snapshot() if guard is not None else DISABLED_STATUS
+
+    def wait_for_initial_handoff(self):
+        """Wait only for initial control discovery, without arming or publishing."""
+        guard = getattr(self, "_handoff", None)
+        return guard.wait_for_initial_confirmation() if guard is not None else True
+
+    def arm_handoff(self, revision: int) -> HandoffStatus:
+        """Latch a ready ownership revision on explicit Start, never on each tick.
+
+        Any ownership change or stale interval revokes this lease until another
+        explicit arm. An unconfigured robot keeps its original output behavior.
+        """
+        guard = getattr(self, "_handoff", None)
+        return guard.arm(revision) if guard is not None else DISABLED_STATUS
+
+    def request_model_start(self) -> HandoffStatus:
+        """Set Cyclo's local execution intent; never command a controller mode."""
+        guard = getattr(self, "_handoff", None)
+        return guard.request_model_start() if guard is not None else DISABLED_STATUS
+
+    def _check_output_authority(self):
+        guard = getattr(self, "_handoff", None)
+        if guard is not None:
+            guard.check()
 
     def _selected_names(self, kind):
         selection = getattr(self, "_subscription_selection", None)
@@ -531,6 +589,7 @@ class RobotClient:
         if not hasattr(self, "_input_received_monotonic"):
             self._input_received_monotonic = {}
         self._input_received_monotonic[source] = received_s
+        self._notify_reception()
         capture = getattr(self, "_observation_capture", None)
         if capture is None or source not in capture.sources:
             return
@@ -673,6 +732,7 @@ class RobotClient:
                 if not hasattr(self, "_input_received_monotonic"):
                     self._input_received_monotonic = {}
                 self._input_received_monotonic[f"sensor:{sensor_name}"] = time.monotonic()
+                self._notify_reception()
                 for field, value in data.items():
                     if isinstance(value, np.ndarray):
                         self._capture_observation(f"sensor:{sensor_name}.{field}", value)
@@ -708,6 +768,32 @@ class RobotClient:
 
     def get_input_snapshot(self) -> dict:
         return self.get_required_input_snapshot()
+
+    def _notify_reception(self):
+        with self._reception_changed:
+            self._reception_version += 1
+            self._reception_changed.notify_all()
+
+    def wait_for_required_input_snapshot(self, sources, *, timeout_s=1.0, **options):
+        """Wait on callback notifications; invalid configurations fail immediately."""
+        if isinstance(timeout_s, bool) or not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("observation timeout must be finite and non-negative")
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._reception_changed:
+                version = self._reception_version
+            if self._closed:
+                raise RuntimeError("RobotClient is closed")
+            try:
+                return self.get_required_input_snapshot(sources, **options)
+            except ObservationNotReady:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                # Never hold the condition while acquiring the observation lock.
+                with self._reception_changed:
+                    if version == self._reception_version:
+                        self._reception_changed.wait(remaining)
 
     def get_required_input_snapshot(
         self, sources=None, *, max_age_s=None, after_s=None, max_age_by_source=None,
@@ -748,20 +834,23 @@ class RobotClient:
                 for source in sorted(requested):
                     kind, _, name = source.partition(":")
                     parent, dot, field = name.partition(".") if kind == "sensor" else (name, "", "")
+                    groups = {"camera": "cameras", "joint": "joint_groups", "sensor": "sensors"}
+                    if kind not in groups or parent not in self._config.get(groups[kind], {}):
+                        raise ValueError(f"Unknown input source: {source}")
                     if kind not in stores or parent not in stores[kind]:
-                        raise ValueError(f"Missing input source: {source}")
+                        raise ObservationNotReady(f"Missing input source: {source}")
                     if dot and field not in stores[kind][parent]:
-                        raise ValueError(f"Missing input source: {source}")
+                        raise ObservationNotReady(f"Missing input source: {source}")
                     age = ages.get(source, max_age_s)
                     if age is not None or after_s is not None or source in ages:
                         stamp = received.get(source)
                         if (type(stamp) not in (int, float) or not math.isfinite(stamp)
                                 or stamp < 0 or stamp > captured):
-                            raise ValueError(f"{source}: missing or invalid reception timestamp")
+                            raise ObservationNotReady(f"{source}: missing or invalid reception timestamp")
                         if after_s is not None and stamp <= after_s:
-                            raise ValueError(f"{source}: observation predates publication barrier {after_s:g}")
+                            raise ObservationNotReady(f"{source}: observation predates publication barrier {after_s:g}")
                         if age is not None and captured - stamp > age:
-                            raise ValueError(f"{source}: stale observation age={captured - stamp:.3f}s")
+                            raise ObservationNotReady(f"{source}: stale observation age={captured - stamp:.3f}s")
             if readiness_check is not None:
                 readiness_check(captured)
 
@@ -906,6 +995,7 @@ class RobotClient:
     def action_keys(self) -> list[str]:
         return list(self._action_keys)
 
+    @physical_output()
     def publish_action(self, action: np.ndarray, action_keys: Optional[list[str]] = None) -> None:
         """Publish one flat action vector to the robot command topics.
 
@@ -941,6 +1031,7 @@ class RobotClient:
                     segment,
                 )
 
+    @physical_output()
     def publish_action_with_receipt(
         self, action: np.ndarray, action_keys: Optional[list[str]] = None,
         *, zero_twist: bool = False,
@@ -965,6 +1056,7 @@ class RobotClient:
             emitted.extend(values)
         return np.asarray(emitted, dtype=np.float64)
 
+    @physical_output()
     def publish_idle_action(self, action_keys: Optional[list[str]] = None) -> None:
         """Publish safe idle commands for velocity-like action topics.
 
@@ -986,6 +1078,7 @@ class RobotClient:
                 continue
             self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
 
+    @physical_output()
     def publish_initial_pose_sync(
         self,
         action: np.ndarray,
@@ -1019,6 +1112,8 @@ class RobotClient:
                         values,
                         time_from_start_s=duration_s,
                     )
+        except OutputAuthorityError:
+            raise
         except Exception:
             try:
                 self.publish_current_pose_hold(action_keys, duration_s=0.1)
@@ -1029,6 +1124,7 @@ class RobotClient:
                 )
             raise
 
+    @physical_output(allow_unarmed=True)
     def publish_named_pose(self, positions: dict[str, float], duration_s: float = 5.0) -> None:
         """Send one timed target per position controller; keep base velocity zero."""
         duration_s = float(duration_s)
@@ -1050,6 +1146,7 @@ class RobotClient:
                 time_from_start_s=duration_s, zero_terminal_derivatives=True,
             )
 
+    @physical_output(allow_unarmed=True)
     def publish_current_pose_hold(
         self,
         action_keys: Optional[list[str]] = None,
@@ -1078,6 +1175,8 @@ class RobotClient:
                 if publisher is None:
                     raise RuntimeError("publisher unavailable")
                 self._publish_twist(publisher, np.zeros(3, dtype=np.float64))
+            except OutputAuthorityError:
+                raise
             except Exception as exc:
                 failures.append(f"{action_key}: {exc}")
 
@@ -1091,6 +1190,8 @@ class RobotClient:
                     self._publish_joint_trajectory(
                         publisher, names, values, time_from_start_s=duration_s,
                     )
+            except OutputAuthorityError:
+                raise
             except Exception as exc:
                 failures.append(f"{key}: {exc}")
         if not position_keys:
@@ -1252,7 +1353,7 @@ class RobotClient:
         joint_names, positions = self.build_action_preview(action, action_keys)
         if not joint_names or len(joint_names) != len(positions):
             return
-        self._publish_joint_trajectory(self._preview_publisher, joint_names, positions)
+        self._publish_joint_trajectory(self._preview_publisher, joint_names, positions, preview=True)
 
     def _resolve_action_key(self, action_key: str) -> str:
         if action_key in self._action_groups:
@@ -1280,6 +1381,7 @@ class RobotClient:
             y=0.0,
             z=filtered_angular_z,
         )
+        self._check_output_authority()
         publisher.publish(linear=linear, angular=angular)
         return np.array([filtered_linear_x, filtered_linear_y, filtered_angular_z], dtype=np.float64)
 
@@ -1290,6 +1392,7 @@ class RobotClient:
         values: np.ndarray,
         time_from_start_s: float = 0.0,
         zero_terminal_derivatives: bool = False,
+        *, preview: bool = False,
     ) -> None:
         Header = get_message_class("std_msgs/msg/Header")
         Time = get_message_class("builtin_interfaces/msg/Time")
@@ -1312,11 +1415,11 @@ class RobotClient:
             effort=np.zeros(0, dtype=np.float64),
             time_from_start=Duration(sec=duration_sec, nanosec=duration_nanosec),
         )
-        publisher.publish(
-            header=Header(stamp=Time(sec=0, nanosec=0), frame_id=""),
-            joint_names=list(joint_names),
-            points=[point],
-        )
+        header = Header(stamp=Time(sec=0, nanosec=0), frame_id="")
+        names = list(joint_names)
+        if not preview or publisher is not getattr(self, "_preview_publisher", None):
+            self._check_output_authority()
+        publisher.publish(header=header, joint_names=names, points=[point])
 
     # ------------------------------------------------------------------ #
     # Task instruction
@@ -1475,6 +1578,8 @@ class RobotClient:
         if hasattr(self, '_closed') and self._closed:
             return
         self._closed = True
+        if hasattr(self, '_reception_changed'):
+            self._notify_reception()
         with self._lock:
             self._observation_capture = None
         for sub in self._subscribers:

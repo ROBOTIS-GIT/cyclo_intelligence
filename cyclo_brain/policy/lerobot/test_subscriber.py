@@ -27,14 +27,8 @@ Run inside lerobot_server or groot_server container to test:
 5. Data integrity checks
 """
 import os
-import sys
 import time
 import threading
-
-# Add zenoh_ros2_sdk to path
-ZENOH_SDK_PATH = os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk")
-if os.path.exists(ZENOH_SDK_PATH):
-    sys.path.insert(0, ZENOH_SDK_PATH)
 
 from zenoh_ros2_sdk import ROS2Subscriber, get_logger
 import numpy as np

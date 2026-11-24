@@ -51,7 +51,7 @@ cyclo_brain/
 └── sdk/
     ├── action_chunk_processing/
     ├── robot_client/
-    └── zenoh_ros2_sdk/
+    └── requirements-zenoh.txt
 ```
 
 The Python package is still named `main_runtime` for source compatibility,

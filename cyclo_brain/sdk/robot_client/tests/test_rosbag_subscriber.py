@@ -29,13 +29,11 @@ Usage:
     python3 /workspace/test_rosbag_subscriber.py
 """
 import sys
-import os
 import time
 import logging
 import json
 
 # Setup paths
-sys.path.insert(0, os.environ.get("ZENOH_SDK_PATH", "/zenoh_sdk"))
 sys.path.insert(0, "/workspace")
 
 logging.basicConfig(

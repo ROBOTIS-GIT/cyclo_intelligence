@@ -6,7 +6,7 @@
 #   - hosts named ffw* install the repository under /mnt/ssd/cyclo_intelligence
 #     and bind-mount it at ~/cyclo_intelligence.
 #   - other hosts install under ~/cyclo_intelligence.
-#   - only the common SDK is initialized; model sources are opt-in.
+#   - the SDK ships in the image; model sources are opt-in.
 #   - the user starts the main container explicitly after installation.
 
 set -euo pipefail
@@ -91,7 +91,6 @@ assert_available_path() {
         echo "Refusing to modify an existing Cyclo checkout automatically." >&2
         echo "Stop active work, then update it manually with:" >&2
         echo "  cd \"$path\" && git pull --ff-only" >&2
-        echo "  git submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk" >&2
         echo "Update selected model sources as described in docker/README.md (Selective Source Checkout)." >&2
         exit 1
     fi
@@ -232,8 +231,10 @@ clone_repo() {
     mkdir -p "$parent_dir"
 
     echo "[install] Cloning ${REPO_URL} (${REF}) into ${install_dir}"
-    if ! git clone --no-recurse-submodules --branch "$REF" "$REPO_URL" "$install_dir" \
-        || ! git -C "$install_dir" submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk; then
+    # Older --ref targets (including 1.5.1) still mount the SDK from the host.
+    if ! git clone --no-recurse-submodules --branch "$REF" "$REPO_URL" "$install_dir" ||
+        { [ -d "$install_dir/cyclo_brain/sdk/zenoh_ros2_sdk" ] &&
+          ! git -C "$install_dir" submodule update --init -- cyclo_brain/sdk/zenoh_ros2_sdk; }; then
         echo "[install] Source setup failed; removing incomplete checkout: $install_dir" >&2
         rm -rf "$install_dir"
         exit 1

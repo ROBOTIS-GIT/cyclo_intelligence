@@ -17,23 +17,23 @@ COPY cyclo_brain/policy/rldx/scripts/install_environment.py /opt/install_environ
 RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} MAX_JOBS=${MAX_JOBS} \
     python3 /opt/install_environment.py /rldx /opt/rldx-env
 ENV PATH=/opt/rldx-env/bin:$PATH
+COPY cyclo_brain/sdk/requirements-zenoh.txt /opt/requirements-zenoh.txt
 RUN uv pip install --python /opt/rldx-env/bin/python \
-    'eclipse-zenoh>=1.6.0,<1.7.0' 'rosbags>=0.11.0' 'GitPython>=3.1.18' json5 pyyaml
+    -r /opt/requirements-zenoh.txt pyyaml
 COPY cyclo_brain/policy/rldx/rldx_engine/ /app/rldx_engine/
 COPY cyclo_brain/policy/rldx/configs/ /app/configs/
 COPY cyclo_brain/policy/rldx/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/policy/common/runtime/ /policy_runtime/
 COPY cyclo_brain/policy/common/catalog/ /catalog/
-COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/ /orchestrator_config/
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
 ENV POLICY_BACKEND=rldx POLICY_ENGINE_MODULE=rldx_engine
-ENV ZENOH_SDK_PATH=/zenoh_sdk ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/rldx
+ENV PYTHONPATH=/app:/policy_runtime:/robot_client_sdk:/rldx
 RUN { \
     echo ""; \
     echo "# Cyclo ROS/Zenoh runtime environment."; \

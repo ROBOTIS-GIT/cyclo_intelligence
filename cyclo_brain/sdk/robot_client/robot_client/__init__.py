@@ -24,7 +24,8 @@ RobotServiceServer (training/inference service framework)
 on top of zenoh_ros2_sdk.
 """
 from .robot_client import RobotClient
+from .handoff import HandoffStatus, OutputAuthorityError
 from .service_server import RobotServiceServer, TrainingProgress
 
-__all__ = ["RobotClient", "RobotServiceServer", "TrainingProgress"]
+__all__ = ["RobotClient", "RobotServiceServer", "TrainingProgress", "HandoffStatus", "OutputAuthorityError"]
 __version__ = "0.1.0"

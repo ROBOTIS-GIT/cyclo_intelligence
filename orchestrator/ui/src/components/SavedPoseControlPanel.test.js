@@ -48,6 +48,13 @@ test('keeps save and return controls without routine status text or refresh', as
   expect(screen.getByRole('button', { name: 'Stop pose return' })).toBeEnabled();
 });
 
+test('places pose controls below the label on mobile without changing the command lifecycle', async () => {
+  const { command } = await setup();
+  expect(screen.getByRole('group', { name: 'Initial pose controls' })).toHaveClass('flex-col', 'sm:flex-row');
+  expect(screen.getByRole('button', { name: 'Return to Saved Pose' })).toBeEnabled();
+  expect(command).toHaveBeenCalledTimes(1);
+});
+
 test('still displays backend errors and keeps stop available', async () => {
   await setup(InferencePhase.READY, {
     status: { returning: true, error: 'Current-pose hold failed' },

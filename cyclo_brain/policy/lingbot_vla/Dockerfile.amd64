@@ -23,11 +23,12 @@ RUN FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARC
     uv pip install --python /opt/lingbot-env/bin/python --no-build-isolation --no-deps flash-attn==2.8.3
 RUN uv pip install --python /opt/lingbot-env/bin/python --no-deps \
     'lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz'
+COPY cyclo_brain/sdk/requirements-zenoh.txt /opt/requirements-zenoh.txt
 RUN uv pip install --python /opt/lingbot-env/bin/python \
-    'eclipse-zenoh>=1.6.0,<1.7.0' 'rosbags>=0.11.0' 'GitPython>=3.1.18' json5
+    -r /opt/requirements-zenoh.txt
 COPY cyclo_brain/policy/lingbot_vla/lingbot-vla-v2/ /lingbot-vla-v2/
 RUN uv pip install --python /opt/lingbot-env/bin/python --no-deps -e /lingbot-vla-v2
-ENV PYTHONPATH=/app:/policy_runtime:/zenoh_sdk:/robot_client_sdk:/lingbot-vla-v2
+ENV PYTHONPATH=/app:/policy_runtime:/robot_client_sdk:/lingbot-vla-v2
 # Upstream's MoE decorators query CUDA during import. Import smoke tests must
 # run with --gpus after the image is built, not in a GPU-less BuildKit step.
 RUN python -m compileall -q /lingbot-vla-v2/deploy/lingbot_vla_v2_policy.py
@@ -36,13 +37,12 @@ COPY cyclo_brain/policy/lingbot_vla/configs/ /app/configs/
 COPY cyclo_brain/policy/lingbot_vla/manifest.yaml /app/policy_manifest.yaml
 COPY cyclo_brain/policy/common/runtime/ /policy_runtime/
 COPY cyclo_brain/policy/common/catalog/ /catalog/
-COPY cyclo_brain/sdk/zenoh_ros2_sdk/ /zenoh_sdk/
 COPY cyclo_brain/sdk/robot_client/ /robot_client_sdk/
 COPY shared/shared/robot_configs/ /orchestrator_config/
 COPY cyclo_brain/policy/common/s6-services/ /etc/s6-overlay/s6-rc.d/
 RUN chmod +x /etc/s6-overlay/s6-rc.d/engine-process/run
 ENV POLICY_BACKEND=lingbot_vla POLICY_ENGINE_MODULE=lingbot_vla_engine
-ENV ZENOH_SDK_PATH=/zenoh_sdk ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
+ENV ROBOT_CLIENT_SDK_PATH=/robot_client_sdk
 ENV ORCHESTRATOR_CONFIG_PATH=/orchestrator_config
 ENV HF_HOME=/root/.cache/huggingface PYTHONUNBUFFERED=1
 RUN { \

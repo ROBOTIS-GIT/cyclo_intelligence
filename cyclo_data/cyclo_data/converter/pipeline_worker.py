@@ -64,6 +64,22 @@ from typing import Dict, List, Optional
 LEROBOT_OUTPUT_ROOT = Path('/workspace/lerobot')
 
 
+def lerobot_output_dirs(dataset_path, output_name, convert_v21, convert_v30):
+    """Resolve only the requested writer targets, refusing to mix or overwrite data."""
+    name = output_name or f'{Path(dataset_path).name}_lerobot'
+    if (name != name.strip() or name in ('.', '..') or '/' in name or '\\' in name
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)):
+        raise ValueError('Output dataset name must be a single folder name')
+    outputs = {}
+    for version, enabled in (('v21', convert_v21), ('v30', convert_v30)):
+        if enabled:
+            path = LEROBOT_OUTPUT_ROOT / f'{name}_{version}'
+            if path.is_symlink() or (path.exists() and (not path.is_dir() or any(path.iterdir()))):
+                raise ValueError(f'Output already exists: {path}. Choose another output name.')
+            outputs[version] = path
+    return outputs
+
+
 def _copy_dataset_readme(src_dir: Path, dst_dir: Path, logger: logging.Logger) -> None:
     """Forward the recording-time README.md from the rosbag2 source folder
     to a converted LeRobot output folder.
@@ -448,6 +464,8 @@ class Mp4ConversionWorker:
                         if not convert_v21 and not convert_v30:
                             convert_v21 = True
                             convert_v30 = True
+                        outputs = lerobot_output_dirs(
+                            dataset_path, data.get('conversion_output_name', ''), convert_v21, convert_v30)
 
                         # Selection knobs. Empty / None = use defaults
                         # from robot_config (legacy behaviour preserved).
@@ -547,6 +565,8 @@ class Mp4ConversionWorker:
                             logger.info(
                                 '=== Stages v2.1+v3.0: shared parse + dual write ===')
                             success, message = Mp4ConversionWorker._convert_to_lerobot_both(
+                                v21_output_dir=outputs['v21'],
+                                v30_output_dir=outputs['v30'],
                                 dataset_path=dataset_path,
                                 robot_config_path=robot_config_path,
                                 progress_queue=progress_queue,
@@ -576,6 +596,7 @@ class Mp4ConversionWorker:
                             logger.info(
                                 f'=== Stage {stage_idx}/{n_stages}: Converting to LeRobot v2.1 ===')
                             success, message = Mp4ConversionWorker._convert_to_lerobot_v21(
+                                output_dir=outputs['v21'],
                                 dataset_path=dataset_path,
                                 robot_config_path=robot_config_path,
                                 progress_queue=progress_queue,
@@ -607,6 +628,7 @@ class Mp4ConversionWorker:
                             logger.info(
                                 f'=== Stage {stage_idx}/{n_stages}: Converting to LeRobot v3.0 ===')
                             success, message = Mp4ConversionWorker._convert_to_lerobot_v30(
+                                output_dir=outputs['v30'],
                                 dataset_path=dataset_path,
                                 robot_config_path=robot_config_path,
                                 progress_queue=progress_queue,
@@ -655,7 +677,7 @@ class Mp4ConversionWorker:
                         # video work during this conversion run.
                         try:
                             removed = Mp4ConversionWorker._cleanup_lerobot_temp_dirs(
-                                Path(dataset_path)
+                                outputs.values()
                             )
                             if removed:
                                 logger.info(
@@ -673,9 +695,7 @@ class Mp4ConversionWorker:
                         # unreadable from the host filesystem (e.g. VSCode).
                         try:
                             import os as _os
-                            v21_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}_lerobot_v21'
-                            v30_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}_lerobot_v30'
-                            for root_dir in (v21_dir, v30_dir):
+                            for root_dir in outputs.values():
                                 if not root_dir.exists():
                                     continue
                                 for p in root_dir.rglob('*'):
@@ -968,12 +988,11 @@ class Mp4ConversionWorker:
         )
 
     @staticmethod
-    def _cleanup_lerobot_temp_dirs(dataset_path: Path) -> int:
+    def _cleanup_lerobot_temp_dirs(output_dirs) -> int:
         import shutil
 
         removed = 0
-        for suffix in ('_lerobot_v21', '_lerobot_v30'):
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{Path(dataset_path).name}{suffix}'
+        for output_dir in output_dirs:
             for dirname in ('_subtask_video_concat', '_stitched_subtasks'):
                 path = output_dir / dirname
                 if path.exists():
@@ -1218,6 +1237,8 @@ class Mp4ConversionWorker:
     @staticmethod
     def _convert_to_lerobot_both(
         dataset_path: str,
+        v21_output_dir: Path,
+        v30_output_dir: Path,
         robot_config_path: str,
         progress_queue: multiprocessing.Queue,
         logger: logging.Logger,
@@ -1249,8 +1270,6 @@ class Mp4ConversionWorker:
             dataset_path = Path(dataset_path)
             LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             repo_id = dataset_path.name
-            v21_output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v21'
-            v30_output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v30'
 
             bag_paths = Mp4ConversionWorker._collect_converted_bag_paths(dataset_path)
             if not bag_paths:
@@ -1350,6 +1369,7 @@ class Mp4ConversionWorker:
     @staticmethod
     def _convert_to_lerobot_v21(
         dataset_path: str,
+        output_dir: Path,
         robot_config_path: str,
         progress_queue: multiprocessing.Queue,
         logger: logging.Logger,
@@ -1385,7 +1405,6 @@ class Mp4ConversionWorker:
         try:
             dataset_path = Path(dataset_path)
             LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v21'
             repo_id = dataset_path.name
 
             bag_paths = Mp4ConversionWorker._collect_converted_bag_paths(dataset_path)
@@ -1448,6 +1467,7 @@ class Mp4ConversionWorker:
     @staticmethod
     def _convert_to_lerobot_v30(
         dataset_path: str,
+        output_dir: Path,
         robot_config_path: str,
         progress_queue: multiprocessing.Queue,
         logger: logging.Logger,
@@ -1502,7 +1522,6 @@ class Mp4ConversionWorker:
         try:
             dataset_path = Path(dataset_path)
             LEROBOT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-            output_dir = LEROBOT_OUTPUT_ROOT / f'{dataset_path.name}_lerobot_v30'
             repo_id = dataset_path.name
 
             # Same input as Stage 2 — _converted/ folders from Stage 1.
