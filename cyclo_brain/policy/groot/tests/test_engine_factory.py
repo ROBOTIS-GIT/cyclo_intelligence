@@ -27,6 +27,11 @@ def _install_stub(name: str, **attrs) -> types.ModuleType:
 class GR00TEngineFactoryTests(unittest.TestCase):
     def setUp(self):
         self._saved_modules = dict(sys.modules)
+        # The Worker exposes this directory as /policy_runtime.
+        runtime = ROOT / "cyclo_brain/policy/common/runtime"
+        paths = patch.object(sys, "path", [str(runtime), *sys.path])
+        paths.start()
+        self.addCleanup(paths.stop)
 
         _install_stub(
             "cv2",
